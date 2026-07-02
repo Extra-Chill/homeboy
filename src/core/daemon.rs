@@ -503,6 +503,7 @@ fn enqueue_exec_job(
         command: request.command,
         env: request.env,
         secret_env_names: request.secret_env_names,
+        secret_env_plan: None,
         capture_patch: request.capture_patch,
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,

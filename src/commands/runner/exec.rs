@@ -54,6 +54,7 @@ pub(super) fn exec(
     validate_runner_exec_public_env(&raw_env, &secret_env_names)?;
     let mut env = secret_env_plan
         .public_env
+        .clone()
         .into_iter()
         .collect::<HashMap<_, _>>();
     env.extend(raw_env);
@@ -95,6 +96,7 @@ pub(super) fn exec(
             command: prepared_command,
             env,
             secret_env_names,
+            secret_env_plan: Some(secret_env_plan),
             capture_patch,
             raw_exec: true,
             source_snapshot,
@@ -378,9 +380,7 @@ fn merge_runner_exec_secret_env_plan(
     target: &mut SecretEnvPlan,
     plan: SecretEnvPlan,
 ) -> homeboy::core::Result<()> {
-    let secret_env_names = plan.secret_env_names();
-    target.public_env.extend(plan.public_env);
-    target.extend_secret_env_names(secret_env_names);
+    target.merge_from(plan);
     Ok(())
 }
 

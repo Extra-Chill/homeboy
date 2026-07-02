@@ -45,6 +45,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
                 "CONTROLLER_API_KEY".to_string(),
                 "RUNNER_API_KEY".to_string(),
             ],
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
             source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -92,6 +93,7 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
             ],
             env: Default::default(),
             secret_env_names: vec!["RUNNER_API_KEY".to_string()],
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
             source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -142,6 +144,7 @@ fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
             ],
             env: Default::default(),
             secret_env_names: Vec::new(),
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -192,6 +195,7 @@ fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
             ],
             env: Default::default(),
             secret_env_names: vec!["HOMEBOY_REQUIRED_SECRET_TEST_KEY".to_string()],
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: false,
             source_snapshot: Some(SourceSnapshot::existing_remote(
@@ -282,6 +286,58 @@ fn runner_exec_secret_env_names_use_runtime_declared_allowlist() {
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
             "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
         ]
+    );
+}
+
+#[test]
+fn runner_exec_secret_env_plan_preserves_explicit_plan_fields() {
+    let plan = runner_exec_secret_env_plan(
+        &["node".to_string(), "run-headless-loop.cjs".to_string()],
+        Some(&RunnerCapabilityPreflight {
+            command: "runner.exec".to_string(),
+            required_env: vec!["PREFLIGHT_SECRET".to_string()],
+            ..Default::default()
+        }),
+        &["CLI_SECRET".to_string()],
+        &HashMap::from([(
+            "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+            "RUNTIME_SECRET".to_string(),
+        )]),
+        Some(crate::core::secret_env_plan::SecretEnvPlan {
+            public_env: std::collections::BTreeMap::from([(
+                "PUBLIC_FLAG".to_string(),
+                "1".to_string(),
+            )]),
+            requirements: vec![crate::core::secret_env_plan::SecretEnvRequirement {
+                name: "PLAN_SECRET".to_string(),
+                required: true,
+                source_env_names: vec!["PLAN_SOURCE_SECRET".to_string()],
+                refresh: Some(crate::core::secret_env_plan::SecretEnvRefreshHint {
+                    provider: "provider-auth".to_string(),
+                    metadata: Default::default(),
+                }),
+            }],
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(plan.public_env.get("PUBLIC_FLAG"), Some(&"1".to_string()));
+    assert_eq!(
+        plan.secret_env_names(),
+        vec![
+            "CLI_SECRET".to_string(),
+            "PLAN_SECRET".to_string(),
+            "PLAN_SOURCE_SECRET".to_string(),
+            "PREFLIGHT_SECRET".to_string(),
+            "RUNTIME_SECRET".to_string()
+        ]
+    );
+    assert_eq!(
+        plan.requirements[0]
+            .refresh
+            .as_ref()
+            .map(|hint| hint.provider.as_str()),
+        Some("provider-auth")
     );
 }
 
@@ -387,6 +443,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 command,
                 env,
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -430,6 +487,7 @@ fn test_exec_runs_local_runner_command() {
                 command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -505,6 +563,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 ],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -544,6 +603,7 @@ fn test_exec_preserves_explicit_request_env() {
                 ],
                 env: HashMap::from([("HOMEBOY_TEST_EXPLICIT".to_string(), "planned".to_string())]),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -597,6 +657,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
                     ),
                 ]),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -657,6 +718,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 ],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -703,6 +765,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 command: vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -760,6 +823,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 command: vec!["homeboy".to_string(), "test".to_string()],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: None,
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
@@ -801,6 +865,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         command: vec!["homeboy".to_string(), "--version".to_string()],
         env: Default::default(),
         secret_env_names: Vec::new(),
+        secret_env_plan: None,
         capture_patch: false,
         raw_exec: true,
         source_snapshot: None,

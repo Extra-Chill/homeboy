@@ -20,6 +20,7 @@ use crate::core::runner_execution_envelope::{
     RunnerExecutionRecord, SourceSnapshotIdentity,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
 };
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
@@ -102,6 +103,7 @@ pub struct RunnerExecOptions {
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
+    pub secret_env_plan: Option<SecretEnvPlan>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -478,6 +480,7 @@ pub(crate) struct RunnerProcessRequest {
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
+    pub secret_env_plan: Option<SecretEnvPlan>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
@@ -526,12 +529,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ));
     }
 
-    let secret_env_names = runner_exec_secret_env_names(
+    let secret_env_plan = runner_exec_secret_env_plan(
         &options.command,
         options.capability_preflight.as_ref(),
         &options.secret_env_names,
         &options.env,
+        options.secret_env_plan.clone(),
     );
+    let secret_env_names = secret_env_plan.secret_env_names();
     let mut plan = prepare_runner_process(RunnerProcessRequest {
         runner_id: runner_id.to_string(),
         runner: None,
@@ -540,6 +545,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         command: options.command.clone(),
         env: options.env.clone(),
         secret_env_names: secret_env_names.clone(),
+        secret_env_plan: Some(secret_env_plan.clone()),
         capture_patch: options.capture_patch,
         raw_exec: options.raw_exec,
         source_snapshot: options.source_snapshot.clone(),

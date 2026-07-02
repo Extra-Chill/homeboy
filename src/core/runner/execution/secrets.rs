@@ -325,7 +325,7 @@ pub(crate) fn runner_exec_secret_env_names(
     explicit_names: &[String],
     env: &HashMap<String, String>,
 ) -> Vec<String> {
-    runner_exec_secret_env_plan(command, preflight, explicit_names, env).secret_env_names()
+    runner_exec_secret_env_plan(command, preflight, explicit_names, env, None).secret_env_names()
 }
 
 pub(crate) fn runner_exec_secret_env_plan(
@@ -333,6 +333,7 @@ pub(crate) fn runner_exec_secret_env_plan(
     preflight: Option<&RunnerCapabilityPreflight>,
     explicit_names: &[String],
     env: &HashMap<String, String>,
+    base_plan: Option<SecretEnvPlan>,
 ) -> SecretEnvPlan {
     let mut names = Vec::new();
     names.extend(explicit_names.iter().cloned());
@@ -351,6 +352,9 @@ pub(crate) fn runner_exec_secret_env_plan(
     names.extend(declared_runtime_provider_secret_env(env));
     let mut plan = SecretEnvPlan::from_secret_env_names(names);
     plan.allow_inherited_env_names([RUNTIME_SECRET_ENV_ALLOWLIST_ENV.to_string()]);
+    if let Some(base_plan) = base_plan {
+        plan.merge_from(base_plan);
+    }
     plan
 }
 

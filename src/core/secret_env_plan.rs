@@ -411,6 +411,24 @@ impl SecretEnvPlan {
         plan
     }
 
+    pub fn merge_from(&mut self, plan: SecretEnvPlan) {
+        self.public_env.extend(plan.public_env);
+        self.extend_secret_env_names(plan.secret_env_names);
+        self.requirements =
+            normalize_requirements(self.requirements.iter().cloned().chain(plan.requirements));
+        self.provider_credentials.extend(plan.provider_credentials);
+        for (key, names) in plan.env_name_mapping {
+            self.map_env_names(key, names);
+        }
+        self.status = normalize_status(self.status.iter().cloned().chain(plan.status));
+        if plan.redaction != SecretEnvRedactionPolicy::default() {
+            self.redaction = plan.redaction;
+        }
+        if plan.inheritance != SecretEnvInheritancePolicy::default() {
+            self.inheritance = plan.inheritance;
+        }
+    }
+
     pub fn json_env_pair(&self) -> (String, String) {
         (
             AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV.to_string(),
@@ -856,6 +874,22 @@ fn normalize_requirements(
         .collect()
 }
 
+fn normalize_status(status: impl IntoIterator<Item = SecretEnvStatus>) -> Vec<SecretEnvStatus> {
+    status
+        .into_iter()
+        .map(|mut status| {
+            status.name = status.name.trim().to_string();
+            status.missing_source_env_names =
+                normalize_ordered_names(status.missing_source_env_names);
+            status
+        })
+        .filter(|status| !status.name.is_empty())
+        .map(|status| (status.name.clone(), status))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
+}
+
 fn secret_env_status(name: String, configured: bool, source: impl Into<String>) -> SecretEnvStatus {
     secret_env_status_with_sources(name, configured, source, None, Vec::new())
 }
@@ -989,6 +1023,71 @@ mod tests {
                 "B_SECRET".to_string(),
                 "C_SECRET".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn secret_env_plan_merge_preserves_contract_fields() {
+        let mut target = SecretEnvPlan::from_secret_env_names(["EXPLICIT_SECRET".to_string()]);
+        target
+            .public_env
+            .insert("PUBLIC".to_string(), "1".to_string());
+
+        target.merge_from(SecretEnvPlan {
+            public_env: BTreeMap::from([("PUBLIC_FROM_PLAN".to_string(), "2".to_string())]),
+            requirements: vec![SecretEnvRequirement {
+                name: "PROVIDER_TOKEN".to_string(),
+                required: true,
+                source_env_names: vec!["SOURCE_TOKEN".to_string()],
+                refresh: Some(SecretEnvRefreshHint {
+                    provider: "provider-auth".to_string(),
+                    metadata: BTreeMap::from([("account".to_string(), "default".to_string())]),
+                }),
+            }],
+            provider_credentials: BTreeMap::from([(
+                "provider".to_string(),
+                SecretEnvProviderCredentialMapping {
+                    secret_env: vec!["PROVIDER_REFRESH".to_string()],
+                    sources: BTreeMap::new(),
+                },
+            )]),
+            env_name_mapping: BTreeMap::from([(
+                "runtime".to_string(),
+                vec!["RUNTIME_SECRET".to_string()],
+            )]),
+            inheritance: SecretEnvInheritancePolicy {
+                require_declaration: true,
+                allowed_env_names: vec!["HOMEBOY_RUNTIME_SECRET_ENV".to_string()],
+            },
+            ..SecretEnvPlan::default()
+        });
+
+        assert_eq!(target.public_env.get("PUBLIC"), Some(&"1".to_string()));
+        assert_eq!(
+            target.public_env.get("PUBLIC_FROM_PLAN"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            target.secret_env_names(),
+            vec![
+                "EXPLICIT_SECRET".to_string(),
+                "PROVIDER_REFRESH".to_string(),
+                "PROVIDER_TOKEN".to_string(),
+                "RUNTIME_SECRET".to_string(),
+                "SOURCE_TOKEN".to_string()
+            ]
+        );
+        assert_eq!(
+            target.requirements[0]
+                .refresh
+                .as_ref()
+                .map(|hint| hint.provider.as_str()),
+            Some("provider-auth")
+        );
+        assert!(target.provider_credentials.contains_key("provider"));
+        assert_eq!(
+            target.inheritance.allowed_env_names,
+            vec!["HOMEBOY_RUNTIME_SECRET_ENV".to_string()]
         );
     }
 

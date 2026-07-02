@@ -151,10 +151,17 @@ pub(crate) fn prepare_runner_process(
             &request.command,
             &runner.id,
         )?;
+        let secret_env_plan = runner_exec_secret_env_plan(
+            &request.command,
+            None,
+            &request.secret_env_names,
+            &request.env,
+            request.secret_env_plan.clone(),
+        );
         provision_provider_file_secret_sources_for_runner(
             &runner,
             &request.command,
-            &request.secret_env_names,
+            &secret_env_plan.secret_env_names(),
             &request.env,
         )?;
     }
@@ -177,8 +184,13 @@ pub(crate) fn prepare_runner_process(
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     }
-    let secret_env_plan =
-        runner_exec_secret_env_plan(&request.command, None, &request.secret_env_names, &env);
+    let secret_env_plan = runner_exec_secret_env_plan(
+        &request.command,
+        None,
+        &request.secret_env_names,
+        &env,
+        request.secret_env_plan.clone(),
+    );
 
     if runner.kind == RunnerKind::Local {
         validate_runner_inherited_secret_env(
@@ -315,8 +327,13 @@ pub(crate) fn prepare_daemon_local_process(
     let request_env = request.env.clone();
     let mut env = raw_runner_env.clone();
     env.extend(request_env.clone());
-    let secret_env_plan =
-        runner_exec_secret_env_plan(&request.command, None, &request.secret_env_names, &env);
+    let secret_env_plan = runner_exec_secret_env_plan(
+        &request.command,
+        None,
+        &request.secret_env_names,
+        &env,
+        request.secret_env_plan.clone(),
+    );
     validate_runner_inherited_secret_env(
         &secret_env_plan,
         &request_env,

@@ -164,6 +164,7 @@ pub fn refresh_homeboy_binary(
             command: vec!["bash".to_string(), "-lc".to_string(), plan.script.clone()],
             env: Default::default(),
             secret_env_names: Vec::new(),
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

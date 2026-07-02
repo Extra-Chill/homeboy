@@ -540,6 +540,7 @@ fn run_runtime_overlay_install_step(
             command,
             env: std::collections::HashMap::new(),
             secret_env_names: Vec::new(),
+            secret_env_plan: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
