@@ -4,7 +4,10 @@ use serde_json::Value;
 use crate::core::error::{Error, Result};
 use crate::core::output::MergeOutput;
 
-use super::{connect, disconnect, exec, load, merge, RunnerCapabilityPreflight, RunnerExecOptions};
+use super::{
+    connect, disconnect, exec, load, merge, normalize_runner_command_env_for_homeboy_path,
+    RunnerCapabilityPreflight, RunnerExecOptions,
+};
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
@@ -202,7 +205,11 @@ pub fn refresh_homeboy_binary(
     }
 
     let identity = parse_identity(&exec_output.stdout)?;
-    let patch = serde_json::json!({ "homeboy_path": plan.binary_path });
+    let env = refreshed_runner_env(&plan.runner_id, &plan.binary_path)?;
+    let patch = serde_json::json!({
+        "homeboy_path": plan.binary_path,
+        "env": env,
+    });
     let updated_fields = match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
         MergeOutput::Single(result) => result.updated_fields,
         MergeOutput::Bulk(_) => Vec::new(),
@@ -266,6 +273,16 @@ fn parse_identity(stdout: &str) -> Result<Value> {
             Some("parse runner Homeboy identity output".to_string()),
         )
     })
+}
+
+fn refreshed_runner_env(
+    runner_id: &str,
+    homeboy_path: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let runner = load(runner_id)?;
+    let mut env = runner.env;
+    normalize_runner_command_env_for_homeboy_path(&mut env, Some(homeboy_path));
+    Ok(env)
 }
 
 fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {
@@ -344,6 +361,7 @@ fn shell_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
 
     #[test]
     fn materialize_plan_uses_clean_runner_cache() {
@@ -407,5 +425,34 @@ mod tests {
         .expect("identity parses");
 
         assert_eq!(identity["data"]["version"], "0.263.0");
+    }
+
+    #[test]
+    fn refreshed_runner_env_prepends_selected_homeboy_dir_to_path() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{
+                    "id": "lab-local",
+                    "kind": "local",
+                    "workspace_root": "/runner/ws",
+                    "homeboy_path": "/old/homeboy",
+                    "env": {"PATH": "/usr/bin:/bin", "RUST_LOG": "info"}
+                }"#,
+                false,
+            )
+            .expect("create runner");
+
+            let env = refreshed_runner_env(
+                "lab-local",
+                "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
+            )
+            .expect("refresh env");
+
+            assert_eq!(
+                env.get("PATH").map(String::as_str),
+                Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
+            );
+            assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
+        });
     }
 }
