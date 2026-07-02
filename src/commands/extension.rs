@@ -276,13 +276,16 @@ impl ExtensionArgs {
     pub(crate) fn is_update_command(&self) -> bool {
         matches!(
             self.command,
-            ExtensionCommand::Update { .. } | ExtensionCommand::Refresh { .. }
+            ExtensionCommand::Update { .. }
+                | ExtensionCommand::Refresh { .. }
+                | ExtensionCommand::DevRun { .. }
         )
     }
 
     pub(crate) fn update_command_label(&self) -> &'static str {
         match self.command {
             ExtensionCommand::Refresh { .. } => "extension refresh",
+            ExtensionCommand::DevRun { .. } => "extension dev-run",
             _ => "extension update",
         }
     }
@@ -765,10 +768,7 @@ fn read_source_url_metadata(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    std::fs::read_to_string(Path::new(path).join(".source-url"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    homeboy::core::extension::read_source_url(Path::new(path))
 }
 
 fn local_source_path(source: &str) -> Option<String> {
@@ -815,6 +815,7 @@ fn installed_extension_diff_status(
     match (installed_revision, checkout_revision) {
         (Some(installed), Some(checkout)) if installed == checkout => "current".to_string(),
         (Some(_), Some(_)) => "stale".to_string(),
+        (Some(_), None) => "current".to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1545,7 +1546,7 @@ mod tests {
         );
         assert_eq!(
             installed_extension_diff_status(true, Some("abc1234"), None),
-            "unknown"
+            "current"
         );
         assert_eq!(
             installed_extension_diff_status(false, Some("abc1234"), Some("abc1234")),

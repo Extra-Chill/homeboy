@@ -61,6 +61,7 @@ pub fn build_test_runner(
     component: &Component,
     path_override: Option<String>,
     settings: &[(String, String)],
+    settings_json: &[(String, serde_json::Value)],
     skip_lint: bool,
     coverage_enabled: bool,
     coverage_min: Option<f64>,
@@ -74,6 +75,7 @@ pub fn build_test_runner(
         .component(component.clone())
         .path_override(path_override)
         .settings(settings)
+        .settings_json(settings_json)
         .with_run_dir(run_dir)
         .env_if(skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");

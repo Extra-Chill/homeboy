@@ -82,7 +82,7 @@ pub fn install_with_revision(
     if is_git_url(source) {
         install_from_url(source, id_override, revision)
     } else {
-        install_from_path(source, id_override, None)
+        install_from_path(source, id_override, None, revision)
     }
 }
 
@@ -191,7 +191,7 @@ mod update;
 #[cfg(test)]
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_source_metadata;
-pub use update::{check_update_available, read_source_revision, update, UpdateAvailable};
+pub use update::{check_update_available, read_source_revision, read_source_url, update, UpdateAvailable};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)
@@ -223,7 +223,7 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, read_source_revision, refresh, source_metadata, update,
+        load_extension, read_source_revision, read_source_url, refresh, source_metadata, update,
     };
     use crate::core::component;
     use crate::core::extension::update_all;
@@ -659,6 +659,40 @@ exec '{}' "$@"
                 read_source_revision("wordpress"),
                 Some(before),
                 "linked extensions should resolve revisions through git discovery"
+            );
+        });
+    }
+
+    #[test]
+    fn linked_install_with_explicit_revision_writes_sidecar_source_metadata() {
+        with_isolated_home(|home| {
+            let home_path = home.path();
+            let source = home_path.join("staged-source");
+            write_extension_fixture(&source, "wordpress");
+
+            let result = install_with_revision(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+                Some("abc1234"),
+            )
+            .expect("install linked staged extension");
+
+            assert!(result.path.is_symlink());
+            assert!(
+                !source.join("wordpress/.source-revision").exists(),
+                "linked install metadata should not dirty the source checkout"
+            );
+            assert_eq!(read_source_revision("wordpress").as_deref(), Some("abc1234"));
+            assert_eq!(
+                read_source_url(&result.path).as_deref(),
+                Some(source.join("wordpress").to_string_lossy().as_ref())
+            );
+
+            let resolved = source_metadata::resolve_source_url("wordpress")
+                .expect("source url resolves from linked sidecar");
+            assert_eq!(
+                resolved.url,
+                source.join("wordpress").to_string_lossy().to_string()
             );
         });
     }

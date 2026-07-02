@@ -313,6 +313,43 @@ fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
 }
 
 #[test]
+fn rewrite_lab_offload_args_preserves_extension_dev_run_runner() {
+    let input = args(&[
+        "homeboy",
+        "extension",
+        "dev-run",
+        "--source",
+        "/Users/user/Developer/homeboy-extensions/wordpress",
+        "--runner",
+        "homeboy-lab",
+        "wordpress",
+        "homeboy",
+        "extension",
+        "show",
+        "wordpress",
+    ]);
+
+    assert_eq!(
+        rewrite_lab_offload_args(&input, "/home/user/Developer/homeboy", &[], None),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "extension",
+            "dev-run",
+            "--source",
+            "/Users/user/Developer/homeboy-extensions/wordpress",
+            "--runner",
+            "homeboy-lab",
+            "wordpress",
+            "homeboy",
+            "extension",
+            "show",
+            "wordpress",
+        ])
+    );
+}
+
+#[test]
 fn detects_lab_offload_source_path_from_path_flag() {
     let input = args(&["homeboy", "test", "--path", "/Users/user/Developer/project"]);
 

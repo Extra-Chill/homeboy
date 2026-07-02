@@ -135,10 +135,53 @@ pub(crate) fn write_source_metadata(
     source_url: &str,
     source_revision: Option<String>,
 ) {
+    let metadata_dir = source_metadata_dir(extension_dir);
     if let Some(rev) = source_revision {
-        let _ = std::fs::write(extension_dir.join(".source-revision"), rev);
+        let _ = std::fs::write(metadata_dir.join(source_metadata_file(extension_dir, "revision")), rev);
     }
-    let _ = std::fs::write(extension_dir.join(".source-url"), source_url);
+    let _ = std::fs::write(metadata_dir.join(source_metadata_file(extension_dir, "url")), source_url);
+}
+
+pub fn read_source_url(extension_dir: &Path) -> Option<String> {
+    read_source_metadata_value(extension_dir, "url")
+}
+
+fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
+    for path in [
+        extension_dir.join(format!(".source-{kind}")),
+        source_metadata_dir(extension_dir).join(source_metadata_file(extension_dir, kind)),
+    ] {
+        if let Some(value) = std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn source_metadata_dir(extension_dir: &Path) -> PathBuf {
+    if extension_dir.is_symlink() {
+        return extension_dir
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+    }
+
+    extension_dir.to_path_buf()
+}
+
+fn source_metadata_file(extension_dir: &Path, kind: &str) -> String {
+    if extension_dir.is_symlink() {
+        if let Some(name) = extension_dir.file_name().and_then(|name| name.to_str()) {
+            return format!(".{name}.source-{kind}");
+        }
+    }
+
+    format!(".source-{kind}")
 }
 
 pub(crate) fn is_extension_update_workdir_clean(git_root: &Path, extension_dir: &Path) -> bool {
@@ -364,10 +407,6 @@ pub fn read_source_revision(extension_id: &str) -> Option<String> {
         return Some(rev);
     }
 
-    // Fall back to .source-revision file (monorepo installs)
-    let rev_file = extension_dir.join(".source-revision");
-    std::fs::read_to_string(&rev_file)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    // Fall back to source metadata files (monorepo installs and staged linked installs).
+    read_source_metadata_value(&extension_dir, "revision")
 }

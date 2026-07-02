@@ -87,6 +87,9 @@ pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
 pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
+pub(crate) const EXTENSION_DEV_RUN_LAB_LABEL: &str = "extension dev-run";
+pub(crate) const EXTENSION_REFRESH_LAB_LABEL: &str = "extension refresh";
+pub(crate) const EXTENSION_UPDATE_LAB_LABEL: &str = "extension update";
 pub(crate) const WORKTREE_CLEANUP_LAB_LABEL: &str = "worktree cleanup";
 pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
 pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
@@ -324,6 +327,24 @@ const RUNTIME_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSumm
     hint_label: RUNTIME_REFRESH_LAB_LABEL,
 }];
 
+const EXTENSION_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
+    CommandLabSupportSummary {
+        contract_labels: &[EXTENSION_DEV_RUN_LAB_LABEL],
+        message_label: EXTENSION_DEV_RUN_LAB_LABEL,
+        hint_label: EXTENSION_DEV_RUN_LAB_LABEL,
+    },
+    CommandLabSupportSummary {
+        contract_labels: &[EXTENSION_REFRESH_LAB_LABEL],
+        message_label: EXTENSION_REFRESH_LAB_LABEL,
+        hint_label: EXTENSION_REFRESH_LAB_LABEL,
+    },
+    CommandLabSupportSummary {
+        contract_labels: &[EXTENSION_UPDATE_LAB_LABEL],
+        message_label: EXTENSION_UPDATE_LAB_LABEL,
+        hint_label: EXTENSION_UPDATE_LAB_LABEL,
+    },
+];
+
 const WORKTREE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
     contract_labels: &[WORKTREE_CLEANUP_LAB_LABEL],
     message_label: WORKTREE_CLEANUP_LAB_LABEL,
@@ -474,7 +495,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
-    command_spec("extension", CommandJsonFamily::Workspace),
+    lab_command_spec_with_summary(
+        "extension",
+        CommandJsonFamily::Workspace,
+        "Lab runner routing covers runner extension refresh/update/dev-run workflows",
+        EXTENSION_LAB_SUPPORT,
+    ),
     command_spec("status", CommandJsonFamily::Ops),
     command_spec("docs", CommandJsonFamily::Workspace),
     manifest_command_spec(),

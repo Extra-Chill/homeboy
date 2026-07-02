@@ -860,6 +860,70 @@ pub(super) fn runtime_refresh_source_extra_workspaces(
     Ok(workspaces)
 }
 
+pub(super) fn extension_source_extra_workspaces(
+    args: &[String],
+    source_path: &Path,
+    allow_dirty_lab_workspace: bool,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let Some(source) = extension_source_arg(args) else {
+        return Ok(Vec::new());
+    };
+    let source = PathBuf::from(shellexpand::tilde(&source).to_string());
+    if !source.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let source_canon = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut workspaces = Vec::new();
+    add_candidate_extra_workspace(
+        &source.display().to_string(),
+        "extension_source",
+        &source_canon,
+        &mut seen,
+        &mut workspaces,
+    )?;
+    for workspace in &mut workspaces {
+        workspace.allow_dirty_lab_workspace = allow_dirty_lab_workspace;
+        workspace.source_provenance = Some(runtime_refresh_source_provenance(&workspace.path));
+    }
+    Ok(workspaces)
+}
+
+fn extension_source_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "extension" {
+            let Some(subcommand) = iter.next() else {
+                break;
+            };
+            if subcommand == "refresh" {
+                return iter.find(|value| !value.starts_with('-')).cloned();
+            }
+            if subcommand == "dev-run" {
+                while let Some(value) = iter.next() {
+                    if value == "--" {
+                        break;
+                    }
+                    if value == "--source" {
+                        return iter.next().cloned();
+                    }
+                    if let Some(source) = value.strip_prefix("--source=") {
+                        return Some(source.to_string());
+                    }
+                }
+            }
+            break;
+        }
+    }
+    None
+}
+
 fn runtime_refresh_source_arg(args: &[String]) -> Option<String> {
     if !args.windows(2).any(|window| {
         matches!(window, [command, subcommand] if command == "runtime" && subcommand == "refresh")
@@ -1486,7 +1550,7 @@ mod provider_config_candidate_paths_tests {
 
     use super::{
         agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
-        path_setting_extra_workspaces, path_setting_values,
+        extension_source_extra_workspaces, path_setting_extra_workspaces, path_setting_values,
         preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
         provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
         rig_component_path_env_extra_workspaces_from_entries,
@@ -1657,6 +1721,33 @@ mod provider_config_candidate_paths_tests {
         assert_eq!(provenance["git_remote"], "https://example.test/runtime.git");
         assert_eq!(provenance["dirty"], true);
         assert!(provenance["git_sha"].as_str().is_some());
+    }
+
+    #[test]
+    fn extension_refresh_source_syncs_local_source() {
+        let controller = tempfile::tempdir().expect("controller");
+        let primary = controller.path().join("primary");
+        let extension_source = controller.path().join("homeboy-extensions/wordpress");
+        std::fs::create_dir_all(&primary).expect("primary dir");
+        std::fs::create_dir_all(&extension_source).expect("extension source dir");
+        std::fs::write(extension_source.join("wordpress.json"), "{}\n")
+            .expect("extension manifest");
+        let args = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "refresh".to_string(),
+            extension_source.display().to_string(),
+            "--id".to_string(),
+            "wordpress".to_string(),
+        ];
+
+        let workspaces = extension_source_extra_workspaces(&args, &primary, true)
+            .expect("extension source workspaces");
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].role, "extension_source");
+        assert_eq!(workspaces[0].path, extension_source.canonicalize().unwrap());
+        assert!(workspaces[0].allow_dirty_lab_workspace);
     }
 
     #[test]
