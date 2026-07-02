@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
-use homeboy::core::cleanup::{self, ArtifactCleanupOptions};
+use clap::{Args, Subcommand, ValueEnum};
+use homeboy::core::cleanup::{self, ArtifactCleanupOptions, ArtifactCleanupSort};
 use homeboy::core::worktree_providers::{self, WorktreeProviderCleanupOptions};
 use serde_json::Value;
 
@@ -40,10 +40,25 @@ pub struct CleanupArtifactsArgs {
     #[arg(long, value_name = "PATH")]
     pub temp_root: Vec<PathBuf>,
 
+    /// Sort artifact candidates before reporting or applying cleanup.
+    #[arg(long, value_enum, default_value = "discovery")]
+    pub sort: CleanupArtifactsSortArg,
+
+    /// Limit artifact candidates reported or removed after sorting.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
+
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream. Preserves in-progress cooks' build dirs.
     #[arg(long)]
     pub merged_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CleanupArtifactsSortArg {
+    #[default]
+    Discovery,
+    Size,
 }
 
 #[derive(Args)]
@@ -68,6 +83,11 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
             apply: args.apply,
             self_artifacts: args.self_artifacts,
             temp_roots: args.temp_root,
+            sort: match args.sort {
+                CleanupArtifactsSortArg::Discovery => ArtifactCleanupSort::Discovery,
+                CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
+            },
+            limit: args.limit,
             merged_only: args.merged_only,
         })
         .and_then(|output| {
@@ -146,6 +166,12 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         lines.push(format!("  - {reason}: {count}"));
     }
 
+    let candidate_lines = artifact_candidate_lines(payload, 10);
+    if !candidate_lines.is_empty() {
+        lines.push("Rebuildable artifacts:".to_string());
+        lines.extend(candidate_lines);
+    }
+
     let next = if mode == "apply" {
         format!("homeboy cleanup artifacts --path {}", shell_quote(root))
     } else {
@@ -158,6 +184,21 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
     lines.push(String::new());
 
     Some(lines.join("\n"))
+}
+
+fn artifact_candidate_lines(payload: &Value, limit: usize) -> Vec<String> {
+    payload
+        .get("candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(limit)
+        .filter_map(|row| {
+            let path = row.get("path").and_then(Value::as_str)?;
+            let bytes = row.get("size_bytes").and_then(Value::as_u64).unwrap_or(0);
+            Some(format!("  - {} {}", format_bytes(bytes), path))
+        })
+        .collect()
 }
 
 fn skipped_counts_by_reason(payload: &Value) -> Vec<(String, u64)> {
@@ -262,5 +303,30 @@ mod tests {
         assert!(
             summary.contains("Next safe command: homeboy cleanup artifacts --path /tmp/homeboy\n")
         );
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_lists_candidates_in_payload_order() {
+        let payload = json!({
+            "command": "cleanup.artifacts",
+            "mode": "dry_run",
+            "root": "/tmp/repo",
+            "candidate_count": 2,
+            "skipped_count": 0,
+            "applied_count": 0,
+            "estimated_bytes": 3072,
+            "reclaimed_bytes": 0,
+            "candidates": [
+                { "path": "/tmp/repo/node_modules", "size_bytes": 2048 },
+                { "path": "/tmp/repo/dist", "size_bytes": 1024 }
+            ],
+            "skipped": []
+        });
+
+        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+
+        let first = summary.find("  - 2.0 KiB /tmp/repo/node_modules").unwrap();
+        let second = summary.find("  - 1.0 KiB /tmp/repo/dist").unwrap();
+        assert!(first < second);
     }
 }

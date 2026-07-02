@@ -29,11 +29,20 @@ pub struct ArtifactCleanupOptions {
     pub apply: bool,
     pub self_artifacts: bool,
     pub temp_roots: Vec<PathBuf>,
+    pub sort: ArtifactCleanupSort,
+    pub limit: Option<usize>,
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream (ancestor or patch-equivalent / squash-merged). This
     /// keeps in-progress cooks' build dirs intact while reclaiming the large
     /// `target/` dirs left behind by merged worktrees.
     pub merged_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ArtifactCleanupSort {
+    #[default]
+    Discovery,
+    Size,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -180,22 +189,25 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
                 unpushed_commits: safety.unpushed_commits,
             };
 
-            if options.apply {
-                remove_artifact_path(&artifact_path)?;
-                applied.push(applied_row(&candidate));
-            }
-
             candidates.push(candidate);
         }
     }
 
     for candidate in self_temp_artifact_candidates(&options)? {
-        if options.apply {
-            remove_artifact_path(Path::new(&candidate.path))?;
-            applied.push(applied_row(&candidate));
-        }
-
         candidates.push(candidate);
+    }
+
+    order_and_limit_candidates(&mut candidates, options.sort, options.limit);
+
+    if options.apply {
+        for candidate in &candidates {
+            let path = Path::new(&candidate.path);
+            if !path.exists() {
+                continue;
+            }
+            remove_artifact_path(path)?;
+            applied.push(applied_row(candidate));
+        }
     }
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
@@ -225,6 +237,25 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
         skipped,
         applied,
     })
+}
+
+fn order_and_limit_candidates(
+    candidates: &mut Vec<ArtifactCleanupCandidate>,
+    sort: ArtifactCleanupSort,
+    limit: Option<usize>,
+) {
+    if sort == ArtifactCleanupSort::Size {
+        candidates.sort_by(|left, right| {
+            right
+                .size_bytes
+                .cmp(&left.size_bytes)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+    }
+
+    if let Some(limit) = limit {
+        candidates.truncate(limit);
+    }
 }
 
 fn cleanup_summary(
@@ -721,6 +752,8 @@ mod tests {
             apply: false,
             self_artifacts: true,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect_err("reject ambiguous cleanup root");
@@ -736,6 +769,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect_err("reject non-git cleanup root");
@@ -775,6 +810,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("temp artifact candidates");
@@ -817,6 +854,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("apply cleanup");
@@ -852,6 +891,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("temp artifact candidates");
@@ -882,6 +923,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("apply cleanup");
@@ -912,6 +955,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("temp artifact candidates");
@@ -936,6 +981,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("temp artifact candidates");
@@ -961,6 +1008,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("temp artifact candidates");
@@ -983,6 +1032,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("apply cleanup");
@@ -1011,6 +1062,8 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("dry-run cleanup");
@@ -1031,6 +1084,71 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_can_sort_artifact_candidates_by_size_descending() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "small");
+        write_file(&repo.path().join("dist/bundle.js"), &"m".repeat(256));
+        write_file(
+            &repo.path().join("node_modules/pkg/index.js"),
+            &"l".repeat(1024),
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Size,
+            limit: None,
+            merged_only: false,
+        })
+        .expect("dry-run cleanup");
+
+        let paths: Vec<&str> = output
+            .candidates
+            .iter()
+            .map(|row| row.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["node_modules", "dist", "target"]);
+        assert!(output.candidates[0].size_bytes >= output.candidates[1].size_bytes);
+        assert!(output.candidates[1].size_bytes >= output.candidates[2].size_bytes);
+    }
+
+    #[test]
+    fn limit_applies_after_size_sort_and_removes_only_selected_artifacts() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "small");
+        write_file(&repo.path().join("dist/bundle.js"), &"m".repeat(256));
+        write_file(
+            &repo.path().join("node_modules/pkg/index.js"),
+            &"l".repeat(1024),
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Size,
+            limit: Some(2),
+            merged_only: false,
+        })
+        .expect("apply cleanup");
+
+        let paths: Vec<&str> = output
+            .candidates
+            .iter()
+            .map(|row| row.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["node_modules", "dist"]);
+        assert_eq!(output.candidate_count, 2);
+        assert_eq!(output.applied_count, 2);
+        assert!(!repo.path().join("node_modules").exists());
+        assert!(!repo.path().join("dist").exists());
+        assert!(repo.path().join("target/debug/app").exists());
+    }
+
+    #[test]
     fn apply_removes_declared_artifacts_only_and_preserves_dirty_source() {
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
@@ -1041,6 +1159,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("apply cleanup");
@@ -1065,6 +1185,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("first apply cleanup");
@@ -1088,6 +1210,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("second apply cleanup");
@@ -1140,6 +1264,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: false,
         })
         .expect("apply cleanup");
@@ -1276,6 +1402,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: true,
         })
         .expect("merged-only cleanup");
@@ -1305,6 +1433,8 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
             merged_only: true,
         })
         .expect("merged-only cleanup");
