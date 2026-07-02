@@ -100,6 +100,82 @@ fn file_delete_without_apply_returns_plan_and_preserves_file() {
 }
 
 #[test]
+fn file_mkdir_without_apply_returns_plan_and_preserves_filesystem() {
+    let project_root = tempfile::tempdir().expect("project tempdir");
+    let project_id = "local-file-mkdir-plan";
+    let dir_path = project_root.path().join("new-dir");
+
+    let result = with_isolated_home(|home| {
+        write_project_config(home.path(), project_id, project_root.path());
+
+        run(
+            FileArgs {
+                command: FileCommand::Mkdir {
+                    project_id: project_id.to_string(),
+                    path: "new-dir".to_string(),
+                    apply: false,
+                },
+            },
+            &GlobalArgs {},
+        )
+    });
+
+    let (output, code) = result.expect("run homeboy file mkdir");
+    let FileCommandOutput::Standard(payload) = output else {
+        panic!("expected standard file output");
+    };
+
+    assert_eq!(code, 0);
+    assert_eq!(payload.command, "file.mkdir");
+    assert!(payload.dry_run);
+    assert_eq!(
+        payload.action_required.as_deref(),
+        Some("Re-run with --apply to create the remote directory.")
+    );
+    assert!(!dir_path.exists());
+}
+
+#[test]
+fn file_rename_without_apply_returns_plan_and_preserves_filesystem() {
+    let project_root = tempfile::tempdir().expect("project tempdir");
+    let project_id = "local-file-rename-plan";
+    let old_path = project_root.path().join("old.txt");
+    let new_path = project_root.path().join("new.txt");
+    std::fs::write(&old_path, "keep me").expect("write sample file");
+
+    let result = with_isolated_home(|home| {
+        write_project_config(home.path(), project_id, project_root.path());
+
+        run(
+            FileArgs {
+                command: FileCommand::Rename {
+                    project_id: project_id.to_string(),
+                    old_path: "old.txt".to_string(),
+                    new_path: "new.txt".to_string(),
+                    apply: false,
+                },
+            },
+            &GlobalArgs {},
+        )
+    });
+
+    let (output, code) = result.expect("run homeboy file rename");
+    let FileCommandOutput::Standard(payload) = output else {
+        panic!("expected standard file output");
+    };
+
+    assert_eq!(code, 0);
+    assert_eq!(payload.command, "file.rename");
+    assert!(payload.dry_run);
+    assert_eq!(
+        payload.action_required.as_deref(),
+        Some("Re-run with --apply to rename or move the remote path.")
+    );
+    assert!(old_path.exists());
+    assert!(!new_path.exists());
+}
+
+#[test]
 fn file_edit_dry_run_returns_preview_and_preserves_file() {
     let project_root = tempfile::tempdir().expect("project tempdir");
     let project_id = "local-file-edit-dry-run";

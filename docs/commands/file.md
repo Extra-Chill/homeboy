@@ -11,9 +11,9 @@ homeboy file <COMMAND>
 - `list <project_id> <path>`
 - `read <project_id> <path>`
 - `write <project_id> <path> [--apply]` (reads content from stdin)
-- `mkdir <project_id> <path>` (create a directory)
+- `mkdir <project_id> <path> [--apply]` (create a directory)
 - `delete <project_id> <path> [-r|--recursive] [--apply]` (delete files or directories)
-- `rename <project_id> <old_path> <new_path>`
+- `rename <project_id> <old_path> <new_path> [--apply]`
 - `find <project_id> <path> [options]` (search for files by name)
 - `grep <project_id> <path> <pattern> [options]` (search file contents)
 - `download <project_id> <path> [local_path] [-r|--recursive]`
@@ -23,15 +23,19 @@ homeboy file <COMMAND>
 
 `copy` and `sync` targets use `local/path` or `server_id:/path` syntax. `sync` is recursive and non-deleting by default; it does not expose a delete mode.
 
-### `write` and `delete`
+### `write`, `mkdir`, `delete`, and `rename`
 
-`write` and `delete` default to non-mutating plan output. Pass `--apply` to perform the remote mutation.
+`write`, `mkdir`, `delete`, and `rename` default to non-mutating plan output. Pass `--apply` to perform the remote mutation.
 
 ```sh
 printf 'content' | homeboy file write mysite /tmp/example.txt
 printf 'content' | homeboy file write mysite /tmp/example.txt --apply
 homeboy file delete mysite /tmp/example.txt
 homeboy file delete mysite /tmp/example.txt --apply
+homeboy file mkdir mysite /tmp/example-dir
+homeboy file mkdir mysite /tmp/example-dir --apply
+homeboy file rename mysite /tmp/example.txt /tmp/example-renamed.txt
+homeboy file rename mysite /tmp/example.txt /tmp/example-renamed.txt --apply
 ```
 
 ### `find`
@@ -151,7 +155,7 @@ Fields:
 - `entries`: for `list` (parsed from `ls -la`)
 - `content`: for `read`
 - `bytes_written`: for `write` (number of bytes written after stripping one trailing `\n` if present)
-- `dry_run`, `action_required`: for guarded `write` and `delete` plans
+- `dry_run`, `action_required`: for guarded `write`, `mkdir`, `delete`, and `rename` plans
 - `stdout`, `stderr`: included for error context when applicable
 - `exit_code`, `success`
 

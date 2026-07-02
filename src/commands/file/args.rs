@@ -51,6 +51,9 @@ pub(crate) enum FileCommand {
         project_id: String,
         /// Remote directory path
         path: String,
+        /// Apply the directory creation. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
     },
     /// Delete a file or directory
     Delete {
@@ -73,6 +76,9 @@ pub(crate) enum FileCommand {
         old_path: String,
         /// New path
         new_path: String,
+        /// Apply the rename/move. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
     },
     /// Find files by name pattern
     Find {
