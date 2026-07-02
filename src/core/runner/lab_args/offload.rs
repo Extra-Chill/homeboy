@@ -75,7 +75,7 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
             continue;
         }
         if passthrough {
-            stripped.push(arg.clone());
+            stripped.push(remap_lab_offload_arg(arg, &ordered));
             continue;
         }
         if arg == "--" {
