@@ -10,10 +10,11 @@ use crate::core::rig::spec::DependencyCacheSpec;
 
 use super::{
     workspace::{
-        canonical_workspace_path, effective_snapshot_excludes, git_output, local_snapshot_stats,
-        materialize_snapshot, materialize_snapshot_git, parent_remote_path, run_shell_capture,
-        run_shell_command, shell_command_for_runner, snapshot_identity, ByteFileCounts,
-        DEFAULT_EXCLUDES,
+        canonical_workspace_path, dependency_cache_manifest_command,
+        dependency_cache_restore_command, dependency_cache_save_command,
+        effective_snapshot_excludes, git_output, local_snapshot_stats, materialize_snapshot,
+        materialize_snapshot_git, parent_remote_path, run_shell_capture, run_shell_command,
+        shell_command_for_runner, snapshot_identity, ByteFileCounts, DEFAULT_EXCLUDES,
     },
     Runner, RunnerKind, RunnerWorkspaceSyncMode,
 };
@@ -333,12 +334,7 @@ fn restore_dependency_cache_paths(
             missing.push(path.clone());
             continue;
         }
-        let command = format!(
-            "mkdir -p {dest} && rm -rf {target} && tar -C {dest} -xf {archive}",
-            dest = shell::quote_arg(remote_path),
-            target = shell::quote_arg(&Path::new(remote_path).join(path).display().to_string()),
-            archive = shell::quote_arg(&archive),
-        );
+        let command = dependency_cache_restore_command(remote_path, path, &archive);
         run_shell_command(
             &shell_command_for_runner(runner, &command)?,
             "restore runner dependency cache",
@@ -375,14 +371,7 @@ fn save_dependency_cache_paths(
             missing.push(path.clone());
             continue;
         }
-        let command = format!(
-            "mkdir -p {cache} {archive_parent} && tar -C {remote} -cf {archive} {path}",
-            cache = shell::quote_arg(cache_path),
-            archive_parent = shell::quote_arg(&parent_remote_path(&archive)),
-            remote = shell::quote_arg(remote_path),
-            archive = shell::quote_arg(&archive),
-            path = shell::quote_arg(path),
-        );
+        let command = dependency_cache_save_command(remote_path, cache_path, path, &archive);
         run_shell_command(
             &shell_command_for_runner(runner, &command)?,
             "save runner dependency cache",
@@ -390,17 +379,7 @@ fn save_dependency_cache_paths(
         saved.push(path.clone());
     }
     let manifest_json = serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".to_string());
-    let write_manifest = format!(
-        "mkdir -p {cache} && printf %s {json} > {manifest}",
-        cache = shell::quote_arg(cache_path),
-        json = shell::quote_arg(&manifest_json),
-        manifest = shell::quote_arg(
-            &Path::new(cache_path)
-                .join("manifest.json")
-                .display()
-                .to_string()
-        ),
-    );
+    let write_manifest = dependency_cache_manifest_command(cache_path, &manifest_json);
     run_shell_command(
         &shell_command_for_runner(runner, &write_manifest)?,
         "write runner dependency cache manifest",

@@ -2,6 +2,8 @@ use crate::core::engine::shell;
 
 use super::util::{owner_capture_shell, owner_restore_shell, parent_remote_path};
 
+const CACHE_MANIFEST_FILE: &str = "manifest.json";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkspaceMaterializationOperation {
     EnsureParent,
@@ -27,6 +29,20 @@ pub(super) enum WorkspaceMaterializationOperation {
         changed_since_base: Option<String>,
         fetch_refs: Vec<String>,
         allow_dirty: bool,
+    },
+    EnsureDestDir,
+    EnsureParentOf(String),
+    RestoreDependencyCachePath {
+        path: String,
+        archive: String,
+    },
+    SaveDependencyCachePath {
+        remote_path: String,
+        path: String,
+        archive: String,
+    },
+    WriteDependencyCacheManifest {
+        json: String,
     },
     AtomicReplaceTemp,
 }
@@ -141,9 +157,84 @@ impl WorkspaceMaterializationOperation {
                 fetch_refs,
                 *allow_dirty,
             ),
+            Self::EnsureDestDir => "mkdir -p \"$dest\"".to_string(),
+            Self::EnsureParentOf(path) => format!(
+                "mkdir -p {parent}",
+                parent = shell::quote_arg(&parent_remote_path(path))
+            ),
+            Self::RestoreDependencyCachePath { path, archive } => format!(
+                "rm -rf {target} && tar -C \"$dest\" -xf {archive}",
+                target = dest_child_path(path),
+                archive = shell::quote_arg(archive)
+            ),
+            Self::SaveDependencyCachePath {
+                remote_path,
+                path,
+                archive,
+            } => format!(
+                "tar -C {remote} -cf {archive} {path}",
+                remote = shell::quote_arg(remote_path),
+                archive = shell::quote_arg(archive),
+                path = shell::quote_arg(path),
+            ),
+            Self::WriteDependencyCacheManifest { json } => format!(
+                "printf %s {json} > {manifest}",
+                json = shell::quote_arg(json),
+                manifest = dest_child_path(CACHE_MANIFEST_FILE),
+            ),
             Self::AtomicReplaceTemp => "rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"".to_string(),
         }
     }
+}
+
+pub(crate) fn dependency_cache_restore_command(
+    remote_path: &str,
+    path: &str,
+    archive: &str,
+) -> String {
+    WorkspaceMaterializer::new(remote_path)
+        .op(WorkspaceMaterializationOperation::EnsureDestDir)
+        .op(
+            WorkspaceMaterializationOperation::RestoreDependencyCachePath {
+                path: path.to_string(),
+                archive: archive.to_string(),
+            },
+        )
+        .command()
+}
+
+pub(crate) fn dependency_cache_save_command(
+    remote_path: &str,
+    cache_path: &str,
+    path: &str,
+    archive: &str,
+) -> String {
+    WorkspaceMaterializer::new(cache_path)
+        .op(WorkspaceMaterializationOperation::EnsureDestDir)
+        .op(WorkspaceMaterializationOperation::EnsureParentOf(
+            archive.to_string(),
+        ))
+        .op(WorkspaceMaterializationOperation::SaveDependencyCachePath {
+            remote_path: remote_path.to_string(),
+            path: path.to_string(),
+            archive: archive.to_string(),
+        })
+        .command()
+}
+
+pub(crate) fn dependency_cache_manifest_command(cache_path: &str, json: &str) -> String {
+    WorkspaceMaterializer::new(cache_path)
+        .op(WorkspaceMaterializationOperation::EnsureDestDir)
+        .op(
+            WorkspaceMaterializationOperation::WriteDependencyCacheManifest {
+                json: json.to_string(),
+            },
+        )
+        .command()
+}
+
+fn dest_child_path(path: &str) -> String {
+    format!("\"$dest\"/{}", shell::quote_arg(path))
 }
 
 fn git_checkout_command(head: &str, branch: Option<&str>) -> String {

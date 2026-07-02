@@ -1,5 +1,6 @@
 use crate::core::runner::workspace::materializer::{
-    WorkspaceMaterializationOperation, WorkspaceMaterializer,
+    dependency_cache_manifest_command, dependency_cache_restore_command,
+    dependency_cache_save_command, WorkspaceMaterializationOperation, WorkspaceMaterializer,
 };
 
 #[test]
@@ -90,4 +91,49 @@ fn workspace_materializer_builds_direct_git_checkout_command() {
     assert!(command.contains("checkout --detach abc123"));
     assert!(command.contains("git -C \"$dest\" clean -ffdqx"));
     assert!(command.contains("chown -R \"$owner\" $dest"));
+}
+
+#[test]
+fn workspace_materializer_builds_dependency_cache_restore_command() {
+    let command = dependency_cache_restore_command(
+        "/srv/homeboy/_lab_workspaces/homeboy-abc",
+        "vendor/cache with spaces",
+        "/srv/homeboy/_dependency_cache/key/vendor__cache.tar",
+    );
+
+    assert!(command.contains("dest=/srv/homeboy/_lab_workspaces/homeboy-abc"));
+    assert!(command.contains("mkdir -p \"$dest\""));
+    assert!(command.contains("rm -rf \"$dest\"/'vendor/cache with spaces'"));
+    assert!(command
+        .contains("tar -C \"$dest\" -xf /srv/homeboy/_dependency_cache/key/vendor__cache.tar"));
+}
+
+#[test]
+fn workspace_materializer_builds_dependency_cache_save_command() {
+    let command = dependency_cache_save_command(
+        "/srv/homeboy/_lab_workspaces/homeboy-abc",
+        "/srv/homeboy/_dependency_cache/key",
+        "vendor/cache with spaces",
+        "/srv/homeboy/_dependency_cache/key/vendor__cache.tar",
+    );
+
+    assert!(command.contains("dest=/srv/homeboy/_dependency_cache/key"));
+    assert!(command.contains("mkdir -p \"$dest\""));
+    assert!(command.contains("mkdir -p /srv/homeboy/_dependency_cache/key"));
+    assert!(command.contains(
+        "tar -C /srv/homeboy/_lab_workspaces/homeboy-abc -cf /srv/homeboy/_dependency_cache/key/vendor__cache.tar 'vendor/cache with spaces'"
+    ));
+}
+
+#[test]
+fn workspace_materializer_builds_dependency_cache_manifest_command() {
+    let command = dependency_cache_manifest_command(
+        "/srv/homeboy/_dependency_cache/key",
+        "{\n  \"key\": \"dep-cache\"\n}",
+    );
+
+    assert!(command.contains("dest=/srv/homeboy/_dependency_cache/key"));
+    assert!(command.contains("mkdir -p \"$dest\""));
+    assert!(command.contains("printf %s '{"));
+    assert!(command.contains("}' > \"$dest\"/manifest.json"));
 }
