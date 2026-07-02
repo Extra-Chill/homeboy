@@ -207,6 +207,40 @@ mod tests {
     }
 
     #[test]
+    fn component_script_bench_env_serializes_passthrough_args() {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut args = bench_run_workflow_args_fixture();
+        args.passthrough_args = vec![
+            "--workload-option".to_string(),
+            "value with spaces".to_string(),
+        ];
+
+        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+
+        assert_eq!(
+            env.iter()
+                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
+            Some(&r#"["--workload-option","value with spaces"]"#.to_string())
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn component_script_bench_env_serializes_empty_passthrough_args() {
+        let run_dir = RunDir::create().expect("run dir");
+        let args = bench_run_workflow_args_fixture();
+
+        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+
+        assert_eq!(
+            env.iter()
+                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
+            Some(&"[]".to_string())
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
     fn component_script_bench_env_omits_run_id_when_absent_or_blank() {
         let run_dir = RunDir::create().expect("run dir");
 
@@ -291,6 +325,29 @@ mod tests {
         assert_eq!(
             parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
             "plain-site-sample-plugin"
+        );
+    }
+
+    #[test]
+    fn component_script_bench_list_env_serializes_passthrough_args() {
+        let env = bench_component_script_list_env(&BenchListWorkflowArgs {
+            component_label: "studio-web".to_string(),
+            component_id: "studio-web".to_string(),
+            path_override: None,
+            settings: Vec::new(),
+            settings_json: Vec::new(),
+            passthrough_args: vec!["--scenario-filter".to_string(), "plain".to_string()],
+            scenario_ids: Vec::new(),
+            extra_workloads: Vec::new(),
+            env_provider_extensions: Vec::new(),
+            rig_package: None,
+        })
+        .expect("component-script list env");
+
+        assert_eq!(
+            env.iter()
+                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
+            Some(&r#"["--scenario-filter","plain"]"#.to_string())
         );
     }
 

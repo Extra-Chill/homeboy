@@ -178,6 +178,15 @@ pub(crate) fn build_runner(
     )
     .env("HOMEBOY_BENCH_PROGRESS", bench_progress_env_value())
     .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")
+    .env(
+        "HOMEBOY_BENCH_ARGS_JSON",
+        &serde_json::to_string(&args.passthrough_args).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("serialize bench passthrough args".to_string()),
+            )
+        })?,
+    )
     .script_args(&args.passthrough_args)
     .passthrough(false)
     .stderr_passthrough(bench_progress_enabled());
