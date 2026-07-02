@@ -15,6 +15,8 @@ use crate::core::proof::{
 use crate::core::run_lifecycle_record::RunLifecycleRecord;
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
+pub const AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA: &str =
+    "homeboy/agent-task-pr-finalization-outcome/v1";
 pub const AGENT_TASK_PUBLICATION_INTENT_SCHEMA: &str = "homeboy/agent-task-publication-intent/v1";
 pub const AGENT_TASK_PUBLICATION_PROOF_SCHEMA: &str = "homeboy/agent-task-publication-proof/v1";
 
@@ -46,8 +48,31 @@ pub struct AgentTaskPrFinalizationReport {
     pub proof: HomeboyProof,
     pub publication_intent: AgentTaskPublicationIntent,
     pub publication_proof: AgentTaskPublicationProof,
+    pub finalization_outcome: AgentTaskPrFinalizationOutcome,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPrFinalizationOutcome {
+    #[serde(default = "finalization_outcome_schema")]
+    pub schema: String,
+    pub run_id: String,
+    pub status: String,
+    pub publication_status: String,
+    pub publication_action: String,
+    pub target: AgentTaskPublicationTarget,
+    pub base: String,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    pub committed: bool,
+    pub pushed: bool,
+    pub published: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -633,6 +658,15 @@ fn report(
     publication_intent.proof = proof.clone();
     let publication_proof =
         publication_proof(&publication_intent, status, pr_action, pr_url.clone());
+    let finalization_outcome = finalization_outcome(
+        &publication_intent,
+        &publication_proof,
+        status,
+        pr_action,
+        pr_number,
+        pr_url.clone(),
+        &changed_files,
+    );
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
@@ -649,8 +683,41 @@ fn report(
         proof,
         publication_intent,
         publication_proof,
+        finalization_outcome,
         evidence: options.evidence.clone(),
     }
+}
+
+fn finalization_outcome(
+    intent: &AgentTaskPublicationIntent,
+    publication_proof: &AgentTaskPublicationProof,
+    status: &str,
+    pr_action: &str,
+    pr_number: Option<u64>,
+    pr_url: Option<String>,
+    changed_files: &[String],
+) -> AgentTaskPrFinalizationOutcome {
+    let published = matches!(pr_action, "created" | "updated");
+    AgentTaskPrFinalizationOutcome {
+        schema: AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA.to_string(),
+        run_id: intent.run_id.clone(),
+        status: status.to_string(),
+        publication_status: publication_proof.status.clone(),
+        publication_action: pr_action.to_string(),
+        target: publication_proof.target.clone(),
+        base: intent.target.base.clone().unwrap_or_default(),
+        head: intent.target.head.clone().unwrap_or_default(),
+        pr_number,
+        pr_url,
+        changed_files: changed_files.to_vec(),
+        committed: published,
+        pushed: published,
+        published,
+    }
+}
+
+fn finalization_outcome_schema() -> String {
+    AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA.to_string()
 }
 
 fn publication_intent_schema() -> String {
@@ -875,6 +942,30 @@ mod tests {
             report.publication_proof.adapter_ref.as_deref(),
             Some("https://github.com/Extra-Chill/homeboy/pull/123")
         );
+        assert_eq!(
+            report.finalization_outcome.schema,
+            AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
+        );
+        assert_eq!(report.finalization_outcome.status, "review_ready");
+        assert_eq!(
+            report.finalization_outcome.publication_status,
+            "review_ready"
+        );
+        assert_eq!(report.finalization_outcome.publication_action, "created");
+        assert_eq!(report.finalization_outcome.base, "main");
+        assert_eq!(report.finalization_outcome.head, "fix/cook");
+        assert_eq!(report.finalization_outcome.pr_number, Some(123));
+        assert_eq!(
+            report.finalization_outcome.pr_url.as_deref(),
+            Some("https://github.com/Extra-Chill/homeboy/pull/123")
+        );
+        assert_eq!(
+            report.finalization_outcome.changed_files,
+            vec!["src/lib.rs"]
+        );
+        assert!(report.finalization_outcome.committed);
+        assert!(report.finalization_outcome.pushed);
+        assert!(report.finalization_outcome.published);
     }
 
     #[test]
@@ -1036,6 +1127,11 @@ mod tests {
 
         assert_eq!(report.status, "no_changes");
         assert_eq!(report.pr_action, "none");
+        assert_eq!(report.finalization_outcome.status, "no_changes");
+        assert_eq!(report.finalization_outcome.publication_action, "none");
+        assert!(!report.finalization_outcome.committed);
+        assert!(!report.finalization_outcome.pushed);
+        assert!(!report.finalization_outcome.published);
         assert!(!backend.committed);
         assert!(!backend.pushed);
         assert!(!backend.created);
