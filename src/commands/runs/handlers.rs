@@ -12,6 +12,7 @@ use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{FindingListFilter, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
 use homeboy::core::{api_jobs, runners as runner};
@@ -203,6 +204,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
         .collect();
     let directory_publication = directory_publication_guidance_for_artifacts(&artifacts);
+    let resource_lifecycle_index = resource_lifecycle_index_from_artifacts(&artifacts)?;
     let pull = if args.pull {
         Some(pull_artifacts_to_local(
             &artifacts,
@@ -218,6 +220,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             runner_id: None,
             path_guide: RunsArtifactPathGuide::for_listing(&args.run_id, None),
             artifacts,
+            resource_lifecycle_index,
             directory_publication,
             preview_entrypoints,
             matrix_summary,
