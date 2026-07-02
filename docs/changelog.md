@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.4] - 2026-07-02
+
+### Changed
+- Use generic lab capability requirements
+- Record runner workspace materialization plans
+- Preserve secret env plans through runner execution
+- Normalize runner refresh-plan execution output
+- Remove stale CLI compatibility surfaces
+- Accept dotted extension object settings
+- Improve task worktree cleanup reporting
+- Report artifact cleanup hotspots
+- Handle missing task worktree sources
+- Support component execution environment config
+- Use resource lifecycle for workspace cleanup
+- Export runtime artifact contract constants
+- Add secret env plan materialization contract
+
 ## [0.280.3] - 2026-07-02
 
 ### Changed
