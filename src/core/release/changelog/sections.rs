@@ -4,6 +4,7 @@ mod unreleased;
 
 pub use normalize_heading_label::{extract_last_release_snapshot, get_latest_finalized_version};
 use normalize_heading_label::{is_matching_next_section_heading, validate_section_content};
+use std::collections::HashSet;
 use types::SectionContentStatus;
 pub use unreleased::{count_unreleased_entries, get_unreleased_entries};
 
@@ -139,14 +140,19 @@ pub fn finalize_with_generated_entries(
 
     // Build entries in memory: ensure next section exists, add typed entries
     let (mut content, _) = ensure_next_section(changelog_content, aliases)?;
+    let mut covered_entries = get_unreleased_entries(changelog_content, aliases);
 
     for (entry_type, messages) in entries_by_type {
         for message in messages {
             let trimmed = message.trim();
             if !trimmed.is_empty() {
+                if generated_entry_is_covered(&covered_entries, trimmed) {
+                    continue;
+                }
                 let (new_content, _) =
                     append_item_to_subsection(&content, aliases, trimmed, entry_type)?;
                 content = new_content;
+                covered_entries.push(trimmed.to_string());
             }
         }
     }
@@ -154,6 +160,118 @@ pub fn finalize_with_generated_entries(
     // Finalize directly into versioned section — no intermediate disk write
     finalize_next_section(&content, aliases, new_version, false)
 }
+
+fn generated_entry_is_covered(existing_entries: &[String], generated: &str) -> bool {
+    let generated_key = normalized_changelog_entry_key(generated);
+    let generated_tokens = changelog_semantic_tokens(generated);
+    let generated_token_set: HashSet<&str> = generated_tokens.iter().map(String::as_str).collect();
+
+    existing_entries.iter().any(|existing| {
+        let existing_key = normalized_changelog_entry_key(existing);
+        if existing_key == generated_key {
+            return true;
+        }
+
+        let existing_tokens = changelog_semantic_tokens(existing);
+        if generated_tokens.len() < 2 || existing_tokens.len() < generated_tokens.len() {
+            return false;
+        }
+
+        if has_conflicting_action(existing) && !has_conflicting_action(generated) {
+            return false;
+        }
+
+        let existing_token_set: HashSet<&str> =
+            existing_tokens.iter().map(String::as_str).collect();
+        generated_token_set.is_subset(&existing_token_set)
+    })
+}
+
+fn normalized_changelog_entry_key(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_space = true;
+
+    for character in value.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() {
+            normalized.push(character);
+            previous_was_space = false;
+        } else if !previous_was_space {
+            normalized.push(' ');
+            previous_was_space = true;
+        }
+    }
+
+    normalized.trim().to_string()
+}
+
+fn changelog_semantic_tokens(value: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = normalized_changelog_entry_key(value)
+        .split_whitespace()
+        .filter(|token| !CHANGELOG_FILLER_TOKENS.contains(token))
+        .map(normalized_changelog_token)
+        .collect();
+
+    while tokens.len() > 1
+        && tokens
+            .first()
+            .is_some_and(|token| CHANGELOG_WEAK_LEADING_ACTIONS.contains(&token.as_str()))
+    {
+        tokens.remove(0);
+    }
+
+    tokens
+}
+
+fn normalized_changelog_token(token: &str) -> String {
+    if token.len() > 3 && token.ends_with('s') && !token.ends_with("ss") {
+        token[..token.len() - 1].to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+fn has_conflicting_action(value: &str) -> bool {
+    normalized_changelog_entry_key(value)
+        .split_whitespace()
+        .any(|token| CHANGELOG_CONFLICTING_ACTIONS.contains(&token))
+}
+
+const CHANGELOG_FILLER_TOKENS: &[&str] = &[
+    "a", "an", "and", "for", "in", "of", "or", "support", "the", "to", "with",
+];
+
+const CHANGELOG_WEAK_LEADING_ACTIONS: &[&str] = &[
+    "add",
+    "added",
+    "adds",
+    "enable",
+    "enabled",
+    "enables",
+    "implement",
+    "implemented",
+    "implements",
+    "introduce",
+    "introduced",
+    "introduces",
+];
+
+const CHANGELOG_CONFLICTING_ACTIONS: &[&str] = &[
+    "deprecate",
+    "deprecated",
+    "deprecates",
+    "disable",
+    "disabled",
+    "disables",
+    "drop",
+    "dropped",
+    "drops",
+    "remove",
+    "removed",
+    "removes",
+    "replace",
+    "replaced",
+    "replaces",
+];
 
 pub(super) fn find_next_section_start(lines: &[&str], aliases: &[String]) -> Option<usize> {
     lines
@@ -618,6 +736,59 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(out.matches("- Bug fix").count(), 1);
+    }
+
+    #[test]
+    fn finalize_generated_entries_prefers_existing_unreleased_prose() {
+        let content =
+            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Codex CLI runtime support\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let entries = std::collections::HashMap::from([(
+            "added",
+            vec!["add Codex runtime support".to_string()],
+        )]);
+
+        let (out, changed) =
+            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
+
+        assert!(changed);
+        assert!(out.contains("## [0.2.0]"));
+        assert!(out.contains("- Codex CLI runtime support"));
+        assert!(!out.contains("- add Codex runtime support"));
+    }
+
+    #[test]
+    fn finalize_generated_entries_dedupes_normalized_exact_existing_entries() {
+        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Add Codex runtime support.\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let entries = std::collections::HashMap::from([(
+            "added",
+            vec!["add codex runtime support".to_string()],
+        )]);
+
+        let (out, changed) =
+            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
+
+        assert!(changed);
+        assert_eq!(out.matches("Codex runtime support").count(), 1);
+    }
+
+    #[test]
+    fn finalize_generated_entries_still_populates_empty_unreleased_section() {
+        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let entries = std::collections::HashMap::from([(
+            "added",
+            vec!["add Codex runtime support".to_string()],
+        )]);
+
+        let (out, changed) =
+            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
+
+        assert!(changed);
+        assert!(out.contains("## [0.2.0]"));
+        assert!(out.contains("### Added"));
+        assert!(out.contains("- add Codex runtime support"));
     }
 
     // === count_unreleased_entries Tests ===
