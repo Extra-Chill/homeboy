@@ -53,7 +53,10 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
-use extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
+use extension_parity::{
+    requested_setting_keys_for_command, required_extensions_for_command,
+    validate_runner_extension_parity,
+};
 use policy::remote_execution_preflight;
 
 // Cross-submodule visibility: re-export each submodule's `pub(super)` surface so
@@ -482,8 +485,15 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             options.runner_workload.as_ref(),
         ),
     );
+    let requested_setting_keys = requested_setting_keys_for_command(&options.command);
 
-    validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
+    validate_runner_extension_parity(
+        runner_id,
+        &runner,
+        &cwd,
+        &required_extensions,
+        &requested_setting_keys,
+    )?;
 
     // Remote capability-parity preflight: derive the contract from the command's
     // top-level executable when the caller did not supply an explicit one, so

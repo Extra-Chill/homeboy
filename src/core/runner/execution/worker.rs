@@ -7,7 +7,10 @@ use super::super::capabilities::{
 };
 use super::super::{load, Runner, RunnerCapabilityPreflight, RunnerKind};
 
-use super::extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
+use super::extension_parity::{
+    requested_setting_keys_for_command, required_extensions_for_command,
+    validate_runner_extension_parity,
+};
 use super::policy::{validate_runner_policy, RunnerPolicyRequest};
 
 #[allow(unused_imports)]
@@ -70,7 +73,14 @@ pub(super) fn exec_worker_local_with_process_output(
             options.runner_workload.as_ref(),
         ),
     );
-    validate_runner_extension_parity(runner_id, &plan.runner, &plan.cwd, &required_extensions)?;
+    let requested_setting_keys = requested_setting_keys_for_command(&options.command);
+    validate_runner_extension_parity(
+        runner_id,
+        &plan.runner,
+        &plan.cwd,
+        &required_extensions,
+        &requested_setting_keys,
+    )?;
     validate_runner_policy(
         &plan.runner,
         &plan.cwd,
