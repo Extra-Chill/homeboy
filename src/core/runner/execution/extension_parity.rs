@@ -647,20 +647,38 @@ fn remote_extension_settings(stdout: &str) -> BTreeMap<String, String> {
     let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
         return BTreeMap::new();
     };
-    value
+    let Some(settings) = value
         .get("data")
         .and_then(|data| data.get("extension"))
         .and_then(|extension| extension.get("settings"))
-        .and_then(Value::as_array)
+    else {
+        return BTreeMap::new();
+    };
+
+    if let Some(array) = settings.as_array() {
+        return array
+            .iter()
+            .filter_map(|setting| {
+                let id = setting.get("id").and_then(Value::as_str)?;
+                let setting_type = setting
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("string");
+                Some((id.to_string(), setting_type.to_string()))
+            })
+            .collect();
+    }
+
+    settings
+        .as_object()
         .into_iter()
-        .flatten()
-        .filter_map(|setting| {
-            let id = setting.get("id").and_then(Value::as_str)?;
+        .flat_map(|settings| settings.iter())
+        .map(|(id, setting)| {
             let setting_type = setting
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or("string");
-            Some((id.to_string(), setting_type.to_string()))
+            (id.to_string(), setting_type.to_string())
         })
         .collect()
 }
@@ -823,6 +841,87 @@ mod tests {
             &["profile.name".to_string()],
         )
         .expect_err("string settings should not cover dotted child overrides");
+    }
+
+    #[test]
+    fn setting_parity_accepts_lab_bench_command_dotted_object_settings() {
+        let remote_stdout = r#"{
+          "success": true,
+          "data": {
+            "command": "extension.show",
+            "extension": {
+              "id": "wordpress",
+              "path": "/home/chubes/.config/homeboy/extensions/wordpress",
+              "source_revision": "3e3e4c41",
+              "settings": [
+                {"default": [], "id": "validation_dependencies", "label": "Validation Dependencies", "type": "array"},
+                {"default": {}, "id": "wp_config_defines", "label": "wp-config additions", "type": "object"},
+                {"default": {}, "id": "bench_env", "label": "Bench env passthrough", "type": "object"},
+                {"default": "", "id": "wp_codebox_core_module", "label": "WP Codebox core module", "type": "string"},
+                {"default": [], "id": "wp_codebox_workloads", "label": "Bench workloads", "type": "array"},
+                {"default": {}, "id": "bench_browser_target", "label": "Bench browser target handoff", "type": "object"}
+              ]
+            }
+          }
+        }"#;
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "static-site-importer".to_string(),
+            "--path".to_string(),
+            "/Users/chubes/Developer/static-site-importer@fix-codebox-validation-provider".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--lab-only".to_string(),
+            "--extension".to_string(),
+            "wordpress".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--shared-state".to_string(),
+            "/home/chubes/Developer/_lab_artifacts/ssi-fast-loop-shared".to_string(),
+            "--iterations".to_string(),
+            "1".to_string(),
+            "--warmup".to_string(),
+            "0".to_string(),
+            "--run-id".to_string(),
+            "ssi-onepager-coffee-wp-codebox-0-12-fullpage".to_string(),
+            "--setting".to_string(),
+            "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT=/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus/fixtures/websites/2-onepager-coffee".to_string(),
+            "--setting".to_string(),
+            "bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH=/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus".to_string(),
+            "--setting".to_string(),
+            "bench_env.SSI_FIXTURE_MATRIX_VISUAL_PARITY_FULL_PAGE=1".to_string(),
+            "--".to_string(),
+            "--max-depth".to_string(),
+            "0".to_string(),
+            "--batch-size".to_string(),
+            "1".to_string(),
+            "--run".to_string(),
+        ];
+        let requested_setting_keys = requested_setting_keys_for_command(&command);
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "wordpress",
+            remote_stdout,
+            &requested_setting_keys,
+        )
+        .expect("declared bench_env object should cover Lab bench dotted overrides");
+    }
+
+    #[test]
+    fn setting_parity_accepts_dotted_children_from_settings_object_map() {
+        let remote_stdout = r#"{"success":true,"data":{"command":"extension.show","extension":{"id":"wordpress","path":"/home/chubes/.config/homeboy/extensions/wordpress","source_revision":"abc1234","settings":{"bench_env":{"default":{},"label":"Bench env passthrough","type":"object"},"profile":{"default":"","label":"Profile","type":"string"}}}}}"#;
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "wordpress",
+            remote_stdout,
+            &["bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT".to_string()],
+        )
+        .expect("settings object maps should preserve object-child semantics");
     }
 
     #[test]
