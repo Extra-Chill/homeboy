@@ -412,6 +412,36 @@ fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
 }
 
 #[test]
+fn runner_exec_accepts_secret_env_contract_flags() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "lab",
+        "--secret-env",
+        "API_TOKEN",
+        "--secret-env-plan",
+        r#"{"secret_env_names":["PLAN_TOKEN"]}"#,
+        "--",
+        "printenv",
+        "API_TOKEN",
+    ])
+    .expect("runner exec should accept secret-env names and plan JSON");
+
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "exec",
+        "lab",
+        "--secret-env-plan-file",
+        "secret-env-plan.json",
+        "--",
+        "true",
+    ])
+    .expect("runner exec should accept secret-env plan files");
+}
+
+#[test]
 fn rig_install_documents_reinstall_semantics() {
     let mut root = Cli::command();
     let help = root

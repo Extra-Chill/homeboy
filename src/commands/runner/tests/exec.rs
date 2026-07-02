@@ -1,8 +1,9 @@
 use super::super::dispatch::raw_exec_command_run;
 use super::super::exec::{
     exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
-    promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts, read_bounded,
-    read_runner_exec_script, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    prepare_runner_exec_secret_env_plan, promote_runner_exec_artifact_dirs,
+    promote_runner_exec_artifacts, read_bounded, read_runner_exec_script,
+    validate_runner_exec_public_env, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
@@ -143,6 +144,46 @@ fn env_parser_injects_script_body_without_shell_quoting() {
 }
 
 #[test]
+fn runner_exec_secret_env_plan_merges_names_and_public_env() {
+    let plan = prepare_runner_exec_secret_env_plan(
+        vec![" DIRECT_SECRET ".to_string()],
+        Some(
+            r#"{
+                "public_env": {"PUBLIC_FLAG": "1"},
+                "secret_env_names": ["PLAN_SECRET", "DIRECT_SECRET"]
+            }"#
+            .to_string(),
+        ),
+        None,
+    )
+    .expect("secret env plan");
+
+    assert_eq!(plan.public_env["PUBLIC_FLAG"], "1");
+    assert_eq!(
+        plan.secret_env_names(),
+        vec!["DIRECT_SECRET".to_string(), "PLAN_SECRET".to_string()]
+    );
+}
+
+#[test]
+fn runner_exec_rejects_declared_secret_like_public_env() {
+    let env = prepare_runner_exec_env(vec!["API_TOKEN=public".to_string()], None).expect("env");
+    let err = validate_runner_exec_public_env(&env, &["API_TOKEN".to_string()])
+        .expect_err("secret-like declared public env should fail");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert_eq!(err.details["field"], "env");
+}
+
+#[test]
+fn runner_exec_allows_non_secret_public_env_even_when_declared() {
+    let env = prepare_runner_exec_env(vec!["FEATURE_FLAG=1".to_string()], None).expect("env");
+
+    validate_runner_exec_public_env(&env, &["FEATURE_FLAG".to_string()])
+        .expect("non-sensitive public env is allowed");
+}
+
+#[test]
 fn runner_exec_promotes_declared_artifacts_to_run_store() {
     homeboy::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -175,6 +216,9 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
             Vec::new(),
             None,
             Vec::new(),
+            Vec::new(),
+            None,
+            None,
             false,
             Some(run.id.clone()),
             vec!["out.txt".to_string(), "reports".to_string()],
@@ -249,6 +293,9 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             Vec::new(),
             None,
             Vec::new(),
+            Vec::new(),
+            None,
+            None,
             false,
             Some(run.id.clone()),
             Vec::new(),
@@ -326,6 +373,9 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
             Vec::new(),
             None,
             Vec::new(),
+            Vec::new(),
+            None,
+            None,
             false,
             Some(run.id.clone()),
             Vec::new(),
@@ -726,6 +776,9 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         Vec::new(),
         None,
         Vec::new(),
+        Vec::new(),
+        None,
+        None,
         false,
         None,
         vec!["out.txt".to_string()],
@@ -783,6 +836,9 @@ fn runner_exec_rejects_summaries_without_run_id() {
         Vec::new(),
         None,
         Vec::new(),
+        Vec::new(),
+        None,
+        None,
         false,
         None,
         Vec::new(),
