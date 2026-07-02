@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::redaction::RedactionPolicy;
 
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
+pub const SECRET_ENV_PLAN_MATERIALIZATION_SCHEMA: &str =
+    "homeboy/secret-env-plan-materialization/v1";
 pub const AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV: &str = "HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON";
 pub const SECRET_ENV_PLAN_ENV_DELTA_SOURCE: &str = "secret_env_plan_env_delta";
 
@@ -90,6 +92,40 @@ pub struct SecretEnvPlanDiagnosticError {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undeclared_inherited_secret_env: Vec<String>,
     pub message: String,
+    pub diagnostics: SecretEnvPlanDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SecretEnvPlanMaterializeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_plan: Option<SecretEnvPlan>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub public_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<SecretEnvRequirement>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_env_map: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_name_mapping: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_allowed_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inheritance: Option<SecretEnvInheritancePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<SecretEnvRedactionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvPlanMaterialization {
+    pub schema: String,
+    pub valid: bool,
+    pub plan: SecretEnvPlan,
     pub diagnostics: SecretEnvPlanDiagnostics,
 }
 
@@ -287,6 +323,76 @@ impl Default for SecretEnvPlan {
 }
 
 impl SecretEnvPlan {
+    pub fn materialize_request(
+        request: SecretEnvPlanMaterializeRequest,
+    ) -> Result<SecretEnvPlanMaterialization, SecretEnvPlanDiagnosticError> {
+        let mut plan = request.base_plan.unwrap_or_default();
+        plan.schema = SECRET_ENV_PLAN_SCHEMA.to_string();
+        plan.public_env.extend(request.public_env);
+        plan.extend_secret_env_names(request.secret_env_names);
+
+        if !request.requirements.is_empty() {
+            plan.requirements =
+                normalize_requirements(plan.requirements.into_iter().chain(request.requirements));
+        }
+
+        for (name, source_env_names) in request.source_env_map {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let source_env_names = normalize_ordered_names(source_env_names);
+            upsert_requirement(
+                &mut plan.requirements,
+                SecretEnvRequirement {
+                    name: name.clone(),
+                    required: true,
+                    source_env_names,
+                    refresh: None,
+                },
+            );
+            plan.extend_secret_env_names([name]);
+        }
+
+        for (key, names) in request.env_name_mapping {
+            plan.map_env_names(key, names);
+        }
+
+        if let Some(inheritance) = request.inheritance {
+            plan.inheritance = SecretEnvInheritancePolicy {
+                require_declaration: inheritance.require_declaration,
+                allowed_env_names: normalize_names(
+                    inheritance
+                        .allowed_env_names
+                        .into_iter()
+                        .chain(request.inherited_allowed_env_names),
+                ),
+            };
+        } else {
+            plan.allow_inherited_env_names(request.inherited_allowed_env_names);
+        }
+
+        if let Some(redaction) = request.redaction {
+            plan.redaction = redaction;
+        }
+
+        plan.requirements = normalize_requirements(plan.secret_env_requirements());
+
+        let diagnostics = plan.diagnose_materialized_declarations(
+            request.inherited_env_names,
+            request
+                .diagnostic_source
+                .unwrap_or_else(|| "materialize-request".to_string()),
+        )?;
+
+        Ok(SecretEnvPlanMaterialization {
+            schema: SECRET_ENV_PLAN_MATERIALIZATION_SCHEMA.to_string(),
+            valid: true,
+            plan,
+            diagnostics,
+        })
+    }
+
     pub fn from_secret_env_names(names: impl IntoIterator<Item = String>) -> Self {
         Self {
             secret_env_names: normalize_names(names),
@@ -434,6 +540,46 @@ impl SecretEnvPlan {
         }
     }
 
+    pub fn diagnose_inherited_env_names(
+        &self,
+        names: impl IntoIterator<Item = String>,
+        source: impl Into<String>,
+    ) -> Result<SecretEnvPlanDiagnostics, SecretEnvPlanDiagnosticError> {
+        let env = normalize_names(names)
+            .into_iter()
+            .map(|name| (name, String::new()))
+            .collect::<BTreeMap<_, _>>();
+        self.diagnose_inherited_env(&env, source)
+    }
+
+    fn diagnose_materialized_declarations(
+        &self,
+        inherited_env_names: impl IntoIterator<Item = String>,
+        inherited_source: impl Into<String>,
+    ) -> Result<SecretEnvPlanDiagnostics, SecretEnvPlanDiagnosticError> {
+        let status = self
+            .secret_env_requirements()
+            .into_iter()
+            .map(|requirement| {
+                secret_env_status_with_sources(requirement.name, true, "declared", None, Vec::new())
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = self.diagnose(status)?;
+        let inherited = self.diagnose_inherited_env_names(inherited_env_names, inherited_source);
+        match inherited {
+            Ok(inherited_diagnostics) => {
+                diagnostics.inherited_env = inherited_diagnostics.inherited_env;
+                Ok(diagnostics)
+            }
+            Err(mut error) => {
+                error.diagnostics.status = diagnostics.status;
+                error.diagnostics.passthrough_secret_env_names =
+                    diagnostics.passthrough_secret_env_names;
+                Err(error)
+            }
+        }
+    }
+
     pub fn remove_undeclared_inherited_secret_env(
         &self,
         env: &mut HashMap<String, String>,
@@ -569,6 +715,33 @@ impl SecretEnvPlan {
             .chain(self.inheritance.allowed_env_names.iter().cloned())
             .collect()
     }
+}
+
+fn upsert_requirement(
+    requirements: &mut Vec<SecretEnvRequirement>,
+    requirement: SecretEnvRequirement,
+) {
+    let mut merged = requirements
+        .drain(..)
+        .map(|entry| (entry.name.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    merged
+        .entry(requirement.name.clone())
+        .and_modify(|entry| {
+            entry.required = entry.required || requirement.required;
+            entry.source_env_names = normalize_ordered_names(
+                entry
+                    .source_env_names
+                    .iter()
+                    .cloned()
+                    .chain(requirement.source_env_names.iter().cloned()),
+            );
+            if entry.refresh.is_none() {
+                entry.refresh = requirement.refresh.clone();
+            }
+        })
+        .or_insert(requirement);
+    *requirements = merged.into_values().collect();
 }
 
 impl SecretEnvRequirement {
@@ -1190,5 +1363,78 @@ mod tests {
             .diagnostics;
 
         assert_eq!(diagnostics.status[0].refresh, Some(refresh));
+    }
+
+    #[test]
+    fn materialize_request_builds_plan_from_declarations_and_source_maps() {
+        let output = SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
+            public_env: BTreeMap::from([("PUBLIC_FLAG".to_string(), "1".to_string())]),
+            secret_env_names: vec!["DIRECT_SECRET".to_string()],
+            source_env_map: BTreeMap::from([(
+                "TARGET_SECRET".to_string(),
+                vec![
+                    "PRIMARY_TARGET_SECRET".to_string(),
+                    "FALLBACK_TARGET_SECRET".to_string(),
+                ],
+            )]),
+            env_name_mapping: BTreeMap::from([(
+                "source_refs".to_string(),
+                vec!["MAPPED_SECRET".to_string()],
+            )]),
+            inherited_allowed_env_names: vec!["HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string()],
+            inherited_env_names: vec!["TARGET_SECRET".to_string()],
+            ..SecretEnvPlanMaterializeRequest::default()
+        })
+        .expect("materialized secret env plan");
+
+        assert_eq!(output.schema, SECRET_ENV_PLAN_MATERIALIZATION_SCHEMA);
+        assert!(output.valid);
+        assert_eq!(output.plan.schema, SECRET_ENV_PLAN_SCHEMA);
+        assert_eq!(
+            output.plan.secret_env_names(),
+            vec![
+                "DIRECT_SECRET".to_string(),
+                "FALLBACK_TARGET_SECRET".to_string(),
+                "MAPPED_SECRET".to_string(),
+                "PRIMARY_TARGET_SECRET".to_string(),
+                "TARGET_SECRET".to_string(),
+            ]
+        );
+        assert_eq!(
+            output.diagnostics.passthrough_secret_env_names,
+            vec![
+                "DIRECT_SECRET".to_string(),
+                "MAPPED_SECRET".to_string(),
+                "TARGET_SECRET".to_string(),
+            ]
+        );
+        assert_eq!(output.diagnostics.status[2].name, "TARGET_SECRET");
+        assert_eq!(
+            output.diagnostics.status[2].source_env_names,
+            vec![
+                "PRIMARY_TARGET_SECRET".to_string(),
+                "FALLBACK_TARGET_SECRET".to_string(),
+            ]
+        );
+        assert!(!serde_json::to_string(&output)
+            .expect("materialization json")
+            .contains("secret-value"));
+    }
+
+    #[test]
+    fn materialize_request_rejects_undeclared_inherited_secret_env_names() {
+        let error = SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
+            inherited_env_names: vec!["UNDECLARED_API_TOKEN".to_string()],
+            ..SecretEnvPlanMaterializeRequest::default()
+        })
+        .expect_err("undeclared sensitive inherited env is rejected");
+
+        assert_eq!(
+            error.undeclared_inherited_secret_env,
+            vec!["UNDECLARED_API_TOKEN".to_string()]
+        );
+        assert!(!serde_json::to_string(&error)
+            .expect("error json")
+            .contains("secret-value"));
     }
 }

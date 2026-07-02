@@ -30,8 +30,11 @@ use super::spec::{
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
+pub const RUNNER_ARTIFACT_MANIFEST_REF_NAME: &str = "runner-artifact-manifest-ref";
+pub const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA: &str = "homeboy/runner-artifact-manifest-ref/v1";
 pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFACT_MANIFEST_SCHEMA;
 pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
+pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
@@ -450,10 +453,10 @@ impl RunnerHandoffEnvelope {
 impl RunnerHandoffArtifactManifestRef {
     pub fn for_remote_cwd(remote_cwd: &str) -> Self {
         Self {
-            schema: "homeboy/runner-artifact-manifest-ref/v1".to_string(),
+            schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
             manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
             path: format!(
-                "{}-homeboy-artifacts/{RUNNER_ARTIFACT_MANIFEST_FILE}",
+                "{}{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/{RUNNER_ARTIFACT_MANIFEST_FILE}",
                 remote_cwd.trim_end_matches('/')
             ),
         }

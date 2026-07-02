@@ -61,6 +61,7 @@ pub(super) fn exec_via_daemon(
     };
     let payload = json!({
         "runner_id": runner.id,
+        "runner": runner,
         "project_id": project_id,
         "cwd": cwd,
         "command": command,

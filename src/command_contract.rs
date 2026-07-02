@@ -32,10 +32,12 @@ pub use constants::{
     artifact_manifest_constants, artifact_postprocess_constants, contract_constants,
     loop_constants, path_materialization_plan_constants, resource_lifecycle_index_constants,
     reviewer_facing_ref_constants, run_location_index_constants, runner_execution_record_constants,
-    secret_env_plan_constants, AllContractConstants, ArtifactManifestConstants,
-    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
+    runtime_artifact_constants, secret_env_plan_constants, AllContractConstants,
+    ArtifactManifestConstants, ArtifactPostprocessConstants, ContractConstants,
+    ContractConstantsOutput, ExecutorEvidenceConstants, LoopConstants,
     PathMaterializationPlanConstants, ResourceLifecycleIndexConstants, ReviewerFacingRefConstants,
-    RunLocationIndexConstants, RunnerExecutionRecordConstants, SecretEnvPlanConstants,
+    RunLocationIndexConstants, RunnerExecutionRecordConstants, RuntimeAgentArtifactPaths,
+    RuntimeArtifactConstants, RuntimeArtifactFilenames, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
 };
 pub use lab::{
@@ -50,8 +52,10 @@ pub use lab::{
     RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
     RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
     RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
-    RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_SCHEMA, RUNNER_HANDOFF_ENVELOPE_SCHEMA,
-    RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
+    RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_REF_NAME,
+    RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
+    RUN_LOCATION_INDEX_SCHEMA,
 };
 pub(crate) use lab::{LAB_NO_EXTRA_TOOLS, RIG_UP_LAB_UNSUPPORTED_REASON};
 pub use output::{
@@ -80,7 +84,10 @@ pub use crate::core::artifacts::{
     ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessPlanDescription,
     ArtifactPostprocessResult, ArtifactPostprocessReviewerRef, ArtifactPostprocessRoot,
     ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
-    ARTIFACT_POSTPROCESS_SCHEMA,
+    ARTIFACT_POSTPROCESS_SCHEMA, RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH,
+    RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE, RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE,
+    RUNTIME_AGENT_RESULT_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
 };
 pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
 pub use crate::core::run_outcome_envelope::{

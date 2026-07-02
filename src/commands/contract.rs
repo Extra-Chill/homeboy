@@ -12,12 +12,14 @@ use crate::command_contract::{
     CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
     CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, ContractConstantsOutput,
     ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_REGISTRY,
-    PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-    RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA, RUN_LOCATION_INDEX_SCHEMA,
+    PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_FILE,
+    RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
+    RUN_LOCATION_INDEX_SCHEMA,
 };
 use crate::commands::{adapter, CmdResult, GlobalArgs};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
-use crate::core::artifacts::validate_artifact_postprocess_plan;
+use crate::core::artifacts::{validate_artifact_postprocess_plan, ArtifactManifest};
 use crate::core::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
 use crate::core::host_mutation_lifecycle::{
     HostMutationLifecycle, HostMutationRevertStrategy, HostMutationStatus,
@@ -39,11 +41,15 @@ use crate::core::run_outcome_envelope::{
     RunOutcomeEnvelope, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
 };
 use crate::core::runner_execution_envelope::{
-    PathMaterializationPlan, RunnerExecutionProjection, RunnerExecutionRecord,
-    PATH_MATERIALIZATION_PLAN_SCHEMA, RUNNER_EXECUTION_RECORD_SCHEMA,
+    PathMaterializationPlan, RunnerExecutionEnvelope, RunnerExecutionProjection,
+    RunnerExecutionRecord, PATH_MATERIALIZATION_PLAN_SCHEMA, RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+    RUNNER_EXECUTION_RECORD_SCHEMA,
 };
-use crate::core::secret_env_plan::{SecretEnvPlan, SECRET_ENV_PLAN_SCHEMA};
-use crate::core::{Error, Result};
+use crate::core::secret_env_plan::{
+    SecretEnvPlan, SecretEnvPlanMaterialization, SecretEnvPlanMaterializeRequest,
+    SECRET_ENV_PLAN_SCHEMA,
+};
+use crate::core::{Error, ErrorCode, Result};
 
 const CONTRACT_EXPORT_INDEX_SCHEMA: &str = "homeboy/contract-export-index/v1";
 const COMMAND_REGISTRY_EXPORT_SCHEMA: &str = "homeboy/command-registry-export/v1";
@@ -70,11 +76,13 @@ pub enum ContractCommand {
     Constants(ContractConstantsArgs),
     /// Validate and normalize generic contract values.
     Normalize(ContractNormalizeArgs),
+    /// Materialize generic contract envelopes from declarative inputs.
+    Materialize(ContractMaterializeArgs),
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, reviewer-facing-ref.
     pub contract_id: String,
 }
 
@@ -93,6 +101,7 @@ pub enum ContractOutput {
     Show(ContractShowOutput),
     Validate(ContractValidateOutput),
     Normalize(ContractNormalizeOutput),
+    Materialize(ContractMaterializeOutput),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -119,6 +128,27 @@ pub struct ContractNormalizeArgs {
     /// Read JSON value to normalize from a file.
     #[arg(long, value_name = "PATH")]
     pub input_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractMaterializeArgs {
+    /// Contract value kind to materialize
+    #[arg(value_enum)]
+    pub kind: ContractMaterializeKind,
+
+    /// JSON request to materialize. If omitted, stdin is read.
+    #[arg(long, conflicts_with = "input_file", value_name = "JSON")]
+    pub input: Option<String>,
+
+    /// Read JSON request to materialize from a file.
+    #[arg(long, value_name = "PATH")]
+    pub input_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum ContractMaterializeKind {
+    SecretEnvPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +203,12 @@ pub enum ContractNormalizeOutput {
     RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
     RunnerExecutionRecord(RunnerExecutionProjection),
     RunOutcomeEnvelope(RunOutcomeProjection),
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContractMaterializeOutput {
+    SecretEnvPlan(SecretEnvPlanMaterialization),
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -377,6 +413,9 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Validate(args) => Ok((ContractOutput::Validate(validate(args)?), 0)),
         ContractCommand::Constants(args) => constants(&args.contract_id),
         ContractCommand::Normalize(args) => Ok((ContractOutput::Normalize(normalize(args)?), 0)),
+        ContractCommand::Materialize(args) => {
+            Ok((ContractOutput::Materialize(materialize(args)?), 0))
+        }
     }
 }
 
@@ -419,7 +458,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
@@ -443,6 +482,38 @@ fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
             normalize_run_outcome_envelope(value).map(ContractNormalizeOutput::RunOutcomeEnvelope)
         }
     }
+}
+
+fn materialize(args: ContractMaterializeArgs) -> Result<ContractMaterializeOutput> {
+    let value = read_json_value(args.input.as_deref(), args.input_file.as_ref())?;
+
+    match args.kind {
+        ContractMaterializeKind::SecretEnvPlan => {
+            materialize_secret_env_plan(value).map(ContractMaterializeOutput::SecretEnvPlan)
+        }
+    }
+}
+
+fn materialize_secret_env_plan(value: Value) -> Result<SecretEnvPlanMaterialization> {
+    let request: SecretEnvPlanMaterializeRequest = deserialize_contract_value(
+        value,
+        "secret-env-plan-materialize-request",
+        "expected a secret env plan materialization request JSON object",
+    )?;
+
+    SecretEnvPlan::materialize_request(request).map_err(|err| {
+        Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            format!("Invalid argument 'secret-env-plan': {}", err.message),
+            json!({
+                "field": "secret-env-plan",
+                "problem": err.message,
+                "missing_required_secret_env": err.missing_required_secret_env,
+                "undeclared_inherited_secret_env": err.undeclared_inherited_secret_env,
+                "diagnostics": err.diagnostics,
+            }),
+        )
+    })
 }
 
 fn normalize_artifact_ref(value: Value) -> Result<ArtifactRefNormalizeOutput> {
@@ -744,6 +815,45 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
             "Homeboy-owned schema IDs and canonical examples for cross-language contract tests.",
         contracts: vec![
             ContractSchemaEntry {
+                id: RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+                version: 1,
+                description: "Generic artifact manifest emitted under a runner/controller artifact root.",
+                fields: vec![
+                    field("schema", "string", "Schema ID for the artifact manifest.", true),
+                    field("artifacts", "array", "Manifest entries for produced artifact files.", false),
+                    field("artifacts[].path", "string", "Artifact-root-relative file path.", true),
+                    field("artifacts[].kind", "string", "Generic artifact kind.", true),
+                ],
+                required: vec!["schema", "artifacts"],
+                example: artifact_manifest_example(),
+            },
+            ContractSchemaEntry {
+                id: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+                version: 1,
+                description: "Runner artifact manifest reference returned in handoff/location contracts.",
+                fields: vec![
+                    field("schema", "string", "Schema ID for the manifest reference.", true),
+                    field("manifest_schema", "string", "Schema ID expected inside the referenced manifest file.", true),
+                    field("path", "string", "Runner-resident manifest path.", true),
+                ],
+                required: vec!["schema", "manifest_schema", "path"],
+                example: runner_artifact_manifest_ref_example(),
+            },
+            ContractSchemaEntry {
+                id: RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+                version: 1,
+                description: "Planned generic runner execution request.",
+                fields: vec![
+                    field("schema", "string", "Schema ID for the runner execution envelope.", true),
+                    field("envelope_id", "string", "Stable envelope identifier.", true),
+                    field("source", "object", "Source contract identity for this execution envelope.", false),
+                    field("artifact_declarations", "array", "Runtime artifacts expected from the execution.", false),
+                    field("result_refs", "object", "Durable result reference fields.", false),
+                ],
+                required: vec!["schema", "envelope_id"],
+                example: runner_execution_envelope_example(),
+            },
+            ContractSchemaEntry {
                 id: ARTIFACT_POSTPROCESS_SCHEMA,
                 version: 1,
                 description:
@@ -994,6 +1104,57 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
     }
 }
 
+fn artifact_manifest_example() -> Value {
+    json!({
+        "schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+        "artifacts": [
+            {
+                "id": "transcript",
+                "path": crate::command_contract::RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+                "kind": "transcript",
+                "label": "Runtime transcript",
+                "content_type": "application/json",
+                "metadata": {}
+            },
+            {
+                "id": "final_output",
+                "path": crate::command_contract::RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH,
+                "kind": "final_output",
+                "label": "Final runtime output",
+                "content_type": "text/markdown",
+                "metadata": {}
+            }
+        ]
+    })
+}
+
+fn runner_artifact_manifest_ref_example() -> Value {
+    json!({
+        "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+        "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+        "path": runner_artifact_manifest_example_path()
+    })
+}
+
+fn runner_execution_envelope_example() -> Value {
+    json!({
+        "schema": RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+        "envelope_id": "execution-1",
+        "source": { "kind": "agent_task", "ref_id": "task-1" },
+        "artifact_declarations": [
+            {
+                "name": "transcript",
+                "type": "file",
+                "path": crate::command_contract::RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+                "required": false,
+                "metadata": {}
+            }
+        ],
+        "result_refs": { "task_id": "task-1", "artifacts": [] },
+        "metadata": {}
+    })
+}
+
 fn artifact_postprocess_example() -> Value {
     json!({
         "schema": ARTIFACT_POSTPROCESS_SCHEMA,
@@ -1003,7 +1164,7 @@ fn artifact_postprocess_example() -> Value {
                 "id": "primary",
                 "path": "artifacts",
                 "persisted_ref": "runner-artifact://run-1/artifacts",
-                "manifest_path": "homeboy-artifact-manifest.json"
+                "manifest_path": RUNNER_ARTIFACT_MANIFEST_FILE
             }
         ],
         "actions": [
@@ -1071,9 +1232,9 @@ fn runner_handoff_example() -> Value {
         "mirror_run_id": "run-1",
         "remote_cwd": "/home/runner/workspace",
         "artifact_manifest": {
-            "schema": "homeboy/runner-artifact-manifest-ref/v1",
+            "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-            "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+            "path": runner_artifact_manifest_example_path()
         },
         "evidence": {
             "schema": "homeboy/runner-handoff-evidence/v1",
@@ -1085,14 +1246,14 @@ fn runner_handoff_example() -> Value {
             "mirror_run_id": "run-1",
             "remote_cwd": "/home/runner/workspace",
             "artifact_manifest": {
-                "schema": "homeboy/runner-artifact-manifest-ref/v1",
+                "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
                 "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-                "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+                "path": runner_artifact_manifest_example_path()
             },
             "artifact_refs": [{
                 "id": "artifact_manifest",
                 "name": "runner artifact manifest",
-                "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+                "path": runner_artifact_manifest_example_path()
             }],
             "next_commands": [{
                 "label": "runner_job_logs",
@@ -1120,12 +1281,18 @@ fn run_location_index_example() -> Value {
         "runner_id": "runner-1",
         "remote_job_id": "job-1",
         "artifact_manifest_ref": {
-            "schema": "homeboy/runner-artifact-manifest-ref/v1",
+            "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-            "path": "/home/runner/workspace-homeboy-artifacts/manifest.json"
+            "path": runner_artifact_manifest_example_path()
         },
         "liveness_heartbeat_timestamp": "2026-01-01T00:00:00Z"
     })
+}
+
+fn runner_artifact_manifest_example_path() -> String {
+    format!(
+        "/home/runner/workspace{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/{RUNNER_ARTIFACT_MANIFEST_FILE}"
+    )
 }
 
 fn resource_lifecycle_index_example() -> Value {
@@ -1299,6 +1466,10 @@ fn resolve_schema(schema_id: &str) -> homeboy::core::Result<&'static ContractSch
 
 static CONTRACT_SCHEMAS: &[ContractSchema] = &[
     ContractSchema {
+        id: RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+        validate_json: validate_artifact_manifest,
+    },
+    ContractSchema {
         id: ARTIFACT_POSTPROCESS_SCHEMA,
         validate_json: validate_artifact_postprocess,
     },
@@ -1335,6 +1506,10 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
         validate_json: validate_loop_evidence,
     },
     ContractSchema {
+        id: RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+        validate_json: validate_runner_execution_envelope,
+    },
+    ContractSchema {
         id: RUNNER_EXECUTION_RECORD_SCHEMA,
         validate_json: validate_runner_execution_record,
     },
@@ -1356,6 +1531,11 @@ fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
 fn validate_artifact_postprocess(raw: &str) -> homeboy::core::Result<()> {
     let plan: ArtifactPostprocessPlan = deserialize_contract(raw, ARTIFACT_POSTPROCESS_SCHEMA)?;
     validate_artifact_postprocess_plan(&plan)
+}
+
+fn validate_artifact_manifest(raw: &str) -> homeboy::core::Result<()> {
+    let manifest: ArtifactManifest = deserialize_contract(raw, RUNNER_ARTIFACT_MANIFEST_SCHEMA)?;
+    manifest.validate_shape()
 }
 
 fn validate_fuzz_workload(raw: &str) -> homeboy::core::Result<()> {
@@ -1410,6 +1590,12 @@ fn validate_loop_evidence(raw: &str) -> homeboy::core::Result<()> {
 fn validate_runner_execution_record(raw: &str) -> homeboy::core::Result<()> {
     let record: RunnerExecutionRecord = deserialize_contract(raw, RUNNER_EXECUTION_RECORD_SCHEMA)?;
     validate_schema_field(RUNNER_EXECUTION_RECORD_SCHEMA, &record.schema)
+}
+
+fn validate_runner_execution_envelope(raw: &str) -> homeboy::core::Result<()> {
+    let envelope: RunnerExecutionEnvelope =
+        deserialize_contract(raw, RUNNER_EXECUTION_ENVELOPE_SCHEMA)?;
+    validate_schema_field(RUNNER_EXECUTION_ENVELOPE_SCHEMA, &envelope.schema)
 }
 
 fn validate_path_materialization_plan(raw: &str) -> homeboy::core::Result<()> {
@@ -1527,6 +1713,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(catalog["schema"], CONTRACT_SCHEMA_CATALOG_SCHEMA);
+        assert!(catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| contract["id"] == RUNNER_ARTIFACT_MANIFEST_SCHEMA));
+        assert!(catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| contract["id"] == RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA));
+        assert!(catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| contract["id"] == RUNNER_EXECUTION_ENVELOPE_SCHEMA));
         assert!(catalog["contracts"]
             .as_array()
             .unwrap()
@@ -1766,6 +1967,47 @@ mod tests {
         let output = validate_file(RUNNER_EXECUTION_RECORD_SCHEMA, file).unwrap();
 
         assert_eq!(output.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_artifact_manifest_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "homeboy-artifact-manifest.json",
+            json!({
+                "schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+                "artifacts": [
+                    {
+                        "path": "artifacts/agent-loop/transcript.json",
+                        "kind": "transcript"
+                    }
+                ]
+            }),
+        );
+
+        let output = validate_file(RUNNER_ARTIFACT_MANIFEST_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, RUNNER_ARTIFACT_MANIFEST_SCHEMA);
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn validates_runner_execution_envelope_json_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "runner-execution-envelope.json",
+            json!({
+                "schema": RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+                "envelope_id": "execution-1"
+            }),
+        );
+
+        let output = validate_file(RUNNER_EXECUTION_ENVELOPE_SCHEMA, file).unwrap();
+
+        assert_eq!(output.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
         assert!(output.valid);
     }
 
