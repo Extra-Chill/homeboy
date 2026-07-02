@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::audit::AuditConfig;
 use super::config::{
@@ -108,6 +108,10 @@ pub struct Component {
     /// then extension-claimed behavior, then not-applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<ComponentScriptsConfig>,
+    /// Component-scoped environment variables applied to Homeboy-managed
+    /// capability runs for this component. Per-run env overrides win on conflict.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -208,6 +212,8 @@ struct RawComponent {
     scopes: Option<ScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scripts: Option<ComponentScriptsConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -259,6 +265,7 @@ impl From<RawComponent> for Component {
             docs_dirs: raw.docs_dirs,
             scopes: raw.scopes,
             scripts: raw.scripts,
+            env: raw.env,
             audit: raw.audit,
             dependency_stack: raw.dependency_stack,
             deploy_together: raw.deploy_together,
@@ -303,6 +310,7 @@ impl From<Component> for RawComponent {
             docs_dirs: c.docs_dirs,
             scopes: c.scopes,
             scripts: c.scripts,
+            env: c.env,
             audit: c.audit,
             dependency_stack: c.dependency_stack,
             deploy_together: c.deploy_together,
@@ -352,6 +360,7 @@ impl Component {
             docs_dirs: Vec::new(),
             scopes: None,
             scripts: None,
+            env: BTreeMap::new(),
             audit: None,
             dependency_stack: Vec::new(),
             deploy_together: Vec::new(),

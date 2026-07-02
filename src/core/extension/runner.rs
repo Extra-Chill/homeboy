@@ -233,7 +233,9 @@ impl ExtensionRunner {
 
         let project_path = PathBuf::from(&prepared.execution.component.local_path);
         let invocation = self.acquire_invocation_guard()?;
-        let mut extra_env_vars = self.env_vars.clone();
+        let mut extra_env_vars =
+            super::component_script::component_env_vars(&prepared.execution.component);
+        extra_env_vars.extend(self.env_vars.clone());
         if let Some(invocation) = invocation.as_ref() {
             extra_env_vars.extend(invocation.env_vars());
         }

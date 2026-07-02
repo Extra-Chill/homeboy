@@ -137,6 +137,29 @@ fn component_priority_labels_serialization_roundtrip() {
 }
 
 #[test]
+fn component_env_serialization_roundtrip() {
+    let component: Component = serde_json::from_value(serde_json::json!({
+        "id": "fixture",
+        "env": {
+            "CARGO_TARGET_DIR": "/tmp/homeboy/cargo-target",
+            "SHARED_CACHE_DIR": "/tmp/homeboy/shared-cache"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        component.env.get("CARGO_TARGET_DIR").map(String::as_str),
+        Some("/tmp/homeboy/cargo-target")
+    );
+
+    let json = serde_json::to_value(&component).unwrap();
+    assert_eq!(
+        json["env"]["SHARED_CACHE_DIR"],
+        serde_json::json!("/tmp/homeboy/shared-cache")
+    );
+}
+
+#[test]
 fn component_deploy_config_reads_legacy_flat_fields() {
     let component: Component = serde_json::from_value(serde_json::json!({
         "id": "sample-plugin",

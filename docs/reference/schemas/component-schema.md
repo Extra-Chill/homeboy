@@ -42,6 +42,9 @@ Component configuration defines buildable and deployable units stored in `compon
     "bench": ["shell command"],
     "trace": ["shell command"]
   },
+  "env": {
+    "KEY": "value"
+  },
   "extensions": {},
   "release": {}
 }
@@ -76,6 +79,11 @@ Component configuration defines buildable and deployable units stored in `compon
   - Resolution order is `scripts.<capability>` first, then linked extension support, then not-applicable
   - Scripts receive the same runner env paths (`HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`, `HOMEBOY_RUN_DIR` and sidecar file vars when relevant) as extension runners, with `HOMEBOY_EXTENSION_ID=component-script`
   - Use `scripts.build`, not `build_command`; `build_command` is still only a diagnostic output field.
+- **`env`** (object): Component-scoped environment variables applied to Homeboy-managed capability runs for the component
+  - Applies to component scripts and extension runners for managed build/test/lint/bench/trace/deps-style capability execution.
+  - Per-run environment variables supplied by command workflows are applied after component config and win on key conflicts.
+  - `homeboy build` reports configured keys as `active_env_keys` so cache/debug configuration is visible without exposing values.
+  - Example: set `"CARGO_TARGET_DIR": "/path/to/shared/rebuildable/cargo-target"` for a Rust component without adding Rust-specific Homeboy behavior.
 - **`artifact_inputs`** (array): Producer artifacts to resolve and compose into this component's build artifact after this component builds
   - **`component`** (string): Producer component ID to build before composition
   - **`artifact`** (string): Producer artifact path or glob, resolved relative to the producer `local_path`
@@ -160,6 +168,9 @@ Setting `local_path` to the same directory as the deploy target is a misconfigur
     "post:release": [
       "echo 'Release complete!'"
     ]
+  },
+  "env": {
+    "SHARED_BUILD_CACHE": "/path/to/shared/rebuildable-cache"
   },
   "extensions": {
     "wordpress": {

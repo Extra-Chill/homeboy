@@ -189,12 +189,14 @@ fn component_script_env(
         (exec_context::COMPONENT_PATH.to_string(), source_path_value),
         (exec_context::SETTINGS_JSON.to_string(), "{}".to_string()),
     ];
+    let component_env = component_env_vars(component);
     if let Some(extensions) = &component.extensions {
         let mut extension_ids = extensions.keys().collect::<Vec<_>>();
         extension_ids.sort();
         for extension_id in extension_ids {
             let extension = load_extension(extension_id)?;
             let mut provider_env = env.clone();
+            provider_env.extend(component_env.iter().cloned());
             provider_env.extend(extra_env.iter().cloned());
             env.extend(env_provider::env_vars(
                 &extension,
@@ -203,8 +205,17 @@ fn component_script_env(
             )?);
         }
     }
+    env.extend(component_env);
     env.extend(extra_env.iter().cloned());
     Ok(env)
+}
+
+pub(crate) fn component_env_vars(component: &Component) -> Vec<(String, String)> {
+    component
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 fn command_with_args(command: &str, script_args: &[String]) -> String {
