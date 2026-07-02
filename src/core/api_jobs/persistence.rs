@@ -138,6 +138,7 @@ pub(super) fn reconcile_stale_jobs(
         } else {
             "daemon restarted before the job reached a terminal status".to_string()
         };
+        let classification = stale_after_restart_classification(stored);
         stored.job.status = JobStatus::Failed;
         stored.job.updated_at_ms = now;
         stored.job.finished_at_ms = Some(now);
@@ -150,7 +151,10 @@ pub(super) fn reconcile_stale_jobs(
             kind: JobEventKind::Error,
             timestamp_ms: now,
             message: Some(reason.clone()),
-            data: Some(serde_json::json!({ "reason": "stale_after_daemon_restart" })),
+            data: Some(serde_json::json!({
+                "reason": "stale_after_daemon_restart",
+                "classification": classification,
+            })),
         });
         next_sequence += 1;
         stored.events.push(JobEvent {
@@ -161,7 +165,8 @@ pub(super) fn reconcile_stale_jobs(
             message: Some("job marked failed after daemon restart".to_string()),
             data: Some(serde_json::json!({
                 "status": JobStatus::Failed,
-                "reason": "stale_after_daemon_restart"
+                "reason": "stale_after_daemon_restart",
+                "classification": classification,
             })),
         });
         apply_event_retention(&mut stored.events, event_retention_limit);
@@ -169,6 +174,64 @@ pub(super) fn reconcile_stale_jobs(
     }
 
     next_sequence
+}
+
+fn stale_after_restart_classification(stored: &StoredJob) -> Value {
+    let last_child_event = stored
+        .events
+        .iter()
+        .rev()
+        .find(|event| child_evidence_kind(event.kind));
+    let artifact_ids = stored
+        .job
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.id.clone())
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "kind": "unrecoverable_child_after_control_plane_restart",
+        "recoverable": false,
+        "reason": "stale_after_daemon_restart",
+        "control_plane": {
+            "daemon_restarted": true,
+        },
+        "child": {
+            "terminal_result_recorded": false,
+            "last_known_event": last_child_event.map(last_known_child_event),
+            "output_observed": last_child_event.is_some(),
+        },
+        "remote_runner": stored.remote_runner.as_ref().map(|remote_runner| serde_json::json!({
+            "runner_id": remote_runner.request.runner_id.clone(),
+            "project_id": remote_runner.request.project_id.clone(),
+            "claim_id": stored.job.claim_id.clone(),
+            "claimed_by_runner_id": stored.job.claimed_by_runner_id.clone(),
+            "claimed_at_ms": stored.job.claimed_at_ms,
+            "claim_expires_at_ms": stored.job.claim_expires_at_ms,
+            "secret_execution_env_unrecoverable": remote_runner_job_has_unrecoverable_execution_env(stored),
+        })),
+        "artifacts": {
+            "count": artifact_ids.len(),
+            "ids": artifact_ids,
+        },
+    })
+}
+
+fn child_evidence_kind(kind: JobEventKind) -> bool {
+    matches!(
+        kind,
+        JobEventKind::Stdout | JobEventKind::Stderr | JobEventKind::Progress | JobEventKind::Result
+    )
+}
+
+fn last_known_child_event(event: &JobEvent) -> Value {
+    serde_json::json!({
+        "sequence": event.sequence,
+        "kind": event.kind,
+        "timestamp_ms": event.timestamp_ms,
+        "message": event.message.clone(),
+        "data": event.data.clone(),
+    })
 }
 
 fn remote_runner_job_has_unrecoverable_execution_env(stored: &StoredJob) -> bool {
