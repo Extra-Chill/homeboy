@@ -2,15 +2,13 @@ use crate::core::component::Component;
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
-use crate::extensions::npm_deps_provider::NpmDependencyProvider;
+use crate::core::deps::npm_provider::NpmDependencyProvider;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-pub use crate::extensions::npm_deps_provider::npm_command_args;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {

@@ -1,6 +1,6 @@
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::{Error, Result};
-use crate::extensions::deps_provider::{
+use crate::core::deps::provider::{
     DependencyProviderAdapter, DependencyProviderContext, DependencyProviderPackageRequest,
     DependencyProviderStatusRequest, DependencyProviderUpdateRequest, ProviderDependencyStatus,
 };

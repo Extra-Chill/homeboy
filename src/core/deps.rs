@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 mod dependency_graph;
+#[path = "npm_deps_provider.rs"]
+pub(crate) mod npm_provider;
+#[path = "deps_provider.rs"]
+pub(crate) mod provider;
 
-use crate::extensions::deps_provider as provider;
 pub use dependency_graph::{
     stack_apply, stack_apply_plan, stack_plan, stack_plan_from_components, stack_status,
     DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
     DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
 };
+pub use npm_provider::npm_command_args;
+pub use provider::{composer_command_args, composer_install_command_args, ComposerAction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyPackage {

@@ -1,6 +1,5 @@
 use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
-use homeboy::core::deps::{self, DependencyUpdateOptions};
-use homeboy::extensions::deps_provider::{self, ComposerAction};
+use homeboy::core::deps::{self, ComposerAction, DependencyUpdateOptions};
 use std::fs;
 use tempfile::tempdir;
 
@@ -152,7 +151,7 @@ fn status_filters_to_one_package() {
 #[test]
 fn test_composer_command_args() {
     assert_eq!(
-        deps_provider::composer_command_args(
+        deps::composer_command_args(
             "fixture/package",
             &ComposerAction::Require {
                 constraint: "^2.0".to_string(),
@@ -167,7 +166,7 @@ fn test_composer_command_args() {
     );
 
     assert_eq!(
-        deps_provider::composer_command_args("fixture/package", &ComposerAction::Update),
+        deps::composer_command_args("fixture/package", &ComposerAction::Update),
         vec![
             "update",
             "fixture/package",
@@ -180,7 +179,7 @@ fn test_composer_command_args() {
 #[test]
 fn composer_install_command_args_are_runtime_prep_safe() {
     assert_eq!(
-        deps_provider::composer_install_command_args(),
+        deps::composer_install_command_args(),
         vec!["install", "--no-interaction", "--no-progress"]
     );
 }
