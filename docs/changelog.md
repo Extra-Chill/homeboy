@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.2] - 2026-07-02
+
+### Changed
+- Verify source upgrade replacement target
+- Add runner orchestration provenance
+- Add extension dev-run runner workflow
+- Add runner extension health diagnostics
+- Clarify controller extension metadata errors
+- Preflight runner extension settings
+
+### Fixed
+- realign stale source-build runner paths
+
 ## [0.280.1] - 2026-07-02
 
 ### Changed
