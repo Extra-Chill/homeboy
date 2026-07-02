@@ -30,9 +30,10 @@ pub use crate::core::artifact_ref::{
 };
 pub use constants::{
     artifact_manifest_constants, artifact_postprocess_constants, contract_constants,
-    loop_constants, reviewer_facing_ref_constants, run_location_index_constants,
-    secret_env_plan_constants, AllContractConstants, ArtifactManifestConstants,
-    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput, LoopConstants,
+    loop_constants, resource_lifecycle_index_constants, reviewer_facing_ref_constants,
+    run_location_index_constants, secret_env_plan_constants, AllContractConstants,
+    ArtifactManifestConstants, ArtifactPostprocessConstants, ContractConstants,
+    ContractConstantsOutput, LoopConstants, ResourceLifecycleIndexConstants,
     ReviewerFacingRefConstants, RunLocationIndexConstants, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
 };

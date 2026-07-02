@@ -26,6 +26,10 @@ use crate::core::loop_lifecycle::{
 use crate::core::resource_cleanup_intent::{
     ResourceCleanupIntentContract, RESOURCE_CLEANUP_INTENT_SCHEMA,
 };
+use crate::core::resource_lifecycle_index::{
+    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
+    ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+};
 use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
 use crate::core::secret_env_plan::{SecretEnvPlan, SECRET_ENV_PLAN_SCHEMA};
 use crate::core::{Error, Result};
@@ -59,7 +63,7 @@ pub enum ContractCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, run-location-index, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, loop, secret-env-plan, resource-lifecycle-index, run-location-index, reviewer-facing-ref.
     pub contract_id: String,
 }
 
@@ -400,7 +404,7 @@ fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
             format!("unknown contract constants id `{contract_id}`"),
             None,
             Some(vec![
-                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, run-location-index, reviewer-facing-ref".to_string(),
+                    "Use one of: all, artifact-manifest, artifact-postprocess, loop, secret-env-plan, resource-lifecycle-index, run-location-index, reviewer-facing-ref".to_string(),
             ]),
         )
     })?;
@@ -882,6 +886,32 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                 ],
                 example: run_location_index_example(),
             },
+            ContractSchemaEntry {
+                id: RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+                version: 1,
+                description: "Generic run-owned resource lifecycle index for cleanup and retention consumers.",
+                fields: vec![
+                    field(
+                        "schema",
+                        "string",
+                        "Schema ID for the resource lifecycle index.",
+                        true,
+                    ),
+                    field("resources", "array", "Run-owned resource records.", true),
+                    field("resources[].owner", "string", "System that declared the resource.", true),
+                    field("resources[].run_id", "string", "Run that owns the resource.", true),
+                    field("resources[].runner_id", "string|null", "Runner that hosts or produced the resource.", false),
+                    field("resources[].path", "string", "Resource path or stable resource address.", true),
+                    field("resources[].kind", "string", "Generic resource kind such as artifact, workspace, or temp_dir.", true),
+                    field("resources[].ttl", "string|null", "Retention duration or deadline understood by the producer/consumer.", false),
+                    field("resources[].cleanup_policy", "string", "Cleanup policy enum.", true),
+                    field("resources[].evidence_retention", "string", "Evidence retention enum.", true),
+                    field("resources[].cleanup_intent", "string", "Dry-run/apply cleanup intent.", true),
+                    field("resources[].status", "string", "Resource lifecycle status enum.", true),
+                ],
+                required: vec!["schema", "resources"],
+                example: resource_lifecycle_index_example(),
+            },
         ],
     }
 }
@@ -1020,6 +1050,26 @@ fn run_location_index_example() -> Value {
     })
 }
 
+fn resource_lifecycle_index_example() -> Value {
+    json!({
+        "schema": RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+        "resources": [
+            {
+                "owner": "homeboy-core",
+                "run_id": "run-1",
+                "runner_id": "runner-1",
+                "path": "/home/runner/workspace-homeboy-artifacts",
+                "kind": "artifact_dir",
+                "ttl": "P7D",
+                "cleanup_policy": ResourceCleanupPolicy::DeleteAfterTtl,
+                "evidence_retention": ResourceEvidenceRetention::Manifest,
+                "cleanup_intent": "dry_run",
+                "status": ResourceLifecycleResourceStatus::Active
+            }
+        ]
+    })
+}
+
 fn field(
     name: &'static str,
     kind: &'static str,
@@ -1147,6 +1197,10 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
         validate_json: validate_resource_cleanup_intent,
     },
     ContractSchema {
+        id: RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+        validate_json: validate_resource_lifecycle_index,
+    },
+    ContractSchema {
         id: LOOP_RUN_SCHEMA,
         validate_json: validate_loop_run,
     },
@@ -1189,6 +1243,12 @@ fn validate_fuzz_workload(raw: &str) -> homeboy::core::Result<()> {
 fn validate_resource_cleanup_intent(raw: &str) -> homeboy::core::Result<()> {
     let contract: ResourceCleanupIntentContract =
         deserialize_contract(raw, RESOURCE_CLEANUP_INTENT_SCHEMA)?;
+    contract.validate()
+}
+
+fn validate_resource_lifecycle_index(raw: &str) -> homeboy::core::Result<()> {
+    let contract: ResourceLifecycleIndex =
+        deserialize_contract(raw, RESOURCE_LIFECYCLE_INDEX_SCHEMA)?;
     contract.validate()
 }
 

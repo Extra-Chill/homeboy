@@ -107,6 +107,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::resource_cleanup_intent::ResourceCleanupIntentContract",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::resource_lifecycle_index::RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+        name: "resource-lifecycle-index",
+        title: "Resource lifecycle index",
+        owner: "homeboy-core",
+        summary: "Indexes run-owned resources, retention policy, cleanup intent, and lifecycle status without runtime-specific semantics.",
+        rust_type: "homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex",
+    },
+    ContractRegistryEntry {
         schema_id: crate::command_contract::RUN_LOCATION_INDEX_SCHEMA,
         name: "run-location-index",
         title: "Run location index",
@@ -179,6 +187,7 @@ mod tests {
             "secret-env-plan",
             "fuzz-workload",
             "resource-cleanup-intent",
+            "resource-lifecycle-index",
             "run-location-index",
             "extension-materialization-source",
             "resolved-agent-runtime-execution-contract",
