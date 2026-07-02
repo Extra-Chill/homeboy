@@ -16,6 +16,7 @@ homeboy contract <COMMAND>
 - `export --dir <dir>` - write machine-consumable contract JSON files
 - `validate <schema-id> --file <path>` - validate a JSON file against a registered contract
 - `normalize <kind>` - validate and normalize contract values from JSON input
+- `materialize <kind>` - assemble generic contract envelopes from declarative JSON input
 
 ## Constants
 
@@ -69,3 +70,20 @@ homeboy contract normalize run-lifecycle-status --input '{"status":"timed_out"}'
 
 Use `normalize` when automation needs to validate contract values and receive a
 canonical classification in the standard JSON envelope.
+
+## Materialize
+
+```sh
+homeboy contract materialize secret-env-plan --input '{
+  "secret_env_names": ["DIRECT_SECRET"],
+  "public_env": { "PUBLIC_FLAG": "1" },
+  "source_env_map": { "TARGET_SECRET": ["PRIMARY_TARGET_SECRET", "FALLBACK_TARGET_SECRET"] },
+  "env_name_mapping": { "source_refs": ["MAPPED_SECRET"] },
+  "inherited_allowed_env_names": ["HOMEBOY_AGENT_RUNTIME_SECRET_ENV"]
+}'
+```
+
+`materialize secret-env-plan` returns a `homeboy/secret-env-plan/v1` envelope plus
+name-only diagnostics. It accepts generic declarations only: public env values,
+secret env names, target-to-source env maps, grouping maps, and inheritance
+allowlists/policy. Secret values are not accepted or emitted.
