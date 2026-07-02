@@ -913,7 +913,7 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
         workspace_mode_policy:
             crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
         required_extensions: Vec::new(),
-        requires_playwright: false,
+        required_capabilities: Vec::new(),
         routing_policy: crate::command_contract::LabRoutingPolicy::default(),
     };
     let workload = crate::core::runner::workload::build_runner_workload(

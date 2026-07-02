@@ -450,11 +450,13 @@ fn required_capabilities(command: &LabOffloadCommand) -> Vec<RunnerWorkloadCapab
             required: true,
         });
     }
-    if command.requires_playwright {
-        capabilities.push(RunnerWorkloadCapability {
-            name: "playwright".to_string(),
-            required: true,
-        });
+    for capability in &command.required_capabilities {
+        if !capabilities
+            .iter()
+            .any(|existing| existing.name == capability.name)
+        {
+            capabilities.push(capability.clone());
+        }
     }
     capabilities
 }
@@ -505,7 +507,10 @@ mod tests {
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             required_extensions: vec!["browser".to_string()],
-            requires_playwright: true,
+            required_capabilities: vec![RunnerWorkloadCapability {
+                name: "playwright".to_string(),
+                required: true,
+            }],
             routing_policy: LabRoutingPolicy {
                 requires_extension_parity: true,
                 ..LabRoutingPolicy::default()

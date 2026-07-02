@@ -395,7 +395,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
             workspace_mode_policy:
                 crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             required_extensions: Vec::new(),
-            requires_playwright: false,
+            required_capabilities: Vec::new(),
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
         let workload = crate::core::runner::workload::build_runner_workload(

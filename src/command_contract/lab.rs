@@ -2,7 +2,7 @@
 //!
 //! Owns the data describing whether a command can be offloaded to a Lab
 //! runner (`LabCommandContract`, `LabCommandPortability`, `LabSourcePathMode`,
-//! `LabWorkspaceModePolicy`, `LabCommandRequiredTool`), the per-command
+//! `LabWorkspaceModePolicy`), the per-command
 //! `Commands::lab_contract` resolution, and the helpers that surface
 //! Lab-specific information through `CommandDescriptor` and the public
 //! `Commands` accessors (`supports_lab_runner`,
@@ -67,7 +67,7 @@ pub struct LabRoutingPolicy {
 pub struct LabCommandRouteContract {
     pub command: LabCommandContract,
     pub required_extensions: Vec<String>,
-    pub requires_playwright: bool,
+    pub required_capabilities: Vec<RunnerWorkloadCapability>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub struct LabCommandContract {
     pub workspace_mode_policy: LabWorkspaceModePolicy,
     pub capture_mutation_patch: bool,
     pub mutation_flag: Option<&'static str>,
-    pub extra_required_tools: &'static [LabCommandRequiredTool],
+    pub extra_required_capabilities: &'static [&'static str],
     /// Routing-policy flags shared across the Lab command layers.
     pub routing_policy: LabRoutingPolicy,
 }
@@ -129,11 +129,6 @@ mod portability_enums {
         Git,
         GitCheckoutRequired,
         RunnerResident,
-    }
-
-    #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-    pub enum LabCommandRequiredTool {
-        Playwright,
     }
 }
 pub use portability_enums::*;
@@ -547,8 +542,9 @@ impl LabLocalExecutionPolicy {
     }
 }
 
-pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
-pub(crate) const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
+pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
+pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
+pub(crate) const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
 pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
@@ -684,7 +680,7 @@ impl Commands {
                 AGENT_TASK_RUN_LAB_LABEL,
                 None,
                 true,
-                LAB_NO_EXTRA_TOOLS,
+                LAB_NO_EXTRA_CAPABILITIES,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
@@ -698,7 +694,7 @@ impl Commands {
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
                 None,
                 true,
-                LAB_NO_EXTRA_TOOLS,
+                LAB_NO_EXTRA_CAPABILITIES,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -709,7 +705,7 @@ impl Commands {
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 None,
                 true,
-                LAB_NO_EXTRA_TOOLS,
+                LAB_NO_EXTRA_CAPABILITIES,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -745,7 +741,7 @@ impl Commands {
                 AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
                 None,
                 false,
-                LAB_NO_EXTRA_TOOLS,
+                LAB_NO_EXTRA_CAPABILITIES,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -805,7 +801,7 @@ impl Commands {
                     args.lab_offload_writes_local_state()
                         .then_some("--write/--commit"),
                     false,
-                    LAB_NO_EXTRA_TOOLS,
+                    LAB_NO_EXTRA_CAPABILITIES,
                 )
             }
             Commands::Rig(args) => return args.portability_contract(),
@@ -935,14 +931,18 @@ impl LabCommandContract {
         self,
         required_extensions: Vec<String>,
     ) -> LabCommandRouteContract {
-        let requires_playwright = self
-            .extra_required_tools
+        let required_capabilities = self
+            .extra_required_capabilities
             .iter()
-            .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright));
+            .map(|capability| RunnerWorkloadCapability {
+                name: (*capability).to_string(),
+                required: true,
+            })
+            .collect();
         LabCommandRouteContract {
             command: self,
             required_extensions,
-            requires_playwright,
+            required_capabilities,
         }
     }
 
@@ -950,7 +950,7 @@ impl LabCommandContract {
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_tools: &'static [LabCommandRequiredTool],
+        extra_required_capabilities: &'static [&'static str],
     ) -> Self {
         Self {
             hot_label,
@@ -959,7 +959,7 @@ impl LabCommandContract {
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             capture_mutation_patch: mutation_flag.is_some(),
             mutation_flag,
-            extra_required_tools,
+            extra_required_capabilities,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
                 infer_source_path_tools: true,
@@ -974,13 +974,13 @@ impl LabCommandContract {
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_tools: &'static [LabCommandRequiredTool],
+        extra_required_capabilities: &'static [&'static str],
     ) -> Self {
         let base = Self::portable(
             hot_label,
             mutation_flag,
             requires_extension_parity,
-            extra_required_tools,
+            extra_required_capabilities,
         );
         Self {
             routing_policy: LabRoutingPolicy {
@@ -995,13 +995,13 @@ impl LabCommandContract {
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
-        extra_required_tools: &'static [LabCommandRequiredTool],
+        extra_required_capabilities: &'static [&'static str],
     ) -> Self {
         let base = Self::portable_workload(
             hot_label,
             mutation_flag,
             requires_extension_parity,
-            extra_required_tools,
+            extra_required_capabilities,
         );
         Self {
             routing_policy: LabRoutingPolicy {
@@ -1015,10 +1015,10 @@ impl LabCommandContract {
     /// Explicit-runner contract for the common case of a command that takes no
     /// mutation flag, requires no extension parity, and pulls in no extra tools.
     /// Collapses the repeated `explicit_runner(label, None, false,
-    /// LAB_NO_EXTRA_TOOLS)` call shape that several agent-task and tunnel arms
+    /// LAB_NO_EXTRA_CAPABILITIES)` call shape that several agent-task and tunnel arms
     /// share down to a single label argument.
     pub(crate) fn explicit_runner_simple(hot_label: &'static str) -> Self {
-        Self::explicit_runner(hot_label, None, false, LAB_NO_EXTRA_TOOLS)
+        Self::explicit_runner(hot_label, None, false, LAB_NO_EXTRA_CAPABILITIES)
     }
 
     /// Explicit-runner contract pinned to a runner-resident workspace: the
@@ -1053,7 +1053,7 @@ impl LabCommandContract {
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             capture_mutation_patch: false,
             mutation_flag: None,
-            extra_required_tools: LAB_NO_EXTRA_TOOLS,
+            extra_required_capabilities: LAB_NO_EXTRA_CAPABILITIES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: false,
                 infer_source_path_tools: false,

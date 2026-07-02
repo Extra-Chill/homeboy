@@ -36,7 +36,7 @@ pub struct PreparedLabRunnerCapability {
 pub struct LabRunnerCapabilityContract {
     pub command: &'static str,
     pub required_tools: Vec<RunnerRequiredTool>,
-    pub requires_playwright: bool,
+    pub required_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +79,10 @@ pub fn prepare_lab_runner_capability(
         push_unique(&mut required_tools, tool);
     }
 
-    if contract.requires_playwright {
-        push_unique(&mut required_tools, RunnerRequiredTool::Playwright);
+    for capability in contract.required_capabilities {
+        if capability == crate::command_contract::LAB_CAPABILITY_PLAYWRIGHT {
+            push_unique(&mut required_tools, RunnerRequiredTool::Playwright);
+        }
     }
 
     PreparedLabRunnerCapability {
@@ -752,7 +754,7 @@ mod tests {
                 RunnerRequiredTool::Composer,
                 RunnerRequiredTool::Docker,
             ],
-            requires_playwright: false,
+            required_capabilities: Vec::new(),
         });
 
         assert_eq!(plan.command, "lint");
@@ -776,7 +778,7 @@ mod tests {
             prepare_lab_runner_capability(LabRunnerCapabilityContract {
                 command: "test",
                 required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Pnpm],
-                requires_playwright: false,
+                required_capabilities: Vec::new(),
             })
             .into();
 
