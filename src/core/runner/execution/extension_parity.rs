@@ -300,7 +300,15 @@ fn sync_runner_extension_revision(
     let local_revision = extension::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
-    let source = extension::resolve_source_url(extension_id)?;
+    let source = extension::resolve_source_url(extension_id).map_err(|err| {
+        controller_extension_metadata_required_error(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &local_revision,
+            err,
+        )
+    })?;
     if let Some(local_source_path) = controller_local_source_path(&source.url) {
         return Err(local_source_runner_sync_error(
             runner_id,
@@ -336,6 +344,51 @@ fn sync_runner_extension_revision(
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
+}
+
+fn controller_extension_metadata_required_error(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    local_revision: &str,
+    source_error: Error,
+) -> Error {
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument 'runner_extension': Controller-local extension metadata is required to materialize runner job extension parity for '{extension_id}' on runner '{runner_id}'"
+        ),
+        serde_json::json!({
+            "field": "runner_extension",
+            "problem": "controller_extension_metadata_required",
+            "id": extension_id,
+            "diagnostic": {
+                "code": "runner_extension.controller_extension_metadata_required",
+                "location": "controller",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "homeboy_path": homeboy_path,
+                "local_source_revision": local_revision,
+                "required_for": "stale runner extension parity auto-sync before runner job dispatch",
+                "source_error": {
+                    "code": source_error.code.as_str(),
+                    "message": source_error.message,
+                    "details": source_error.details,
+                },
+                "next_commands": [
+                    format!("{homeboy_path} extension show {extension_id}"),
+                    format!("{homeboy_path} extension diff-installed {extension_id}"),
+                    format!("{homeboy_path} extension install <runner-resolvable-source> --id {extension_id} --replace")
+                ]
+            },
+            "tried": [
+                format!("Controller-local extension source_revision: {local_revision}"),
+                "Controller-local extension source metadata is required because the runner extension is stale and Homeboy needs a runner-resolvable source/ref to refresh it before dispatch.",
+                "Runner-local extension readiness was checked first; this controller metadata is only used to build the runner-side refresh job.",
+                format!("Repair controller metadata or sync manually on the runner: {homeboy_path} extension refresh <runner-resolvable-source> --id {extension_id} --ref {local_revision}")
+            ]
+        }),
+    )
 }
 
 fn local_source_runner_sync_error(
@@ -630,11 +683,12 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        controller_local_source_path, local_source_runner_sync_error,
-        remote_extension_ready_status, remote_extension_setting_ids,
-        remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_runner_extension_ready,
-        validate_runner_extension_revision, validate_runner_extension_settings,
+        controller_extension_metadata_required_error, controller_local_source_path,
+        local_source_runner_sync_error, remote_extension_ready_status,
+        remote_extension_setting_ids, remote_extension_source_revision,
+        requested_setting_keys_for_command, runner_extension_sync_command,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings,
     };
     use crate::test_support::with_isolated_home;
 
@@ -853,6 +907,42 @@ mod tests {
             .to_string()
             .contains("extension diff-installed rust"));
         assert!(err.details["diagnostic"]["issue_acceptance_criteria"].is_array());
+    }
+
+    #[test]
+    fn parity_auto_sync_reports_controller_metadata_when_required_for_runner_job() {
+        let source_error = crate::core::error::Error::validation_invalid_argument(
+            "extension_id",
+            "Extension 'rust' has no sourceUrl or .source-url metadata",
+            Some("rust".to_string()),
+            None,
+        );
+
+        let err = controller_extension_metadata_required_error(
+            "homeboy-lab",
+            "homeboy",
+            "rust",
+            "abc1234",
+            source_error,
+        );
+
+        assert!(err
+            .to_string()
+            .contains("Controller-local extension metadata"));
+        assert_eq!(
+            err.details["diagnostic"]["code"].as_str(),
+            Some("runner_extension.controller_extension_metadata_required")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["location"].as_str(),
+            Some("controller")
+        );
+        assert!(err.details["diagnostic"]["required_for"]
+            .as_str()
+            .is_some_and(|value| value.contains("runner job dispatch")));
+        let tried = err.details["tried"].to_string();
+        assert!(tried.contains("Runner-local extension readiness was checked first"));
+        assert!(tried.contains("extension refresh <runner-resolvable-source>"));
     }
 
     #[test]
