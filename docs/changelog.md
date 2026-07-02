@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.0] - 2026-07-02
+
+### Added
+- expose bench passthrough args env
+
+### Changed
+- Add fuzz campaign planner
+- Add resource lifecycle index contract
+- Add workspace materializer primitive
+- share dependency provider command runner
+- Add structured runner handoff evidence
+- Add structured PR finalization outcome contract
+
 ## [0.279.1] - 2026-07-02
 
 ### Fixed
