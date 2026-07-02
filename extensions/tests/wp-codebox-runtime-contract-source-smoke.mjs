@@ -140,6 +140,7 @@ const {
 const {
   WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
   WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
   WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
   wpCodeboxProviderRuntimeInvocationContract,
@@ -167,6 +168,14 @@ assert.equal(WP_CODEBOX_RUNTIME_PROFILE_SCHEMA, schemas.runtimeBoundary.profile)
 assert.equal(WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA, schemas.artifact.resultEnvelope);
 assert.equal(WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA, schemas.agentTask.runResult);
 assert.equal(WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.workspace_capture, schemas.runnerWorkspace.captureResult);
+assert.equal(
+  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'runtime-profile').schema,
+  schemas.runtimeBoundary.profile
+);
+assert.equal(
+  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').schema,
+  schemas.artifact.resultEnvelope
+);
 assert.deepEqual(wpCodeboxProviderRuntimeInvocationContract(), {
   ...canonicalManifest.providerRuntime,
   result_schemas: {

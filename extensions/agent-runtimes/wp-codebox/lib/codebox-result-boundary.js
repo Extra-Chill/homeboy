@@ -1,6 +1,7 @@
 'use strict';
 
 const {
+  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   normalizeCodeboxPublicResultEnvelope,
 } = require('./codebox-artifact-contract');
 
@@ -40,7 +41,7 @@ function publicEnvelopeBoundaryDiagnostic(result, options = {}) {
     class: 'codebox.public_result_envelope_missing',
     message: 'WP Codebox result used private runtime fields without the canonical public artifact result envelope.',
     data: {
-      required_schema: 'wp-codebox/artifact-result-envelope/v1',
+      required_schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
       private_shapes: privateShapes,
     },
   };

@@ -23,6 +23,7 @@ const {
   providerCredentialSecretEnvNames,
 } = require('../../lib/provider-credential-boundary');
 const {
+  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   artifactNameFromDeclaration,
   artifactPath,
   normalizeTypedArtifactEntry,
@@ -1535,7 +1536,7 @@ function resultExecutions(result) {
 
 function publicArtifactResultPayload(result) {
   const envelope = plainObject(result?.artifact_result) ? result.artifact_result : (plainObject(result?.artifactResult) ? result.artifactResult : null);
-  if (!envelope || envelope.schema !== 'wp-codebox/artifact-result-envelope/v1' || !plainObject(envelope.result)) {
+  if (!envelope || envelope.schema !== WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA || !plainObject(envelope.result)) {
     return null;
   }
   return envelope.result;

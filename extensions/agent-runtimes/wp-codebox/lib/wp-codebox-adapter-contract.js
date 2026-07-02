@@ -130,7 +130,7 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
   },
   {
     id: 'runtime-profile',
-    schema: 'wp-codebox/runtime-profile/v1',
+    schema: RUNTIME_CONTRACT_SCHEMAS.runtimeBoundary.profile,
     owner: 'wp-codebox',
     adapter_behavior: 'forward_profile_payload',
     requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts through the public runtime profile payload Homeboy forwards.',
