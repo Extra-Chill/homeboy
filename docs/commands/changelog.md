@@ -22,16 +22,11 @@ In JSON output mode, the default `show` output is returned as JSON (with a `cont
 
 ```sh
 homeboy changelog
-homeboy changelog --self
 homeboy changelog show
 homeboy changelog show <component_id>
 ```
 
 Shows the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`), or a specific component's changelog when a component ID is provided.
-
-Options:
-
-- `--self`: explicit alias for the default Homeboy changelog output
 
 This prints raw markdown to stdout.
 
