@@ -142,10 +142,12 @@ pub(super) fn execute_release_plan_step(
                 .tag
                 .clone()
                 .or_else(|| context.state.version.as_deref().map(|v| format!("v{v}")));
+            let push_branch = step.inputs.get("branch").and_then(|value| value.as_str());
             executor::run_git_push(
                 context.component,
                 context.component_id,
                 release_tag.as_deref(),
+                push_branch,
             )
             .map(Some)
         }

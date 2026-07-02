@@ -136,12 +136,15 @@ pub(in crate::core::release) fn build_release_steps(
         string_config("name", tag_name),
     ));
 
+    let push_branch = super::super::planning_git::release_push_branch(component)?;
     steps.push(ready_step(
         "git.push",
         "git.push",
-        "Push to remote",
+        format!("Push to remote {}", push_branch),
         vec!["git.tag".to_string()],
-        StepConfig::new().bool("tags", true),
+        StepConfig::new()
+            .bool("tags", true)
+            .string("branch", push_branch),
     ));
 
     if !options.skip_github_release && github_release_applies(component) {
