@@ -5,8 +5,9 @@ use serde::Serialize;
 
 use homeboy::core::build_identity::BuildIdentity;
 use homeboy::core::runner_execution_envelope::{
-    RunnerExecutionArtifactDeclaration, RunnerExecutionEnvelope, RunnerExecutionLifecyclePolicy,
-    RunnerExecutionResultRefs, RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+    RunnerExecutionArtifactDeclaration, RunnerExecutionArtifactRef, RunnerExecutionEnvelope,
+    RunnerExecutionLifecyclePolicy, RunnerExecutionRecord, RunnerExecutionResultRefs,
+    RUNNER_EXECUTION_ENVELOPE_SCHEMA,
 };
 use homeboy::core::runners;
 use homeboy::core::runners::{RunnerSession, RunnerStaleDaemonWarning, RunnerWorkspaceSyncMode};
@@ -58,10 +59,6 @@ pub struct RefreshPlanArgs {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct LabRefreshPlanOutput {
     pub variant: &'static str,
-    pub runner: String,
-    pub workspace: String,
-    pub runner_cwd: String,
-    pub run_id: String,
     pub execution_envelope: RunnerExecutionEnvelope,
     pub handoff: LabRefreshPlanHandoff,
     pub checks: Vec<LabRefreshPlanCheck>,
@@ -73,35 +70,15 @@ pub struct LabRefreshPlanOutput {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct LabRefreshPlanHandoff {
     pub schema: &'static str,
-    pub run_id: String,
-    pub handoff_id: String,
-    pub workload_id: String,
     pub execution_envelope_ref: LabRefreshPlanExecutionEnvelopeRef,
     pub execution_envelope: RunnerExecutionEnvelope,
-    pub runner: LabRefreshPlanRunnerHandoff,
+    pub execution_record: RunnerExecutionRecord,
     pub homeboy_provenance: LabHomeboyProvenance,
     pub workspace: LabRefreshPlanWorkspaceHandoff,
     pub env_plan: LabRefreshPlanEnvPlan,
     pub secret_plan: SecretEnvPlan,
     pub runtime_refs: LabRefreshPlanRuntimeRefs,
     pub lifecycle: LabRefreshPlanLifecycle,
-    pub artifact: LabRefreshPlanArtifactPlan,
-    pub evidence: LabRefreshPlanEvidencePlan,
-    pub result: LabRefreshPlanResultPlan,
-    pub inspection: LabRefreshPlanInspectionPlan,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanExecutionEnvelopeRef {
-    pub schema: &'static str,
-    pub envelope_id: String,
-    pub source_kind: String,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanRunnerHandoff {
-    pub id: String,
-    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -185,28 +162,10 @@ pub struct LabRefreshPlanLifecycle {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanArtifactPlan {
-    pub paths: Vec<String>,
-    pub unknown: bool,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanEvidencePlan {
-    pub paths: Vec<LabRefreshPlanEvidencePath>,
-    pub unknown: bool,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanResultPlan {
-    pub run_id: String,
-    pub status: &'static str,
-    pub refs: Vec<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct LabRefreshPlanInspectionPlan {
-    pub commands: Vec<LabRefreshPlanCommand>,
-    pub unknown: bool,
+pub struct LabRefreshPlanExecutionEnvelopeRef {
+    pub schema: &'static str,
+    pub envelope_id: String,
+    pub source_kind: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -272,10 +231,6 @@ pub fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPl
 
     Ok(LabRefreshPlanOutput {
         variant: "refresh_plan",
-        runner: args.runner,
-        workspace: args.workspace,
-        runner_cwd: args.runner_cwd,
-        run_id: args.run_id,
         execution_envelope,
         handoff,
         checks,
@@ -592,37 +547,28 @@ fn handoff_plan(
     args: &RefreshPlanArgs,
     execution_envelope: &RunnerExecutionEnvelope,
     evidence_paths: &[LabRefreshPlanEvidencePath],
-    next_commands: &[LabRefreshPlanCommand],
+    _next_commands: &[LabRefreshPlanCommand],
     docs: &[String],
     homeboy_provenance: LabHomeboyProvenance,
 ) -> LabRefreshPlanHandoff {
-    let artifact_paths = evidence_paths
-        .iter()
-        .filter(|path| path.kind == "artifact")
-        .map(|path| path.path.clone())
-        .collect();
-    let inspection_commands = next_commands
-        .iter()
-        .filter(|command| matches!(command.label, "inspect-artifacts" | "inspect-evidence"))
-        .cloned()
-        .collect();
     let workspace_mapping = workspace_mapping(args);
+    let execution_record = RunnerExecutionRecord::planned(
+        execution_envelope.envelope_id.clone(),
+        args.runner.clone(),
+        "refresh_plan",
+    )
+    .with_mirror_run_id(Some(args.run_id.clone()))
+    .with_artifact_refs(execution_artifact_refs(evidence_paths));
 
     LabRefreshPlanHandoff {
         schema: "homeboy/lab-refresh-handoff/v1",
-        run_id: args.run_id.clone(),
-        handoff_id: execution_envelope.envelope_id.clone(),
-        workload_id: args.run_id.clone(),
         execution_envelope_ref: LabRefreshPlanExecutionEnvelopeRef {
             schema: RUNNER_EXECUTION_ENVELOPE_SCHEMA,
             envelope_id: execution_envelope.envelope_id.clone(),
             source_kind: execution_envelope.source.kind.clone(),
         },
         execution_envelope: redacted_execution_envelope(execution_envelope),
-        runner: LabRefreshPlanRunnerHandoff {
-            id: args.runner.clone(),
-            mode: None,
-        },
+        execution_record,
         homeboy_provenance,
         workspace: LabRefreshPlanWorkspaceHandoff {
             controller_path: args.workspace.clone(),
@@ -648,23 +594,6 @@ fn handoff_plan(
                 "run_refresh",
                 "inspect_evidence",
             ],
-        },
-        artifact: LabRefreshPlanArtifactPlan {
-            paths: artifact_paths,
-            unknown: false,
-        },
-        evidence: LabRefreshPlanEvidencePlan {
-            paths: evidence_paths.to_vec(),
-            unknown: false,
-        },
-        result: LabRefreshPlanResultPlan {
-            run_id: args.run_id.clone(),
-            status: "planned",
-            refs: Vec::new(),
-        },
-        inspection: LabRefreshPlanInspectionPlan {
-            commands: inspection_commands,
-            unknown: false,
         },
     }
 }
@@ -777,6 +706,21 @@ fn artifact_declarations(
                 metadata: serde_json::Value::Null,
             },
         )
+        .collect()
+}
+
+fn execution_artifact_refs(
+    evidence_paths: &[LabRefreshPlanEvidencePath],
+) -> Vec<RunnerExecutionArtifactRef> {
+    evidence_paths
+        .iter()
+        .enumerate()
+        .map(|(index, evidence_path)| RunnerExecutionArtifactRef {
+            id: artifact_name(evidence_path, index),
+            name: Some(evidence_path.kind.to_string()),
+            path: Some(evidence_path.path.clone()),
+            url: None,
+        })
         .collect()
 }
 
@@ -983,12 +927,6 @@ mod tests {
         let handoff = handoff_plan(&args, &envelope, &evidence, &commands, &docs, provenance);
 
         assert_eq!(handoff.schema, "homeboy/lab-refresh-handoff/v1");
-        assert_eq!(handoff.run_id, "matrix-refresh-1");
-        assert_eq!(
-            handoff.handoff_id,
-            "lab-refresh:lab-runner:matrix-refresh-1"
-        );
-        assert_eq!(handoff.workload_id, "matrix-refresh-1");
         assert_eq!(
             handoff.execution_envelope_ref.schema,
             RUNNER_EXECUTION_ENVELOPE_SCHEMA
@@ -1009,8 +947,21 @@ mod tests {
             handoff.execution_envelope.result_refs.run_id.as_deref(),
             Some("matrix-refresh-1")
         );
-        assert_eq!(handoff.runner.id, "lab-runner");
-        assert_eq!(handoff.runner.mode, None);
+        assert_eq!(
+            handoff.execution_record.execution_id,
+            "lab-refresh:lab-runner:matrix-refresh-1"
+        );
+        assert_eq!(handoff.execution_record.runner_id, "lab-runner");
+        assert_eq!(handoff.execution_record.status, "planned");
+        assert_eq!(
+            handoff.execution_record.remote_run_id.as_deref(),
+            Some("matrix-refresh-1")
+        );
+        assert_eq!(handoff.execution_record.artifact_refs.len(), 2);
+        assert_eq!(
+            handoff.execution_record.artifact_refs[0].path.as_deref(),
+            Some("artifacts/matrix")
+        );
         assert_eq!(
             handoff.homeboy_provenance.controller_cli.role,
             "controller_cli"
@@ -1049,10 +1000,6 @@ mod tests {
         assert_eq!(handoff.secret_plan.schema, SECRET_ENV_PLAN_SCHEMA);
         assert_eq!(handoff.secret_plan.secret_env_names(), Vec::<String>::new());
         assert_eq!(handoff.runtime_refs.command, vec!["cargo", "test"]);
-        assert_eq!(handoff.artifact.paths, vec!["artifacts/matrix"]);
-        assert_eq!(handoff.evidence.paths, evidence);
-        assert_eq!(handoff.result.status, "planned");
-        assert_eq!(handoff.inspection.commands.len(), 2);
     }
 
     #[test]
