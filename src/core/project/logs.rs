@@ -25,6 +25,29 @@ pub struct LogContent {
     pub path: String,
     pub lines: u32,
     pub content: String,
+    pub evidence: LogEvidenceMetadata,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEvidenceMetadata {
+    pub evidence_type: String,
+    pub source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_lines: Option<u32>,
+    pub captured_lines: usize,
+    pub byte_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_scope_lines: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_lines: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_insensitive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -39,6 +62,7 @@ pub struct LogSearchResult {
     pub pattern: String,
     pub matches: Vec<LogSearchMatch>,
     pub match_count: usize,
+    pub evidence: LogEvidenceMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +71,7 @@ pub struct PinnedLogContent {
     pub label: Option<String>,
     pub lines: u32,
     pub content: String,
+    pub evidence: LogEvidenceMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,11 +134,18 @@ pub fn show_pinned(project_id: &str, lines: u32, local: bool) -> Result<PinnedLo
 
         let command = format!("tail -n {} {}", log_lines, shell::quote_path(&full_path));
         let output = execute_for_project(&project, &command)?;
+        let evidence = LogEvidenceMetadata::tail(
+            &full_path,
+            pinned_log.label.clone(),
+            log_lines,
+            &output.stdout,
+        );
 
         logs.push(PinnedLogContent {
             path: full_path,
             label: pinned_log.label.clone(),
             lines: log_lines,
+            evidence,
             content: output.stdout,
         });
     }
@@ -129,10 +161,12 @@ pub fn show(project_id: &str, path: &str, lines: u32, local: bool) -> Result<Log
 
     let command = format!("tail -n {} {}", lines, shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
+    let evidence = LogEvidenceMetadata::tail(&full_path, None, lines, &output.stdout);
 
     Ok(LogContent {
         path: full_path,
         lines,
+        evidence,
         content: output.stdout,
     })
 }
@@ -198,13 +232,109 @@ pub fn search(
     let output = execute_for_project(&project, &command)?;
     let matches = parse_grep_output(&output.stdout);
     let match_count = matches.len();
+    let evidence = LogEvidenceMetadata::search(
+        &full_path,
+        pattern,
+        lines,
+        context,
+        case_insensitive,
+        &output.stdout,
+        match_count,
+    );
 
     Ok(LogSearchResult {
         path: full_path,
         pattern: pattern.to_string(),
         matches,
         match_count,
+        evidence,
     })
+}
+
+impl LogEvidenceMetadata {
+    fn tail(path: &str, label: Option<String>, requested_lines: u32, content: &str) -> Self {
+        Self {
+            evidence_type: "log_tail".to_string(),
+            source_path: path.to_string(),
+            label,
+            requested_lines: Some(requested_lines),
+            captured_lines: content.lines().count(),
+            byte_count: content.len(),
+            pattern: None,
+            search_scope_lines: None,
+            context_lines: None,
+            case_insensitive: None,
+            match_count: None,
+        }
+    }
+
+    fn search(
+        path: &str,
+        pattern: &str,
+        search_scope_lines: Option<u32>,
+        context_lines: Option<u32>,
+        case_insensitive: bool,
+        content: &str,
+        match_count: usize,
+    ) -> Self {
+        Self {
+            evidence_type: "log_search".to_string(),
+            source_path: path.to_string(),
+            label: None,
+            requested_lines: None,
+            captured_lines: content.lines().count(),
+            byte_count: content.len(),
+            pattern: Some(pattern.to_string()),
+            search_scope_lines,
+            context_lines,
+            case_insensitive: Some(case_insensitive),
+            match_count: Some(match_count),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_evidence_records_source_and_capture_size() {
+        let evidence = LogEvidenceMetadata::tail(
+            "/var/log/app.log",
+            Some("app".to_string()),
+            50,
+            "first\nsecond\n",
+        );
+
+        assert_eq!(evidence.evidence_type, "log_tail");
+        assert_eq!(evidence.source_path, "/var/log/app.log");
+        assert_eq!(evidence.label.as_deref(), Some("app"));
+        assert_eq!(evidence.requested_lines, Some(50));
+        assert_eq!(evidence.captured_lines, 2);
+        assert_eq!(evidence.byte_count, "first\nsecond\n".len());
+    }
+
+    #[test]
+    fn search_evidence_records_query_scope_and_match_count() {
+        let evidence = LogEvidenceMetadata::search(
+            "/var/log/app.log",
+            "fatal",
+            Some(500),
+            Some(2),
+            true,
+            "12:Fatal error\n13-context\n",
+            1,
+        );
+
+        assert_eq!(evidence.evidence_type, "log_search");
+        assert_eq!(evidence.source_path, "/var/log/app.log");
+        assert_eq!(evidence.pattern.as_deref(), Some("fatal"));
+        assert_eq!(evidence.search_scope_lines, Some(500));
+        assert_eq!(evidence.context_lines, Some(2));
+        assert_eq!(evidence.case_insensitive, Some(true));
+        assert_eq!(evidence.match_count, Some(1));
+        assert_eq!(evidence.captured_lines, 2);
+    }
 }
 
 fn parse_grep_output(output: &str) -> Vec<LogSearchMatch> {
