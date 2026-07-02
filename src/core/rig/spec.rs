@@ -25,7 +25,9 @@ pub use dependencies::{
     DependencyMaterializationSafety, DependencyMaterializationStepSpec,
     NormalizedDependencyMaterializationStep,
 };
-pub use pipeline::{GitOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp};
+pub use pipeline::{
+    GitOp, HostMutationOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp,
+};
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,

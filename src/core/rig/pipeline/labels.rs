@@ -2,7 +2,8 @@
 
 use super::super::expand::expand_vars;
 use super::super::spec::{
-    GitOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SharedPathOp, StackOp, SymlinkOp,
+    GitOp, HostMutationOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SharedPathOp, StackOp,
+    SymlinkOp,
 };
 
 pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
@@ -18,6 +19,7 @@ pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::Symlink { .. } => "symlink",
         PipelineStep::SharedPath { .. } => "shared-path",
         PipelineStep::Patch { .. } => "patch",
+        PipelineStep::HostMutation { .. } => "host-mutation",
         PipelineStep::Check { .. } => "check",
     }
 }
@@ -114,6 +116,18 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
                 truncate(file, 60)
             )
         }),
+        PipelineStep::HostMutation {
+            op,
+            lifecycle,
+            label,
+            ..
+        } => label.clone().unwrap_or_else(|| {
+            format!(
+                "host-mutation {} {}",
+                serialize_host_mutation_op(*op),
+                truncate(&lifecycle.run_id, 60)
+            )
+        }),
         PipelineStep::Check { label, .. } => label
             .clone()
             .unwrap_or_else(|| format!("check #{}", idx + 1)),
@@ -166,6 +180,14 @@ fn serialize_patch_op(op: PatchOp) -> &'static str {
     match op {
         PatchOp::Apply => "apply",
         PatchOp::Verify => "verify",
+    }
+}
+
+fn serialize_host_mutation_op(op: HostMutationOp) -> &'static str {
+    match op {
+        HostMutationOp::Validate => "validate",
+        HostMutationOp::Apply => "apply",
+        HostMutationOp::Revert => "revert",
     }
 }
 

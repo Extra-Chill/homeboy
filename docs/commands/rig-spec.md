@@ -350,6 +350,38 @@ Executable requirements are provider-agnostic. If `executable_env` is set and th
 
 Applies or verifies an idempotent local-only patch. `marker` must appear in `content`; when the marker is already present, `apply` is a no-op. If `after` is set and not found, the step fails rather than guessing where to insert. Use `op: "verify"` in `check` pipelines.
 
+### `host-mutation`
+
+```jsonc
+{
+  "kind": "host-mutation",
+  "op": "apply",
+  "dry_run": false,
+  "lifecycle": {
+    "schema": "homeboy/host-mutation-lifecycle/v1",
+    "owner": "example-rig",
+    "run_id": "example-rig-up",
+    "mutations": [
+      {
+        "id": "link-tool",
+        "actor": "rig.pipeline.up",
+        "kind": "symlink",
+        "link_path": "~/bin/example-tool",
+        "target_path": "${components.app.path}/bin/example-tool",
+        "status": "declared",
+        "revert": { "strategy": "remove_path" }
+      }
+    ]
+  }
+}
+```
+
+Consumes the generic `homeboy/host-mutation-lifecycle/v1` contract from rig pipelines. `op` defaults to `validate`; supported values are `validate`, `apply`, and `revert`. `validate` is read-only. `dry_run: true` validates and expands the lifecycle without changing files, regardless of `op`.
+
+Supported mutation kinds are the contract kinds: `symlink`, `temp_dir`, `file_backup`, and `package_manifest_rewrite`. Revert runs mutations in reverse order using each record's `revert` plan. Path fields support normal rig expansion (`~`, `${env.NAME}`, `${components.<id>.path}`, `${package.root}`).
+
+Package manifest rewrites operate on JSON package manifests and update common dependency sections (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`) using each change's `before`/`after` guard. Declare `revert.backup_path` with `strategy: "restore_package_manifest"` so `op: "revert"` can restore the original file.
+
 ### `command`
 
 ```jsonc
