@@ -9,7 +9,7 @@ use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
-use super::super::normalize_runner_command_env;
+use super::super::normalize_runner_command_env_for_homeboy_path;
 use super::super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled_with_progress,
     RunnerCommandProgressSink,
@@ -201,7 +201,10 @@ pub(crate) fn prepare_runner_process(
             &secret_env_plan,
             &env,
         )?);
-        normalize_runner_command_env(&mut env);
+        normalize_runner_command_env_for_homeboy_path(
+            &mut env,
+            runner.settings.homeboy_path.as_deref(),
+        );
     } else {
         validate_runner_inherited_secret_env(
             &secret_env_plan,
@@ -334,7 +337,10 @@ pub(crate) fn prepare_daemon_local_process(
         &secret_env_plan,
         &env,
     )?);
-    normalize_runner_command_env(&mut env);
+    normalize_runner_command_env_for_homeboy_path(
+        &mut env,
+        runner.settings.homeboy_path.as_deref(),
+    );
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         SourceSnapshot::collect_local(
             &runner.id,

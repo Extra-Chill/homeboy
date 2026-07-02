@@ -408,3 +408,41 @@ fn daemon_local_prep_normalizes_default_path_on_runner_side() {
         );
     });
 }
+
+#[test]
+fn daemon_local_prep_prefers_configured_homeboy_path_for_nested_homeboy() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = workspace.display().to_string();
+        let mut runner = ssh_runner();
+        runner.settings.homeboy_path = Some("/opt/homeboy/current/homeboy".to_string());
+        runner.env.insert(
+            "PATH".to_string(),
+            "/usr/local/bin:/usr/bin:/bin".to_string(),
+        );
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace),
+            project_id: None,
+            command: vec!["homeboy".to_string(), "--version".to_string()],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("prepare daemon-local runner process");
+
+        assert_eq!(
+            plan.env.get("PATH").map(String::as_str),
+            Some("/opt/homeboy/current:/usr/local/bin:/usr/bin:/bin"),
+            "daemon-side nested `homeboy` commands should resolve through configured homeboy_path first"
+        );
+    });
+}

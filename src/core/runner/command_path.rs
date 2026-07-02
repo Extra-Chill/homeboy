@@ -26,6 +26,40 @@ pub(crate) fn normalize_runner_command_env(env: &mut HashMap<String, String>) {
     }
 }
 
+pub(crate) fn normalize_runner_command_env_for_homeboy_path(
+    env: &mut HashMap<String, String>,
+    homeboy_path: Option<&str>,
+) {
+    normalize_runner_command_env(env);
+
+    let Some(homeboy_path) = homeboy_path else {
+        return;
+    };
+    let homeboy_path = Path::new(homeboy_path);
+    if !homeboy_path.is_absolute() {
+        return;
+    }
+    let Some(parent) = homeboy_path.parent() else {
+        return;
+    };
+    let Some(parent) = parent.to_str() else {
+        return;
+    };
+    prepend_path_entry(env, parent);
+}
+
+fn prepend_path_entry(env: &mut HashMap<String, String>, entry: &str) {
+    let path = env.entry("PATH".to_string()).or_default();
+    if path.split(':').any(|part| part == entry) {
+        return;
+    }
+    if path.is_empty() {
+        path.push_str(entry);
+    } else {
+        *path = format!("{entry}:{path}");
+    }
+}
+
 pub(crate) fn remote_shell_path_preamble() -> &'static str {
     concat!(
         "export PATH=\"$HOME/.local/bin:$HOME/.",

@@ -73,7 +73,8 @@ pub use capabilities::{
 };
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{
-    normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,
+    normalize_runner_command_env, normalize_runner_command_env_for_homeboy_path,
+    quote_runner_env_value, remote_shell_path_preamble,
 };
 pub use connection::{
     connect, connect_reverse, disconnect, reverse_broker_artifact, reverse_broker_reconcile,
