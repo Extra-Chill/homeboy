@@ -8,7 +8,7 @@ use homeboy::core::Error;
 use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
-    hotspots, latest, loop_sync, proof, query, reconcile, refs, watch,
+    hotspots, latest, loop_sync, proof, query, reconcile, refs, resources, watch,
 };
 use super::{CmdResult, GlobalArgs};
 
@@ -172,6 +172,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Import(args) => super::bundle::import_runs(args),
         RunsCommand::Query(args) => query::runs_query(args),
         RunsCommand::Refs(args) => refs::runs_refs(args),
+        RunsCommand::Resources(args) => resources::runs_resources(args),
         RunsCommand::Drift(args) => drift::runs_drift(args),
         RunsCommand::LoopSync(args) => loop_sync::loop_sync(args),
     }

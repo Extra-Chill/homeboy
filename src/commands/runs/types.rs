@@ -37,6 +37,7 @@ use super::proof::RunsProofOutput;
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
+use super::resources::{RunsResourcesArgs, RunsResourcesOutput};
 use super::watch::{RunsWatchArgs, RunsWatchOutput};
 use crate::commands::fuzz::FuzzCompareOutput;
 
@@ -139,6 +140,8 @@ pub(super) enum RunsCommand {
     Query(RunsQueryArgs),
     /// Emit stable run/artifact refs for matching runs.
     Refs(RunsRefsArgs),
+    /// Inspect resource lifecycle records from resource index files.
+    Resources(RunsResourcesArgs),
     /// Window-based distribution drift over a JSONPath metric.
     Drift(RunsDriftArgs),
     /// Sync continuous-loop archive directories into observation artifacts.
@@ -211,6 +214,7 @@ pub enum RunsOutput {
     ImportFromGhActions(GhActionsImportOutput),
     Query(RunsQueryOutput),
     Refs(RunsRefsOutput),
+    Resources(RunsResourcesOutput),
     Drift(RunsDriftOutput),
     LoopSync(RunsLoopSyncOutput),
 }
