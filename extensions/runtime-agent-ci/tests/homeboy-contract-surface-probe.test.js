@@ -8,6 +8,8 @@ const {
   probeHomeboyContractSurface,
 } = require('../lib/homeboy-contract-surface-probe.cjs');
 const {
+  RUN_OUTCOME_ENVELOPE_SCHEMA,
+  RUNTIME_CONTRACT_CONSTANTS,
   runtimeContractConstantsFromHomeboyOutput,
 } = require('../lib/runtime-contracts.cjs');
 const {
@@ -40,6 +42,8 @@ const releasedContractShape = probeHomeboyContractSurface({
 
 assert.equal(releasedContractShape.status, 'passed');
 assert.deepEqual(releasedContractShape.argv, ['contract', 'constants', 'all']);
+assert.equal(RUN_OUTCOME_ENVELOPE_SCHEMA, 'homeboy/run-outcome-envelope/v1');
+assert.equal(RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id, RUN_OUTCOME_ENVELOPE_SCHEMA);
 
 assert.deepEqual(runtimeContractConstantsFromHomeboyOutput({
   data: {

@@ -13,6 +13,12 @@ const CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   }),
 });
 
+const LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS = validatedLocalSchemaFallback(
+  'run_outcome_envelope',
+  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope,
+  Object.freeze({ schema_id: 'homeboy/run-outcome-envelope/v1' })
+);
+
 // Extension-local artifact schemas. These remain here until Homeboy core exports
 // contract constants for the runtime artifact path/ref boundary.
 const EXTENSION_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
@@ -24,10 +30,14 @@ const EXTENSION_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   }),
 });
 
-const CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS = Object.freeze(Object.keys(EXTENSION_RUNTIME_CONTRACT_CONSTANTS));
+const CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS = Object.freeze(Object.keys({
+  ...(CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope ? {} : { run_outcome_envelope: LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS }),
+  ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
+}));
 
 const RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   ...CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
+  run_outcome_envelope: CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope || LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS,
   ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
 });
 
@@ -36,6 +46,7 @@ const ARTIFACT_MANIFEST_SCHEMA = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.schema_id;
 const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
 const SECRET_ENV_PLAN_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
 const RUN_LOCATION_INDEX_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
+const RUN_OUTCOME_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id;
 const ARTIFACT_PATHS_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
 const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
@@ -129,6 +140,16 @@ function uniqueStrings(values) {
   return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
+function validatedLocalSchemaFallback(contractName, coreConstants, fallback) {
+  if (coreConstants && typeof coreConstants.schema_id === 'string' && coreConstants.schema_id.length > 0) {
+    return coreConstants;
+  }
+  if (!fallback || typeof fallback.schema_id !== 'string' || fallback.schema_id.length === 0) {
+    throw new Error(`${contractName}.schema_id fallback must be a non-empty string`);
+  }
+  return fallback;
+}
+
 function runtimeContractConstantsFromHomeboyOutput(output) {
   const constants = contractConstantsPayload(output);
   if (!constants) {
@@ -181,6 +202,7 @@ module.exports = {
   CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
   EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
   RUN_LOCATION_INDEX_SCHEMA,
+  RUN_OUTCOME_ENVELOPE_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
   RUNTIME_CONTRACT_CONSTANTS,
   SECRET_ENV_PLAN_SCHEMA,
