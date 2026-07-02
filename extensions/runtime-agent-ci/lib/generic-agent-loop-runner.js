@@ -14,7 +14,8 @@ const {
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 const { evaluateGatePlan } = require('./gate-plan-evaluator');
 const { assertLoopSuccess, loopEvidence, loopIteration, loopRun } = require('./loop-lifecycle.cjs');
-const { artifactManifestForFiles, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { artifactManifestForFiles, artifactManifestRef, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { RUN_OUTCOME_ENVELOPE_SCHEMA } = require('./runtime-contracts.cjs');
 
 const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
 const DEFAULT_RUNTIME_ENV_ALLOWLIST = [
@@ -862,6 +863,12 @@ function validateGenericAgentLoopOutcomeContract(options = {}) {
 function writeGenericAgentLoopArtifacts(options = {}) {
   const artifactPaths = runtimeAgentArtifactPaths(options);
   const manifestFiles = [];
+  const status = {
+    schema: 'homeboy/runtime-agent-status/v1',
+    task_id: options.outcome?.task_id || options.request?.task_id || '',
+    status: options.outcome?.status || 'failed',
+    success: ['succeeded', 'no_op'].includes(options.outcome?.status),
+  };
   if (artifactPaths.outcome) {
     writeJsonFile(artifactPaths.outcome, options.outcome);
     manifestFiles.push({ id: 'outcome', kind: 'agent-task-outcome', role: 'outcome', label: 'Agent task outcome', path: artifactPaths.outcome, content_type: 'application/json' });
@@ -871,13 +878,12 @@ function writeGenericAgentLoopArtifacts(options = {}) {
     manifestFiles.push({ id: 'results', kind: 'runtime-agent-results', role: 'results', label: 'Runtime agent results', path: artifactPaths.results, content_type: 'application/json' });
   }
   if (artifactPaths.status) {
-    writeJsonFile(artifactPaths.status, {
-      schema: 'homeboy/runtime-agent-status/v1',
-      task_id: options.outcome?.task_id || options.request?.task_id || '',
-      status: options.outcome?.status || 'failed',
-      success: ['succeeded', 'no_op'].includes(options.outcome?.status),
-    });
+    writeJsonFile(artifactPaths.status, status);
     manifestFiles.push({ id: 'status', kind: 'runtime-agent-status', role: 'status', label: 'Runtime agent status', path: artifactPaths.status, content_type: 'application/json' });
+  }
+  if (artifactPaths.run_outcome_envelope) {
+    writeJsonFile(artifactPaths.run_outcome_envelope, buildRunOutcomeEnvelope({ ...options, artifactPaths, status }));
+    manifestFiles.push({ id: 'run_outcome_envelope', kind: 'run-outcome-envelope', role: 'run_outcome_envelope', label: 'Run outcome envelope', path: artifactPaths.run_outcome_envelope, content_type: 'application/json' });
   }
   for (const artifact of normalizeArray(options.outcome?.artifacts)) {
     if (artifact?.path) {
@@ -1049,6 +1055,9 @@ function resolveOutcomeAdapter(runtime, repoRoot) {
 
 function normalizeOutcome(value, request) {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (isRunOutcomeEnvelope(value)) {
+      return agentTaskOutcomeFromRunOutcomeEnvelope(value, request);
+    }
     return value;
   }
   return {
@@ -1056,6 +1065,56 @@ function normalizeOutcome(value, request) {
     task_id: request.task_id,
     status: 'failed',
     summary: 'Runtime agent task executor produced an invalid outcome.',
+  };
+}
+
+function buildRunOutcomeEnvelope(options = {}) {
+  const artifactPaths = options.artifactPaths || runtimeAgentArtifactPaths(options);
+  const outcome = optionalObject(options.outcome);
+  const results = optionalObject(options.results);
+  const status = optionalObject(options.status);
+  return {
+    schema: RUN_OUTCOME_ENVELOPE_SCHEMA,
+    task_id: outcome.task_id || options.request?.task_id || '',
+    status: status.status || outcome.status || 'failed',
+    success: status.success === true,
+    outcome,
+    results,
+    status_record: status,
+    artifacts: normalizeArray(outcome.artifacts),
+    artifact_manifest: artifactManifestRef(artifactPaths),
+    files: compactObject({
+      outcome: artifactPaths.outcome,
+      results: artifactPaths.results,
+      status: artifactPaths.status,
+      artifact_manifest: artifactPaths.artifact_manifest,
+    }),
+  };
+}
+
+function isRunOutcomeEnvelope(value) {
+  return isPlainObject(value) && value.schema === RUN_OUTCOME_ENVELOPE_SCHEMA;
+}
+
+function agentTaskOutcomeFromRunOutcomeEnvelope(envelope, request) {
+  const candidate = optionalObject(envelope.outcome || envelope.agent_task_outcome || envelope.task_outcome || envelope.result?.outcome);
+  const normalized = normalizeOutcome(Object.keys(candidate).length > 0 ? candidate : null, request);
+  return {
+    ...normalized,
+    task_id: normalized.task_id || envelope.task_id || request.task_id,
+    status: normalized.status || envelope.status || 'failed',
+    metadata: {
+      ...optionalObject(normalized.metadata),
+      ...(Array.isArray(envelope.results?.scenarios) && !normalized.metadata?.results ? { results: envelope.results } : {}),
+      run_outcome_envelope: compactObject({
+        schema: envelope.schema,
+        task_id: envelope.task_id,
+        status: envelope.status,
+        success: envelope.success,
+        artifact_manifest: envelope.artifact_manifest,
+        files: envelope.files,
+      }),
+    },
   };
 }
 
@@ -1175,6 +1234,7 @@ module.exports = {
   controllerProofPolicy,
   materializeGenericAgentLoopResults,
   genericAgentLoopStdoutSummary,
+  buildRunOutcomeEnvelope,
   runGenericAgentLoop,
   runGenericDeterministicLoop,
   validateGenericAgentLoopOutcomeContract,

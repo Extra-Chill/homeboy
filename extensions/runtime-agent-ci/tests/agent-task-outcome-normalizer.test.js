@@ -11,6 +11,7 @@ const {
   normalizeProviderStatus,
   providerFailureClassification,
 } = require('../lib/agent-task-outcome-normalizer');
+const { RUN_OUTCOME_ENVELOPE_SCHEMA } = require('../lib/runtime-contracts.cjs');
 
 const request = { task_id: 'provider-task-123' };
 
@@ -125,6 +126,25 @@ assert.equal(completedWithNonZeroExit.failure_category, 'runtime.execution_faile
 assert.equal(completedWithNonZeroExit.retryable, false);
 assert.equal(completedWithNonZeroExit.outputs.issue_url, 'https://github.com/example/repo/issues/12');
 assert.equal(completedWithNonZeroExit.evidence_refs[0].kind, 'issue');
+
+const envelopeOutcome = normalizeAgentTaskOutcome(request, {
+  schema: RUN_OUTCOME_ENVELOPE_SCHEMA,
+  task_id: 'provider-task-123',
+  status: 'succeeded',
+  success: true,
+  outcome: {
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: 'provider-task-123',
+    status: 'succeeded',
+    summary: 'Envelope provider task completed.',
+  },
+  results: { scenarios: [{ id: 'provider-task-123' }] },
+  files: { outcome: '/tmp/outcome.json' },
+});
+assert.equal(envelopeOutcome.status, 'succeeded');
+assert.equal(envelopeOutcome.summary, 'Envelope provider task completed.');
+assert.equal(envelopeOutcome.metadata.results.scenarios[0].id, 'provider-task-123');
+assert.equal(envelopeOutcome.metadata.run_outcome_envelope.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
 
 const noOpOutcome = normalizeAgentTaskOutcome(request, { success: true, outcome: 'no_op' });
 assert.equal(noOpOutcome.status, 'no_op');

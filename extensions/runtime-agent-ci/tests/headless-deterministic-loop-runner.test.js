@@ -209,6 +209,7 @@ try {
   assert.equal(manifest.schema, ARTIFACT_MANIFEST_SCHEMA);
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'loop-result.json'), true);
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'events.json'), true);
+  assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'run-outcome-envelope.json'), true);
   assert.equal(manifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
 } finally {
   fs.rmSync(artifactDir, { recursive: true, force: true });
@@ -396,6 +397,7 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'events.json'), 'utf8'))[0].type, 'loop_started');
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'status.json'), 'utf8')).status, 'succeeded');
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'results.json'), 'utf8')).scenarios[0].id, 'build-site');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'run-outcome-envelope.json'), 'utf8')).outcome.task_id, 'build-site');
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }

@@ -9,6 +9,7 @@ const genericLoopRunner = require('../lib/generic-agent-loop-runner');
 const {
   ARTIFACT_MANIFEST_FILE,
   ARTIFACT_MANIFEST_SCHEMA,
+  RUN_OUTCOME_ENVELOPE_SCHEMA,
 } = require('../lib/runtime-contracts.cjs');
 
 assert.equal(
@@ -360,17 +361,52 @@ process.stdout.write(JSON.stringify({
   genericLoopRunner.writeGenericAgentLoopArtifacts({
     outcome: sharedArtifactsRun.outcome,
     results: sharedArtifactsRun.results,
+    request: sharedArtifactsRun.request,
     artifact_paths: { run_dir: sharedArtifactDir },
   });
+  const sharedEnvelope = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, 'run-outcome-envelope.json'), 'utf8'));
+  assert.equal(sharedEnvelope.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
+  assert.equal(sharedEnvelope.outcome.task_id, 'shared-artifact-paths');
+  assert.equal(sharedEnvelope.results.scenarios[0].id, 'shared-artifact-paths');
+  assert.equal(sharedEnvelope.artifact_manifest.manifest_schema, ARTIFACT_MANIFEST_SCHEMA);
   const sharedManifest = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, ARTIFACT_MANIFEST_FILE), 'utf8'));
   assert.equal(sharedManifest.schema, ARTIFACT_MANIFEST_SCHEMA);
   assert.deepEqual(sharedManifest.artifacts.map((artifact) => artifact.path).sort(), [
     'outcome.json',
     'results.json',
+    'run-outcome-envelope.json',
     'shared-artifact-paths-runtime-stderr.txt',
     'status.json',
   ]);
   assert.equal(sharedManifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
+
+  const envelopeRun = genericLoopRunner.runGenericAgentLoop({
+    runtime,
+    plan: { ...plan, workload_id: 'envelope-executor' },
+    validationPolicy: { success_completion_outcomes: ['done'] },
+    execute: ({ request }) => ({
+      schema: RUN_OUTCOME_ENVELOPE_SCHEMA,
+      task_id: request.task_id,
+      status: 'succeeded',
+      success: true,
+      outcome: {
+        schema: 'homeboy/agent-task-outcome/v1',
+        task_id: request.task_id,
+        status: 'succeeded',
+        summary: 'Envelope executor completed.',
+      },
+      results: {
+        scenarios: [{
+          id: request.task_id,
+          metrics: { generic_agent_task_executor_mean: 1 },
+          metadata: { completion_outcome: 'done', completion_outcome_satisfied: true },
+        }],
+      },
+    }),
+  });
+  assert.equal(envelopeRun.outcome.status, 'succeeded');
+  assert.equal(envelopeRun.outcome.metadata.run_outcome_envelope.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
+  assert.equal(envelopeRun.results.scenarios[0].id, 'envelope-executor');
 
   let capturedEnv = null;
   genericLoopRunner.runGenericAgentLoop({

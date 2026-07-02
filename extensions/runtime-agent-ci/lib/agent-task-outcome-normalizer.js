@@ -1,6 +1,7 @@
 'use strict';
 
 const { AGENT_TASK_OUTCOME_SCHEMA } = require('../../agent-task-contracts');
+const { RUN_OUTCOME_ENVELOPE_SCHEMA } = require('./runtime-contracts.cjs');
 const { normalizeAgentTaskOutcomeStatus } = require('./runtime-status.cjs');
 
 const TERMINAL_FAILURE_STATUSES = ['failed', 'provider_error', 'timeout', 'unable_to_remediate'];
@@ -13,6 +14,7 @@ function normalizeAgentTaskOutcome(request, result = {}, options = {}) {
   if (!request.task_id) {
     throw new Error('normalizeAgentTaskOutcome requires request.task_id.');
   }
+  result = unwrapRunOutcomeEnvelope(result, request);
 
   const diagnostics = normalizeProviderDiagnostics(options.diagnostics ?? result.diagnostics);
   const status = normalizeAgentTaskStatus(result, options);
@@ -25,7 +27,10 @@ function normalizeAgentTaskOutcome(request, result = {}, options = {}) {
     evidence_refs: normalizeProviderEvidenceRefs(options.evidenceRefs ?? result.evidence_refs),
     outputs: normalizeProviderOutputs(options.outputs ?? result.outputs),
     diagnostics,
-    metadata: normalizeProviderMetadata(result, options),
+    metadata: {
+      ...normalizeProviderMetadata(result, options),
+      ...runOutcomeEnvelopeMetadata(result),
+    },
   };
 
   const failureClassification = options.failureClassification !== undefined
@@ -228,6 +233,40 @@ function defaultSummary(status, providerLabel = 'Provider') {
 
 function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function runOutcomeEnvelopeMetadata(result) {
+  if (!plainObject(result.metadata) || !plainObject(result.metadata.run_outcome_envelope)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries({
+    results: result.metadata.results,
+    run_outcome_envelope: result.metadata.run_outcome_envelope,
+  }).filter(([, value]) => value !== undefined));
+}
+
+function unwrapRunOutcomeEnvelope(result, request) {
+  if (!plainObject(result) || result.schema !== RUN_OUTCOME_ENVELOPE_SCHEMA) {
+    return result;
+  }
+  const outcome = plainObject(result.outcome) ? result.outcome : {};
+  return {
+    ...outcome,
+    task_id: outcome.task_id || result.task_id || request.task_id,
+    status: outcome.status || result.status,
+    metadata: {
+      ...(plainObject(outcome.metadata) ? outcome.metadata : {}),
+      ...(Array.isArray(result.results?.scenarios) && !outcome.metadata?.results ? { results: result.results } : {}),
+      run_outcome_envelope: Object.fromEntries(Object.entries({
+        schema: result.schema,
+        task_id: result.task_id,
+        status: result.status,
+        success: result.success,
+        artifact_manifest: result.artifact_manifest,
+        files: result.files,
+      }).filter(([, value]) => value !== undefined && value !== '')),
+    },
+  };
 }
 
 module.exports = {

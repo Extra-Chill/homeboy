@@ -446,9 +446,9 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
     results: options.result?.results,
     artifact_paths: { ...artifactPaths, status: '' },
   });
-  for (const key of ['outcome', 'results']) {
+  for (const key of ['outcome', 'results', 'run_outcome_envelope']) {
     if (artifactPaths[key]) {
-      manifestFiles.push({ id: key, kind: key === 'outcome' ? 'agent-task-outcome' : 'runtime-agent-results', role: key, path: artifactPaths[key], content_type: 'application/json' });
+      manifestFiles.push({ id: key, kind: headlessRuntimeArtifactKind(key), role: key, path: artifactPaths[key], content_type: 'application/json' });
     }
   }
   for (const artifact of normalizeArray(options.result?.outcome?.artifacts)) {
@@ -459,6 +459,16 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
   if (artifactPaths.artifact_manifest) {
     writeJsonFile(artifactPaths.artifact_manifest, artifactManifestForFiles(artifactPaths, manifestFiles));
   }
+}
+
+function headlessRuntimeArtifactKind(key) {
+  if (key === 'outcome') {
+    return 'agent-task-outcome';
+  }
+  if (key === 'run_outcome_envelope') {
+    return 'run-outcome-envelope';
+  }
+  return 'runtime-agent-results';
 }
 
 function runHeadlessPolicyLoop(options = {}) {

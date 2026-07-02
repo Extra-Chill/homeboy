@@ -43,6 +43,7 @@ const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   status: 'status.json',
   results: 'results.json',
   outcome: 'outcome.json',
+  run_outcome_envelope: 'run-outcome-envelope.json',
   fanout_run: 'fanout-run.json',
   loop_result: 'loop-result.json',
   loop_policy: 'loop-policy.json',
