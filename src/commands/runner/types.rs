@@ -332,6 +332,8 @@ pub struct RunnerJobOutput {
     /// compact/tail projections so callers can read "exit N" without the blob.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orchestration_provenance: Option<Value>,
     /// Bounded stdout view. Present only when the raw stdout was stripped from
     /// `events` (compact or `--tail`); otherwise stdout lives once in the
     /// structured result event.

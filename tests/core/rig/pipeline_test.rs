@@ -266,6 +266,303 @@ fn test_bootstrap_step_provides_required_runner_capability_before_consumer() {
     );
 }
 
+#[test]
+fn test_host_mutation_step_reports_contract_validation_failure() {
+    let rig: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "host-mutation-invalid",
+            "pipeline": {
+                "up": [{
+                    "kind": "host-mutation",
+                    "op": "validate",
+                    "lifecycle": {
+                        "schema": "homeboy/host-mutation-lifecycle/v0",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": []
+                    }
+                }]
+            }
+        }"#,
+    )
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "up", true).expect("pipeline reports failure");
+
+    assert!(!out.is_success());
+    assert_eq!(out.steps[0].kind, "host-mutation");
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("expected homeboy/host-mutation-lifecycle/v1"));
+}
+
+#[test]
+fn test_host_mutation_step_dry_run_does_not_mutate_filesystem() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let temp_dir = tmp.path().join("created-by-mutation");
+    let temp_dir_arg = temp_dir.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "host-mutation-dry-run",
+            "pipeline": {{
+                "up": [{{
+                    "kind": "host-mutation",
+                    "op": "apply",
+                    "dry_run": true,
+                    "lifecycle": {{
+                        "schema": "homeboy/host-mutation-lifecycle/v1",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": [{{
+                            "id": "temp-dir",
+                            "actor": "test",
+                            "kind": "temp_dir",
+                            "path": "{}",
+                            "status": "declared",
+                            "revert": {{ "strategy": "remove_path" }}
+                        }}]
+                    }}
+                }}]
+            }}
+        }}"#,
+        temp_dir_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert!(
+        !temp_dir.exists(),
+        "dry-run host mutation should not create path"
+    );
+}
+
+#[test]
+fn test_host_mutation_step_applies_and_reverts_package_manifest_rewrite() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let manifest = tmp.path().join("package.json");
+    let backup = tmp.path().join("package.json.homeboy-backup");
+    std::fs::write(
+        &manifest,
+        r#"{
+  "dependencies": {
+    "demo-package": "1.0.0"
+  }
+}
+"#,
+    )
+    .expect("write manifest");
+    let manifest_arg = manifest.to_string_lossy();
+    let backup_arg = backup.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "host-mutation-package-manifest",
+            "pipeline": {{
+                "up": [{{
+                    "kind": "host-mutation",
+                    "op": "apply",
+                    "lifecycle": {{
+                        "schema": "homeboy/host-mutation-lifecycle/v1",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": [{{
+                            "id": "rewrite-package",
+                            "actor": "test",
+                            "kind": "package_manifest_rewrite",
+                            "manifest_path": "{}",
+                            "changes": [{{
+                                "package": "demo-package",
+                                "before": "1.0.0",
+                                "after": "2.0.0"
+                            }}],
+                            "status": "declared",
+                            "revert": {{
+                                "strategy": "restore_package_manifest",
+                                "backup_path": "{}"
+                            }}
+                        }}]
+                    }}
+                }}],
+                "down": [{{
+                    "kind": "host-mutation",
+                    "op": "revert",
+                    "lifecycle": {{
+                        "schema": "homeboy/host-mutation-lifecycle/v1",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": [{{
+                            "id": "rewrite-package",
+                            "actor": "test",
+                            "kind": "package_manifest_rewrite",
+                            "manifest_path": "{}",
+                            "changes": [{{
+                                "package": "demo-package",
+                                "before": "1.0.0",
+                                "after": "2.0.0"
+                            }}],
+                            "status": "applied",
+                            "revert": {{
+                                "strategy": "restore_package_manifest",
+                                "backup_path": "{}"
+                            }}
+                        }}]
+                    }}
+                }}]
+            }}
+        }}"#,
+        manifest_arg, backup_arg, manifest_arg, backup_arg
+    ))
+    .expect("parse rig");
+
+    let up = run_pipeline(&rig, "up", true).expect("up pipeline runs");
+    assert!(up.is_success(), "outcomes: {:?}", up.steps);
+    let rewritten = std::fs::read_to_string(&manifest).expect("read rewritten");
+    assert!(rewritten.contains("2.0.0"), "manifest: {rewritten}");
+    assert!(backup.exists(), "apply should create revert backup");
+
+    let down = run_pipeline(&rig, "down", true).expect("down pipeline runs");
+    assert!(down.is_success(), "outcomes: {:?}", down.steps);
+    let restored = std::fs::read_to_string(&manifest).expect("read restored");
+    assert!(restored.contains("1.0.0"), "manifest: {restored}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_host_mutation_step_applies_and_reverts_filesystem_mutations() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let target = tmp.path().join("target-bin");
+    let link = tmp.path().join("bin/tool");
+    let temp_dir = tmp.path().join("runtime-temp");
+    let original = tmp.path().join("config.json");
+    let backup = tmp.path().join("config.json.homeboy-backup");
+    std::fs::write(&target, "tool").expect("write target");
+    std::fs::write(&original, "original").expect("write original");
+    let target_arg = target.to_string_lossy();
+    let link_arg = link.to_string_lossy();
+    let temp_dir_arg = temp_dir.to_string_lossy();
+    let original_arg = original.to_string_lossy();
+    let backup_arg = backup.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "host-mutation-filesystem",
+            "pipeline": {{
+                "up": [{{
+                    "kind": "host-mutation",
+                    "op": "apply",
+                    "lifecycle": {{
+                        "schema": "homeboy/host-mutation-lifecycle/v1",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": [
+                            {{
+                                "id": "link-tool",
+                                "actor": "test",
+                                "kind": "symlink",
+                                "link_path": "{}",
+                                "target_path": "{}",
+                                "status": "declared",
+                                "revert": {{ "strategy": "remove_path" }}
+                            }},
+                            {{
+                                "id": "temp-dir",
+                                "actor": "test",
+                                "kind": "temp_dir",
+                                "path": "{}",
+                                "status": "declared",
+                                "revert": {{ "strategy": "remove_path" }}
+                            }},
+                            {{
+                                "id": "file-backup",
+                                "actor": "test",
+                                "kind": "file_backup",
+                                "original_path": "{}",
+                                "backup_path": "{}",
+                                "status": "declared",
+                                "revert": {{
+                                    "strategy": "restore_backup",
+                                    "backup_path": "{}"
+                                }}
+                            }}
+                        ]
+                    }}
+                }}],
+                "down": [{{
+                    "kind": "host-mutation",
+                    "op": "revert",
+                    "lifecycle": {{
+                        "schema": "homeboy/host-mutation-lifecycle/v1",
+                        "owner": "fixture",
+                        "run_id": "run-1",
+                        "mutations": [
+                            {{
+                                "id": "link-tool",
+                                "actor": "test",
+                                "kind": "symlink",
+                                "link_path": "{}",
+                                "target_path": "{}",
+                                "status": "applied",
+                                "revert": {{ "strategy": "remove_path" }}
+                            }},
+                            {{
+                                "id": "temp-dir",
+                                "actor": "test",
+                                "kind": "temp_dir",
+                                "path": "{}",
+                                "status": "applied",
+                                "revert": {{ "strategy": "remove_path" }}
+                            }},
+                            {{
+                                "id": "file-backup",
+                                "actor": "test",
+                                "kind": "file_backup",
+                                "original_path": "{}",
+                                "backup_path": "{}",
+                                "status": "applied",
+                                "revert": {{
+                                    "strategy": "restore_backup",
+                                    "backup_path": "{}"
+                                }}
+                            }}
+                        ]
+                    }}
+                }}]
+            }}
+        }}"#,
+        link_arg,
+        target_arg,
+        temp_dir_arg,
+        original_arg,
+        backup_arg,
+        backup_arg,
+        link_arg,
+        target_arg,
+        temp_dir_arg,
+        original_arg,
+        backup_arg,
+        backup_arg
+    ))
+    .expect("parse rig");
+
+    let up = run_pipeline(&rig, "up", true).expect("up pipeline runs");
+    assert!(up.is_success(), "outcomes: {:?}", up.steps);
+    assert_eq!(std::fs::read_link(&link).expect("read link"), target);
+    assert!(temp_dir.is_dir(), "temp dir should be created");
+    assert_eq!(
+        std::fs::read_to_string(&backup).expect("read backup"),
+        "original"
+    );
+
+    std::fs::write(&original, "changed").expect("change original");
+    let down = run_pipeline(&rig, "down", true).expect("down pipeline runs");
+    assert!(down.is_success(), "outcomes: {:?}", down.steps);
+    assert!(!link.exists(), "revert should remove symlink");
+    assert!(!temp_dir.exists(), "revert should remove temp dir");
+    assert_eq!(
+        std::fs::read_to_string(&original).expect("read restored"),
+        "original"
+    );
+}
+
 struct EnvRestore {
     name: &'static str,
     previous: Option<String>,

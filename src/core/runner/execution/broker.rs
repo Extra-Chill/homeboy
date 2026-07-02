@@ -189,6 +189,13 @@ pub(super) fn exec_via_reverse_broker(
         mirror_run_id.as_deref(),
         mutation_artifacts.clone(),
     );
+    let provenance_extensions = required_extensions_for_command(
+        &command,
+        &super::super::workload::merge_runner_workload_required_extensions(
+            Vec::new(),
+            runner_workload.as_ref(),
+        ),
+    );
     let handoff = runner_handoff(
         runner,
         "reverse_broker",
@@ -203,6 +210,7 @@ pub(super) fn exec_via_reverse_broker(
         mirror_run_id.clone(),
         Some(&source_snapshot),
         &require_paths,
+        &provenance_extensions,
         &artifacts,
         Some(&runner_result),
     );

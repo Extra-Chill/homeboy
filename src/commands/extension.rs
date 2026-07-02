@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticsContract,
@@ -9,6 +9,8 @@ use homeboy::core::extension::{
     UpdateEntry,
 };
 use homeboy::core::project::{self, Project};
+use homeboy::core::runners::{self, RunnerKind};
+use homeboy::core::server::{self, SshClient};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
@@ -34,6 +36,9 @@ enum ExtensionCommand {
     DiffInstalled {
         /// Optional extension ID to inspect
         extension_id: Option<String>,
+        /// Inspect the extension install visible to a configured runner
+        #[arg(long)]
+        runner: Option<String>,
     },
     /// Show detailed information about a extension
     Show {
@@ -109,6 +114,20 @@ enum ExtensionCommand {
         /// Local path to extension directory
         source: String,
     },
+    /// Sync local extension source to a runner, refresh it there, then run a command
+    DevRun {
+        /// Extension ID
+        extension_id: String,
+        /// Local extension source directory to sync to the runner
+        #[arg(long)]
+        source: String,
+        /// Runner ID
+        #[arg(long)]
+        runner: String,
+        /// Command and arguments to execute on the runner after refresh
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
     /// Install every extension configured by a component
     InstallForComponent {
         /// Git URL or local path to extension repository/directory
@@ -177,7 +196,10 @@ pub fn run(
 ) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List { project } => list(project),
-        ExtensionCommand::DiffInstalled { extension_id } => diff_installed(extension_id.as_deref()),
+        ExtensionCommand::DiffInstalled {
+            extension_id,
+            runner,
+        } => diff_installed(extension_id.as_deref(), runner.as_deref()),
         ExtensionCommand::Show { extension_id } => show_extension(&extension_id),
         ExtensionCommand::Run {
             extension_id,
@@ -216,6 +238,12 @@ pub fn run(
             extension_id,
             source,
         } => relink_extension(&extension_id, &source),
+        ExtensionCommand::DevRun {
+            extension_id,
+            source,
+            runner,
+            command,
+        } => dev_run_extension(&extension_id, &source, &runner, &command),
         ExtensionCommand::InstallForComponent { source, path } => {
             install_for_component(&source, path.as_deref())
         }
@@ -274,6 +302,8 @@ pub enum ExtensionOutput {
     DiffInstalled {
         #[serde(skip_serializing_if = "Option::is_none")]
         extension_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runner_id: Option<String>,
         extensions: Vec<InstalledExtensionDiff>,
     },
     #[serde(rename = "extension.show")]
@@ -380,6 +410,8 @@ pub enum ExtensionOutput {
         #[serde(skip_serializing_if = "Option::is_none", flatten)]
         output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
+    #[serde(rename = "extension.dev_run")]
+    DevRun(homeboy::core::extension::ExtensionDevRunOutput),
     #[serde(rename = "extension.set")]
     SetBatch { batch: homeboy::core::BatchResult },
 }
@@ -501,14 +533,27 @@ pub struct ExtensionRuntimeDiagnosticCommands {
     pub refresh: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstalledExtensionDiff {
     pub extension_id: String,
+    pub version: String,
     pub path: String,
+    pub manifest_path: String,
     pub linked: bool,
+    pub copied: bool,
     pub ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    pub source_url_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub source_path_available: bool,
+    pub has_setup: bool,
+    pub setup_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -530,7 +575,14 @@ fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
     ))
 }
 
-fn diff_installed(extension_id: Option<&str>) -> CmdResult<ExtensionOutput> {
+fn diff_installed(
+    extension_id: Option<&str>,
+    runner_id: Option<&str>,
+) -> CmdResult<ExtensionOutput> {
+    if let Some(runner_id) = runner_id {
+        return runner_diff_installed(extension_id, runner_id);
+    }
+
     let rows = extension::list_summaries(None)
         .into_iter()
         .filter(|summary| extension_id.is_none_or(|id| summary.id == id))
@@ -546,14 +598,121 @@ fn diff_installed(extension_id: Option<&str>) -> CmdResult<ExtensionOutput> {
     Ok((
         ExtensionOutput::DiffInstalled {
             extension_id: extension_id.map(str::to_string),
+            runner_id: None,
             extensions: rows,
         },
         0,
     ))
 }
 
+fn runner_diff_installed(
+    extension_id: Option<&str>,
+    runner_id: &str,
+) -> CmdResult<ExtensionOutput> {
+    let runner = runners::load(runner_id)?;
+    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let mut command = format!("{} extension diff-installed", shell_arg(homeboy_path));
+    if let Some(extension_id) = extension_id {
+        command.push(' ');
+        command.push_str(&shell_arg(extension_id));
+    }
+
+    let output = match runner.kind {
+        RunnerKind::Local => {
+            let output = Command::new(homeboy_path)
+                .args(["extension", "diff-installed"])
+                .args(extension_id.into_iter())
+                .output()
+                .map_err(|err| {
+                    homeboy::core::Error::internal_io(
+                        err.to_string(),
+                        Some("run local runner extension diff-installed".to_string()),
+                    )
+                })?;
+            server::CommandOutput {
+                success: output.status.success(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(1),
+                timed_out: false,
+                child_resource: None,
+            }
+        }
+        RunnerKind::Ssh => {
+            let server_id = runner.server_id.as_deref().ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "runner",
+                    format!("Runner '{runner_id}' is missing server_id"),
+                    Some(runner_id.to_string()),
+                    None,
+                )
+            })?;
+            let server = server::load(server_id)?;
+            let mut client = SshClient::from_server(&server, server_id)?;
+            client.env.extend(runner.env);
+            client.execute(&command)
+        }
+    };
+
+    if !output.success {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "runner",
+            format!("Runner '{runner_id}' extension health probe failed"),
+            Some(runner_id.to_string()),
+            Some(vec![runner_diff_diagnostic_tail(
+                &output.stderr,
+                &output.stdout,
+            )]),
+        ));
+    }
+
+    let rows = parse_runner_diff_installed(&output.stdout)?;
+    Ok((
+        ExtensionOutput::DiffInstalled {
+            extension_id: extension_id.map(str::to_string),
+            runner_id: Some(runner_id.to_string()),
+            extensions: rows,
+        },
+        0,
+    ))
+}
+
+fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<InstalledExtensionDiff>> {
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|err| {
+        homeboy::core::Error::validation_invalid_argument(
+            "runner_output",
+            format!("Runner extension health output was not valid JSON: {err}"),
+            None,
+            None,
+        )
+    })?;
+    let extensions = value
+        .pointer("/data/extensions")
+        .or_else(|| value.get("extensions"))
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "runner_output",
+                "Runner extension health output did not contain data.extensions",
+                None,
+                None,
+            )
+        })?;
+    serde_json::from_value(extensions.clone()).map_err(|err| {
+        homeboy::core::Error::validation_invalid_argument(
+            "runner_output",
+            format!("Runner extension health extensions payload was invalid: {err}"),
+            None,
+            None,
+        )
+    })
+}
+
 fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
     let checkout_head_revision = git_head_revision(Path::new(&summary.path));
+    let manifest_path = manifest_path_for_summary(&summary);
+    let source_url = read_source_url_metadata(&summary.path);
+    let source_path = source_url.as_deref().and_then(local_source_path);
+    let has_setup = summary.has_setup.unwrap_or(false);
     let status = installed_extension_diff_status(
         summary.ready,
         summary.source_revision.as_deref(),
@@ -563,15 +722,86 @@ fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff
 
     InstalledExtensionDiff {
         extension_id: summary.id,
+        version: summary.version,
         path: summary.path,
+        manifest_path,
         linked: summary.linked,
+        copied: !summary.linked,
         ready: summary.ready,
         ready_reason: summary.ready_reason,
+        ready_detail: summary.ready_detail,
+        source_url_available: source_url.is_some(),
+        source_path_available: source_path
+            .as_ref()
+            .is_some_and(|path| Path::new(path).exists()),
+        source_url,
+        source_path,
+        has_setup,
+        setup_status: if summary.ready {
+            "ready".to_string()
+        } else if has_setup {
+            "setup_required".to_string()
+        } else {
+            "unready_no_setup".to_string()
+        },
         installed_source_revision: summary.source_revision,
         checkout_head_revision,
         status,
         next_command,
     }
+}
+
+fn manifest_path_for_summary(summary: &ExtensionSummary) -> String {
+    if summary.path.is_empty() {
+        return String::new();
+    }
+    Path::new(&summary.path)
+        .join(format!("{}.json", summary.id))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn read_source_url_metadata(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    std::fs::read_to_string(Path::new(path).join(".source-url"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn local_source_path(source: &str) -> Option<String> {
+    if looks_like_remote_source(source) {
+        return None;
+    }
+    Some(shellexpand::tilde(source).to_string())
+}
+
+fn looks_like_remote_source(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    lower.contains("://")
+        || lower.starts_with("git@")
+        || source.contains('@') && source.contains(':')
+}
+
+fn runner_diff_diagnostic_tail(stderr: &str, stdout: &str) -> String {
+    let output = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn installed_extension_diff_status(
@@ -829,6 +1059,18 @@ fn relink_extension(extension_id: &str, source: &str) -> CmdResult<ExtensionOutp
         },
         0,
     ))
+}
+
+fn dev_run_extension(
+    extension_id: &str,
+    source: &str,
+    runner: &str,
+    command: &[String],
+) -> CmdResult<ExtensionOutput> {
+    let (output, exit_code) =
+        homeboy::core::extension::run_extension_dev_run(extension_id, runner, source, command)?;
+
+    Ok((ExtensionOutput::DevRun(output), exit_code))
 }
 
 fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
@@ -1349,6 +1591,131 @@ mod tests {
         assert_eq!(
             installed_extension_diff_next_command(&summary, "unready"),
             "homeboy extension setup rust"
+        );
+    }
+
+    #[test]
+    fn installed_extension_diff_reports_copied_install_health_and_update_hint() {
+        with_isolated_home(|home| {
+            let extension_id = "copied-runtime";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(".source-url"),
+                "https://example.com/runtime.git\n",
+            )
+            .expect("source metadata");
+
+            let summary = ExtensionSummary {
+                id: extension_id.to_string(),
+                name: "Copied Runtime".to_string(),
+                version: "1.2.3".to_string(),
+                description: String::new(),
+                runtime: "platform".to_string(),
+                compatible: true,
+                ready: true,
+                ready_reason: None,
+                ready_detail: None,
+                linked: false,
+                path: extension_dir.to_string_lossy().to_string(),
+                error: None,
+                symlink_target: None,
+                source_revision: Some("abc1234".to_string()),
+                cli_tool: None,
+                cli_display_name: None,
+                actions: Vec::new(),
+                has_setup: Some(true),
+                has_ready_check: Some(true),
+            };
+
+            let diff = installed_extension_diff(summary);
+
+            assert_eq!(diff.extension_id, extension_id);
+            assert_eq!(diff.version, "1.2.3");
+            assert!(!diff.linked);
+            assert!(diff.copied);
+            assert_eq!(
+                diff.source_url.as_deref(),
+                Some("https://example.com/runtime.git")
+            );
+            assert!(diff.source_url_available);
+            assert!(!diff.source_path_available);
+            assert_eq!(diff.setup_status, "ready");
+            assert!(diff
+                .manifest_path
+                .ends_with("copied-runtime/copied-runtime.json"));
+            assert_eq!(diff.next_command, "homeboy extension show copied-runtime");
+
+            let stale_summary = ExtensionSummary {
+                source_revision: Some("abc1234".to_string()),
+                linked: false,
+                path: extension_dir.to_string_lossy().to_string(),
+                id: extension_id.to_string(),
+                name: "Copied Runtime".to_string(),
+                version: "1.2.3".to_string(),
+                description: String::new(),
+                runtime: "platform".to_string(),
+                compatible: true,
+                ready: true,
+                ready_reason: None,
+                ready_detail: None,
+                error: None,
+                symlink_target: None,
+                cli_tool: None,
+                cli_display_name: None,
+                actions: Vec::new(),
+                has_setup: Some(true),
+                has_ready_check: Some(true),
+            };
+            assert_eq!(
+                installed_extension_diff_next_command(&stale_summary, "stale"),
+                "homeboy extension update copied-runtime"
+            );
+        });
+    }
+
+    #[test]
+    fn runner_diff_installed_parses_runner_json_payload() {
+        let stdout = r#"{
+  "success": true,
+  "data": {
+    "command": "extension.diff_installed",
+    "extensions": [{
+      "extension_id": "generic-runtime",
+      "version": "1.0.0",
+      "path": "/runner/extensions/generic-runtime",
+      "manifest_path": "/runner/extensions/generic-runtime/generic-runtime.json",
+      "linked": false,
+      "copied": true,
+      "ready": false,
+      "ready_reason": "ready_check_failed",
+      "ready_detail": "missing dependency",
+      "source_url": "https://example.com/generic-runtime.git",
+      "source_url_available": true,
+      "source_path_available": false,
+      "has_setup": true,
+      "setup_status": "setup_required",
+      "installed_source_revision": "abc1234",
+      "checkout_head_revision": "def5678",
+      "status": "unready",
+      "next_command": "homeboy extension setup generic-runtime"
+    }]
+  }
+}"#;
+
+        let rows = parse_runner_diff_installed(stdout).expect("runner diff payload");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].extension_id, "generic-runtime");
+        assert!(rows[0].copied);
+        assert_eq!(rows[0].setup_status, "setup_required");
+        assert_eq!(rows[0].ready_detail.as_deref(), Some("missing dependency"));
+        assert_eq!(
+            rows[0].next_command,
+            "homeboy extension setup generic-runtime"
         );
     }
 }

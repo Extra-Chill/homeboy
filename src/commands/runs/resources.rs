@@ -1,16 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
     ResourceLifecycleRecord, ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
 use homeboy::core::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{CmdResult, RunsOutput};
 
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone)]
 pub struct RunsResourcesArgs {
     /// Resource lifecycle index JSON file. Repeatable until producers publish a canonical store.
     #[arg(long = "file", value_name = "PATH")]
@@ -35,18 +35,129 @@ pub struct RunsResourcesArgs {
     /// Include only records eligible for cleanup orchestration.
     #[arg(long = "cleanup-eligible")]
     pub cleanup_eligible: bool,
+
+    /// Emit cleanup planning data for matching resources. This is read-only unless --apply is also passed.
+    #[arg(long = "cleanup-plan")]
+    pub cleanup_plan: bool,
+
+    /// Delete apply-intended cleanup-eligible resources. Requires --cleanup-root and remains bounded by --limit.
+    #[arg(long, requires = "cleanup_root")]
+    pub apply: bool,
+
+    /// Root directory that cleanup candidates must canonicalize under before apply can delete them.
+    #[arg(long = "cleanup-root", value_name = "PATH")]
+    pub cleanup_root: Option<PathBuf>,
+
+    /// Maximum cleanup candidates to include in the plan/apply page.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// Cleanup operation used by apply. Delete removes files, symlinks, or directories.
+    #[arg(long = "cleanup-operation", default_value_t = ResourceCleanupOperation::Delete)]
+    pub cleanup_operation: ResourceCleanupOperation,
+}
+
+impl Default for RunsResourcesArgs {
+    fn default() -> Self {
+        Self {
+            file: Vec::new(),
+            sample: false,
+            run_id: None,
+            owner: None,
+            actionable: false,
+            cleanup_eligible: false,
+            cleanup_plan: false,
+            apply: false,
+            cleanup_root: None,
+            limit: 20,
+            cleanup_operation: ResourceCleanupOperation::Delete,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCleanupOperation {
+    Delete,
+}
+
+impl Default for ResourceCleanupOperation {
+    fn default() -> Self {
+        Self::Delete
+    }
+}
+
+impl std::fmt::Display for ResourceCleanupOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delete => formatter.write_str("delete"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunsResourcesOutput {
     pub command: &'static str,
     pub schema: &'static str,
+    pub mode: ResourceCleanupMode,
     pub source_count: usize,
     pub resource_count: usize,
     pub actionable_count: usize,
     pub cleanup_eligible_count: usize,
     pub sources: Vec<RunsResourcesSourceOutput>,
     pub resources: Vec<ResourceLifecycleRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<RunsResourcesCleanupOutput>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCleanupMode {
+    Inspect,
+    DryRun,
+    Apply,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunsResourcesCleanupOutput {
+    pub operation: ResourceCleanupOperation,
+    pub root: Option<String>,
+    pub limit: usize,
+    pub candidate_count: usize,
+    pub planned_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub deferred_count: usize,
+    pub planned: Vec<RunsResourcesCleanupPlanItem>,
+    pub applied: Vec<RunsResourcesCleanupAppliedItem>,
+    pub skipped: Vec<RunsResourcesCleanupSkippedItem>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunsResourcesCleanupPlanItem {
+    pub owner: String,
+    pub run_id: String,
+    pub path: String,
+    pub kind: String,
+    pub operation: ResourceCleanupOperation,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunsResourcesCleanupAppliedItem {
+    pub owner: String,
+    pub run_id: String,
+    pub path: String,
+    pub kind: String,
+    pub operation: ResourceCleanupOperation,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunsResourcesCleanupSkippedItem {
+    pub owner: String,
+    pub run_id: String,
+    pub path: String,
+    pub kind: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -56,6 +167,8 @@ pub struct RunsResourcesSourceOutput {
 }
 
 pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
+    validate_cleanup_args(&args)?;
+
     if !args.sample && args.file.is_empty() {
         return Err(Error::validation_invalid_argument(
             "file",
@@ -94,20 +207,241 @@ pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
         .into_iter()
         .filter(|record| resource_matches_filters(record, &args))
         .collect::<Vec<_>>();
+    let cleanup = if args.cleanup_plan || args.apply {
+        Some(build_cleanup_output(&resources, &args)?)
+    } else {
+        None
+    };
+    let mode = if args.apply {
+        ResourceCleanupMode::Apply
+    } else if args.cleanup_plan {
+        ResourceCleanupMode::DryRun
+    } else {
+        ResourceCleanupMode::Inspect
+    };
 
     Ok((
         RunsOutput::Resources(RunsResourcesOutput {
             command: "runs.resources",
             schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+            mode,
             source_count,
             resource_count: resources.len(),
             actionable_count,
             cleanup_eligible_count,
             sources,
             resources,
+            cleanup,
         }),
         0,
     ))
+}
+
+fn validate_cleanup_args(args: &RunsResourcesArgs) -> Result<()> {
+    if args.apply && args.sample {
+        return Err(Error::validation_invalid_argument(
+            "apply",
+            "cleanup apply cannot run against sample data",
+            None,
+            Some(vec![
+                "Run without --sample and pass explicit --file resource lifecycle index paths."
+                    .to_string(),
+            ]),
+        ));
+    }
+
+    if args.apply && args.limit == 0 {
+        return Err(Error::validation_invalid_argument(
+            "limit",
+            "cleanup apply requires a positive bounded limit",
+            Some(args.limit.to_string()),
+            None,
+        ));
+    }
+
+    if args.apply {
+        let root = args
+            .cleanup_root
+            .as_ref()
+            .expect("clap requires cleanup_root");
+        let canonical_root = canonical_cleanup_root(root)?;
+        if canonical_root.parent().is_none() {
+            return Err(Error::validation_invalid_argument(
+                "cleanup-root",
+                "cleanup root must not be the filesystem root",
+                Some(root.display().to_string()),
+                None,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn build_cleanup_output(
+    resources: &[ResourceLifecycleRecord],
+    args: &RunsResourcesArgs,
+) -> Result<RunsResourcesCleanupOutput> {
+    let root = match &args.cleanup_root {
+        Some(path) => Some(canonical_cleanup_root(path)?),
+        None => None,
+    };
+    let root_display = root.as_ref().map(|path| path.display().to_string());
+    let limit = args.limit;
+    let mut candidate_count = 0;
+    let mut deferred_count = 0;
+    let mut planned = Vec::new();
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+
+    for record in resources {
+        if !resource_is_cleanup_eligible(record) {
+            skipped.push(cleanup_skip(record, "resource is not cleanup eligible"));
+            continue;
+        }
+
+        candidate_count += 1;
+        if planned.len() + applied.len() >= limit {
+            deferred_count += 1;
+            continue;
+        }
+
+        if args.apply && !record.cleanup_intent.is_apply() {
+            skipped.push(cleanup_skip(
+                record,
+                "resource cleanup intent is dry_run; apply requires explicit apply intent",
+            ));
+            continue;
+        }
+
+        let Some(root) = &root else {
+            planned.push(cleanup_plan_item(record, args.cleanup_operation));
+            continue;
+        };
+
+        match cleanup_candidate_path(root, record) {
+            Ok(path) => {
+                if args.apply {
+                    apply_cleanup_path(&path)?;
+                    applied.push(cleanup_applied_item(record, args.cleanup_operation));
+                } else {
+                    planned.push(cleanup_plan_item(record, args.cleanup_operation));
+                }
+            }
+            Err(reason) => skipped.push(cleanup_skip(record, reason)),
+        }
+    }
+
+    Ok(RunsResourcesCleanupOutput {
+        operation: args.cleanup_operation,
+        root: root_display,
+        limit,
+        candidate_count,
+        planned_count: planned.len(),
+        applied_count: applied.len(),
+        skipped_count: skipped.len(),
+        deferred_count,
+        planned,
+        applied,
+        skipped,
+    })
+}
+
+fn canonical_cleanup_root(root: &Path) -> Result<PathBuf> {
+    let canonical = root.canonicalize().map_err(|error| {
+        Error::validation_invalid_argument(
+            "cleanup-root",
+            format!("cleanup root must exist and be canonicalizable: {error}"),
+            Some(root.display().to_string()),
+            None,
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "cleanup-root",
+            "cleanup root must be a directory",
+            Some(root.display().to_string()),
+            None,
+        ));
+    }
+    Ok(canonical)
+}
+
+fn cleanup_candidate_path(
+    root: &Path,
+    record: &ResourceLifecycleRecord,
+) -> std::result::Result<PathBuf, String> {
+    let path = PathBuf::from(&record.path);
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| "resource path does not exist".to_string())?;
+
+    if !canonical.starts_with(root) {
+        return Err("resource path is outside cleanup root".to_string());
+    }
+
+    Ok(canonical)
+}
+
+fn apply_cleanup_path(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+    })?;
+
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
+        })
+    } else {
+        std::fs::remove_file(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("delete {}", path.display())),
+            )
+        })
+    }
+}
+
+fn cleanup_plan_item(
+    record: &ResourceLifecycleRecord,
+    operation: ResourceCleanupOperation,
+) -> RunsResourcesCleanupPlanItem {
+    RunsResourcesCleanupPlanItem {
+        owner: record.owner.clone(),
+        run_id: record.run_id.clone(),
+        path: record.path.clone(),
+        kind: record.kind.clone(),
+        operation,
+    }
+}
+
+fn cleanup_applied_item(
+    record: &ResourceLifecycleRecord,
+    operation: ResourceCleanupOperation,
+) -> RunsResourcesCleanupAppliedItem {
+    RunsResourcesCleanupAppliedItem {
+        owner: record.owner.clone(),
+        run_id: record.run_id.clone(),
+        path: record.path.clone(),
+        kind: record.kind.clone(),
+        operation,
+    }
+}
+
+fn cleanup_skip(
+    record: &ResourceLifecycleRecord,
+    reason: impl Into<String>,
+) -> RunsResourcesCleanupSkippedItem {
+    RunsResourcesCleanupSkippedItem {
+        owner: record.owner.clone(),
+        run_id: record.run_id.clone(),
+        path: record.path.clone(),
+        kind: record.kind.clone(),
+        reason: reason.into(),
+    }
 }
 
 struct LoadedResourceIndex {
@@ -259,10 +593,12 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(output.command, "runs.resources");
         assert_eq!(output.schema, RESOURCE_LIFECYCLE_INDEX_SCHEMA);
+        assert_eq!(output.mode, ResourceCleanupMode::Inspect);
         assert_eq!(output.source_count, 1);
         assert_eq!(output.resource_count, 1);
         assert_eq!(output.actionable_count, 1);
         assert_eq!(output.cleanup_eligible_count, 1);
+        assert!(output.cleanup.is_none());
     }
 
     #[test]
@@ -284,5 +620,150 @@ mod tests {
         assert!(resource_is_cleanup_eligible(&active));
         assert!(!resource_is_cleanup_eligible(&cleaned));
         assert!(resource_is_cleanup_eligible(&retained_apply));
+    }
+
+    #[test]
+    fn cleanup_plan_is_read_only_by_default() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::create_dir(&resource_path).expect("resource dir");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                cleanup_plan: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup plan");
+
+        assert_eq!(cleanup.candidate_count, 1);
+        assert_eq!(cleanup.planned_count, 1);
+        assert_eq!(cleanup.applied_count, 0);
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn apply_requires_explicit_apply_intent() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource file");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::DryRun,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply plan");
+
+        assert_eq!(cleanup.applied_count, 0);
+        assert_eq!(cleanup.skipped_count, 1);
+        assert!(cleanup.skipped[0].reason.contains("explicit apply intent"));
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn apply_deletes_apply_intended_paths_under_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource file");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 1);
+        assert!(!resource_path.exists());
+    }
+
+    #[test]
+    fn apply_skips_paths_outside_root() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let resource_path = outside.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource file");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(root.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 0);
+        assert_eq!(cleanup.skipped_count, 1);
+        assert_eq!(
+            cleanup.skipped[0].reason,
+            "resource path is outside cleanup root"
+        );
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn cleanup_apply_is_bounded_by_limit() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let first_path = tempdir.path().join("first");
+        let second_path = tempdir.path().join("second");
+        std::fs::write(&first_path, "generated").expect("first file");
+        std::fs::write(&second_path, "generated").expect("second file");
+        let first = ResourceLifecycleRecord {
+            path: first_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+        let second = ResourceLifecycleRecord {
+            path: second_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[first, second],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 1);
+        assert_eq!(cleanup.deferred_count, 1);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
     }
 }

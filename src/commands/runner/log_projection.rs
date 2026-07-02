@@ -21,6 +21,7 @@ pub(super) const DEFAULT_COMPACT_TAIL_BYTES: usize = 4096;
 pub(super) struct JobLogProjection {
     pub events: Vec<JobEvent>,
     pub exit_code: Option<i32>,
+    pub orchestration_provenance: Option<Value>,
     pub stdout: Option<RunnerJobLogStream>,
     pub stderr: Option<RunnerJobLogStream>,
 }
@@ -48,6 +49,17 @@ pub(super) fn project_job_log(
         .and_then(|data| data.get("exit_code"))
         .and_then(Value::as_i64)
         .map(|code| code as i32);
+    let orchestration_provenance = result_data
+        .as_ref()
+        .and_then(|data| data.get("orchestration_provenance"))
+        .cloned()
+        .or_else(|| {
+            result_data
+                .as_ref()
+                .and_then(|data| data.get("data"))
+                .and_then(|data| data.get("orchestration_provenance"))
+                .cloned()
+        });
 
     // Bound tails when compacting or when an explicit --tail was given.
     let effective_tail = tail_bytes.or(if compact {
@@ -70,9 +82,8 @@ pub(super) fn project_job_log(
         // De-dup: the structured result event already carries stdout/stderr, so
         // drop the raw duplicate events whenever a result is present.
         if result_data.is_some() {
-            events.retain(|event| {
-                !matches!(event.kind, JobEventKind::Stdout | JobEventKind::Stderr)
-            });
+            events
+                .retain(|event| !matches!(event.kind, JobEventKind::Stdout | JobEventKind::Stderr));
         }
         if lift_streams {
             // Strip the blobs out of the retained result event so stdout/stderr
@@ -100,6 +111,7 @@ pub(super) fn project_job_log(
     JobLogProjection {
         events,
         exit_code: if lift_streams { exit_code } else { None },
+        orchestration_provenance,
         stdout,
         stderr,
     }
@@ -176,7 +188,12 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    fn event(sequence: u64, kind: JobEventKind, message: Option<&str>, data: Option<Value>) -> JobEvent {
+    fn event(
+        sequence: u64,
+        kind: JobEventKind,
+        message: Option<&str>,
+        data: Option<Value>,
+    ) -> JobEvent {
         JobEvent {
             sequence,
             job_id: Uuid::nil(),
@@ -192,9 +209,19 @@ mod tests {
     fn snapshot(blob: &str) -> Vec<JobEvent> {
         vec![
             event(1, JobEventKind::Status, Some("queued"), None),
-            event(2, JobEventKind::Progress, None, Some(json!({"phase": "started"}))),
+            event(
+                2,
+                JobEventKind::Progress,
+                None,
+                Some(json!({"phase": "started"})),
+            ),
             event(3, JobEventKind::Stdout, Some(blob), None),
-            event(4, JobEventKind::Progress, None, Some(json!({"phase": "finished", "exit_code": 1}))),
+            event(
+                4,
+                JobEventKind::Progress,
+                None,
+                Some(json!({"phase": "finished", "exit_code": 1})),
+            ),
             event(
                 5,
                 JobEventKind::Result,
@@ -220,7 +247,10 @@ mod tests {
             .find(|event| event.kind == JobEventKind::Result)
             .expect("result event retained");
         assert_eq!(
-            result.data.as_ref().unwrap()["stdout"].as_str().unwrap().len(),
+            result.data.as_ref().unwrap()["stdout"]
+                .as_str()
+                .unwrap()
+                .len(),
             12_000
         );
         // Default mode does not lift streams or exit code to the top level.
@@ -271,5 +301,30 @@ mod tests {
         assert_eq!(stdout.total_bytes, 5_000);
         assert_eq!(stdout.returned_bytes, 1024);
         assert!(stdout.truncated);
+    }
+
+    #[test]
+    fn projection_lifts_orchestration_provenance_from_result_data() {
+        let mut events = snapshot("ok");
+        let result = events
+            .iter_mut()
+            .find(|event| event.kind == JobEventKind::Result)
+            .expect("result event");
+        result.data = Some(json!({
+            "exit_code": 0,
+            "data": {
+                "orchestration_provenance": {
+                    "schema": "homeboy/orchestration-target-provenance/v1",
+                    "selected_runner_id": "lab"
+                }
+            }
+        }));
+
+        let projection = project_job_log(events, true, None);
+
+        assert_eq!(
+            projection.orchestration_provenance.unwrap()["selected_runner_id"],
+            "lab"
+        );
     }
 }

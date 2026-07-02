@@ -69,7 +69,7 @@ pub(super) fn exec_via_daemon(
         "capture_patch": capture_patch,
         "source_snapshot": source_snapshot.clone(),
         "require_paths": require_paths.clone(),
-        "runner_workload": runner_workload,
+        "runner_workload": runner_workload.clone(),
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
         "lifecycle": lifecycle,
     });
@@ -194,6 +194,13 @@ pub(super) fn exec_via_daemon(
         mirror_run_id.as_deref(),
         mutation_artifacts.clone(),
     );
+    let provenance_extensions = required_extensions_for_command(
+        &command,
+        &super::super::workload::merge_runner_workload_required_extensions(
+            Vec::new(),
+            runner_workload.as_ref(),
+        ),
+    );
     let handoff = runner_handoff(
         runner,
         "daemon",
@@ -208,6 +215,7 @@ pub(super) fn exec_via_daemon(
         mirror_run_id.clone(),
         Some(&source_snapshot),
         &require_paths,
+        &provenance_extensions,
         &artifacts,
         Some(&runner_result),
     );
@@ -438,6 +446,7 @@ pub(super) fn detached_handoff_output(
                 mirror_run_id.clone(),
                 Some(&source_snapshot),
                 &require_paths,
+                &[],
                 &[],
                 Some(&runner_result),
             )),

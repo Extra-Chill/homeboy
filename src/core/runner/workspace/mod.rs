@@ -28,6 +28,10 @@ pub use types::{
 };
 
 pub(crate) use materialized::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+pub(crate) use materializer::{
+    dependency_cache_manifest_command, dependency_cache_restore_command,
+    dependency_cache_save_command,
+};
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
     materialize_snapshot, materialize_snapshot_git, snapshot_identity,

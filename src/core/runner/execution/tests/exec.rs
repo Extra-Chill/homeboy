@@ -449,6 +449,19 @@ fn test_exec_runs_local_runner_command() {
         assert_eq!(output.runner_id, "lab-local");
         assert_eq!(output.mode, RunnerExecMode::Local);
         assert_eq!(output.stdout, "ok");
+        let provenance = output
+            .execution_record
+            .as_ref()
+            .and_then(|record| record.orchestration_provenance.as_ref())
+            .expect("orchestration provenance");
+        assert_eq!(provenance.selected_runner_id, "lab-local");
+        assert_eq!(provenance.controller_binary.owner, "operator_command");
+        assert_eq!(provenance.runner_daemon_binary.owner, "runner_session");
+        assert_eq!(
+            provenance.runner_command_binary.owner,
+            "runner_config.settings.homeboy_path"
+        );
+        assert!(provenance.source_snapshot_identity.is_some());
         let metrics = output.metrics.expect("local exec metrics");
         assert!(metrics.duration_ms < 60_000);
         if cfg!(target_os = "linux") {

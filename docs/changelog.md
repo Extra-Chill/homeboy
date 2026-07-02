@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.1] - 2026-07-02
+
+### Changed
+- Add rig host mutation pipeline step
+- Use workspace materializer for dependency cache commands
+- Add lifecycle resource cleanup planning
+- Add fuzz campaign execution dispatch
+- Add host mutation lifecycle contract
+- Add run outcome envelope contract
+- Wire lifecycle records for promoted artifacts
+- Add runs resource inspection CLI
+- Use workspace materializer for direct git sync
+
 ## [0.280.0] - 2026-07-02
 
 ### Added

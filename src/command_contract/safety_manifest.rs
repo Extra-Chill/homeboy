@@ -256,6 +256,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["extension", "setup"]
         | ["extension", "refresh"]
         | ["extension", "relink"]
+        | ["extension", "dev-run"]
         | ["extension", "install-for-component"]
         | ["extension", "set"] => {
             metadata.mutates = true;
@@ -305,6 +306,11 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.output_notes =
                 "default output is a non-mutating cleanup plan; pass --apply to delete artifacts";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["runs", "resources"] => {
+            metadata.mutates = true;
+            metadata.output_notes = "default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["runs", "artifact", "attach"] => {

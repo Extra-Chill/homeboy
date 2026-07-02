@@ -4,6 +4,7 @@ use crate::core::extension;
 use crate::core::server::{self, SshClient};
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::{Runner, RunnerKind};
@@ -36,9 +37,42 @@ pub(super) fn required_extensions_for_command(
     extensions
 }
 
+pub(super) fn requested_setting_keys_for_command(command: &[String]) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut args = command.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--setting" | "--setting-json" => {
+                if let Some(value) = args.next() {
+                    push_setting_key(&mut keys, value);
+                }
+            }
+            _ => {
+                if let Some(value) = arg.strip_prefix("--setting=") {
+                    push_setting_key(&mut keys, value);
+                } else if let Some(value) = arg.strip_prefix("--setting-json=") {
+                    push_setting_key(&mut keys, value);
+                }
+            }
+        }
+    }
+
+    keys
+}
+
 fn push_unique(items: &mut Vec<String>, item: String) {
     if !items.contains(&item) {
         items.push(item);
+    }
+}
+
+fn push_setting_key(keys: &mut Vec<String>, value: &str) {
+    let Some((key, _)) = value.split_once('=') else {
+        return;
+    };
+    let key = key.trim();
+    if !key.is_empty() {
+        push_unique(keys, key.to_string());
     }
 }
 
@@ -47,9 +81,10 @@ pub(super) fn validate_runner_extension_parity(
     runner: &Runner,
     cwd: &str,
     required_extensions: &[String],
+    requested_setting_keys: &[String],
 ) -> Result<()> {
     for extension_id in required_extensions {
-        validate_runner_extension(runner_id, runner, cwd, extension_id)?;
+        validate_runner_extension(runner_id, runner, cwd, extension_id, requested_setting_keys)?;
     }
 
     Ok(())
@@ -60,12 +95,20 @@ fn validate_runner_extension(
     runner: &Runner,
     cwd: &str,
     extension_id: &str,
+    requested_setting_keys: &[String],
 ) -> Result<()> {
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
 
     if output.success {
         validate_runner_extension_ready(runner_id, homeboy_path, extension_id, &output.stdout)?;
+        validate_runner_extension_settings(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &output.stdout,
+            requested_setting_keys,
+        )?;
         if let Err(err) = validate_runner_extension_revision(
             runner_id,
             homeboy_path,
@@ -90,6 +133,13 @@ fn validate_runner_extension(
                     homeboy_path,
                     extension_id,
                     &refreshed.stdout,
+                )?;
+                validate_runner_extension_settings(
+                    runner_id,
+                    homeboy_path,
+                    extension_id,
+                    &refreshed.stdout,
+                    requested_setting_keys,
                 )?;
                 return Ok(());
             }
@@ -125,6 +175,80 @@ fn validate_runner_extension_parity_status(
 ) -> Result<()> {
     validate_runner_extension_ready(runner_id, homeboy_path, extension_id, remote_stdout)?;
     validate_runner_extension_revision(runner_id, homeboy_path, extension_id, remote_stdout)
+}
+
+fn validate_runner_extension_settings(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+    requested_setting_keys: &[String],
+) -> Result<()> {
+    if requested_setting_keys.is_empty() {
+        return Ok(());
+    }
+
+    let metadata = remote_extension_metadata(remote_stdout);
+    let declared = remote_extension_setting_ids(remote_stdout);
+    for key in requested_setting_keys {
+        if !declared.contains(key) {
+            return Err(unsupported_runner_extension_setting_error(
+                runner_id,
+                homeboy_path,
+                extension_id,
+                key,
+                &metadata,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct RemoteExtensionMetadata {
+    path: Option<String>,
+    source_revision: Option<String>,
+}
+
+fn unsupported_runner_extension_setting_error(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    setting_key: &str,
+    metadata: &RemoteExtensionMetadata,
+) -> Error {
+    let runner_path = metadata.path.as_deref().unwrap_or("<unknown>");
+    let runner_revision = metadata.source_revision.as_deref().unwrap_or("<unknown>");
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument 'runner_extension_setting': unsupported_setting: runner extension '{extension_id}' does not declare requested setting '{setting_key}'"
+        ),
+        serde_json::json!({
+            "field": "runner_extension_setting",
+            "problem": "unsupported_setting",
+            "id": extension_id,
+            "diagnostic": {
+                "code": "runner_extension.unsupported_setting",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "unsupported_setting_key": setting_key,
+                "runner_extension_path": metadata.path,
+                "runner_extension_source_revision": metadata.source_revision,
+                "repair_hint": format!(
+                    "Update, relink, or refresh the active runner extension so its manifest declares `{setting_key}` before dispatch: {homeboy_path} extension update {extension_id} or {homeboy_path} extension relink {extension_id} <source>"
+                )
+            },
+            "tried": [
+                format!("Runner extension id: {extension_id}"),
+                format!("Runner extension path: {runner_path}"),
+                format!("Runner extension source_revision: {runner_revision}"),
+                format!("Unsupported setting key: {setting_key}"),
+                format!("Repair: update, relink, or refresh the active runner extension so its manifest declares `{setting_key}` before dispatch."),
+            ]
+        }),
+    )
 }
 
 fn show_runner_extension(
@@ -477,13 +601,43 @@ fn validate_runner_extension_revision(
 }
 
 fn remote_extension_source_revision(stdout: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(stdout.trim()).ok()?;
+    remote_extension_metadata(stdout).source_revision
+}
+
+fn remote_extension_metadata(stdout: &str) -> RemoteExtensionMetadata {
+    let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return RemoteExtensionMetadata::default();
+    };
+    let Some(extension) = value.get("data").and_then(|data| data.get("extension")) else {
+        return RemoteExtensionMetadata::default();
+    };
+
+    RemoteExtensionMetadata {
+        path: extension
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_revision: extension
+            .get("source_revision")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+fn remote_extension_setting_ids(stdout: &str) -> BTreeSet<String> {
+    let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return BTreeSet::new();
+    };
     value
         .get("data")
         .and_then(|data| data.get("extension"))
-        .and_then(|extension| extension.get("source_revision"))
-        .and_then(Value::as_str)
+        .and_then(|extension| extension.get("settings"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|setting| setting.get("id").and_then(Value::as_str))
         .map(str::to_string)
+        .collect()
 }
 
 fn ssh_client_for_runner_extension_parity(runner: &Runner) -> Result<SshClient> {
@@ -531,8 +685,10 @@ mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
         local_source_runner_sync_error, remote_extension_ready_status,
-        remote_extension_source_revision, runner_extension_sync_command,
+        remote_extension_setting_ids, remote_extension_source_revision,
+        requested_setting_keys_for_command, runner_extension_sync_command,
         validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings,
     };
     use crate::test_support::with_isolated_home;
 
@@ -546,6 +702,76 @@ mod tests {
             remote_extension_source_revision(stdout).as_deref(),
             Some("abc1234")
         );
+    }
+
+    #[test]
+    fn requested_setting_keys_for_command_reads_string_and_json_flags() {
+        let command = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--extension".to_string(),
+            "example".to_string(),
+            "--setting".to_string(),
+            "profile=fast".to_string(),
+            "--setting-json=env={\"A\":true}".to_string(),
+            "--setting".to_string(),
+            "profile=slow".to_string(),
+        ];
+
+        assert_eq!(
+            requested_setting_keys_for_command(&command),
+            vec!["profile".to_string(), "env".to_string()]
+        );
+    }
+
+    #[test]
+    fn remote_extension_setting_ids_reads_extension_show_output() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"example","settings":[{"id":"profile","type":"string","label":"Profile"},{"id":"env","type":"object","label":"Env"}]}}}"#;
+
+        let settings = remote_extension_setting_ids(stdout);
+
+        assert!(settings.contains("profile"));
+        assert!(settings.contains("env"));
+    }
+
+    #[test]
+    fn setting_parity_rejects_unsupported_runner_extension_setting() {
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"example","path":"/runner/extensions/example","source_revision":"abc1234","settings":[{"id":"profile","type":"string","label":"Profile"}]}}}"#;
+
+        let err = validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "example",
+            remote_stdout,
+            &["missing_setting".to_string()],
+        )
+        .expect_err("unsupported setting should fail before execution");
+
+        assert!(err.to_string().contains("unsupported_setting"));
+        assert_eq!(
+            err.details["diagnostic"]["code"].as_str(),
+            Some("runner_extension.unsupported_setting")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["extension_id"].as_str(),
+            Some("example")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["unsupported_setting_key"].as_str(),
+            Some("missing_setting")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["runner_extension_path"].as_str(),
+            Some("/runner/extensions/example")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
+            Some("abc1234")
+        );
+        assert!(err.details["diagnostic"]["repair_hint"]
+            .as_str()
+            .unwrap()
+            .contains("extension update example"));
     }
 
     #[test]

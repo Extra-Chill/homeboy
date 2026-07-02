@@ -55,6 +55,38 @@ fn agent_task_prompt_store_commands_parse() {
 }
 
 #[test]
+fn extension_dev_run_command_parses() {
+    Cli::try_parse_from([
+        "homeboy",
+        "extension",
+        "dev-run",
+        "demo-extension",
+        "--source",
+        "/tmp/demo-extension",
+        "--runner",
+        "lab-runner",
+        "--",
+        "homeboy",
+        "extension",
+        "run",
+        "demo-extension",
+    ])
+    .expect("extension dev-run should parse with trailing command");
+
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "extension",
+        "dev-run",
+        "demo-extension",
+        "--source",
+        "/tmp/demo-extension",
+        "--runner",
+        "lab-runner",
+    ])
+    .is_err());
+}
+
+#[test]
 fn agent_task_dispatch_is_not_public_cli_surface() {
     let surface = current_command_surface();
 

@@ -32,6 +32,14 @@ pub(super) fn remote_runner_result_from_exec_output(
     if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
         data["mirror_run_id"] = json!(mirror_run_id);
     }
+    if let Some(execution_record) = exec_output.execution_record.clone() {
+        data["execution_record"] =
+            serde_json::to_value(&execution_record).unwrap_or(serde_json::Value::Null);
+        if let Some(provenance) = execution_record.orchestration_provenance {
+            data["orchestration_provenance"] =
+                serde_json::to_value(provenance).unwrap_or(serde_json::Value::Null);
+        }
+    }
     if let Some(lifecycle_event) = agent_task_run_plan_lifecycle_event_from_output(
         AgentTaskDispatchIdentity {
             runner_id: exec_output.runner_id.clone(),
