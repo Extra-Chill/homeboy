@@ -65,6 +65,11 @@ pub(crate) fn execute_upgrade(
 ) -> Result<(bool, Option<String>, Option<String>)> {
     let defaults = defaults::load_defaults();
     let mut source_workspace_root = None;
+    let source_replacement_target = if method == InstallMethod::Source {
+        replacement_target_path().ok()
+    } else {
+        None
+    };
 
     let output = match method {
         InstallMethod::Homebrew => {
@@ -146,7 +151,13 @@ pub(crate) fn execute_upgrade(
         previous_build_identity,
         VERIFY_READBACK_ATTEMPTS,
         VERIFY_READBACK_DELAY,
-        || active_binary_info().ok().flatten(),
+        || {
+            if let Some(path) = source_replacement_target.as_deref() {
+                active_binary_info_at(path).ok().flatten()
+            } else {
+                active_binary_info().ok().flatten()
+            }
+        },
         std::thread::sleep,
     );
 
@@ -167,6 +178,7 @@ pub(crate) fn execute_upgrade(
         new_version.as_deref(),
         new_build_identity.as_deref(),
         source_workspace_root.as_deref(),
+        source_replacement_target.as_deref(),
     ) {
         return Err(error);
     }
@@ -186,6 +198,7 @@ fn source_swap_failure(
     new_version: Option<&str>,
     new_build_identity: Option<&str>,
     source_workspace: Option<&Path>,
+    replacement_target: Option<&Path>,
 ) -> Option<Error> {
     if method != InstallMethod::Source || success {
         return None;
@@ -195,7 +208,7 @@ fn source_swap_failure(
         .or(new_version)
         .unwrap_or("an unverifiable version");
 
-    let diagnostics = source_swap_failure_diagnostics(source_workspace);
+    let diagnostics = source_swap_failure_diagnostics(source_workspace, replacement_target);
     let mut error = Error::internal_unexpected(format!(
         "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
     ))
@@ -211,12 +224,12 @@ fn source_swap_failure(
     ))
     .with_hint(format!("Permissions: {}", diagnostics.permissions));
 
-    if let Some(command) = diagnostics.copy_command {
-        error = error.with_hint(format!("Remediate safely: {command}"));
+    if let Some(command) = diagnostics.built_binary_command {
+        error = error.with_hint(format!("Retry through just-built Homeboy: {command}"));
     }
 
-    if let Some(command) = diagnostics.built_binary_command {
-        error = error.with_hint(format!("Invoke just-built binary: {command}"));
+    if let Some(command) = diagnostics.copy_command {
+        error = error.with_hint(format!("Last-resort manual replacement: {command}"));
     }
 
     Some(error)
@@ -234,8 +247,11 @@ struct SourceSwapFailureDiagnostics {
 
 fn source_swap_failure_diagnostics(
     source_workspace: Option<&Path>,
+    replacement_target: Option<&Path>,
 ) -> SourceSwapFailureDiagnostics {
-    let active_path = active_binary_path().ok();
+    let active_path = replacement_target
+        .map(Path::to_path_buf)
+        .or_else(|| active_binary_path().ok());
     source_swap_failure_diagnostics_for_paths(source_workspace, active_path.as_deref())
 }
 
@@ -744,7 +760,10 @@ fn find_homeboy_source_checkout(path: &Path) -> Option<PathBuf> {
 
 fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
     let exe_path = active_binary_path()?;
+    active_binary_info_at(&exe_path)
+}
 
+fn active_binary_info_at(exe_path: &Path) -> Result<Option<ActiveBinaryInfo>> {
     let mut command = Command::new(exe_path);
     command.arg("--version");
     let output = command_output_with_timeout(&mut command, Duration::from_secs(5))?;
@@ -818,6 +837,13 @@ fn active_binary_path() -> Result<PathBuf> {
             Some("get current executable path".to_string()),
         )
     })
+}
+
+fn replacement_target_path() -> Result<PathBuf> {
+    match std::env::current_exe() {
+        Ok(path) => Ok(path),
+        Err(_) => active_binary_path(),
+    }
 }
 
 pub(crate) fn upgrade_verification_result(
@@ -1266,6 +1292,7 @@ mod tests {
             Some("0.247.5"),
             Some("homeboy 0.247.5+old"),
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/active/homeboy")),
         )
         .expect("unverified source swap must surface an error");
 
@@ -1300,6 +1327,7 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            None,
         )
         .expect("unverified source swap must surface an error");
 
@@ -1314,6 +1342,7 @@ mod tests {
             None,
             None,
             Some(Path::new("/src/homeboy")),
+            None,
         )
         .expect("unverified source swap must surface an error");
 
@@ -1329,6 +1358,7 @@ mod tests {
                 Some("0.249.0"),
                 None,
                 Some(Path::new("/src/homeboy")),
+                None,
             )
             .is_none(),
             "a verified source swap is not a failure"
@@ -1345,6 +1375,7 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            None,
         )
         .is_none());
         assert!(source_swap_failure(
@@ -1353,8 +1384,42 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            None,
         )
         .is_none());
+    }
+
+    #[test]
+    fn source_swap_failure_diagnostics_use_replacement_target_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let target = dir.path().join("configured-runner-homeboy");
+        std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
+        std::fs::write(&target, "old").expect("target");
+
+        let err = source_swap_failure(
+            InstallMethod::Source,
+            false,
+            Some("0.255.8"),
+            Some("homeboy 0.255.8+old"),
+            Some(&source),
+            Some(&target),
+        )
+        .expect("unverified source swap must surface an error");
+
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains(&format!("Active binary path: {}", target.display()))));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains(&format!("Replacement target path: {}", target.display()))));
+        let first_recovery = err
+            .hints
+            .iter()
+            .find(|hint| hint.message.contains("Homeboy") || hint.message.contains("replacement"))
+            .map(|hint| hint.message.as_str())
+            .unwrap_or_default();
+        assert!(first_recovery.contains("Retry through just-built Homeboy"));
     }
 
     #[test]
