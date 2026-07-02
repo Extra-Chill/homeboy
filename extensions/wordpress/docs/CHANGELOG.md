@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.9] - 2026-07-02
+
+### Changed
+- Trim runtime agent CI root barrel
+- Document core fuzz plan boundary
+
 ## [3.23.8] - 2026-07-02
 
 ### Changed
