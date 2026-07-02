@@ -2,7 +2,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use homeboy::core::cleanup::{
-    self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput,
+    self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput, ArtifactCleanupSort,
 };
 use homeboy::core::worktree::{
     self, CleanupPolicy, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOutput,
@@ -225,6 +225,8 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                         apply: true,
                         self_artifacts: true,
                         temp_roots: Vec::new(),
+                        sort: ArtifactCleanupSort::Discovery,
+                        limit: None,
                         merged_only: false,
                     },
                 )?)
