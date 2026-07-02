@@ -550,10 +550,6 @@ pub fn compute_changed_test_scope(
 }
 
 fn changed_test_file_for_path(file: &str) -> Option<String> {
-    if file == "tests/fixtures/refactor_transform_no_match.json" {
-        return Some("tests/refactor_transform_test.rs".to_string());
-    }
-
     if file.starts_with("tests/fixtures/output_contracts/errors/") {
         return Some("tests/output_errors.rs".to_string());
     }
@@ -628,11 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_scope_maps_refactor_transform_fixture_to_regression_test() {
-        assert_eq!(
-            changed_test_file_for_path("tests/fixtures/refactor_transform_no_match.json"),
-            Some("tests/refactor_transform_test.rs".to_string())
-        );
+    fn changed_scope_maps_contract_fixtures_to_regression_tests() {
         assert_eq!(
             changed_test_file_for_path(
                 "tests/fixtures/output_contracts/errors/runner-unsupported.json"

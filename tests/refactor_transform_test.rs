@@ -5,8 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy::core::refactor;
 
-const NO_MATCH_FIXTURE: &str = include_str!("fixtures/refactor_transform_no_match.json");
-
 fn tmp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -78,17 +76,6 @@ fn transform_output_can_include_full_match_details() {
     assert_eq!(rule.match_detail_limit, None);
 
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn transform_no_match_status_fixture_is_successful_empty_result() {
-    let fixture: serde_json::Value = serde_json::from_str(NO_MATCH_FIXTURE).unwrap();
-
-    assert_eq!(fixture["success"], true);
-    assert_eq!(fixture["data"]["command"], "refactor.transform");
-    assert_eq!(fixture["data"]["total_replacements"], 0);
-    assert_eq!(fixture["data"]["total_files"], 0);
-    assert_eq!(fixture["data"]["written"], false);
 }
 
 #[test]
