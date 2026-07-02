@@ -1,14 +1,14 @@
+use crate::core::deps::provider::{
+    run_dependency_provider_command, DependencyProviderAdapter, DependencyProviderCommand,
+    DependencyProviderContext, DependencyProviderPackageRequest, DependencyProviderStatusRequest,
+    DependencyProviderUpdateRequest, ProviderDependencyStatus,
+};
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::{Error, Result};
-use crate::core::deps::provider::{
-    DependencyProviderAdapter, DependencyProviderContext, DependencyProviderPackageRequest,
-    DependencyProviderStatusRequest, DependencyProviderUpdateRequest, ProviderDependencyStatus,
-};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub fn npm_command_args(package: &str, constraint: Option<&str>) -> Vec<String> {
     match constraint {
@@ -49,35 +49,8 @@ impl DependencyProviderAdapter for NpmDependencyProvider {
         let package = request.package;
         let before = npm_package_snapshot(path, package)?;
         let args = npm_command_args(package, request.constraint);
-        let output = Command::new("npm")
-            .args(&args)
-            .current_dir(path)
-            .output()
-            .map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            return Err(Error::validation_invalid_argument(
-                "dependency_provider",
-                format!(
-                    "Dependency provider command failed with status {}: {}",
-                    output.status,
-                    first_non_empty_line(&stderr)
-                        .or_else(|| first_non_empty_line(&stdout))
-                        .unwrap_or("no output")
-                ),
-                None,
-                Some(vec![format!(
-                    "Run manually in {}: npm {}",
-                    path.display(),
-                    args.join(" ")
-                )]),
-            ));
-        }
+        let command = DependencyProviderCommand::new("npm", args, path);
+        let result = run_dependency_provider_command(&command, "command")?;
 
         let after = npm_package_snapshot(path, package)?;
 
@@ -87,11 +60,11 @@ impl DependencyProviderAdapter for NpmDependencyProvider {
             package_manager: "npm".to_string(),
             package: package.to_string(),
             requested_constraint: request.constraint.map(str::to_string),
-            command: std::iter::once("npm".to_string()).chain(args).collect(),
+            command: result.command,
             before,
             after,
-            stdout,
-            stderr,
+            stdout: result.stdout,
+            stderr: result.stderr,
             install: None,
             rebuild: None,
         })
@@ -103,63 +76,17 @@ impl DependencyProviderAdapter for NpmDependencyProvider {
     ) -> Result<Option<DependencyCommandResult>> {
         let path = context.path;
         let install = npm_install_command(path);
-        let output = Command::new(&install.binary)
-            .args(&install.args)
-            .current_dir(&install.cwd)
-            .output()
-            .map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let status = output.status.code();
-        if !output.status.success() {
-            return Err(Error::validation_invalid_argument(
-                "dependency_provider",
-                format!(
-                    "Dependency provider install failed with status {}: {}",
-                    output.status,
-                    first_non_empty_line(&stderr)
-                        .or_else(|| first_non_empty_line(&stdout))
-                        .unwrap_or("no output")
-                ),
-                None,
-                Some(vec![format!(
-                    "Run manually in {}: {} {}",
-                    install.cwd.display(),
-                    install.binary,
-                    install.args.join(" ")
-                )]),
-            ));
-        }
-
-        Ok(Some(DependencyCommandResult {
-            command: std::iter::once(install.binary)
-                .chain(install.args)
-                .collect(),
-            skipped: false,
-            status,
-            stdout,
-            stderr,
-        }))
+        Ok(Some(run_dependency_provider_command(&install, "install")?))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NpmInstallCommand {
-    binary: String,
-    args: Vec<String>,
-    cwd: PathBuf,
-}
-
-fn npm_install_command(path: &Path) -> NpmInstallCommand {
+fn npm_install_command(path: &Path) -> DependencyProviderCommand {
     if let Some(root) = find_pnpm_root(path) {
-        return NpmInstallCommand {
-            binary: "pnpm".to_string(),
-            args: vec!["install".to_string(), "--frozen-lockfile".to_string()],
-            cwd: root,
-        };
+        return DependencyProviderCommand::new(
+            "pnpm",
+            vec!["install".to_string(), "--frozen-lockfile".to_string()],
+            root,
+        );
     }
 
     let args = if path.join("package-lock.json").is_file() {
@@ -168,11 +95,7 @@ fn npm_install_command(path: &Path) -> NpmInstallCommand {
         vec!["install".to_string()]
     };
 
-    NpmInstallCommand {
-        binary: "npm".to_string(),
-        args,
-        cwd: path.to_path_buf(),
-    }
+    DependencyProviderCommand::new("npm", args, path)
 }
 
 fn find_pnpm_root(path: &Path) -> Option<PathBuf> {
@@ -341,10 +264,6 @@ fn read_optional_json_file(path: &Path) -> Result<Option<Value>> {
     read_json_file(path).map(Some)
 }
 
-fn first_non_empty_line(output: &str) -> Option<&str> {
-    output.lines().find(|line| !line.trim().is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +325,7 @@ mod tests {
 
         let command = npm_install_command(&plugin);
 
-        assert_eq!(command.binary, "pnpm");
+        assert_eq!(command.program, "pnpm");
         assert_eq!(
             command.args,
             vec!["install".to_string(), "--frozen-lockfile".to_string()]
@@ -421,7 +340,7 @@ mod tests {
 
         let command = npm_install_command(project.path());
 
-        assert_eq!(command.binary, "npm");
+        assert_eq!(command.program, "npm");
         assert_eq!(command.args, vec!["install".to_string()]);
         assert_eq!(command.cwd, project.path());
     }

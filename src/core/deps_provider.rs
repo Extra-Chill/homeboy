@@ -1,13 +1,13 @@
 use crate::core::component::Component;
+use crate::core::deps::npm_provider::NpmDependencyProvider;
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
-use crate::core::deps::npm_provider::NpmDependencyProvider;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +76,33 @@ pub(crate) trait DependencyProviderAdapter {
         &self,
         context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DependencyProviderCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+}
+
+impl DependencyProviderCommand {
+    pub(crate) fn new(
+        program: impl Into<String>,
+        args: Vec<String>,
+        cwd: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            cwd: cwd.into(),
+        }
+    }
+
+    pub(crate) fn argv(&self) -> Vec<String> {
+        std::iter::once(self.program.clone())
+            .chain(self.args.clone())
+            .collect()
+    }
 }
 
 pub(crate) enum DependencyProvider {
@@ -305,35 +332,8 @@ impl DependencyProviderAdapter for ComposerDependencyProvider {
             None => ComposerAction::Update,
         };
         let args = composer_command_args(package, &action);
-        let output = Command::new("composer")
-            .args(&args)
-            .current_dir(path)
-            .output()
-            .map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            return Err(Error::validation_invalid_argument(
-                "dependency_provider",
-                format!(
-                    "Dependency provider command failed with status {}: {}",
-                    output.status,
-                    first_non_empty_line(&stderr)
-                        .or_else(|| first_non_empty_line(&stdout))
-                        .unwrap_or("no output")
-                ),
-                None,
-                Some(vec![format!(
-                    "Run manually in {}: composer {}",
-                    path.display(),
-                    args.join(" ")
-                )]),
-            ));
-        }
+        let command = DependencyProviderCommand::new("composer", args, path);
+        let result = run_dependency_provider_command(&command, "command")?;
 
         let after = package_snapshot(path, package)?;
 
@@ -343,13 +343,11 @@ impl DependencyProviderAdapter for ComposerDependencyProvider {
             package_manager: "composer".to_string(),
             package: package.to_string(),
             requested_constraint: request.constraint.map(str::to_string),
-            command: std::iter::once("composer".to_string())
-                .chain(args)
-                .collect(),
+            command: result.command,
             before,
             after,
-            stdout,
-            stderr,
+            stdout: result.stdout,
+            stderr: result.stderr,
             install: None,
             rebuild: None,
         })
@@ -360,46 +358,9 @@ impl DependencyProviderAdapter for ComposerDependencyProvider {
         context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>> {
         let path = context.path;
-        let args = composer_install_command_args();
-        let output = Command::new("composer")
-            .args(&args)
-            .current_dir(path)
-            .output()
-            .map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let status = output.status.code();
-        if !output.status.success() {
-            return Err(Error::validation_invalid_argument(
-                "dependency_provider",
-                format!(
-                    "Dependency provider install failed with status {}: {}",
-                    output.status,
-                    first_non_empty_line(&stderr)
-                        .or_else(|| first_non_empty_line(&stdout))
-                        .unwrap_or("no output")
-                ),
-                None,
-                Some(vec![format!(
-                    "Run manually in {}: composer {}",
-                    path.display(),
-                    args.join(" ")
-                )]),
-            ));
-        }
-
-        Ok(Some(DependencyCommandResult {
-            command: std::iter::once("composer".to_string())
-                .chain(args)
-                .collect(),
-            skipped: false,
-            status,
-            stdout,
-            stderr,
-        }))
+        let command =
+            DependencyProviderCommand::new("composer", composer_install_command_args(), path);
+        Ok(Some(run_dependency_provider_command(&command, "install")?))
     }
 }
 
@@ -612,6 +573,50 @@ fn extension_deps_command(args: &[String]) -> Vec<String> {
     let mut command = vec!["extension.deps".to_string()];
     command.extend(args.iter().cloned());
     command
+}
+
+pub(crate) fn run_dependency_provider_command(
+    command: &DependencyProviderCommand,
+    operation: &str,
+) -> Result<DependencyCommandResult> {
+    let output = Command::new(&command.program)
+        .args(&command.args)
+        .current_dir(&command.cwd)
+        .output()
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let status = output.status.code();
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            format!(
+                "Dependency provider {} failed with status {}: {}",
+                operation,
+                output.status,
+                first_non_empty_line(&stderr)
+                    .or_else(|| first_non_empty_line(&stdout))
+                    .unwrap_or("no output")
+            ),
+            None,
+            Some(vec![format!(
+                "Run manually in {}: {}",
+                command.cwd.display(),
+                command.argv().join(" ")
+            )]),
+        ));
+    }
+
+    Ok(DependencyCommandResult {
+        command: command.argv(),
+        skipped: false,
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[derive(Debug, Deserialize)]
