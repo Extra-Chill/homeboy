@@ -401,23 +401,19 @@ pub fn directory_publication_guidance(
     }
 
     if crate::core::runners::is_remote_runner_artifact_path(&artifact.path) {
-        return Some(DirectoryArtifactPublicationGuidance {
-            status: "runner_resident".to_string(),
-            note: "directory artifact is runner-resident; mirror it to the controller artifact store before using it as review evidence".to_string(),
-            public_url: None,
-            command: public_base_configured()
-                .then(|| format!("homeboy runs artifacts {} --pull", artifact.run_id)),
-        });
+        return Some(unpublished_directory_guidance(
+            "runner_resident",
+            "directory artifact is runner-resident; mirror it to the controller artifact store before using it as review evidence",
+            artifact,
+        ));
     }
 
     if Path::new(&artifact.path).is_dir() {
-        return Some(DirectoryArtifactPublicationGuidance {
-            status: "mirrored".to_string(),
-            note: "directory artifact is mirrored in the operator-local Homeboy artifact store but is not a reviewer-facing URL".to_string(),
-            public_url: None,
-            command: public_base_configured()
-                .then(|| format!("homeboy runs artifacts {} --pull", artifact.run_id)),
-        });
+        return Some(unpublished_directory_guidance(
+            "mirrored",
+            "directory artifact is mirrored in the operator-local Homeboy artifact store but is not a reviewer-facing URL",
+            artifact,
+        ));
     }
 
     Some(DirectoryArtifactPublicationGuidance {
@@ -426,6 +422,20 @@ pub fn directory_publication_guidance(
         public_url: None,
         command: None,
     })
+}
+
+fn unpublished_directory_guidance(
+    status: &str,
+    note: &str,
+    artifact: &ArtifactRecord,
+) -> DirectoryArtifactPublicationGuidance {
+    DirectoryArtifactPublicationGuidance {
+        status: status.to_string(),
+        note: note.to_string(),
+        public_url: None,
+        command: public_base_configured()
+            .then(|| format!("homeboy runs artifacts {} --pull", artifact.run_id)),
+    }
 }
 
 fn public_base_configured() -> bool {

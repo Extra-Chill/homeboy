@@ -6,10 +6,7 @@ use super::{handlers, list_runs, RunsListArgs, RunsOutput};
 
 struct XdgGuard(Option<String>);
 
-struct EnvGuard {
-    key: &'static str,
-    prior: Option<String>,
-}
+struct PublicArtifactBaseGuard(Option<String>);
 
 impl XdgGuard {
     fn unset() -> Self {
@@ -28,19 +25,22 @@ impl Drop for XdgGuard {
     }
 }
 
-impl EnvGuard {
-    fn unset(key: &'static str) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, prior }
+impl PublicArtifactBaseGuard {
+    fn unset() -> Self {
+        let prior = std::env::var(homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV).ok();
+        std::env::remove_var(homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV);
+        Self(prior)
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for PublicArtifactBaseGuard {
     fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
+        match &self.0 {
+            Some(value) => std::env::set_var(
+                homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                value,
+            ),
+            None => std::env::remove_var(homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV),
         }
     }
 }
@@ -494,8 +494,7 @@ fn runs_artifacts_summarizes_static_site_fixture_matrix_artifacts() {
 fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
-        let _public_artifact_base =
-            EnvGuard::unset(homeboy::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV);
+        let _public_artifact_base = PublicArtifactBaseGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(sample_run(
