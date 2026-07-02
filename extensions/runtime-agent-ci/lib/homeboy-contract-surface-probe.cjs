@@ -3,7 +3,8 @@
 const { spawnSync } = require('node:child_process');
 
 const {
-  LOCAL_RUNTIME_CONTRACT_CONSTANTS,
+  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
+  PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS,
   runtimeContractConstantsFromHomeboyOutput,
 } = require('./runtime-contracts.cjs');
 
@@ -13,11 +14,9 @@ const CONTRACT_COMMANDS = Object.freeze([
   ['contract', 'constants', 'secret-env-plan'],
 ]);
 
-const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
-const CORE_PUBLISHED_CONTRACT_CONSTANTS = Object.freeze({
-  artifact_manifest: LOCAL_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest,
-  secret_env_plan: LOCAL_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan,
-});
+const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
+const CORE_PUBLISHED_CONTRACT_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS;
+const VERSION_GATED_PENDING_CONTRACT_CONSTANTS = PENDING_CORE_RUNTIME_CONTRACT_CONSTANTS;
 
 function probeHomeboyContractSurface(options = {}) {
   const command = options.homeboyCommand || process.env.HOMEBOY_COMMAND || 'homeboy';
@@ -58,9 +57,7 @@ function probeHomeboyContractSurface(options = {}) {
 function validateRuntimeContractConstants({ contract, command, argv, attempts }) {
   const actualConstants = runtimeContractConstantsFromHomeboyOutput(contract);
   const expectedConstants = expectedConstantsForCommand(argv);
-  const comparableConstants = Object.fromEntries(
-    Object.entries(expectedConstants).filter(([contractName]) => actualConstants[contractName])
-  );
+  const comparableConstants = comparableConstantsForProbe(actualConstants, expectedConstants, argv);
   if (Object.keys(actualConstants).length === 0 || Object.keys(comparableConstants).length === 0) {
     return skip(`homeboy contract surface probe skipped: ${argv.join(' ')} did not expose runtime-agent constants`, attempts);
   }
@@ -93,10 +90,25 @@ function validateRuntimeContractConstants({ contract, command, argv, attempts })
   };
 }
 
+function comparableConstantsForProbe(actualConstants, expectedConstants, argv) {
+  const contractId = argv[2] || '';
+  return Object.fromEntries(
+    Object.entries(expectedConstants).filter(([contractName]) => {
+      if (actualConstants[contractName]) {
+        return true;
+      }
+      return contractId !== 'all' || !VERSION_GATED_PENDING_CONTRACT_CONSTANTS[contractName];
+    })
+  );
+}
+
 function expectedConstantsForCommand(argv) {
   const contractId = argv[2] || '';
   if (contractId === 'all') {
-    return CORE_PUBLISHED_CONTRACT_CONSTANTS;
+    return {
+      ...CORE_PUBLISHED_CONTRACT_CONSTANTS,
+      ...VERSION_GATED_PENDING_CONTRACT_CONSTANTS,
+    };
   }
   if (contractId === 'artifact-manifest') {
     return { artifact_manifest: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_manifest };
@@ -119,5 +131,6 @@ module.exports = {
   CONTRACT_COMMANDS,
   CORE_PUBLISHED_CONTRACT_CONSTANTS,
   LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+  VERSION_GATED_PENDING_CONTRACT_CONSTANTS,
   probeHomeboyContractSurface,
 };
