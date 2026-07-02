@@ -10,6 +10,8 @@ use crate::command_contract::{
     RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
 };
 use crate::core::error::{Error, Result};
+use crate::core::resource_lifecycle_index::ResourceCleanupPolicy;
+use crate::core::runner::RunnerWorkspaceLease;
 use crate::core::runners::{
     self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
@@ -42,7 +44,31 @@ pub struct ExtensionDevRunOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_outcome: Option<ExtensionDevRunExecutionOutcome>,
     pub provenance: ExtensionDevRunProvenance,
+    pub lifecycle: ExtensionDevRunOverlayLifecycle,
     pub persistent_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionDevRunOverlayLifecycle {
+    pub overlay_id: String,
+    pub source_revision: ExtensionDevRunSourceRevision,
+    pub install_mode: String,
+    pub cleanup_policy: ResourceCleanupPolicy,
+    pub ttl: Option<String>,
+    pub retain_policy: String,
+    pub revert_policy: String,
+    pub lease: RunnerWorkspaceLease,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionDevRunSourceRevision {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    pub source_dirty: bool,
+    pub snapshot_identity: String,
+    pub snapshot_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +101,10 @@ pub struct ExtensionDevRunProvenance {
     pub remote_source: String,
     pub sync_mode: String,
     pub snapshot_identity: String,
+    pub source_revision: ExtensionDevRunSourceRevision,
+    pub install_mode: String,
+    pub cleanup_policy: ResourceCleanupPolicy,
+    pub ttl: Option<String>,
     pub install_command: Vec<String>,
     pub command: Vec<String>,
 }
@@ -160,12 +190,14 @@ pub(crate) fn run_extension_dev_run_with(
     ];
 
     let prior_extension_state = probe_runner_extension_state(&plan, &mut exec);
-    let source_snapshot = SourceSnapshot::collect_local(
+    let mut source_snapshot = SourceSnapshot::collect_local(
         &plan.runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),
         synced.sync_mode.label(),
     );
+    source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+    let lifecycle = extension_dev_run_overlay_lifecycle(&plan, &synced, &source_snapshot);
     let provenance = ExtensionDevRunProvenance {
         extension_id: plan.extension_id.clone(),
         runner_id: plan.runner_id.clone(),
@@ -173,6 +205,10 @@ pub(crate) fn run_extension_dev_run_with(
         remote_source: synced.remote_path.clone(),
         sync_mode: synced.sync_mode.label().to_string(),
         snapshot_identity: synced.snapshot_identity.clone(),
+        source_revision: lifecycle.source_revision.clone(),
+        install_mode: lifecycle.install_mode.clone(),
+        cleanup_policy: lifecycle.cleanup_policy,
+        ttl: lifecycle.ttl.clone(),
         install_command: plan.install_command.clone(),
         command: plan.command.clone(),
     };
@@ -233,6 +269,7 @@ pub(crate) fn run_extension_dev_run_with(
                 command: empty_skipped_exec_output(),
                 command_outcome: None,
                 provenance,
+                lifecycle,
                 persistent_state:
                     "runner extension refresh failed; inspect install output for persistent state"
                         .to_string(),
@@ -292,6 +329,7 @@ pub(crate) fn run_extension_dev_run_with(
             command: command_output,
             command_outcome: Some(command_outcome),
             provenance,
+            lifecycle,
         },
         command_exit_code,
     ))
@@ -389,6 +427,29 @@ fn extension_dev_run_execution_outcome(
             .as_ref()
             .map(|record| record.projection()),
         exit_code: output.exit_code,
+    }
+}
+
+fn extension_dev_run_overlay_lifecycle(
+    plan: &ExtensionDevRunPlan,
+    synced: &RunnerWorkspaceSyncOutput,
+    source_snapshot: &SourceSnapshot,
+) -> ExtensionDevRunOverlayLifecycle {
+    ExtensionDevRunOverlayLifecycle {
+        overlay_id: format!("extension-overlay:{}:{}", plan.runner_id, plan.extension_id),
+        source_revision: ExtensionDevRunSourceRevision {
+            source_ref: source_snapshot.git_branch.clone(),
+            source_commit: source_snapshot.git_sha.clone(),
+            source_dirty: source_snapshot.dirty,
+            snapshot_identity: synced.snapshot_identity.clone(),
+            snapshot_hash: source_snapshot.snapshot_hash.clone(),
+        },
+        install_mode: "refresh_from_synced_source_snapshot".to_string(),
+        cleanup_policy: ResourceCleanupPolicy::Preserve,
+        ttl: None,
+        retain_policy: "retain runner extension overlay until an operator refreshes, relinks, reinstalls, or uninstalls the extension".to_string(),
+        revert_policy: "manual: restore the prior extension state with extension refresh, relink, install, or uninstall".to_string(),
+        lease: synced.workspace_lease.clone(),
     }
 }
 
@@ -495,7 +556,6 @@ mod tests {
     use crate::command_contract::RunnerExecutionRecord;
     use crate::core::runner::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
-        RunnerWorkspaceMaterializationPlan,
     };
 
     #[test]
@@ -598,8 +658,41 @@ mod tests {
         assert!(execs[2]
             .2
             .contains_key("HOMEBOY_EXTENSION_DEV_RUN_PROVENANCE_JSON"));
+        let provenance: serde_json::Value = serde_json::from_str(
+            execs[2]
+                .2
+                .get("HOMEBOY_EXTENSION_DEV_RUN_PROVENANCE_JSON")
+                .expect("provenance env"),
+        )
+        .expect("provenance json");
+        assert_eq!(
+            provenance["install_mode"],
+            "refresh_from_synced_source_snapshot"
+        );
+        assert_eq!(provenance["cleanup_policy"], "preserve");
+        assert!(provenance["ttl"].is_null());
+        assert_eq!(
+            provenance["source_revision"]["snapshot_identity"],
+            "snapshot-1"
+        );
         assert_eq!(output.remote_source, "/remote/demo");
         assert!(output.persistent_state.contains("left refreshed/linked"));
+        assert_eq!(
+            output.lifecycle.overlay_id,
+            "extension-overlay:lab:demo".to_string()
+        );
+        assert_eq!(
+            output.lifecycle.install_mode,
+            "refresh_from_synced_source_snapshot"
+        );
+        assert_eq!(
+            output.lifecycle.cleanup_policy,
+            ResourceCleanupPolicy::Preserve
+        );
+        assert_eq!(output.lifecycle.ttl, None);
+        assert_eq!(output.lifecycle.lease.remote_path, "/remote/demo");
+        assert!(output.lifecycle.retain_policy.contains("retain"));
+        assert!(output.lifecycle.revert_policy.contains("manual"));
         assert_eq!(
             output.install_outcome.runner_workload.kind.command_label,
             "extension refresh"
