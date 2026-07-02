@@ -42,8 +42,11 @@ use crate::core::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionProjection, RunnerExecutionRecord,
     PATH_MATERIALIZATION_PLAN_SCHEMA, RUNNER_EXECUTION_RECORD_SCHEMA,
 };
-use crate::core::secret_env_plan::{SecretEnvPlan, SECRET_ENV_PLAN_SCHEMA};
-use crate::core::{Error, Result};
+use crate::core::secret_env_plan::{
+    SecretEnvPlan, SecretEnvPlanMaterialization, SecretEnvPlanMaterializeRequest,
+    SECRET_ENV_PLAN_SCHEMA,
+};
+use crate::core::{Error, ErrorCode, Result};
 
 const CONTRACT_EXPORT_INDEX_SCHEMA: &str = "homeboy/contract-export-index/v1";
 const COMMAND_REGISTRY_EXPORT_SCHEMA: &str = "homeboy/command-registry-export/v1";
@@ -70,6 +73,8 @@ pub enum ContractCommand {
     Constants(ContractConstantsArgs),
     /// Validate and normalize generic contract values.
     Normalize(ContractNormalizeArgs),
+    /// Materialize generic contract envelopes from declarative inputs.
+    Materialize(ContractMaterializeArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -93,6 +98,7 @@ pub enum ContractOutput {
     Show(ContractShowOutput),
     Validate(ContractValidateOutput),
     Normalize(ContractNormalizeOutput),
+    Materialize(ContractMaterializeOutput),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -119,6 +125,27 @@ pub struct ContractNormalizeArgs {
     /// Read JSON value to normalize from a file.
     #[arg(long, value_name = "PATH")]
     pub input_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContractMaterializeArgs {
+    /// Contract value kind to materialize
+    #[arg(value_enum)]
+    pub kind: ContractMaterializeKind,
+
+    /// JSON request to materialize. If omitted, stdin is read.
+    #[arg(long, conflicts_with = "input_file", value_name = "JSON")]
+    pub input: Option<String>,
+
+    /// Read JSON request to materialize from a file.
+    #[arg(long, value_name = "PATH")]
+    pub input_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum ContractMaterializeKind {
+    SecretEnvPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,6 +200,12 @@ pub enum ContractNormalizeOutput {
     RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
     RunnerExecutionRecord(RunnerExecutionProjection),
     RunOutcomeEnvelope(RunOutcomeProjection),
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContractMaterializeOutput {
+    SecretEnvPlan(SecretEnvPlanMaterialization),
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -377,6 +410,9 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Validate(args) => Ok((ContractOutput::Validate(validate(args)?), 0)),
         ContractCommand::Constants(args) => constants(&args.contract_id),
         ContractCommand::Normalize(args) => Ok((ContractOutput::Normalize(normalize(args)?), 0)),
+        ContractCommand::Materialize(args) => {
+            Ok((ContractOutput::Materialize(materialize(args)?), 0))
+        }
     }
 }
 
@@ -443,6 +479,38 @@ fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
             normalize_run_outcome_envelope(value).map(ContractNormalizeOutput::RunOutcomeEnvelope)
         }
     }
+}
+
+fn materialize(args: ContractMaterializeArgs) -> Result<ContractMaterializeOutput> {
+    let value = read_json_value(args.input.as_deref(), args.input_file.as_ref())?;
+
+    match args.kind {
+        ContractMaterializeKind::SecretEnvPlan => {
+            materialize_secret_env_plan(value).map(ContractMaterializeOutput::SecretEnvPlan)
+        }
+    }
+}
+
+fn materialize_secret_env_plan(value: Value) -> Result<SecretEnvPlanMaterialization> {
+    let request: SecretEnvPlanMaterializeRequest = deserialize_contract_value(
+        value,
+        "secret-env-plan-materialize-request",
+        "expected a secret env plan materialization request JSON object",
+    )?;
+
+    SecretEnvPlan::materialize_request(request).map_err(|err| {
+        Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            format!("Invalid argument 'secret-env-plan': {}", err.message),
+            json!({
+                "field": "secret-env-plan",
+                "problem": err.message,
+                "missing_required_secret_env": err.missing_required_secret_env,
+                "undeclared_inherited_secret_env": err.undeclared_inherited_secret_env,
+                "diagnostics": err.diagnostics,
+            }),
+        )
+    })
 }
 
 fn normalize_artifact_ref(value: Value) -> Result<ArtifactRefNormalizeOutput> {
