@@ -11,17 +11,23 @@
 //   HOMEBOY_BENCH_WARMUP_ITERATIONS — discarded warmups per workload (default 1)
 //   HOMEBOY_BENCH_RESULTS_FILE   — where to write the envelope
 //   HOMEBOY_BENCH_LIST_ONLY      — when 1, emit scenario inventory only
+//   HOMEBOY_BENCH_ARGS_JSON      — optional JSON array of passthrough args for workloads
 //   HOMEBOY_BENCH_PUBLIC_ARTIFACT_BASE_URL — optional public URL base for artifacts
 //
 // Discovers `bench/**/*.bench.{ts,mjs,js}` under the project root.
-// Each workload file must export a default async function. The function may
-// return `{ metrics, artifacts, metadata }` to report workload-owned custom
-// metrics, artifacts, and scenario labels. Metrics are averaged across measured
-// iterations and merged beside the dispatcher-owned timing metrics; artifacts
-// and metadata are preserved under the scenario in the results envelope.
+// Each workload file must export a default async function. The runner calls it
+// as `fn(context)`, where context includes `{ args, artifactsDir,
+// publicArtifactBaseUrl, env }`. `args` is parsed from HOMEBOY_BENCH_ARGS_JSON;
+// artifactsDir and publicArtifactBaseUrl are present when their env-backed
+// values are available; env is process.env. The function may return `{ metrics,
+// artifacts, metadata }` to report workload-owned custom metrics, artifacts,
+// and scenario labels. Metrics are averaged across measured iterations and
+// merged beside the dispatcher-owned timing metrics; artifacts and metadata are
+// preserved under the scenario in the results envelope.
 //
 //     // bench/cold-boot.bench.ts
-//     export default async function () {
+//     export default async function (context) {
+//         console.log(context.args);
 //         await launchAppAndWaitForReady();
 //     }
 //
@@ -73,6 +79,13 @@ const ARTIFACTS_DIR = process.env.HOMEBOY_BENCH_ARTIFACTS_DIR
     ? resolve(process.env.HOMEBOY_BENCH_ARTIFACTS_DIR)
     : undefined;
 const PUBLIC_ARTIFACT_BASE_URL = publicArtifactBaseUrl();
+const WORKLOAD_ARGS = parseBenchArgs(process.env.HOMEBOY_BENCH_ARGS_JSON);
+const WORKLOAD_CONTEXT = {
+    args: WORKLOAD_ARGS,
+    artifactsDir: ARTIFACTS_DIR,
+    publicArtifactBaseUrl: PUBLIC_ARTIFACT_BASE_URL || undefined,
+    env: process.env,
+};
 
 const TIMING_METRIC_KEYS = new Set([
     'mean_ms',
@@ -99,6 +112,27 @@ function parseWarmupIterations(value) {
     }
 
     return Math.max(0, Number(value));
+}
+
+function parseBenchArgs(value) {
+    if (value === undefined || value === '') {
+        return [];
+    }
+
+    let parsed;
+    try {
+        parsed = JSON.parse(value);
+    } catch (err) {
+        console.error(`FATAL: HOMEBOY_BENCH_ARGS_JSON must be a JSON array of strings: ${err.message}`);
+        process.exit(2);
+    }
+
+    if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+        console.error('FATAL: HOMEBOY_BENCH_ARGS_JSON must be a JSON array of strings');
+        process.exit(2);
+    }
+
+    return parsed;
 }
 
 function validateWorkloadResult(value, iterationLabel) {
@@ -351,7 +385,7 @@ async function runWorkload(file) {
     // Warmup pass — discarded.
     for (let i = 0; i < WARMUP; i++) {
         try {
-            validateWorkloadResult(await fn(), `warmup iteration ${i + 1}/${WARMUP}`);
+            validateWorkloadResult(await fn(WORKLOAD_CONTEXT), `warmup iteration ${i + 1}/${WARMUP}`);
         } catch (err) {
             return { error: `warmup iteration threw: ${err.message}` };
         }
@@ -365,7 +399,7 @@ async function runWorkload(file) {
     for (let i = 0; i < ITERATIONS; i++) {
         const start = performance.now();
         try {
-            const workloadResult = validateWorkloadResult(await fn(), `iteration ${i + 1}/${ITERATIONS}`);
+            const workloadResult = validateWorkloadResult(await fn(WORKLOAD_CONTEXT), `iteration ${i + 1}/${ITERATIONS}`);
             customMetrics.push(workloadResult.metrics);
             customArtifacts.push(workloadResult.artifacts);
             customMetadata.push(workloadResult.metadata);
