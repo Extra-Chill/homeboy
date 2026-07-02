@@ -1,12 +1,39 @@
 use serde::Serialize;
 
-use crate::command_contract::{registered_contract, RUNNER_ARTIFACT_MANIFEST_FILE};
+use crate::command_contract::{
+    registered_contract, RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_REF_NAME,
+    RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+    RUNNER_ARTIFACT_ROOT_DIR_SUFFIX,
+};
+use crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
+use crate::core::agent_task_batch::AGENT_TASK_BATCH_ARTIFACTS_SCHEMA;
 use crate::core::agent_task_contract::AGENT_TASK_LOOP_ACTION_SCHEMA;
+use crate::core::agent_task_executor_evidence::{
+    EXECUTOR_INPUT_EVIDENCE_KIND, EXECUTOR_INPUT_FILE, EXECUTOR_RESULT_EVIDENCE_KIND,
+    EXECUTOR_RESULT_FILE,
+};
 use crate::core::agent_task_loop_controller::{
     AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
 };
 use crate::core::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
-use crate::core::artifact_ref::{HOMEBOY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME};
+use crate::core::artifact_address::ARTIFACT_ADDRESS_SCHEMA;
+use crate::core::artifact_contract::{ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA};
+use crate::core::artifact_dom_boxes::ARTIFACT_DOM_BOXES_SCHEMA;
+use crate::core::artifact_ref::{
+    ARTIFACT_REF_SCHEMA, HOMEBOY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
+};
+use crate::core::artifacts::{
+    ARTIFACT_POSTPROCESS_PLAN_SCHEMA, ARTIFACT_POSTPROCESS_RESULT_SCHEMA,
+    ARTIFACT_POSTPROCESS_SCHEMA, RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH,
+    RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE, RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE,
+    RUNTIME_AGENT_RESULT_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+};
+use crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA;
+use crate::core::fuzz::FUZZ_ARTIFACT_SCHEMA;
+use crate::core::matrix_artifact_summary::{
+    GENERIC_MATRIX_SUMMARY_SCHEMA, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
+};
 use crate::core::runner_execution_envelope::{
     PATH_MATERIALIZATION_MODE_EXISTING_REMOTE, PATH_MATERIALIZATION_MODE_GIT,
     PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
@@ -37,6 +64,7 @@ pub enum ContractConstants {
     RunLocationIndex(RunLocationIndexConstants),
     RunnerExecutionRecord(RunnerExecutionRecordConstants),
     PathMaterializationPlan(PathMaterializationPlanConstants),
+    RuntimeArtifacts(RuntimeArtifactConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
 }
 
@@ -51,6 +79,7 @@ pub struct AllContractConstants {
     pub run_location_index: RunLocationIndexConstants,
     pub runner_execution_record: RunnerExecutionRecordConstants,
     pub path_materialization_plan: PathMaterializationPlanConstants,
+    pub runtime_artifacts: RuntimeArtifactConstants,
     pub reviewer_facing_ref: ReviewerFacingRefConstants,
 }
 
@@ -58,6 +87,10 @@ pub struct AllContractConstants {
 pub struct ArtifactManifestConstants {
     pub schema_id: String,
     pub file_name: String,
+    pub runner_manifest_ref_schema_id: String,
+    pub runner_manifest_ref_name: String,
+    pub runner_artifact_root_dir_suffix: String,
+    pub represented_artifact_schema_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -109,6 +142,36 @@ pub struct PathMaterializationPlanConstants {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeArtifactConstants {
+    pub runtime_agent_paths: RuntimeAgentArtifactPaths,
+    pub canonical_filenames: RuntimeArtifactFilenames,
+    pub executor_evidence: ExecutorEvidenceConstants,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeAgentArtifactPaths {
+    pub transcript: String,
+    pub final_output: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeArtifactFilenames {
+    pub transcript: String,
+    pub agent_result: String,
+    pub agent_result_legacy_underscore: String,
+    pub patch_diff: String,
+    pub patch_patch: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExecutorEvidenceConstants {
+    pub input_kind: String,
+    pub input_file_name: String,
+    pub result_kind: String,
+    pub result_file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReviewerFacingRefConstants {
     pub accepted_schemes: Vec<String>,
 }
@@ -126,6 +189,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             run_location_index: run_location_index_constants(),
             runner_execution_record: runner_execution_record_constants(),
             path_materialization_plan: path_materialization_plan_constants(),
+            runtime_artifacts: runtime_artifact_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
         }),
         "artifact-manifest" => ContractConstants::ArtifactManifest(artifact_manifest_constants()),
@@ -147,6 +211,9 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         "path-materialization-plan" => {
             ContractConstants::PathMaterializationPlan(path_materialization_plan_constants())
         }
+        "runtime-artifacts" | "runtime-agent-artifacts" => {
+            ContractConstants::RuntimeArtifacts(runtime_artifact_constants())
+        }
         "reviewer-facing-ref" | "reviewer-ref" => {
             ContractConstants::ReviewerFacingRef(reviewer_facing_ref_constants())
         }
@@ -164,6 +231,10 @@ pub fn artifact_manifest_constants() -> ArtifactManifestConstants {
     ArtifactManifestConstants {
         schema_id: registry_schema_id("artifact-manifest"),
         file_name: RUNNER_ARTIFACT_MANIFEST_FILE.to_string(),
+        runner_manifest_ref_schema_id: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
+        runner_manifest_ref_name: RUNNER_ARTIFACT_MANIFEST_REF_NAME.to_string(),
+        runner_artifact_root_dir_suffix: RUNNER_ARTIFACT_ROOT_DIR_SUFFIX.to_string(),
+        represented_artifact_schema_ids: represented_artifact_schema_ids(),
     }
 }
 
@@ -249,6 +320,29 @@ pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants
     }
 }
 
+pub fn runtime_artifact_constants() -> RuntimeArtifactConstants {
+    RuntimeArtifactConstants {
+        runtime_agent_paths: RuntimeAgentArtifactPaths {
+            transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH.to_string(),
+            final_output: RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH.to_string(),
+        },
+        canonical_filenames: RuntimeArtifactFilenames {
+            transcript: RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE.to_string(),
+            agent_result: RUNTIME_AGENT_RESULT_ARTIFACT_FILE.to_string(),
+            agent_result_legacy_underscore: RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE
+                .to_string(),
+            patch_diff: RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE.to_string(),
+            patch_patch: RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE.to_string(),
+        },
+        executor_evidence: ExecutorEvidenceConstants {
+            input_kind: EXECUTOR_INPUT_EVIDENCE_KIND.to_string(),
+            input_file_name: EXECUTOR_INPUT_FILE.to_string(),
+            result_kind: EXECUTOR_RESULT_EVIDENCE_KIND.to_string(),
+            result_file_name: EXECUTOR_RESULT_FILE.to_string(),
+        },
+    }
+}
+
 pub fn reviewer_facing_ref_constants() -> ReviewerFacingRefConstants {
     ReviewerFacingRefConstants {
         accepted_schemes: vec![
@@ -265,4 +359,24 @@ fn registry_schema_id(name: &str) -> String {
         .expect("contract constants must reference registered contracts")
         .schema_id
         .to_string()
+}
+
+fn represented_artifact_schema_ids() -> Vec<String> {
+    vec![
+        RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
+        ARTIFACT_CONTRACT_SCHEMA.to_string(),
+        EVIDENCE_CONTRACT_SCHEMA.to_string(),
+        ARTIFACT_REF_SCHEMA.to_string(),
+        ARTIFACT_ADDRESS_SCHEMA.to_string(),
+        ARTIFACT_DOM_BOXES_SCHEMA.to_string(),
+        ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
+        ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
+        ARTIFACT_POSTPROCESS_RESULT_SCHEMA.to_string(),
+        AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        AGENT_TASK_BATCH_ARTIFACTS_SCHEMA.to_string(),
+        CHANGE_ARTIFACT_SCHEMA.to_string(),
+        FUZZ_ARTIFACT_SCHEMA.to_string(),
+        GENERIC_MATRIX_SUMMARY_SCHEMA.to_string(),
+        MATRIX_ARTIFACT_SUMMARY_SCHEMA.to_string(),
+    ]
 }

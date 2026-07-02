@@ -12,6 +12,18 @@ use std::path::{Component, Path, PathBuf};
 pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 pub const ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
 
+/// Stable runtime-agent artifact path for an agent execution transcript.
+pub const RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH: &str = "artifacts/agent-loop/transcript.json";
+
+/// Stable runtime-agent artifact path for the final agent response/output.
+pub const RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH: &str = "artifacts/agent-loop/final.md";
+
+pub const RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE: &str = "transcript.json";
+pub const RUNTIME_AGENT_RESULT_ARTIFACT_FILE: &str = "agent-result.json";
+pub const RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE: &str = "agent_result.json";
+pub const RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE: &str = "patch.diff";
+pub const RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE: &str = "patch.patch";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactManifest {
     #[serde(default = "default_schema")]

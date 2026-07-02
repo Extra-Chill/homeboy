@@ -26,7 +26,10 @@ pub use super::artifact_manifest::{
     read_manifest_from_root, write_manifest_to_root, ArtifactManifest, ArtifactManifestEntry,
     ArtifactManifestProvenance, ArtifactManifestPublicUrlState, ArtifactManifestViewer,
     ArtifactManifestViewerLink, ArtifactRedactionState, ValidatedArtifactManifestEntry,
-    ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
+    ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA, RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH,
+    RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE, RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE,
+    RUNTIME_AGENT_RESULT_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
 };
 pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
