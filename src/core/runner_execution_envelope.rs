@@ -9,6 +9,8 @@ use crate::core::secret_env_plan::SecretEnvPlan;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
+pub const ORCHESTRATION_TARGET_PROVENANCE_SCHEMA: &str =
+    "homeboy/orchestration-target-provenance/v1";
 pub const PATH_MATERIALIZATION_PLAN_SCHEMA: &str = "homeboy/path-materialization-plan/v1";
 pub const PATH_MATERIALIZATION_MODE_EXISTING_REMOTE: &str = "existing_remote";
 pub const PATH_MATERIALIZATION_MODE_GIT: &str = "git";
@@ -106,6 +108,8 @@ pub struct RunnerExecutionRecord {
     pub mirror_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_materialization_plan: Option<PathMaterializationPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_provenance: Option<OrchestrationTargetProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -118,6 +122,90 @@ pub struct PathMaterializationPlan {
     pub schema: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<PathMaterializationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestrationTargetProvenance {
+    #[serde(default = "orchestration_target_provenance_schema")]
+    pub schema: String,
+    pub selected_runner_id: String,
+    pub controller_binary: BinaryProvenance,
+    pub runner_daemon_binary: BinaryProvenance,
+    pub runner_command_binary: BinaryProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_identity: Option<SourceSnapshotIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<ExtensionProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BinaryProvenance {
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSnapshotIdentity {
+    pub snapshot_hash: String,
+    pub sync_mode: String,
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_snapshot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionProvenance {
+    pub extension_id: String,
+    pub path: String,
+    pub install_mode: String,
+    pub manifest_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+}
+
+impl OrchestrationTargetProvenance {
+    pub fn new(
+        selected_runner_id: impl Into<String>,
+        controller_binary: BinaryProvenance,
+        runner_daemon_binary: BinaryProvenance,
+        runner_command_binary: BinaryProvenance,
+    ) -> Self {
+        Self {
+            schema: ORCHESTRATION_TARGET_PROVENANCE_SCHEMA.to_string(),
+            selected_runner_id: selected_runner_id.into(),
+            controller_binary,
+            runner_daemon_binary,
+            runner_command_binary,
+            source_snapshot_identity: None,
+            extensions: Vec::new(),
+        }
+    }
+
+    pub fn with_source_snapshot_identity(
+        mut self,
+        identity: Option<SourceSnapshotIdentity>,
+    ) -> Self {
+        self.source_snapshot_identity = identity;
+        self
+    }
+
+    pub fn with_extensions(mut self, extensions: Vec<ExtensionProvenance>) -> Self {
+        self.extensions = extensions;
+        self
+    }
 }
 
 impl PathMaterializationPlan {
@@ -259,6 +347,7 @@ impl RunnerExecutionRecord {
             agent_task_run_id: None,
             mirror_run_id: None,
             path_materialization_plan: None,
+            orchestration_provenance: None,
             artifact_refs: Vec::new(),
             next_actions: Vec::new(),
         }
@@ -288,6 +377,14 @@ impl RunnerExecutionRecord {
         path_materialization_plan: Option<PathMaterializationPlan>,
     ) -> Self {
         self.path_materialization_plan = path_materialization_plan;
+        self
+    }
+
+    pub fn with_orchestration_provenance(
+        mut self,
+        provenance: Option<OrchestrationTargetProvenance>,
+    ) -> Self {
+        self.orchestration_provenance = provenance;
         self
     }
 
@@ -536,6 +633,10 @@ fn runner_execution_record_schema() -> String {
     RUNNER_EXECUTION_RECORD_SCHEMA.to_string()
 }
 
+fn orchestration_target_provenance_schema() -> String {
+    ORCHESTRATION_TARGET_PROVENANCE_SCHEMA.to_string()
+}
+
 fn path_materialization_plan_schema() -> String {
     PATH_MATERIALIZATION_PLAN_SCHEMA.to_string()
 }
@@ -695,7 +796,10 @@ mod tests {
         .expect("non-empty plan");
 
         assert_eq!(plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
-        assert_eq!(plan.entries[0].role, PATH_MATERIALIZATION_ROLE_REQUIRED_PATH);
+        assert_eq!(
+            plan.entries[0].role,
+            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
+        );
         assert_eq!(
             plan.entries[0].owner,
             PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS

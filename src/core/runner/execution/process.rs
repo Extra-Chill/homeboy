@@ -501,6 +501,7 @@ pub(super) fn exec_output(
     };
     let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);
     let handoff = runner_handoff(runner, transport, None, Some(runner_result.clone()));
+    let provenance_extensions = required_extensions_for_command(&command, &[]);
     let execution_record = runner_execution_record_for_output(
         runner,
         transport,
@@ -509,6 +510,7 @@ pub(super) fn exec_output(
         None,
         source_snapshot.as_ref(),
         &require_paths,
+        &provenance_extensions,
         &[],
         Some(&runner_result),
     );
