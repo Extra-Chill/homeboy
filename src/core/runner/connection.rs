@@ -14,7 +14,7 @@ use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::http_api::RunSummary;
 use crate::core::paths;
-use crate::core::server::{self, Server, ServerAuthMode, SshClient};
+use crate::core::server::{self, Server, SshClient};
 
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
@@ -881,44 +881,17 @@ mod remote_daemon {
             };
         }
 
-        let mut args = Vec::new();
-        if let Some(identity_file) = server
-            .identity_file
-            .as_deref()
-            .filter(|path| !path.is_empty())
-        {
-            args.push("-i".to_string());
-            args.push(shellexpand::tilde(identity_file).to_string());
-        }
-        if server.port != 22 {
-            args.push("-p".to_string());
-            args.push(server.port.to_string());
-        }
-        if let Some(auth) = &server.auth {
-            if auth.mode == ServerAuthMode::KeyPlusPasswordControlmaster {
-                let control_path = auth
-                    .session
-                    .control_path
-                    .as_deref()
-                    .unwrap_or("~/.ssh/controlmasters/%h-%p-%r");
-                let persist = auth.session.persist.as_deref().unwrap_or("4h");
-                args.extend([
-                    "-o".to_string(),
-                    "ControlMaster=auto".to_string(),
-                    "-o".to_string(),
-                    format!("ControlPath={}", shellexpand::tilde(control_path)),
-                    "-o".to_string(),
-                    format!("ControlPersist={}", persist),
-                ]);
-            }
-        }
+        let mut args = crate::core::server::ssh_args::server_option_args(
+            server,
+            crate::core::server::ssh_args::SshArgOptions {
+                batch_mode: true,
+                connect_timeout: true,
+                exit_on_forward_failure: true,
+                port_flag: Some(crate::core::server::ssh_args::SshPortFlag::Lowercase),
+                ..crate::core::server::ssh_args::SshArgOptions::default()
+            },
+        );
         args.extend([
-            "-o".to_string(),
-            "BatchMode=yes".to_string(),
-            "-o".to_string(),
-            "ExitOnForwardFailure=yes".to_string(),
-            "-o".to_string(),
-            "ConnectTimeout=10".to_string(),
             "-N".to_string(),
             "-L".to_string(),
             format!("127.0.0.1:{}:{}:{}", local_port, remote_host, remote_port),

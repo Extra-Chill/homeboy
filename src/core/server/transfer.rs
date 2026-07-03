@@ -1,4 +1,7 @@
 use super::SshClient;
+use crate::core::server::ssh_args::{
+    client_option_args, shell_join_args, SshArgOptions, SshPortFlag,
+};
 use serde::Serialize;
 use std::process::{Command, Stdio};
 
@@ -95,61 +98,24 @@ pub fn parse_target(target: &str) -> TransferTarget {
     TransferTarget::Local(target.to_string())
 }
 
-/// Build scp-compatible SSH args for a server connection.
-fn build_scp_args(client: &SshClient) -> Vec<String> {
-    let mut args = vec![
-        "-O".to_string(), // Use legacy SCP protocol (not SFTP)
-        "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
-        "-o".to_string(),
-        "BatchMode=yes".to_string(),
-    ];
-
-    if let Some(identity_file) = &client.identity_file {
-        args.push("-i".to_string());
-        args.push(identity_file.clone());
-    }
-
-    if let Some(session) = &client.auth {
-        args.extend([
-            "-o".to_string(),
-            "ControlMaster=auto".to_string(),
-            "-o".to_string(),
-            format!("ControlPath={}", session.control_path),
-            "-o".to_string(),
-            format!("ControlPersist={}", session.persist),
-        ]);
-    }
-
-    if client.port != 22 {
-        args.push("-P".to_string()); // scp uses -P (uppercase) for port
-        args.push(client.port.to_string());
-    }
-
-    args
+enum TransferBackend {
+    Scp { args: Vec<String> },
+    Shell { command: String },
 }
 
-/// Build SSH connection args for server-to-server tar pipe.
-fn build_ssh_args(client: &SshClient) -> String {
-    let mut args = Vec::new();
-    args.push("-o StrictHostKeyChecking=no".to_string());
-    args.push("-o BatchMode=yes".to_string());
+struct TransferPlan {
+    method: String,
+    direction: String,
+    backend: TransferBackend,
+}
 
-    if let Some(identity_file) = &client.identity_file {
-        args.push(format!("-i {}", identity_file));
+impl TransferPlan {
+    fn dry_run_output(&self, config: &TransferConfig) -> (TransferOutput, i32) {
+        (
+            transfer_output(config, &self.method, &self.direction, true, None, true),
+            0,
+        )
     }
-
-    if let Some(session) = &client.auth {
-        args.push("-o ControlMaster=auto".to_string());
-        args.push(format!("-o ControlPath={}", session.control_path));
-        args.push(format!("-o ControlPersist={}", session.persist));
-    }
-
-    if client.port != 22 {
-        args.push(format!("-p {}", client.port));
-    }
-
-    args.join(" ")
 }
 
 /// Execute a file transfer between local and remote paths, or between two servers.
@@ -173,10 +139,10 @@ pub fn transfer(config: &TransferConfig) -> crate::core::Result<(TransferOutput,
             ))
         }
         (TransferTarget::Local(local_path), TransferTarget::Remote { server_id, path }) => {
-            run_push(config, local_path, server_id, path)
+            execute_plan(config, plan_push(config, local_path, server_id, path)?)
         }
         (TransferTarget::Remote { server_id, path }, TransferTarget::Local(local_path)) => {
-            run_pull(config, server_id, path, local_path)
+            execute_plan(config, plan_pull(config, server_id, path, local_path)?)
         }
         (
             TransferTarget::Remote {
@@ -187,17 +153,20 @@ pub fn transfer(config: &TransferConfig) -> crate::core::Result<(TransferOutput,
                 server_id: dst_id,
                 path: dst_path,
             },
-        ) => run_server_to_server(config, src_id, src_path, dst_id, dst_path),
+        ) => execute_plan(
+            config,
+            plan_server_to_server(config, src_id, src_path, dst_id, dst_path)?,
+        ),
     }
 }
 
 /// Push a local file/directory to a remote server via scp.
-fn run_push(
+fn plan_push(
     config: &TransferConfig,
     local_path: &str,
     server_id: &str,
     remote_path: &str,
-) -> crate::core::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<TransferPlan> {
     let srv = super::load(server_id)?;
     let client = SshClient::from_server(&srv, server_id)?;
 
@@ -211,7 +180,11 @@ fn run_push(
             server_id,
             remote_path
         );
-        return Ok((transfer_output(config, "scp", "push", true, None, true), 0));
+        return Ok(TransferPlan {
+            method: "scp".to_string(),
+            direction: "push".to_string(),
+            backend: TransferBackend::Scp { args: Vec::new() },
+        });
     }
 
     // Validate local path exists
@@ -225,7 +198,7 @@ fn run_push(
         ));
     }
 
-    let mut scp_args = build_scp_args(&client);
+    let mut scp_args = scp_args(&client);
 
     if config.recursive || local.is_dir() {
         scp_args.push("-r".to_string());
@@ -245,16 +218,20 @@ fn run_push(
         remote_path
     );
 
-    execute_scp(&scp_args, config)
+    Ok(TransferPlan {
+        method: "scp".to_string(),
+        direction: "push".to_string(),
+        backend: TransferBackend::Scp { args: scp_args },
+    })
 }
 
 /// Pull a remote file/directory to a local path via scp.
-fn run_pull(
+fn plan_pull(
     config: &TransferConfig,
     server_id: &str,
     remote_path: &str,
     local_path: &str,
-) -> crate::core::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<TransferPlan> {
     let srv = super::load(server_id)?;
     let client = SshClient::from_server(&srv, server_id)?;
 
@@ -268,7 +245,11 @@ fn run_pull(
             remote_path,
             local_path
         );
-        return Ok((transfer_output(config, "scp", "pull", true, None, true), 0));
+        return Ok(TransferPlan {
+            method: "scp".to_string(),
+            direction: "pull".to_string(),
+            backend: TransferBackend::Scp { args: Vec::new() },
+        });
     }
 
     // Ensure parent directory exists for local destination
@@ -284,7 +265,7 @@ fn run_pull(
         }
     }
 
-    let mut scp_args = build_scp_args(&client);
+    let mut scp_args = scp_args(&client);
 
     if config.recursive {
         scp_args.push("-r".to_string());
@@ -304,17 +285,21 @@ fn run_pull(
         local_path
     );
 
-    execute_scp(&scp_args, config)
+    Ok(TransferPlan {
+        method: "scp".to_string(),
+        direction: "pull".to_string(),
+        backend: TransferBackend::Scp { args: scp_args },
+    })
 }
 
 /// Transfer between two remote servers via SSH tar pipe.
-fn run_server_to_server(
+fn plan_server_to_server(
     config: &TransferConfig,
     src_id: &str,
     src_path: &str,
     dst_id: &str,
     dst_path: &str,
-) -> crate::core::Result<(TransferOutput, i32)> {
+) -> crate::core::Result<TransferPlan> {
     let src_server = super::load(src_id)?;
     let dst_server = super::load(dst_id)?;
 
@@ -336,14 +321,17 @@ fn run_server_to_server(
             dst_path
         );
         log_status!("dry-run", "Method: {}", method);
-        return Ok((
-            transfer_output(config, method, "server-to-server", true, None, true),
-            0,
-        ));
+        return Ok(TransferPlan {
+            method: method.to_string(),
+            direction: "server-to-server".to_string(),
+            backend: TransferBackend::Shell {
+                command: String::new(),
+            },
+        });
     }
 
-    let source_ssh_args = build_ssh_args(&src_client);
-    let dest_ssh_args = build_ssh_args(&dst_client);
+    let source_ssh_args = ssh_shell_args(&src_client);
+    let dest_ssh_args = ssh_shell_args(&dst_client);
 
     let source_remote = format!("{}@{}", src_client.user, src_client.host);
     let dest_remote = format!("{}@{}", dst_client.user, dst_client.host);
@@ -381,13 +369,40 @@ fn run_server_to_server(
         ("cat-pipe".to_string(), cmd)
     };
 
-    log_status!("transfer", "{} -> {}", config.source, config.destination);
-    log_status!("transfer", "Method: {}", method);
+    Ok(TransferPlan {
+        method,
+        direction: "server-to-server".to_string(),
+        backend: TransferBackend::Shell { command },
+    })
+}
 
-    let output = Command::new("sh")
-        .args(["-c", &command])
-        .stdin(Stdio::null())
-        .output();
+fn execute_plan(
+    config: &TransferConfig,
+    plan: TransferPlan,
+) -> crate::core::Result<(TransferOutput, i32)> {
+    if config.dry_run {
+        return Ok(plan.dry_run_output(config));
+    }
+
+    if matches!(&plan.backend, TransferBackend::Shell { .. }) {
+        log_status!("transfer", "{} -> {}", config.source, config.destination);
+        log_status!("transfer", "Method: {}", plan.method);
+    }
+
+    let output = match &plan.backend {
+        TransferBackend::Scp { args } => {
+            Command::new("scp").args(args).stdin(Stdio::null()).output()
+        }
+        TransferBackend::Shell { command } => Command::new("sh")
+            .args(["-c", command])
+            .stdin(Stdio::null())
+            .output(),
+    };
+
+    let backend_label = match plan.backend {
+        TransferBackend::Scp { .. } => "scp",
+        TransferBackend::Shell { .. } => "transfer",
+    };
 
     match output {
         Ok(out) => {
@@ -403,8 +418,8 @@ fn run_server_to_server(
             Ok((
                 transfer_output(
                     config,
-                    method,
-                    "server-to-server",
+                    plan.method,
+                    plan.direction,
                     success,
                     if success { None } else { Some(stderr) },
                     false,
@@ -415,10 +430,10 @@ fn run_server_to_server(
         Err(e) => Ok((
             transfer_output(
                 config,
-                method,
-                "server-to-server",
+                plan.method,
+                plan.direction,
                 false,
-                Some(format!("Failed to execute transfer: {}", e)),
+                Some(format!("Failed to execute {}: {}", backend_label, e)),
                 false,
             ),
             1,
@@ -426,55 +441,29 @@ fn run_server_to_server(
     }
 }
 
-/// Execute an scp command and return structured output.
-fn execute_scp(
-    scp_args: &[String],
-    config: &TransferConfig,
-) -> crate::core::Result<(TransferOutput, i32)> {
-    let output = Command::new("scp")
-        .args(scp_args)
-        .stdin(Stdio::null())
-        .output();
+fn scp_args(client: &SshClient) -> Vec<String> {
+    client_option_args(
+        client,
+        SshArgOptions {
+            strict_host_key_checking_no: true,
+            batch_mode: true,
+            legacy_scp: true,
+            port_flag: Some(SshPortFlag::Uppercase),
+            ..SshArgOptions::default()
+        },
+    )
+}
 
-    match output {
-        Ok(out) => {
-            let success = out.status.success();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-            if !success {
-                eprintln!("[transfer] Failed: {}", stderr);
-            } else {
-                log_status!("transfer", "Complete");
-            }
-
-            Ok((
-                transfer_output(
-                    config,
-                    "scp",
-                    if config.source.contains(':') {
-                        "pull"
-                    } else {
-                        "push"
-                    },
-                    success,
-                    if success { None } else { Some(stderr) },
-                    false,
-                ),
-                if success { 0 } else { 1 },
-            ))
-        }
-        Err(e) => Ok((
-            transfer_output(
-                config,
-                "scp",
-                "unknown",
-                false,
-                Some(format!("Failed to execute scp: {}", e)),
-                false,
-            ),
-            1,
-        )),
-    }
+fn ssh_shell_args(client: &SshClient) -> String {
+    shell_join_args(&client_option_args(
+        client,
+        SshArgOptions {
+            strict_host_key_checking_no: true,
+            batch_mode: true,
+            port_flag: Some(SshPortFlag::Lowercase),
+            ..SshArgOptions::default()
+        },
+    ))
 }
 
 #[cfg(test)]

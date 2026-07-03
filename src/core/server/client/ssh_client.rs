@@ -7,6 +7,7 @@ use crate::core::error::{Error, Result};
 use crate::core::runner::{quote_runner_env_value, remote_shell_path_preamble};
 
 use super::super::session::ensure_control_path_parent;
+use super::super::ssh_args::{client_ssh_args, SshArgOptions, SshPortFlag};
 use super::super::{
     ManagedSshSession, ManagedSshSessionOutput, Server, ServerAuthMode, ServerSessionConfig,
 };
@@ -140,51 +141,18 @@ impl SshClient {
     }
 
     pub(crate) fn build_ssh_args(&self, command: Option<&str>, interactive: bool) -> Vec<String> {
-        let mut args = Vec::new();
-
-        if let Some(identity_file) = &self.identity_file {
-            args.push("-i".to_string());
-            args.push(identity_file.clone());
-        }
-
-        if self.port != 22 {
-            args.push("-p".to_string());
-            args.push(self.port.to_string());
-        }
-
-        if let Some(session) = &self.auth {
-            args.extend([
-                "-o".to_string(),
-                "ControlMaster=auto".to_string(),
-                "-o".to_string(),
-                format!("ControlPath={}", session.control_path),
-                "-o".to_string(),
-                format!("ControlPersist={}", session.persist),
-            ]);
-        }
-
-        // For non-interactive commands, add timeout and keepalive options
-        // to prevent hangs on stalled connections or unexpected prompts.
-        if !interactive {
-            args.extend([
-                "-o".to_string(),
-                "BatchMode=yes".to_string(),
-                "-o".to_string(),
-                "ConnectTimeout=10".to_string(),
-                "-o".to_string(),
-                "ServerAliveInterval=15".to_string(),
-                "-o".to_string(),
-                "ServerAliveCountMax=3".to_string(),
-            ]);
-        }
-
-        args.push(format!("{}@{}", self.user, self.host));
-
-        if let Some(cmd) = command {
-            args.push(cmd.to_string());
-        }
-
-        args
+        client_ssh_args(
+            self,
+            SshArgOptions {
+                interactive,
+                batch_mode: true,
+                connect_timeout: true,
+                keepalive: true,
+                port_flag: Some(SshPortFlag::Lowercase),
+                command,
+                ..SshArgOptions::default()
+            },
+        )
     }
 
     fn build_session_control_args(&self, operation: &str) -> Result<Vec<String>> {
