@@ -76,6 +76,21 @@ pub(crate) trait DependencyProviderAdapter {
         &self,
         context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyCommandResult>>;
+
+    /// The install command this provider would run, without executing it.
+    ///
+    /// Returns `None` for providers whose install cannot be expressed as a
+    /// standalone shell command (e.g. component-script/extension providers that
+    /// run through Homeboy's extension machinery). Native providers (composer,
+    /// npm) override this so callers such as Lab workspace hydration can detect
+    /// the provider on the controller and run the same install command on the
+    /// runner (#7366).
+    fn install_command(
+        &self,
+        _context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +198,20 @@ impl DependencyProvider {
             DependencyProvider::Npm(provider) => provider.install(context),
             DependencyProvider::ComponentScript(provider) => provider.install(context),
             DependencyProvider::Extension(provider) => provider.install(context),
+        }
+    }
+
+    pub(crate) fn install_command(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        let context = DependencyProviderContext { component, path };
+        match self {
+            DependencyProvider::Composer(provider) => provider.install_command(context),
+            DependencyProvider::Npm(provider) => provider.install_command(context),
+            DependencyProvider::ComponentScript(provider) => provider.install_command(context),
+            DependencyProvider::Extension(provider) => provider.install_command(context),
         }
     }
 }
@@ -361,6 +390,17 @@ impl DependencyProviderAdapter for ComposerDependencyProvider {
         let command =
             DependencyProviderCommand::new("composer", composer_install_command_args(), path);
         Ok(Some(run_dependency_provider_command(&command, "install")?))
+    }
+
+    fn install_command(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(Some(DependencyProviderCommand::new(
+            "composer",
+            composer_install_command_args(),
+            context.path,
+        )))
     }
 }
 

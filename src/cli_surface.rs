@@ -58,6 +58,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_dirty_lab_workspace: bool,
 
+    /// Skip post-materialization dependency hydration for agent-task Lab offloads.
+    /// When set, Homeboy does not run the detected provider install (e.g.
+    /// `composer install`, `npm ci`) in the materialized runner workspace before
+    /// the executor starts.
+    #[arg(long, global = true)]
+    pub skip_deps_hydration: bool,
+
     /// Add a job-scoped environment variable to a Lab offload without mutating runner config.
     #[arg(long, global = true, value_name = "KEY=VALUE")]
     pub runner_env: Vec<String>,
@@ -1077,6 +1084,21 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.allow_dirty_lab_workspace);
+    }
+
+    #[test]
+    fn skip_deps_hydration_global_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--skip-deps-hydration",
+        ])
+        .expect("global skip deps hydration override should parse");
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(cli.skip_deps_hydration);
     }
 
     #[test]
