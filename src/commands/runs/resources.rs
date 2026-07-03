@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use homeboy::core::observation::{ObservationStore, RunListFilter};
+use homeboy::core::observation::{ObservationStore, RunListFilter, RunStatus};
 use homeboy::core::resource_lifecycle_index::{
     resource_lifecycle_index_from_artifacts, resource_lifecycle_record_is_actionable,
-    resource_lifecycle_record_is_cleanup_eligible, ResourceCleanupPolicy,
+    resource_lifecycle_record_is_cleanup_eligible,
+    transition_preserved_runner_workspaces_to_cleanup_pending, ResourceCleanupPolicy,
     ResourceEvidenceRetention, ResourceLifecycle, ResourceLifecycleCleanupOperation,
     ResourceLifecycleIndex, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
     RESOURCE_LIFECYCLE_INDEX_SCHEMA,
@@ -297,16 +298,14 @@ fn build_cleanup_output(
             continue;
         };
 
-        match ResourceLifecycle::cleanup_path(root, record) {
-            Ok(path) => {
-                if args.apply {
-                    ResourceLifecycle::delete_path(&path)?;
-                    applied.push(cleanup_applied_item(record, args.cleanup_operation));
-                } else {
-                    planned.push(cleanup_plan_item(record, args.cleanup_operation));
-                }
+        match cleanup_dispatch(record, root, args)? {
+            CleanupDispatch::Plan => {
+                planned.push(cleanup_plan_item(record, args.cleanup_operation))
             }
-            Err(reason) => skipped.push(cleanup_skip(record, reason)),
+            CleanupDispatch::Applied => {
+                applied.push(cleanup_applied_item(record, args.cleanup_operation))
+            }
+            CleanupDispatch::Skipped(reason) => skipped.push(cleanup_skip(record, reason)),
         }
     }
 
@@ -323,6 +322,45 @@ fn build_cleanup_output(
         applied,
         skipped,
     })
+}
+
+enum CleanupDispatch {
+    Plan,
+    Applied,
+    Skipped(String),
+}
+
+fn cleanup_dispatch(
+    record: &ResourceLifecycleRecord,
+    root: &Path,
+    args: &RunsResourcesArgs,
+) -> Result<CleanupDispatch> {
+    if record.is_runner_workspace() && record.runner_id.is_some() {
+        if !args.apply {
+            return Ok(CleanupDispatch::Plan);
+        }
+        let runner_id = record.runner_id.as_deref().expect("checked runner_id");
+        homeboy::core::runner::reap_run_workspace(runner_id, &record.path, None)?;
+        return Ok(CleanupDispatch::Applied);
+    }
+
+    if record.runner_id.is_some() {
+        return Ok(CleanupDispatch::Skipped(
+            "remote-owned resource has no cleanup executor; leaving plan-only".to_string(),
+        ));
+    }
+
+    match ResourceLifecycle::cleanup_path(root, record) {
+        Ok(path) => {
+            if args.apply {
+                ResourceLifecycle::delete_path(&path)?;
+                Ok(CleanupDispatch::Applied)
+            } else {
+                Ok(CleanupDispatch::Plan)
+            }
+        }
+        Err(reason) => Ok(CleanupDispatch::Skipped(reason)),
+    }
 }
 
 fn canonical_cleanup_root(root: &Path) -> Result<PathBuf> {
@@ -427,9 +465,11 @@ fn load_observation_store_index(
             .collect()
     };
 
-    let Some(index) = resource_lifecycle_index_from_artifacts(&artifacts)? else {
+    let Some(mut index) = resource_lifecycle_index_from_artifacts(&artifacts)? else {
         return Ok(Vec::new());
     };
+
+    apply_terminal_workspace_transitions(store, &mut index)?;
 
     Ok(vec![LoadedResourceIndex {
         source: match run_id {
@@ -438,6 +478,35 @@ fn load_observation_store_index(
         },
         index,
     }])
+}
+
+fn apply_terminal_workspace_transitions(
+    store: &ObservationStore,
+    index: &mut ResourceLifecycleIndex,
+) -> Result<()> {
+    let mut run_ids = index
+        .resources
+        .iter()
+        .filter(|record| record.is_runner_workspace())
+        .map(|record| record.run_id.clone())
+        .collect::<Vec<_>>();
+    run_ids.sort();
+    run_ids.dedup();
+
+    for run_id in run_ids {
+        let Some(run) = store.get_run(&run_id)? else {
+            continue;
+        };
+        if is_terminal_run_status(&run.status) {
+            transition_preserved_runner_workspaces_to_cleanup_pending(index, &run_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_terminal_run_status(status: &str) -> bool {
+    RunStatus::from_label(status).is_some_and(RunStatus::is_terminal)
 }
 
 fn load_index_file(path: &Path) -> Result<LoadedResourceIndex> {
@@ -807,6 +876,123 @@ mod tests {
 
         assert_eq!(cleanup.applied_count, 1);
         assert!(!resource_path.exists());
+    }
+
+    #[test]
+    fn apply_reaps_runner_workspace_through_runner_transport() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace_root = tempfile::tempdir().expect("workspace root");
+            let lab_root = workspace_root.path().join("_lab_workspaces");
+            let resource_path = lab_root.join("repo");
+            std::fs::create_dir_all(&resource_path).expect("runner workspace");
+            std::fs::write(resource_path.join("generated.txt"), "generated")
+                .expect("workspace file");
+            homeboy::core::runner::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
+                    workspace_root.path().display()
+                ),
+                false,
+            )
+            .expect("create local runner");
+            let resource = ResourceLifecycleRecord {
+                owner: "runner.workspace".to_string(),
+                runner_id: Some("lab-local".to_string()),
+                path: resource_path.display().to_string(),
+                kind: "runner_workspace".to_string(),
+                cleanup_intent: ResourceCleanupIntent::Apply,
+                ..record(ResourceLifecycleResourceStatus::CleanupPending)
+            };
+
+            let cleanup = build_cleanup_output(
+                &[resource],
+                &RunsResourcesArgs {
+                    apply: true,
+                    cleanup_root: Some(workspace_root.path().to_path_buf()),
+                    ..Default::default()
+                },
+            )
+            .expect("cleanup apply");
+
+            assert_eq!(cleanup.applied_count, 1);
+            assert!(!resource_path.exists());
+        });
+    }
+
+    #[test]
+    fn apply_keeps_unsupported_remote_records_plan_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource = ResourceLifecycleRecord {
+            owner: "homeboy-runs".to_string(),
+            runner_id: Some("lab".to_string()),
+            path: "/srv/homeboy/artifacts/run-1".to_string(),
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 0);
+        assert_eq!(cleanup.skipped_count, 1);
+        assert_eq!(
+            cleanup.skipped[0].reason,
+            "remote-owned resource has no cleanup executor; leaving plan-only"
+        );
+    }
+
+    #[test]
+    fn terminal_store_run_flips_preserved_runner_workspace_eligibility() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = temp_store(&tempdir);
+        let run = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .expect("run");
+        store
+            .finish_run(&run.id, RunStatus::Pass, None)
+            .expect("finish run");
+        let artifact_path = tempdir.path().join("artifact.json");
+        std::fs::write(&artifact_path, "{}").expect("artifact file");
+        let resource = ResourceLifecycleRecord {
+            owner: "runner.workspace".to_string(),
+            run_id: run.id.clone(),
+            runner_id: Some("lab".to_string()),
+            path: "/srv/homeboy/_lab_workspaces/repo".to_string(),
+            kind: "runner_workspace".to_string(),
+            ttl: None,
+            cleanup_policy: ResourceCleanupPolicy::Preserve,
+            status: ResourceLifecycleResourceStatus::Active,
+            ..record(ResourceLifecycleResourceStatus::Active)
+        };
+        store
+            .record_artifact_with_metadata(
+                &run.id,
+                "lab-metadata",
+                &artifact_path,
+                serde_json::json!({ "workspace_resource_lifecycle": resource }),
+            )
+            .expect("artifact with resource lifecycle metadata");
+
+        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+
+        let transitioned = &indexes[0].index.resources[0];
+        assert_eq!(
+            transitioned.cleanup_policy,
+            ResourceCleanupPolicy::DeleteAfterTtl
+        );
+        assert_eq!(transitioned.ttl.as_deref(), Some("P7D"));
+        assert_eq!(
+            transitioned.status,
+            ResourceLifecycleResourceStatus::CleanupPending
+        );
+        assert!(resource_lifecycle_record_is_cleanup_eligible(transitioned));
     }
 
     #[test]

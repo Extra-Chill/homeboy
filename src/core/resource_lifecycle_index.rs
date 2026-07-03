@@ -103,6 +103,10 @@ impl ResourceLifecycleRecord {
     pub fn validate(&self, index: usize) -> Result<()> {
         validate_resource_lifecycle_record(index, self)
     }
+
+    pub fn is_runner_workspace(&self) -> bool {
+        self.owner == "runner.workspace" && self.kind == "runner_workspace"
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,20 +312,19 @@ pub fn resource_lifecycle_index_from_artifacts(
             continue;
         }
 
-        let Some(value) = artifact.metadata_json.get("resource_lifecycle") else {
-            continue;
-        };
-        let record: ResourceLifecycleRecord =
-            serde_json::from_value(value.clone()).map_err(|err| {
-                Error::internal_json(
-                    err.to_string(),
-                    Some(format!(
-                        "parse resource lifecycle metadata for artifact {}",
-                        artifact.id
-                    )),
-                )
-            })?;
-        resources.push(record);
+        for key in ["resource_lifecycle", "workspace_resource_lifecycle"] {
+            let Some(value) = artifact.metadata_json.get(key) else {
+                continue;
+            };
+            let record: ResourceLifecycleRecord =
+                serde_json::from_value(value.clone()).map_err(|err| {
+                    Error::internal_json(
+                        err.to_string(),
+                        Some(format!("parse {key} metadata for artifact {}", artifact.id)),
+                    )
+                })?;
+            resources.push(record);
+        }
     }
     if resources.is_empty() {
         return Ok(None);
@@ -333,6 +336,24 @@ pub fn resource_lifecycle_index_from_artifacts(
     };
     index.validate()?;
     Ok(Some(index))
+}
+
+pub fn transition_preserved_runner_workspaces_to_cleanup_pending(
+    index: &mut ResourceLifecycleIndex,
+    run_id: &str,
+) {
+    for record in &mut index.resources {
+        if record.run_id == run_id
+            && record.is_runner_workspace()
+            && record.runner_id.is_some()
+            && matches!(record.cleanup_policy, ResourceCleanupPolicy::Preserve)
+            && matches!(record.status, ResourceLifecycleResourceStatus::Active)
+        {
+            record.cleanup_policy = ResourceCleanupPolicy::DeleteAfterTtl;
+            record.ttl.get_or_insert_with(|| "P7D".to_string());
+            record.status = ResourceLifecycleResourceStatus::CleanupPending;
+        }
+    }
 }
 
 pub fn validate_resource_lifecycle_record(
@@ -465,6 +486,78 @@ mod tests {
 
         assert_eq!(index.resources.len(), 1);
         assert_eq!(index.resources[0].kind, "workspace");
+    }
+
+    #[test]
+    fn extracts_workspace_resource_lifecycle_artifact_metadata() {
+        let mut source = record();
+        source.owner = "runner.workspace".to_string();
+        source.kind = "runner_workspace".to_string();
+        let artifact = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "lab-metadata".to_string(),
+            artifact_type: "metadata".to_string(),
+            path: "/tmp/index.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::json!({
+                "workspace_resource_lifecycle": source,
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let index = resource_lifecycle_index_from_artifacts(&[artifact])
+            .expect("parse index metadata")
+            .expect("index present");
+
+        assert_eq!(index.resources.len(), 1);
+        assert_eq!(index.resources[0].owner, "runner.workspace");
+    }
+
+    #[test]
+    fn terminal_transition_flips_preserved_runner_workspace_eligibility() {
+        let mut index = ResourceLifecycleIndex {
+            schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+            resources: vec![ResourceLifecycleRecord {
+                owner: "runner.workspace".to_string(),
+                run_id: "run-1".to_string(),
+                runner_id: Some("lab".to_string()),
+                path: "/srv/homeboy/_lab_workspaces/repo".to_string(),
+                root_bound: None,
+                kind: "runner_workspace".to_string(),
+                ttl: None,
+                cleanup_policy: ResourceCleanupPolicy::Preserve,
+                evidence_retention: ResourceEvidenceRetention::Metadata,
+                cleanup_intent: ResourceCleanupIntent::DryRun,
+                cleanup_command: None,
+                status: ResourceLifecycleResourceStatus::Active,
+            }],
+        };
+
+        assert!(!resource_lifecycle_record_is_cleanup_eligible(
+            &index.resources[0]
+        ));
+
+        transition_preserved_runner_workspaces_to_cleanup_pending(&mut index, "run-1");
+
+        assert_eq!(
+            index.resources[0].cleanup_policy,
+            ResourceCleanupPolicy::DeleteAfterTtl
+        );
+        assert_eq!(index.resources[0].ttl.as_deref(), Some("P7D"));
+        assert_eq!(
+            index.resources[0].status,
+            ResourceLifecycleResourceStatus::CleanupPending
+        );
+        assert!(resource_lifecycle_record_is_cleanup_eligible(
+            &index.resources[0]
+        ));
     }
 
     #[test]

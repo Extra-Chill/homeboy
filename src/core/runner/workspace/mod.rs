@@ -19,7 +19,7 @@ pub use pull::{plan_workspace_pull, pull_workspace};
 pub use sync::sync_workspace;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
-pub use sync::{list_workspaces, prune_workspaces, workspace_snapshots};
+pub use sync::{list_workspaces, prune_workspaces, reap_run_workspace, workspace_snapshots};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
     RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
