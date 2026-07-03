@@ -1,6 +1,7 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::core::rig;
 
 pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) plan: HomeboyPlan,
@@ -435,13 +436,18 @@ fn prepare_lab_offload_workspace_stage_inner(
     let remote_output_file = request
         .output_file_requested
         .then(|| remote_lab_output_file(&remote_cwd));
+    let runner_command_plan = RunnerCommandPlan::for_offload(
+        &remapped_args,
+        &contract.required_extensions,
+        Path::new(&synced.local_path),
+    )?;
     let command = build_lab_offload_remote_command(
         command_prefix_argv,
         &remapped_args,
         &remote_cwd,
         &path_remaps,
         remote_output_file.as_deref(),
-        &contract.required_extensions,
+        &runner_command_plan,
     );
     let remote_command = command.clone();
     plan = with_step(
@@ -580,7 +586,7 @@ fn build_lab_offload_remote_command(
     remote_cwd: &str,
     path_remaps: &[LabPathRemap],
     remote_output_file: Option<&str>,
-    required_extensions: &[String],
+    plan: &RunnerCommandPlan,
 ) -> Vec<String> {
     let mut command = command_prefix_argv.to_vec();
     if !args_contain_output_file(remapped_args) {
@@ -596,16 +602,226 @@ fn build_lab_offload_remote_command(
         path_remaps,
         remote_output_file,
     );
-    let remote_args = inject_required_extension_args(remote_args, required_extensions);
+    let remote_args = inject_required_extension_args(remote_args, &plan.required_extensions);
     command.extend(remote_args.into_iter().skip(1));
     command
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerCommandPlan {
+    required_extensions: Vec<String>,
+}
+
+impl RunnerCommandPlan {
+    fn for_offload(
+        args: &[String],
+        route_required_extensions: &[String],
+        primary_source_path: &Path,
+    ) -> Result<Self> {
+        let mut required_extensions = std::collections::BTreeSet::new();
+        required_extensions.extend(route_required_extensions.iter().cloned());
+        required_extensions.extend(bench_required_extensions_from_primary_rig(
+            args,
+            primary_source_path,
+        )?);
+        Ok(Self {
+            required_extensions: required_extensions.into_iter().collect(),
+        })
+    }
+}
+
+fn bench_required_extensions_from_primary_rig(
+    args: &[String],
+    primary_source_path: &Path,
+) -> Result<Vec<String>> {
+    if !args.iter().any(|arg| arg == "bench") {
+        return Ok(Vec::new());
+    }
+
+    let rig_ids = bench_rig_ids_from_args(args);
+    if rig_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let explicit_component = bench_component_from_args(args);
+    let explicit_extensions = extension_overrides_from_args(args);
+    let mut extension_ids = std::collections::BTreeSet::new();
+    for rig_id in rig_ids {
+        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
+            continue;
+        };
+        if explicit_extensions.is_empty() {
+            extension_ids.extend(rig::extension_ids_for_workloads(
+                &spec,
+                rig::RigWorkloadKind::Bench,
+            ));
+        } else {
+            extension_ids.extend(explicit_extensions.iter().cloned());
+        }
+        for extension_id in rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench) {
+            extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
+                &spec,
+                rig::RigWorkloadKind::Bench,
+                &extension_id,
+            ));
+        }
+        extension_ids.extend(bench_component_extensions_from_rig(
+            &spec,
+            explicit_component.as_deref(),
+        ));
+    }
+
+    Ok(extension_ids.into_iter().collect())
+}
+
+fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
+    let Some(discovered) = rig::discover_rigs(primary_source_path)?
+        .into_iter()
+        .find(|candidate| candidate.id == rig_id)
+    else {
+        return Ok(None);
+    };
+    let spec = rig::load_local_source(
+        &discovered.rig_path.to_string_lossy(),
+        Some(discovered.id.as_str()),
+    )?;
+    Ok(Some(spec))
+}
+
+fn bench_component_extensions_from_rig(
+    spec: &rig::RigSpec,
+    explicit_component: Option<&str>,
+) -> Vec<String> {
+    let component_ids = explicit_component
+        .map(|id| vec![id.to_string()])
+        .or_else(|| {
+            spec.bench.as_ref().map(|bench| {
+                if bench.components.is_empty() {
+                    bench.default_component.iter().cloned().collect()
+                } else {
+                    bench.components.clone()
+                }
+            })
+        })
+        .unwrap_or_default();
+
+    let mut extension_ids = std::collections::BTreeSet::new();
+    for component_id in component_ids {
+        if let Some(extensions) = spec
+            .components
+            .get(&component_id)
+            .and_then(|component| component.extensions.as_ref())
+        {
+            extension_ids.extend(extensions.keys().cloned());
+        }
+    }
+    extension_ids.into_iter().collect()
+}
+
+fn bench_rig_ids_from_args(args: &[String]) -> Vec<String> {
+    values_for_flag(args, "--rig")
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn extension_overrides_from_args(args: &[String]) -> Vec<String> {
+    values_for_flag(args, "--extension")
+}
+
+fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut passthrough = false;
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            continue;
+        }
+        if arg == flag {
+            if let Some(value) = iter.peek() {
+                values.push((*value).to_string());
+            }
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
+fn bench_component_from_args(args: &[String]) -> Option<String> {
+    let mut command_seen = false;
+    let mut skip_next = false;
+    let flags_with_values = [
+        "--extension",
+        "--path",
+        "--iterations",
+        "--warmup",
+        "--runs",
+        "--run-id",
+        "--shared-state",
+        "--concurrency",
+        "--matrix",
+        "--runner-pool",
+        "--matrix-max-tasks",
+        "--matrix-max-queue-depth",
+        "--expected-artifact",
+        "--regression-threshold",
+        "--setting",
+        "--setting-json",
+        "--status-file",
+        "--report",
+        "--rig",
+        "--rig-order",
+        "--rig-concurrency",
+        "--scenario",
+        "--profile",
+        "--ci-profile",
+        "--output",
+        "--runner",
+    ];
+    for arg in args.iter().skip(1) {
+        if arg == "--" {
+            return None;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if !command_seen {
+            if arg == "bench" {
+                command_seen = true;
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            if flags_with_values.contains(&arg.as_str()) {
+                skip_next = true;
+            }
+            continue;
+        }
+        return Some(arg.clone());
+    }
+    None
 }
 
 fn inject_required_extension_args(
     mut args: Vec<String>,
     required_extensions: &[String],
 ) -> Vec<String> {
-    if required_extensions.is_empty() || args_have_extension_override(&args) {
+    let missing_extensions = missing_required_extensions(&args, required_extensions);
+    if missing_extensions.is_empty() {
         return args;
     }
 
@@ -617,25 +833,21 @@ fn inject_required_extension_args(
     };
 
     let insert_at = command_index + 1;
-    for extension in required_extensions.iter().rev() {
+    for extension in missing_extensions.iter().rev() {
         args.insert(insert_at, extension.clone());
         args.insert(insert_at, "--extension".to_string());
     }
     args
 }
 
-fn args_have_extension_override(args: &[String]) -> bool {
-    let mut passthrough = false;
-    args.iter().any(|arg| {
-        if passthrough {
-            return false;
-        }
-        if arg == "--" {
-            passthrough = true;
-            return false;
-        }
-        arg == "--extension" || arg.starts_with("--extension=")
-    })
+fn missing_required_extensions(args: &[String], required_extensions: &[String]) -> Vec<String> {
+    let existing: std::collections::BTreeSet<String> =
+        extension_overrides_from_args(args).into_iter().collect();
+    required_extensions
+        .iter()
+        .filter(|extension| !existing.contains(*extension))
+        .cloned()
+        .collect()
 }
 
 fn command_accepts_extension_override(arg: &str) -> bool {
@@ -650,6 +862,15 @@ mod tests {
     use super::*;
     use crate::cli_surface::Cli;
     use clap::Parser;
+
+    fn command_plan(required_extensions: &[&str]) -> RunnerCommandPlan {
+        RunnerCommandPlan {
+            required_extensions: required_extensions
+                .iter()
+                .map(|extension| extension.to_string())
+                .collect(),
+        }
+    }
 
     #[test]
     fn final_remote_command_remaps_bench_env_path_settings() {
@@ -718,7 +939,7 @@ mod tests {
             "/runner/workspaces/node-project",
             &[],
             None,
-            &["wordpress".to_string()],
+            &command_plan(&["wordpress"]),
         );
 
         assert_eq!(
@@ -783,7 +1004,13 @@ mod tests {
                 "/runner/workspaces/node-project",
                 &[],
                 None,
-                &contract.required_extensions,
+                &command_plan(
+                    &contract
+                        .required_extensions
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                ),
             );
 
             assert_eq!(contract.required_extensions, vec!["wordpress".to_string()]);
@@ -858,7 +1085,13 @@ mod tests {
                 "/runner/workspaces/static-site-importer",
                 &[],
                 None,
-                &contract.required_extensions,
+                &command_plan(
+                    &contract
+                        .required_extensions
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                ),
             );
 
             let wordpress_flag = command
@@ -895,6 +1128,91 @@ mod tests {
     }
 
     #[test]
+    fn runner_command_plan_for_primary_rig_adds_env_provider_extension_and_remaps_settings() {
+        crate::test_support::with_isolated_home(|home| {
+            let primary = home.path().join("primary-static-site-importer");
+            let rig_dir = primary.join("rigs/static-site-importer-fixture-matrix");
+            std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                r#"{
+                    "components": {
+                        "static-site-importer": {
+                            "component_id": "static-site-importer",
+                            "path": "/controller/workspaces/static-site-importer"
+                        }
+                    },
+                    "bench": { "default_component": "static-site-importer" },
+                    "bench_workloads": {
+                        "nodejs": [
+                            {
+                                "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs",
+                                "env_provider_extensions": ["wordpress"]
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("primary rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--path".to_string(),
+                "/controller/workspaces/static-site-importer".to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+                "--setting".to_string(),
+                "bench_env.FIXTURE_ROOT=/controller/workspaces/static-site-importer/fixtures"
+                    .to_string(),
+            ];
+            let path_remaps = vec![LabPathRemap {
+                local: "/controller/workspaces/static-site-importer".to_string(),
+                remote: "/runner/workspaces/static-site-importer".to_string(),
+            }];
+            let plan =
+                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &args,
+                "/runner/workspaces/static-site-importer",
+                &path_remaps,
+                None,
+                &plan,
+            );
+
+            assert_eq!(
+                plan.required_extensions,
+                vec!["nodejs".to_string(), "wordpress".to_string()]
+            );
+            assert_eq!(
+                command,
+                vec![
+                    "/runner/bin/homeboy".to_string(),
+                    "--force-hot".to_string(),
+                    "bench".to_string(),
+                    "--extension".to_string(),
+                    "nodejs".to_string(),
+                    "--extension".to_string(),
+                    "wordpress".to_string(),
+                    "static-site-importer".to_string(),
+                    "--path".to_string(),
+                    "/runner/workspaces/static-site-importer".to_string(),
+                    "--rig".to_string(),
+                    "static-site-importer-fixture-matrix".to_string(),
+                    "--setting".to_string(),
+                    "bench_env.FIXTURE_ROOT=/runner/workspaces/static-site-importer/fixtures"
+                        .to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
     fn final_remote_command_keeps_explicit_extension_override() {
         let args = vec![
             "homeboy".to_string(),
@@ -912,7 +1230,7 @@ mod tests {
             "/runner/workspaces/node-project",
             &[],
             None,
-            &["wordpress".to_string()],
+            &command_plan(&["wordpress"]),
         );
 
         assert_eq!(
@@ -921,6 +1239,8 @@ mod tests {
                 "/runner/bin/homeboy".to_string(),
                 "--force-hot".to_string(),
                 "bench".to_string(),
+                "--extension".to_string(),
+                "wordpress".to_string(),
                 "--extension".to_string(),
                 "custom".to_string(),
                 "node-project".to_string(),
