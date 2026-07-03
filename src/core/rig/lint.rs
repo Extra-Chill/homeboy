@@ -19,6 +19,7 @@ use crate::core::error::{Error, Result};
 /// top-level Data Machine working directory the homeboy-rigs package carries.
 const IGNORED_DIRECTORIES: &[&str] = &[
     ".git",
+    ".homeboy",
     ".claude",
     ".sampleplugin",
     ".datamachine",
@@ -241,12 +242,13 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
     for file in files.iter().filter(|path| portable_source_file(path)) {
         let content = fs::read_to_string(file).unwrap_or_default();
         let rel = display_relative(root, file);
-        if content.contains("/Users/") {
+        let scan_content = portable_scan_content(file, &content);
+        if scan_content.contains("/Users/") {
             failures.push(format!(
                 "{rel}: use $HOME, homedir(), component paths, or settings instead of hard-coded /Users paths"
             ));
         }
-        if content.contains("~/Developer/") || content.contains("$HOME/Developer/") {
+        if scan_content.contains("~/Developer/") || scan_content.contains("$HOME/Developer/") {
             failures.push(format!(
                 "{rel}: use portable component path settings instead of committed ~/Developer or $HOME/Developer checkout paths"
             ));
@@ -267,6 +269,18 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
     }
 
     Ok(failures)
+}
+
+fn portable_scan_content(path: &Path, content: &str) -> String {
+    if matches!(path.extension().and_then(OsStr::to_str), Some("js" | "mjs")) {
+        return content
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    content.to_string()
 }
 
 fn portable_source_file(path: &Path) -> bool {
@@ -642,6 +656,27 @@ mod tests {
         let outcome = aggregate_step("rig-package-lint", "JSON parses", Vec::new());
         assert_eq!(outcome.status, "pass");
         assert_eq!(outcome.error, None);
+    }
+
+    #[test]
+    fn lint_ignores_homeboy_metadata_directory() {
+        assert!(ignored_directory(OsStr::new(".homeboy")));
+    }
+
+    #[test]
+    fn portability_scan_ignores_js_line_comment_path_examples() {
+        let content = "// local path example: /Users/chubes/Developer/project\nconst path = process.env.HOME;\n";
+        let scanned = portable_scan_content(Path::new("tools/run-fixture-matrix.mjs"), content);
+
+        assert!(!scanned.contains("/Users/"));
+    }
+
+    #[test]
+    fn portability_scan_keeps_js_string_paths_actionable() {
+        let content = "const path = '/Users/chubes/Developer/project';\n";
+        let scanned = portable_scan_content(Path::new("tools/run-fixture-matrix.mjs"), content);
+
+        assert!(scanned.contains("/Users/"));
     }
 
     #[test]
