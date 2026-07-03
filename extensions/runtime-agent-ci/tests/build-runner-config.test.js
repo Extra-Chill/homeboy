@@ -10,6 +10,8 @@ const {
   buildConfig,
   buildSecretEnvPlan,
   loopPolicyFromEnv,
+  normalizePathMaterializationPlan,
+  PATH_MATERIALIZATION_PLAN_SCHEMA,
   SECRET_ENV_PLAN_SCHEMA,
 } = require('../provider-adapters');
 const { normalizeProviderPlugin } = require('../lib/full-run-inputs.cjs');
@@ -46,6 +48,53 @@ assert.deepEqual(loopPolicyFromEnv({
   deadline_at: '2030-01-01T00:00:00.000Z',
 });
 
+const pathPlanWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-path-plan-'));
+try {
+  const pathPlan = normalizePathMaterializationPlan({
+    schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+    paths: {
+      runner_workspace_guest_checkout: '/runtime/workspace/example',
+      transcript_host_dir: 'artifacts/transcript',
+      transcript_dir: '/runtime/workspace/example/artifacts/transcript',
+    },
+    runtime_mounts: [{ source: '.', target: '/runtime/workspace/example', metadata: { kind: 'runner-workspace' } }],
+  }, { workspace: pathPlanWorkspace });
+  assert.equal(pathPlan.runner_workspace_guest_checkout, '/runtime/workspace/example');
+  assert.equal(pathPlan.transcript_host_dir, path.join(pathPlanWorkspace, 'artifacts/transcript'));
+  assert.equal(pathPlan.transcript_dir, '/runtime/workspace/example/artifacts/transcript');
+  assert.deepEqual(pathPlan.runtime_mounts, [{
+    type: 'directory',
+    source: pathPlanWorkspace,
+    target: '/runtime/workspace/example',
+    mode: 'readwrite',
+    metadata: { kind: 'runner-workspace' },
+  }]);
+
+  assert.throws(
+    () => normalizePathMaterializationPlan({
+      schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+      paths: { transcript_host_dir: '../outside' },
+    }, { workspace: pathPlanWorkspace }),
+    /transcript_host_dir.*parent-directory|transcript_host_dir.*under GITHUB_WORKSPACE/
+  );
+  assert.throws(
+    () => normalizePathMaterializationPlan({
+      schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+      paths: { transcript_dir: 'relative/transcript' },
+    }, { workspace: pathPlanWorkspace }),
+    /transcript_dir must be an absolute POSIX path/
+  );
+  assert.throws(
+    () => normalizePathMaterializationPlan({
+      schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+      runtime_mounts: [{ source: '.', target: '/runtime/../escape' }],
+    }, { workspace: pathPlanWorkspace }),
+    /runtime_mounts\[0\]\.target.*normalized absolute POSIX path/
+  );
+} finally {
+  fs.rmSync(pathPlanWorkspace, { recursive: true, force: true });
+}
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-config-'));
 try {
   const config = buildConfig({
@@ -76,6 +125,43 @@ try {
   assert.deepEqual(config.secret_env_plan.secret_env_names, config.secret_env);
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+const materializedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-config-path-plan-'));
+try {
+  const config = buildConfig({
+    ...process.env,
+    GITHUB_WORKSPACE: materializedTmpRoot,
+    RUNNER_TEMP: materializedTmpRoot,
+    WORKLOAD_ID: 'path-plan-fixture',
+    TARGET_REPO: 'Extra-Chill/example',
+    PROFILE: 'runtime-agent-ci',
+    RUNTIME_PROFILES: '{}',
+    RUNTIME: 'local-shell',
+    RUNNER_WORKSPACE_CONFIG: '{"enabled":true}',
+    PATH_MATERIALIZATION_PLAN: JSON.stringify({
+      schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+      paths: {
+        runner_workspace_guest_checkout: '/runtime/workspace/example',
+        transcript_host_dir: 'runtime-artifacts/path-plan-fixture',
+        transcript_dir: '/runtime/workspace/example/runtime-artifacts/path-plan-fixture',
+      },
+      runtime_mounts: [{ source: '.', target: '/runtime/workspace/example', mode: 'readwrite' }],
+    }),
+  });
+
+  assert.equal(config.runner_workspace.checkout_path, '/runtime/workspace/example');
+  assert.equal(config.transcript_host_dir, path.join(materializedTmpRoot, 'runtime-artifacts/path-plan-fixture'));
+  assert.equal(config.transcript_dir, '/runtime/workspace/example/runtime-artifacts/path-plan-fixture');
+  assert.deepEqual(config.runtime_mounts, [{
+    type: 'directory',
+    source: materializedTmpRoot,
+    target: '/runtime/workspace/example',
+    mode: 'readwrite',
+  }]);
+  assert.equal(config.path_materialization_plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+} finally {
+  fs.rmSync(materializedTmpRoot, { recursive: true, force: true });
 }
 
 const mappedSecretEnvPlan = buildSecretEnvPlan({
