@@ -20,6 +20,7 @@ pub const PATH_MATERIALIZATION_ROLE_REQUIRED_PATH: &str = "required_path";
 pub const PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT: &str =
     "runner_exec.source_snapshot";
 pub const PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS: &str = "runner_exec.require_paths";
+pub const PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG: &str = "lab.provider_config";
 pub const PATH_MATERIALIZATION_STATUS_MATERIALIZED: &str = "materialized";
 pub const PATH_MATERIALIZATION_STATUS_VALIDATED: &str = "validated";
 
