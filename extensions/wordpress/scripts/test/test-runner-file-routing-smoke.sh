@@ -75,6 +75,7 @@ set -euo pipefail
 echo "WP_CODEBOX_STUB"
 echo "SELECTED=${HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE:-}"
 printf 'CHANGED=%s\n' "${HOMEBOY_CHANGED_TEST_FILES:-}"
+printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:-}"
 printf 'ARGS=%s\n' "$*"
 if [ -n "${WP_CODEBOX_ARGS_FILE:-}" ]; then
     printf '%s\n' "$@" > "${WP_CODEBOX_ARGS_FILE}"
@@ -380,6 +381,7 @@ HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builde
 
 assert_contains "${TMPDIR}/wp-codebox-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-file.out" "Backend: wp-codebox"
+assert_contains "${TMPDIR}/wp-codebox-file.out" "NODE_OPTIONS=--max-old-space-size=8192"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "recipe-run"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "--recipe"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.phpunit"
