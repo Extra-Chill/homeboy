@@ -8,6 +8,7 @@
     "root_files": ["package.json"],
     "optional_files": ["pnpm-workspace.yaml", "pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
   },
+  "lockfile_priority": ["pnpm-lock.yaml", "yarn.lock", "package-lock.json"],
   "capabilities": {
     "discover_project_root": true,
     "select_package_manager": true,
@@ -28,10 +29,33 @@
         "intent": "frozen-lockfile",
         "command": "pnpm install --frozen-lockfile"
       },
+      "commands": {
+        "status": {
+          "command": "pnpm install --frozen-lockfile --offline",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "install": {
+          "command": "pnpm install --frozen-lockfile",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "update": {
+          "command": "pnpm install --lockfile-only",
+          "success_exit_codes": [0],
+          "produces_lockfile": true
+        }
+      },
       "scripts": {
         "manifest": "package.json",
         "run_command": "pnpm run",
         "exec_command": "pnpm exec"
+      },
+      "package_identity": {
+        "manifest": "package.json",
+        "name": "name",
+        "version": "version",
+        "dependencies": ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
       },
       "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
     },
@@ -46,10 +70,33 @@
         "intent": "frozen-lockfile",
         "command": "yarn install --frozen-lockfile"
       },
+      "commands": {
+        "status": {
+          "command": "yarn install --frozen-lockfile --offline",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "install": {
+          "command": "yarn install --frozen-lockfile",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "update": {
+          "command": "yarn install --mode=update-lockfile",
+          "success_exit_codes": [0],
+          "produces_lockfile": true
+        }
+      },
       "scripts": {
         "manifest": "package.json",
         "run_command": "yarn",
         "exec_command": "yarn"
+      },
+      "package_identity": {
+        "manifest": "package.json",
+        "name": "name",
+        "version": "version",
+        "dependencies": ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
       },
       "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
     },
@@ -66,10 +113,33 @@
         "command": "npm ci",
         "fallback_command": "npm install"
       },
+      "commands": {
+        "status": {
+          "command": "npm ci --dry-run",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "install": {
+          "command": "npm ci",
+          "success_exit_codes": [0],
+          "requires_lockfile": true
+        },
+        "update": {
+          "command": "npm install --package-lock-only",
+          "success_exit_codes": [0],
+          "produces_lockfile": true
+        }
+      },
       "scripts": {
         "manifest": "package.json",
         "run_command": "npm run",
         "exec_command": "npx"
+      },
+      "package_identity": {
+        "manifest": "package.json",
+        "name": "name",
+        "version": "version",
+        "dependencies": ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
       },
       "outputs": [{ "kind": "directory", "path": "node_modules", "required": true }]
     }

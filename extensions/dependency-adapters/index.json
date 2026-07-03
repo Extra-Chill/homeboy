@@ -1,0 +1,20 @@
+{
+  "schema": "homeboy-extension/dependency-adapter-index/v1",
+  "manifests": [
+    {
+      "id": "composer-package-manager",
+      "ecosystem": "php",
+      "path": "examples/composer.json"
+    },
+    {
+      "id": "nodejs-package-managers",
+      "ecosystem": "nodejs",
+      "path": "examples/nodejs.json"
+    },
+    {
+      "id": "wordpress-dependency-helpers",
+      "ecosystem": "wordpress",
+      "path": "examples/wordpress.json"
+    }
+  ]
+}

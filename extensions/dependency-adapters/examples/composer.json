@@ -9,6 +9,7 @@
     "root_match": "any",
     "optional_files": ["composer.lock"]
   },
+  "lockfile_priority": ["composer.lock"],
   "capabilities": {
     "discover_project_root": true,
     "select_package_manager": false,
@@ -31,10 +32,32 @@
         "command": "composer install",
         "fallback_command": "composer update"
       },
+      "commands": {
+        "status": {
+          "command": "composer validate --no-check-publish",
+          "success_exit_codes": [0]
+        },
+        "install": {
+          "command": "composer install",
+          "success_exit_codes": [0],
+          "requires_lockfile": false
+        },
+        "update": {
+          "command": "composer update",
+          "success_exit_codes": [0],
+          "produces_lockfile": true
+        }
+      },
       "scripts": {
         "manifest": "composer.json",
         "run_command": "composer run-script",
         "exec_command": "composer exec"
+      },
+      "package_identity": {
+        "manifest": "composer.json",
+        "name": "name",
+        "version": "version",
+        "dependencies": ["require", "require-dev"]
       },
       "outputs": [
         { "kind": "directory", "path": "vendor", "required": true },
