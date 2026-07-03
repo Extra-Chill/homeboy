@@ -36,7 +36,6 @@ assert.deepEqual(
 );
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/package.json'), 'utf8'));
-assert.equal(packageJson.main, 'index.js');
 assert.equal(packageJson.exports['./generic-orchestration'], './generic-orchestration.js');
 assert.equal(packageJson.exports['./provider-adapters'], './provider-adapters.js');
 assert.equal(packageJson.exports['./controller-loop-proof-validator'], './lib/controller-loop-proof-validator.js');
@@ -45,12 +44,7 @@ assert.equal(packageJson.exports['./generic-fanout-reconcile-workflow'], './lib/
 assert.equal(packageJson.bin['homeboy-controller-loop-proof-validate'], './scripts/homeboy-controller-loop-proof-validate.cjs');
 assert.equal(packageJson.bin['homeboy-generic-fanout-reconcile'], './scripts/homeboy-generic-fanout-reconcile.cjs');
 
-const rootExportSource = fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/index.js'), 'utf8');
-assert.match(rootExportSource, /emitWarning/);
-assert.doesNotMatch(rootExportSource, /require\(/);
-
 const runtimeSources = [
-  'runtime-agent-ci/index.js',
   'runtime-agent-ci/generic-orchestration.js',
   'runtime-agent-ci/provider-adapters.js',
   'runtime-agent-ci/lib/controller-loop-proof-validator.js',

@@ -239,16 +239,17 @@ function normalizeControllerExecution(value) {
   }
   return {
     schema: value.schema || 'homeboy/headless-controller-execution/v1',
-		spec,
-		inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
-		policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
-		output: stringValue(value.output || value.output_path || value.outputPath),
-		max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
-		reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale ?? process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
-		replace: booleanValue(value.replace),
-		fork: booleanValue(value.fork),
-		resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
-		prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
+    spec,
+    inputs: stringValue(value.inputs || value.inputs_path || value.inputsPath),
+    policy_result: stringValue(value.policy_result || value.policyResult || value.policy_result_path || value.policyResultPath),
+    output: stringValue(value.output || value.output_path || value.outputPath),
+    max_actions: positiveInteger(value.max_actions || value.maxActions) || 100,
+    reconcile_stale: booleanValue(value.reconcile_stale ?? value.reconcileStale ?? process.env.HOMEBOY_CONTROLLER_RECONCILE_STALE),
+    replace: booleanValue(value.replace),
+    fork: booleanValue(value.fork),
+    resume_existing: booleanValue(value.resume_existing ?? value.resumeExisting),
+    prepare: normalizeArray(value.prepare || value.prepare_commands || value.prepareCommands),
+    env_allowlist: normalizeStringArray(value.env_allowlist || value.envAllowlist || value.runner_env_allowlist || value.runnerEnvAllowlist),
     env: optionalObject(value.env),
     metadata: optionalObject(value.metadata),
   };
@@ -317,7 +318,7 @@ function defaultExecuteControllerExecution(options = {}) {
   if (controllerExecution.output) {
     args.push('--output', controllerExecution.output);
   }
-  args.push(...controllerExecutionRunnerEnvArgs(env));
+  args.push(...controllerExecutionRunnerEnvArgs(env, options));
   args.push(...controllerExecutionRunModeArgs(controllerExecution));
   const run = spawnSync(homeboyBin, args, { cwd, env, encoding: 'utf8' });
   if (run.status !== 0) {
@@ -340,17 +341,12 @@ function defaultExecuteControllerExecution(options = {}) {
   };
 }
 
-function controllerExecutionRunnerEnvArgs(env = {}) {
-  const names = [
-    'HOMEBOY_WP_CODEBOX_BIN',
-    'WP_CODEBOX_BIN',
-    'HOMEBOY_WP_CODEBOX_CORE_MODULE',
-    'WP_CODEBOX_CORE_MODULE',
-    'HOMEBOY_AGENT_RUNTIME_PROVIDER',
-    'HOMEBOY_AGENT_RUNTIME_MODEL',
-    'HOMEBOY_AGENT_RUNTIME_PROVIDER_PLUGIN_PATHS',
-    'HOMEBOY_AGENT_RUNTIME_SECRET_ENV',
-  ];
+function controllerExecutionRunnerEnvArgs(env = {}, options = {}) {
+  const names = uniqueStrings([
+    ...normalizeArray(options.controllerExecution?.env_allowlist || options.controllerExecution?.envAllowlist || options.controller_execution?.env_allowlist || options.controller_execution?.envAllowlist),
+    ...normalizeArray(options.runtime?.executor?.invocation?.env_allowlist || options.runtime?.executor?.invocation?.envAllowlist),
+    ...normalizeArray(options.runtime?.manifest?.runner_config_projection?.runner_env_allowlist || options.runtime?.manifest?.runner_config_projection?.runnerEnvAllowlist),
+  ]);
   return names.flatMap((name) => {
     const value = env[name];
     return typeof value === 'string' && value !== '' ? ['--runner-env', `${name}=${value}`] : [];
@@ -1203,6 +1199,14 @@ function optionalNullableObject(value) {
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function normalizeStringArray(value) {
+  return normalizeArray(value).filter((entry) => typeof entry === 'string' && entry.trim() !== '');
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(normalizeStringArray(values)));
 }
 
 function stringValue(value) {

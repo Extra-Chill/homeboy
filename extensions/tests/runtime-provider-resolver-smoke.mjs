@@ -50,6 +50,12 @@ assert.equal(runtime.executor.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(runtime.executor.backend, 'wp-codebox');
 assert.equal(runtime.executor.path, path.join(rootDir, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
 assert.equal(runtime.executor.capabilities.includes('agent_bundle_execution'), true);
+assert.deepEqual(runtime.executor.invocation.env_allowlist, [
+	'HOMEBOY_WP_CODEBOX_BIN',
+	'WP_CODEBOX_BIN',
+	'HOMEBOY_WP_CODEBOX_CORE_MODULE',
+	'WP_CODEBOX_CORE_MODULE',
+]);
 assert.deepEqual(runtime.executor.runtime_execution_contracts.bundle, {
 	ability_field: 'runtime_bundle_ability',
 	required_capabilities: ['agent_bundle_execution'],
