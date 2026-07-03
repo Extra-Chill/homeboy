@@ -39,6 +39,8 @@ assert.equal(typeof wordpress.normalizeWordPressRuntimeSurfaceDiscovery, 'functi
 assert.equal(typeof wordpress.buildWordPressRuntimeSurfaceCoverageManifest, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzPlanFromSurfaces, 'function');
 assert.equal(typeof wordpress.compileWordPressFuzzCampaign, 'function');
+assert.equal(typeof wordpress.runWordPressFuzzCampaign, 'function');
+assert.equal(typeof wordpress.validateWordPressFuzzCampaignArtifacts, 'function');
 assert.equal(typeof wordpress.detectWordPressFuzzPlanResultGaps, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRunnerResult, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRuntimeTaskRequest, 'function');
