@@ -378,11 +378,12 @@ fn hydrated_executor_input_value(
 }
 
 fn provider_boundary_projection(input: &Value) -> Value {
-    let executor_config = input
+    let mut executor_config = input
         .get("executor")
         .and_then(|executor| executor.get("config"))
         .cloned()
         .unwrap_or(Value::Null);
+    normalize_runtime_env_path_aliases_for_replay(&mut executor_config);
     let runtime_task = input
         .get("inputs")
         .and_then(|inputs| inputs.get("runtime_task"))
@@ -398,11 +399,88 @@ fn provider_boundary_projection(input: &Value) -> Value {
     json!({
         "runtime_task": runtime_task,
         "provider_config": executor_config,
-        "runtime_component_paths": input.pointer("/executor/config/runtime_component_paths").cloned().unwrap_or(Value::Null),
-        "runtime_env": input.pointer("/executor/config/runtime_env").cloned().unwrap_or(Value::Null),
+        "runtime_component_paths": executor_config.get("runtime_component_paths").cloned().unwrap_or(Value::Null),
+        "runtime_env": executor_config.get("runtime_env").cloned().unwrap_or(Value::Null),
         "artifact_declarations": input.get("artifact_declarations").cloned().unwrap_or(Value::Null),
         "package_descriptor": package_descriptor,
     })
+}
+
+fn normalize_runtime_env_path_aliases_for_replay(config: &mut Value) {
+    let aliases = runtime_env_path_aliases_for_replay(config);
+    if aliases.is_empty() {
+        return;
+    }
+
+    let Some(root) = config.as_object_mut() else {
+        return;
+    };
+    let component_paths = root
+        .get("runtime_component_paths")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if component_paths.is_empty() {
+        return;
+    }
+
+    if !root.get("runtime_env").is_some_and(Value::is_object) {
+        root.insert(
+            "runtime_env".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+    }
+
+    let Some(runtime_env) = root.get_mut("runtime_env").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (component_key, env_name) in aliases {
+        if let Some(selected_path) = component_paths
+            .get(&component_key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            runtime_env.insert(env_name, Value::String(selected_path));
+        }
+    }
+}
+
+fn runtime_env_path_aliases_for_replay(config: &Value) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    if let Some(map) = config
+        .get("runtime_env_path_aliases")
+        .and_then(Value::as_object)
+    {
+        for (component_key, env_names) in map {
+            collect_runtime_env_aliases_for_replay(component_key, env_names, &mut aliases);
+        }
+    }
+    if let Some(map) = config.get("runtime_env_aliases").and_then(Value::as_object) {
+        for (env_name, component_key) in map {
+            if let Some(component_key) = component_key.as_str() {
+                aliases.push((component_key.to_string(), env_name.to_string()));
+            }
+        }
+    }
+    aliases
+}
+
+fn collect_runtime_env_aliases_for_replay(
+    component_key: &str,
+    value: &Value,
+    aliases: &mut Vec<(String, String)>,
+) {
+    match value {
+        Value::String(env_name) => aliases.push((component_key.to_string(), env_name.to_string())),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(env_name) = item.as_str() {
+                    aliases.push((component_key.to_string(), env_name.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Serialize)]
