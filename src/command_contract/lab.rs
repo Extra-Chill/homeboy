@@ -446,7 +446,7 @@ impl RunnerHandoffEnvelope {
         };
         let evidence = RunnerHandoffEvidence {
             schema: "homeboy/runner-handoff-evidence/v1".to_string(),
-            status: "handoff_complete".to_string(),
+            status: "running".to_string(),
             runner_id: runner_id.to_string(),
             runner_job_id: job_id.to_string(),
             run_id: mirror_run_id.clone(),
@@ -472,7 +472,7 @@ impl RunnerHandoffEnvelope {
         };
         Self {
             schema: RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
-            status: "handoff_complete".to_string(),
+            status: "running".to_string(),
             execution_location: format!("runner:{runner_id}"),
             identity: AgentTaskDispatchIdentity {
                 runner_id: runner_id.to_string(),
@@ -495,45 +495,46 @@ impl RunnerHandoffEnvelope {
     }
 
     pub fn runner_execution_record(&self) -> RunnerExecutionRecord {
-        RunnerExecutionRecord::terminal(
-            self.job_id.clone(),
-            self.runner_id.clone(),
-            "daemon",
-            if self.status == "handoff_complete" {
-                0
-            } else {
-                1
-            },
-        )
-        .with_job_id(self.job_id.clone())
-        .with_mirror_run_id(
-            self.mirror_run_id
-                .clone()
-                .or_else(|| self.persisted_run_id.clone())
-                .or_else(|| self.durable_run_id.clone()),
-        )
-        .with_path_materialization_plan(PathMaterializationPlan::non_empty(vec![
-            PathMaterializationEntry::primary_workspace_materialized(
-                PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
-                None,
-                self.remote_cwd.clone(),
-                PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
-            ),
-        ]))
-        .with_artifact_refs(self.evidence.artifact_refs.iter().map(|artifact| {
-            RunnerExecutionArtifactRef {
-                id: artifact.id.clone(),
-                name: artifact.name.clone(),
-                path: artifact.path.clone(),
-                url: artifact.url.clone(),
-            }
-        }))
-        .with_next_actions(self.evidence.next_commands.iter().map(|command| {
-            RunnerExecutionNextAction {
-                label: command.label.clone(),
-                command: command.command.clone(),
-            }
-        }))
+        let record = if self.status == "running" {
+            RunnerExecutionRecord::in_flight(self.job_id.clone(), self.runner_id.clone(), "daemon")
+        } else {
+            RunnerExecutionRecord::terminal(
+                self.job_id.clone(),
+                self.runner_id.clone(),
+                "daemon",
+                if self.status == "succeeded" { 0 } else { 1 },
+            )
+        };
+        record
+            .with_job_id(self.job_id.clone())
+            .with_mirror_run_id(
+                self.mirror_run_id
+                    .clone()
+                    .or_else(|| self.persisted_run_id.clone())
+                    .or_else(|| self.durable_run_id.clone()),
+            )
+            .with_path_materialization_plan(PathMaterializationPlan::non_empty(vec![
+                PathMaterializationEntry::primary_workspace_materialized(
+                    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+                    None,
+                    self.remote_cwd.clone(),
+                    PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+                ),
+            ]))
+            .with_artifact_refs(self.evidence.artifact_refs.iter().map(|artifact| {
+                RunnerExecutionArtifactRef {
+                    id: artifact.id.clone(),
+                    name: artifact.name.clone(),
+                    path: artifact.path.clone(),
+                    url: artifact.url.clone(),
+                }
+            }))
+            .with_next_actions(self.evidence.next_commands.iter().map(|command| {
+                RunnerExecutionNextAction {
+                    label: command.label.clone(),
+                    command: command.command.clone(),
+                }
+            }))
     }
 
     pub fn run_outcome_envelope(&self) -> RunOutcomeEnvelope {

@@ -83,4 +83,11 @@ pub enum LabOffloadOutcome {
         exit_code: i32,
         output_file_content: Option<String>,
     },
+    InFlight {
+        plan: HomeboyPlan,
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        output_file_content: Option<String>,
+    },
 }
