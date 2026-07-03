@@ -120,6 +120,7 @@ pub struct LabRoutePlan {
     pub label: String,
     pub portability: CommandPortability,
     pub source_policy: CommandSourcePolicy,
+    pub source_materialization: CommandSourceMaterialization,
     pub workspace_policy: CommandWorkspacePolicy,
     pub output_contract: CommandOutputContract,
     pub required_extensions: Vec<String>,
@@ -137,6 +138,7 @@ impl LabRoutePlan {
             label: label.into(),
             portability: CommandPortability::Portable,
             source_policy: CommandSourcePolicy::ControllerCwdOrExplicitPath,
+            source_materialization: CommandSourceMaterialization::ControllerCwdAsPathArg,
             workspace_policy: CommandWorkspacePolicy::ChangedSinceGitElseSnapshot,
             output_contract: CommandOutputContract::inherit(),
             required_extensions: Vec::new(),
@@ -159,4 +161,11 @@ impl LabRoutePlan {
             CommandPortability::LocalOnly { reason } => Some(reason),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSourceMaterialization {
+    None,
+    ControllerCwdAsPathArg,
 }
