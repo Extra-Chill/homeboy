@@ -78,6 +78,13 @@ impl DependencyProviderAdapter for NpmDependencyProvider {
         let install = npm_install_command(path);
         Ok(Some(run_dependency_provider_command(&install, "install")?))
     }
+
+    fn install_command(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(Some(npm_install_command(context.path)))
+    }
 }
 
 fn npm_install_command(path: &Path) -> DependencyProviderCommand {

@@ -254,6 +254,54 @@ pub fn install_for_resolved(
     }))
 }
 
+/// A single provider's dependency-install command for a detected workspace,
+/// without executing it. Produced by [`dependency_install_plan`] so callers
+/// (e.g. Lab workspace hydration) can detect providers on the controller using
+/// the existing machinery and run the same install command on a runner (#7366).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DependencyInstallPlanStep {
+    /// Dependency-provider id (e.g. `composer`, `npm`) reporting the manifest
+    /// that triggered detection. Matches the `package_manager` reported by
+    /// `deps status` for the same provider.
+    pub provider_id: String,
+    /// Full install argv (program + args) the provider would run, e.g.
+    /// `["composer", "install", "--no-interaction", "--no-progress"]`.
+    pub command: Vec<String>,
+}
+
+/// Detect dependency providers for a workspace path and return the install
+/// command each would run, without executing any of them.
+///
+/// Reuses [`provider::resolve_dependency_providers_optional`] (the detection
+/// behind `homeboy deps install`) so a lockfile/manifest detected by an existing
+/// provider surfaces its install command here: `composer.json` →
+/// `composer install`, `package.json`/`package-lock.json` → `npm ci`/`npm
+/// install`, and so on for whatever providers `deps.rs` already implements.
+/// Providers whose install cannot be expressed as a standalone shell command
+/// (component-script/extension providers) are omitted. Returns an empty vector
+/// when no provider detects the workspace.
+///
+/// The lockfile/manifest files are part of the synced snapshot (only built
+/// dependency trees like `vendor/`/`node_modules/` are excluded), so detecting
+/// against the controller-side source path yields the same providers the
+/// materialized runner workspace exposes.
+pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanStep>> {
+    let (component, resolved_path) =
+        resolve_component_path(None, Some(&path.display().to_string()))?;
+    let providers = provider::resolve_dependency_providers_optional(&component, &resolved_path)?;
+    let mut steps = Vec::new();
+    for provider in providers {
+        let status = provider.status(&component, &resolved_path, None)?;
+        if let Some(command) = provider.install_command(&component, &resolved_path)? {
+            steps.push(DependencyInstallPlanStep {
+                provider_id: status.package_manager,
+                command: command.argv(),
+            });
+        }
+    }
+    Ok(steps)
+}
+
 fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {
     let mut build_component = component.clone();
     build_component.local_path = path.display().to_string();
@@ -362,5 +410,57 @@ fn combine_provider_statuses(
         component_path: path.display().to_string(),
         package_manager,
         packages,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_install_plan_detects_composer_lockfile() {
+        let _guard = crate::test_support::home_env_guard();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
+
+        let plan = dependency_install_plan(project.path()).expect("composer plan");
+
+        assert!(plan.iter().any(|step| {
+            step.provider_id == "composer"
+                && step.command
+                    == vec![
+                        "composer".to_string(),
+                        "install".to_string(),
+                        "--no-interaction".to_string(),
+                        "--no-progress".to_string(),
+                    ]
+        }));
+    }
+
+    #[test]
+    fn dependency_install_plan_detects_npm_package_lock() {
+        let _guard = crate::test_support::home_env_guard();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("package.json"), "{}").expect("package json");
+        std::fs::write(project.path().join("package-lock.json"), "{}").expect("package lock");
+
+        let plan = dependency_install_plan(project.path()).expect("npm plan");
+
+        assert!(plan.iter().any(|step| {
+            step.provider_id == "npm" && step.command == vec!["npm".to_string(), "ci".to_string()]
+        }));
+    }
+
+    #[test]
+    fn dependency_install_plan_skips_when_no_provider_detects() {
+        let _guard = crate::test_support::home_env_guard();
+        let project = tempfile::tempdir().expect("project tempdir");
+
+        let plan = dependency_install_plan(project.path()).expect("empty plan");
+
+        assert!(
+            plan.is_empty(),
+            "no lockfile/manifest should yield no steps: {plan:?}"
+        );
     }
 }

@@ -111,6 +111,7 @@ pub fn route_after_parse(
                 cli.lab_only,
             ),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+            skip_deps_hydration: cli.skip_deps_hydration,
             capture_patch: capture_mutation_patch,
             mutation_flag,
             timeout: lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),

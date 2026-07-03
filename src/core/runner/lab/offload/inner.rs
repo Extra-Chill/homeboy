@@ -520,6 +520,23 @@ pub(crate) fn run_lab_offload_inner(
         ensure_remote_lab_artifact_dir(runner_id, output_file)?;
     }
 
+    // Dependency hydration (#7366): the snapshot sync excludes built dependency
+    // trees (vendor/, node_modules/, target/), so the materialized runner
+    // workspace has manifests/lockfiles but no installed dependencies. Before
+    // the executor starts, run the detected provider install (composer install,
+    // npm ci, ...) in the workspace root so the agent/task workspace is ready
+    // without depending on model cooperation. Only agent-task exec jobs run
+    // agent/task work in the workspace; patch-only/read paths skip hydration.
+    let dependency_hydration = hydrate_for_agent_task_exec(
+        agent_task_run_id.is_some(),
+        request.skip_deps_hydration,
+        runner_id,
+        &synced.local_path,
+        &remote_cwd,
+        plan,
+    )?;
+    plan = dependency_hydration.plan;
+
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
         redact_argv_display(&command),
@@ -558,6 +575,8 @@ pub(crate) fn run_lab_offload_inner(
     );
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
+    lab_metadata["dependency_hydration"] =
+        dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_materialization_plan"] =
         serde_json::to_value(&synced.materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =

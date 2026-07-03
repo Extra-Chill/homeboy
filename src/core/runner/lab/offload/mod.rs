@@ -19,6 +19,7 @@
 mod errors;
 mod execute;
 mod fallback_commands;
+mod hydration;
 mod inner;
 mod metadata;
 mod overhead;
@@ -136,6 +137,7 @@ use super::workspace_plan::{
 pub(crate) use errors::*;
 pub(crate) use execute::*;
 pub(crate) use fallback_commands::*;
+pub(crate) use hydration::*;
 pub(crate) use inner::*;
 pub(crate) use metadata::*;
 pub(crate) use overhead::*;
