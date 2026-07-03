@@ -148,6 +148,40 @@ fn provider_preserves_structured_outcome_from_stderr_when_stdout_empty() {
 }
 
 #[test]
+fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
+    let command = format!(
+        "node {}",
+        script("process.stderr.write('x'.repeat(20000) + 'runtime contract constants are incomplete'); process.exit(42);")
+    );
+    let (request, provider) = request("task-empty-stdout", command);
+
+    let outcome = run_provider_command(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_empty_stdout"
+    );
+    assert_eq!(outcome.diagnostics[0].data["exit_code"], json!(42));
+    assert_eq!(outcome.diagnostics[0].data["stderr_truncated"], json!(true));
+    assert!(
+        outcome.diagnostics[0].data["stderr_bytes"]
+            .as_u64()
+            .expect("stderr byte count")
+            > 16_384
+    );
+    let stderr = outcome.diagnostics[0].data["stderr"]
+        .as_str()
+        .expect("stderr capture");
+    assert!(stderr.contains("runtime contract constants are incomplete"));
+    assert!(stderr.len() <= 16 * 1024);
+    assert!(outcome
+        .evidence_refs
+        .iter()
+        .any(|reference| reference.kind == "executor-result"));
+}
+
+#[test]
 fn provider_timeout_returns_structured_outcome() {
     let command = format!("node {}", script("setInterval(() => {}, 1000);"));
     let (mut request, provider) = request("task-timeout", command);

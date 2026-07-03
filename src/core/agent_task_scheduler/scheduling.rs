@@ -598,12 +598,14 @@ impl AgentTaskScheduleSupport {
         if let Some(running) = running {
             Self::normalize_required_typed_artifacts(&mut outcome, &running.request);
             Self::recover_missing_typed_artifacts_wrapper_failure(&mut outcome, &running.request);
+            Self::classify_failed_nested_executor_status(&mut outcome);
+            Self::classify_incomplete_executor_result(&mut outcome);
             Self::classify_missing_required_typed_artifacts(&mut outcome, &running.request);
             Self::classify_invalid_required_typed_artifacts(&mut outcome, &running.request);
+        } else {
+            Self::classify_failed_nested_executor_status(&mut outcome);
+            Self::classify_incomplete_executor_result(&mut outcome);
         }
-
-        Self::classify_failed_nested_executor_status(&mut outcome);
-        Self::classify_incomplete_executor_result(&mut outcome);
 
         if let Some(running) = running {
             if let Some(timeout_ms) = running.timeout_ms {
@@ -817,6 +819,7 @@ impl AgentTaskScheduleSupport {
                 "path": failed_status.path,
                 "key": failed_status.key,
                 "value": failed_status.value,
+                "provider_run_result": outcome.outputs.get("provider_run_result").cloned(),
             }),
         });
     }
