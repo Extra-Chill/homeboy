@@ -27,6 +27,8 @@ The `test` command resolves the component's linked extension with `test` capabil
 - `--drift`: Cross-reference production changes with test files
 - `--write`: Write fixes to disk for workflows that support it
 - `--since <REF>`: Git ref for drift detection (default `HEAD~10`)
+- `--settings-json-file <FILE>`: Load typed setting overrides from a JSON object file; repeatable
+- `--settings-profile <FILE>`: Alias for `--settings-json-file`
 - `--setting <key=value>`: Override component settings (can be used multiple times)
 - `--setting-json <key=json>`: Override component settings with typed JSON values
 - `--path <PATH>`: Override component `local_path` for this run
@@ -49,6 +51,9 @@ homeboy test my-component --skip-lint
 
 # Test with multiple setting overrides
 homeboy test my-component --setting database_type=mysql --setting mysql_database=test_db
+
+# Load a reusable settings profile, then override one setting explicitly
+homeboy test my-component --settings-json-file ./test-settings.json --setting database_type=mysql
 
 # Reproduce an extension-declared CI test job through the test workflow
 homeboy test my-component --ci-job unit
@@ -80,7 +85,9 @@ For a component to be testable, it must have:
 
 ## Settings
 
-Settings are extension-defined. Use `--setting key=value` for string values and `--setting-json key=<json>` when the runner expects typed values such as objects, arrays, booleans, numbers, or null.
+Settings are extension-defined. Use `--settings-json-file <FILE>` or `--settings-profile <FILE>` to load a JSON object whose top-level keys are setting names. Use `--setting key=value` for explicit string values and `--setting-json key=<json>` when the runner expects typed values such as objects, arrays, booleans, numbers, or null.
+
+Merge order is extension defaults, component settings, settings profile files, explicit `--setting`, then explicit `--setting-json`. Later values win for the same key, so command-line overrides take precedence over profile files.
 
 ## Output
 

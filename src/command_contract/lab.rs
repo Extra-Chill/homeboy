@@ -1267,8 +1267,11 @@ mod extension_ids {
                 component_id: args.comp.component.clone(),
                 path_override: args.comp.path.clone(),
                 capability,
-                settings_overrides: args.setting_args.setting.clone(),
-                settings_json_overrides: args.setting_args.setting_json.clone(),
+                settings_profile_json_overrides: args
+                    .setting_args
+                    .settings_profile_json_overrides()?,
+                settings_overrides: args.setting_args.settings_overrides()?,
+                settings_json_overrides: args.setting_args.settings_json_overrides()?,
                 extension_overrides: args.extension_override.extensions.clone(),
             })
         };
@@ -1298,6 +1301,7 @@ mod extension_ids {
                 path_override: args.comp.path.clone(),
                 capability,
                 settings_overrides: Vec::new(),
+                settings_profile_json_overrides: Vec::new(),
                 settings_json_overrides: Vec::new(),
                 extension_overrides: args.extension_override.extensions.clone(),
             })

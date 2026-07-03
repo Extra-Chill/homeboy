@@ -11,6 +11,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             rig: Some("package-fuzz".to_string()),
             extension_override: ExtensionOverrideArgs { extensions: vec![] },
             setting_args: SettingArgs {
+                settings_json_file: vec![],
                 setting: vec![],
                 setting_json: vec![],
             },
@@ -1187,6 +1188,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             rig: Some("package-fuzz".to_string()),
             extension_override: ExtensionOverrideArgs { extensions: vec![] },
             setting_args: SettingArgs {
+                settings_json_file: vec![],
                 setting: vec![],
                 setting_json: vec![],
             },
