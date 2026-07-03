@@ -14,6 +14,12 @@ use crate::commands::agent_task;
 use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
+use crate::core::run_outcome_envelope::RunOutcomeEnvelope;
+use crate::core::runner_execution_envelope::{
+    PathMaterializationEntry, PathMaterializationPlan, RunnerExecutionArtifactRef,
+    RunnerExecutionNextAction, RunnerExecutionRecord, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+};
 use std::collections::BTreeSet;
 
 use super::spec::{
@@ -459,6 +465,52 @@ impl RunnerHandoffEnvelope {
             evidence,
             follow_commands,
         }
+    }
+
+    pub fn runner_execution_record(&self) -> RunnerExecutionRecord {
+        RunnerExecutionRecord::terminal(
+            self.job_id.clone(),
+            self.runner_id.clone(),
+            "daemon",
+            if self.status == "handoff_complete" {
+                0
+            } else {
+                1
+            },
+        )
+        .with_job_id(self.job_id.clone())
+        .with_mirror_run_id(
+            self.mirror_run_id
+                .clone()
+                .or_else(|| self.persisted_run_id.clone())
+                .or_else(|| self.durable_run_id.clone()),
+        )
+        .with_path_materialization_plan(PathMaterializationPlan::non_empty(vec![
+            PathMaterializationEntry::primary_workspace_materialized(
+                PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+                None,
+                self.remote_cwd.clone(),
+                PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+            ),
+        ]))
+        .with_artifact_refs(self.evidence.artifact_refs.iter().map(|artifact| {
+            RunnerExecutionArtifactRef {
+                id: artifact.id.clone(),
+                name: artifact.name.clone(),
+                path: artifact.path.clone(),
+                url: artifact.url.clone(),
+            }
+        }))
+        .with_next_actions(self.evidence.next_commands.iter().map(|command| {
+            RunnerExecutionNextAction {
+                label: command.label.clone(),
+                command: command.command.clone(),
+            }
+        }))
+    }
+
+    pub fn run_outcome_envelope(&self) -> RunOutcomeEnvelope {
+        RunOutcomeEnvelope::from_runner_execution_record(&self.runner_execution_record())
     }
 }
 
