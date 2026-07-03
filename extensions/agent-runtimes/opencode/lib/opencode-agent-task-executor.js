@@ -63,7 +63,6 @@ const OPENCODE_PROCESS_ENV_ALLOWLIST = [
 	'SHELL',
 	'TMPDIR',
 	'USER',
-	'HOMEBOY_OPENCODE_COMMAND',
 	'HOMEBOY_OPENCODE_COMMAND_ARGS',
 ];
 
@@ -81,12 +80,11 @@ const OPENCODE_RUNNER_READINESS = [
 		id: 'opencode.executable',
 		label: 'OpenCode executable',
 		executable: {
-			env: ['HOMEBOY_OPENCODE_COMMAND'],
 			candidates: ['opencode'],
 			version_command: ['--version'],
-			install_hint: 'Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias.',
+			install_hint: 'Install OpenCode or set the generic runtime_bin executor config.',
 		},
-		remediation: 'Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias.',
+		remediation: 'Install OpenCode or set the generic runtime_bin executor config.',
 	},
 ];
 
@@ -508,7 +506,7 @@ function objectValue(value) {
 }
 
 function resolveCommandSpec(config = {}, options = {}) {
-	const configuredCommand = options.command || config.runtime_bin || config.runtimeBin || config.command || process.env.HOMEBOY_OPENCODE_COMMAND || 'opencode';
+	const configuredCommand = options.command || config.runtime_bin || config.runtimeBin || config.command || 'opencode';
 	const configuredArgs = options.commandArgs || config.command_args || parseEnvCommandArgs();
 	if (typeof configuredCommand !== 'string' || configuredCommand.trim() === '') {
 		return { error: 'executor.config.command must be a non-empty string when provided.' };

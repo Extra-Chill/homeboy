@@ -116,12 +116,11 @@
           "id": "opencode.executable",
           "label": "OpenCode executable",
           "executable": {
-            "env": ["HOMEBOY_OPENCODE_COMMAND"],
             "candidates": ["opencode"],
             "version_command": ["--version"],
-            "install_hint": "Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias."
+            "install_hint": "Install OpenCode or set the generic runtime_bin executor config."
           },
-          "remediation": "Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias."
+          "remediation": "Install OpenCode or set the generic runtime_bin executor config."
         }
       ],
       "workspace_tools": {

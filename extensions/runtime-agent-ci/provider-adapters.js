@@ -10,4 +10,5 @@ Object.assign(module.exports, require('./lib/agent-task-outcome-normalizer'));
 Object.assign(module.exports, require('./lib/runtime-contracts.cjs'));
 Object.assign(module.exports, require('./lib/secret-env-plan.cjs'));
 Object.assign(module.exports, require('./lib/path-materialization-plan.cjs'));
+Object.assign(module.exports, require('./lib/materialize-dependencies.cjs'));
 Object.assign(module.exports, require('./lib/full-run-config.cjs'));

@@ -2,8 +2,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { normalizeProviderPlugin } = require('../../../.github/scripts/runtime-agent-full-run/lib/common.cjs');
-const { resolveDependencyTarget, runtimeDependencyEntries } = require('../../../.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs');
+const { normalizeProviderPlugin } = require('../../../runtime-agent-ci/lib/full-run-inputs.cjs');
+const { resolveDependencyTarget, runtimeDependencyEntries } = require('../../../runtime-agent-ci/lib/materialize-dependencies.cjs');
 
 function setupRuntime({ phase, workspace, env = process.env, run }) {
   // After the runtime's build commands run, the wp-codebox CLI exists in the

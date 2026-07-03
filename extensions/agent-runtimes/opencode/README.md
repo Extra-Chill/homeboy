@@ -48,8 +48,8 @@ OPENCODE_CONFIG_CONTENT='{"model":"opencode-go/kimi-k2.7-code","agent":{"build":
 ```
 
 The OpenCode binary is resolved from `executor.config.runtime_bin`,
-`executor.config.command`, `HOMEBOY_OPENCODE_COMMAND`, or `opencode` in that
-order. Additional leading command args may be supplied with
+`executor.config.command`, or `opencode` in that order. Additional leading
+command args may be supplied with
 `executor.config.command_args` or `HOMEBOY_OPENCODE_COMMAND_ARGS` as a JSON array.
 
 The outcome includes status, diagnostics, and bounded metadata. It intentionally
