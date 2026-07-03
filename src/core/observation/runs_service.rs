@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, ObservationStore,
-    RunListFilter, RunRecord,
+    RunListFilter, RunRecord, RunStatus,
 };
 use crate::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use crate::core::engine::temp::CleanupSizeTotals;
@@ -216,6 +216,28 @@ mod run_lookup {
                 "Warning: could not refresh mirrored Lab runner evidence for `{run_id}`: {}",
                 err.message
             );
+        }
+    }
+
+    /// Best-effort refresh of all locally-running Lab runner mirror records.
+    ///
+    /// A controller can exit, disconnect, or time out while the runner daemon keeps
+    /// executing the job. Refreshing before list/reconcile reads lets the local
+    /// observation store converge on the daemon's terminal state without requiring
+    /// operators to know and run `runs show <mirror-run-id>` first.
+    pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationStore) {
+        let runs = store
+            .list_runs(RunListFilter {
+                status: Some(RunStatus::Running.as_str().to_string()),
+                limit: Some(1000),
+                ..Default::default()
+            })
+            .unwrap_or_default();
+
+        for run in runs {
+            if crate::core::runners::mirrored_runner_job_identity(&run).is_some() {
+                refresh_mirrored_daemon_evidence_best_effort(&run.id);
+            }
         }
     }
 }

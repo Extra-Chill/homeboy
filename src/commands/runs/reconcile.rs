@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
-    run_owner_pid, ObservationStore, RunListFilter, RunRecord, RunStatus,
+    run_owner_pid, runs_service, ObservationStore, RunListFilter, RunRecord, RunStatus,
 };
 use homeboy::core::process::pid_is_running;
 
@@ -47,6 +47,7 @@ pub struct ReconciledRunSummary {
 
 pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
+    runs_service::refresh_running_mirrored_daemon_evidence_best_effort(&store);
     let inspected = store
         .list_runs(RunListFilter {
             status: Some(RunStatus::Running.as_str().to_string()),
