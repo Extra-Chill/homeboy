@@ -542,7 +542,7 @@ fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
 }
 
 #[test]
-fn runner_job_matrix_summary_result_refs_exclude_related_lab_run_artifacts() {
+fn runner_job_artifact_listing_excludes_related_lab_run_artifacts() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -608,7 +608,7 @@ fn runner_job_matrix_summary_result_refs_exclude_related_lab_run_artifacts() {
             panic!("expected artifacts output");
         };
 
-        assert!(output
+        assert!(!output
             .artifacts
             .iter()
             .any(|artifact| artifact.id == remote_artifact.id));
