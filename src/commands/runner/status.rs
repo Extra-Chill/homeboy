@@ -7,8 +7,8 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::runners::{
-    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerSession, RunnerStatusReport,
-    RunnerTunnelMode,
+    self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
+    RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
 };
 
 use super::super::CmdResult;
@@ -163,52 +163,41 @@ pub(super) fn lab_runner_homeboy_output(
     configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> LabRunnerHomeboyOutput {
-    let controller_version = env!("CARGO_PKG_VERSION").to_string();
-    let controller_build_identity = homeboy::core::build_identity::current().display;
-    let active_daemon_version = status
-        .session
-        .as_ref()
-        .map(|session| session.homeboy_version.clone());
-    let version_drift = active_daemon_version
-        .as_ref()
-        .is_some_and(|version| version != &controller_version);
+    let materialization =
+        RuntimeMaterializationStatus::for_homeboy_runner(runner_id, configured_executable, status);
     let stale_daemon = status.stale_daemon.as_ref();
-    let binary_roles = runner_homeboy_binary_roles(
-        configured_executable,
-        &status.session,
-        &active_daemon_version,
-    );
+    let binary_roles: Vec<_> = materialization
+        .binary_sources
+        .iter()
+        .map(runner_homeboy_binary_role)
+        .collect();
     let controller_cli = binary_roles[0].clone();
     let active_daemon = binary_roles[1].clone();
     let configured_job_binary = binary_roles[2].clone();
+    let has_drift = materialization.has_drift();
     LabRunnerHomeboyOutput {
-        controller_version,
-        controller_build_identity,
-        configured_executable: configured_executable.to_string(),
+        controller_version: materialization.controller_version,
+        controller_build_identity: materialization.controller_build_identity,
+        configured_executable: materialization.configured_executable,
         controller_cli,
         active_daemon,
         configured_job_binary,
         binary_roles,
         workflow_binary_guidance: runner_workflow_binary_guidance(),
-        active_daemon_version,
-        active_daemon_build_identity: status
-            .session
-            .as_ref()
-            .and_then(|session| session.homeboy_build_identity.clone()),
-        job_command_binary_version: stale_daemon
-            .map(|warning| warning.job_command_binary_version.clone()),
-        job_command_binary_build_identity: stale_daemon
-            .and_then(|warning| warning.job_command_binary_build_identity.clone()),
-        stale_daemon_severity: stale_daemon.map(|warning| warning.severity.to_string()),
-        stale_daemon_refresh_command: stale_daemon.map(|warning| warning.refresh_command.clone()),
+        active_daemon_version: materialization.active_daemon_version,
+        active_daemon_build_identity: materialization.active_daemon_build_identity,
+        job_command_binary_version: materialization.job_command_binary_version,
+        job_command_binary_build_identity: materialization.job_command_binary_build_identity,
+        stale_daemon_severity: materialization.stale_daemon_severity.map(str::to_string),
+        stale_daemon_refresh_command: materialization.stale_daemon_refresh_command,
         stale_daemon: stale_daemon.and_then(|warning| serde_json::to_value(warning).ok()),
-        version_drift,
+        version_drift: materialization.version_drift,
         command_availability_checks: lab_command_availability_checks(configured_executable),
         artifact_features: runner_artifact_feature_diagnostics(
             runner_id,
             configured_executable,
             status,
-            version_drift,
+            has_drift,
         ),
         refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
         upgrade_command: format!(
@@ -647,44 +636,15 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
     ]
 }
 
-fn runner_homeboy_binary_roles(
-    configured_executable: &str,
-    session: &Option<RunnerSession>,
-    active_daemon_version: &Option<String>,
-) -> Vec<RunnerHomeboyBinaryRole> {
-    let controller_identity = homeboy::core::build_identity::current();
-    vec![
-        RunnerHomeboyBinaryRole {
-            role: "controller_cli",
-            owner: "operator_command",
-            path: std::env::current_exe()
-                .ok()
-                .map(|path| path.display().to_string()),
-            version: Some(controller_identity.version),
-            build_identity: Some(controller_identity.display),
-            purpose: "Renders this status output and submits runner jobs; it does not prove what the runner daemon or job command binary supports.",
-        },
-        RunnerHomeboyBinaryRole {
-            role: "active_daemon",
-            owner: "runner_session",
-            path: session
-                .as_ref()
-                .and_then(|session| session.remote_daemon_address.clone()),
-            version: active_daemon_version.clone(),
-            build_identity: session
-                .as_ref()
-                .and_then(|session| session.homeboy_build_identity.clone()),
-            purpose: "Accepts connected daemon jobs until the runner is disconnected/reconnected; it can lag behind the configured job binary after refresh-homeboy.",
-        },
-        RunnerHomeboyBinaryRole {
-            role: "configured_job_binary",
-            owner: "runner_config.settings.homeboy_path",
-            path: Some(configured_executable.to_string()),
-            version: None,
-            build_identity: None,
-            purpose: "Binary path selected for runner-side Homeboy subcommands and capability checks; use command_availability_checks to verify required subcommands on the runner.",
-        },
-    ]
+fn runner_homeboy_binary_role(source: &RunnerBinarySource) -> RunnerHomeboyBinaryRole {
+    RunnerHomeboyBinaryRole {
+        role: source.role,
+        owner: source.owner,
+        path: source.path.clone(),
+        version: source.version.clone(),
+        build_identity: source.build_identity.clone(),
+        purpose: source.purpose,
+    }
 }
 
 fn runner_workflow_binary_guidance() -> RunnerWorkflowBinaryGuidance {
@@ -974,19 +934,11 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             report.runner_id, report.stale_runner_job_count
         ));
     }
-    if let Some(warning) = report.stale_daemon.as_ref() {
-        let active_daemon = warning
-            .active_daemon_control_plane_build_identity
-            .as_deref()
-            .unwrap_or(&warning.active_daemon_control_plane_version);
-        let job_binary = warning
-            .job_command_binary_build_identity
-            .as_deref()
-            .unwrap_or(&warning.job_command_binary_version);
-        hints.push(format!(
-            "Runner `{}` stale daemon severity={}: active daemon control plane is `{active_daemon}`, but the job command binary is `{job_binary}`. Refresh with `{}` before using runner/Lab status as version evidence.",
-            report.runner_id, warning.severity, warning.refresh_command
-        ));
+    if report.stale_daemon.is_some() {
+        hints.extend(
+            RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report)
+                .stale_daemon_hint(),
+        );
     }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
