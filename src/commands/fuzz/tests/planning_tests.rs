@@ -55,7 +55,8 @@ fn fuzz_discover_requires_inventory_artifacts() {
 
 #[test]
 fn fuzz_plan_selects_inventory_targets_operations_seeds_and_budgets() {
-    let args = planner_args();
+    let mut args = planner_args();
+    args.run.isolation = FuzzIsolationArg::Isolated;
     let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
 
     assert_eq!(
@@ -489,6 +490,7 @@ fn fuzz_run_campaign_dry_run_emits_structured_dispatch_records() {
 #[test]
 fn fuzz_plan_operation_filter_limits_inventory_selection() {
     let mut args = planner_args();
+    args.run.isolation = FuzzIsolationArg::Isolated;
     args.operations = vec!["read".to_string()];
 
     let metadata = super::plan_inventory_selection(&args, &planner_inventory(), None).unwrap();
@@ -510,6 +512,64 @@ fn fuzz_plan_operation_filter_limits_inventory_selection() {
         metadata["skipped"]["operations"].as_array().unwrap().len(),
         1
     );
+}
+
+#[test]
+fn fuzz_plan_skips_mutating_operation_families_in_shared_mode() {
+    let metadata =
+        super::plan_inventory_selection(&planner_args(), &mutation_family_inventory(), None)
+            .unwrap();
+
+    assert_eq!(
+        metadata["selection"]["operation_families"],
+        serde_json::json!(["read"])
+    );
+    assert_eq!(
+        metadata["selection"]["operations"][0]["operation_id"],
+        serde_json::json!("api.users.read")
+    );
+    let skipped = metadata["skipped"]["operations"].as_array().unwrap();
+    assert_eq!(skipped.len(), 4);
+    assert!(skipped
+        .iter()
+        .all(|operation| operation["reason"] == serde_json::json!("unsafe")));
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("shared"));
+}
+
+#[test]
+fn fuzz_plan_includes_mutating_operation_families_in_isolated_mode() {
+    let mut args = planner_args();
+    args.run.isolation = FuzzIsolationArg::Isolated;
+
+    let metadata = super::plan_inventory_selection(&args, &mutation_family_inventory(), None)
+        .expect("isolated mutation planning");
+
+    assert_eq!(
+        metadata["selection"]["operation_families"],
+        serde_json::json!(["create", "delete", "read", "submit", "update"])
+    );
+    assert!(metadata["skipped"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(metadata["isolation"]["required"], serde_json::json!(true));
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("isolated"));
+}
+
+#[test]
+fn fuzz_plan_skips_isolated_mutation_safety_class_in_shared_mode() {
+    let metadata =
+        super::plan_inventory_selection(&planner_args(), &planner_inventory(), None).unwrap();
+
+    assert!(metadata["selection"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(metadata["skipped"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|operation| operation["reason"] == serde_json::json!("unsafe")));
 }
 
 #[test]
