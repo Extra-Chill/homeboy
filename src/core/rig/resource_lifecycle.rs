@@ -83,11 +83,16 @@ fn record(
         run_id: options.run_id.clone(),
         runner_id: options.runner_id.clone(),
         path,
+        root_bound: None,
         kind: kind.to_string(),
         ttl: None,
         cleanup_policy: ResourceCleanupPolicy::Manual,
         evidence_retention: ResourceEvidenceRetention::Metadata,
         cleanup_intent: options.cleanup_intent,
+        cleanup_command: Some(format!(
+            "homeboy runs resources --run-id {} --cleanup-plan",
+            options.run_id
+        )),
         status: options.status,
     }
 }

@@ -124,8 +124,12 @@ pub struct RunsResourcesCleanupPlanItem {
     pub owner: String,
     pub run_id: String,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_bound: Option<String>,
     pub kind: String,
     pub operation: ResourceCleanupOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_command: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -349,8 +353,10 @@ fn cleanup_plan_item(
         owner: record.owner.clone(),
         run_id: record.run_id.clone(),
         path: record.path.clone(),
+        root_bound: record.root_bound.clone(),
         kind: record.kind.clone(),
         operation,
+        cleanup_command: record.cleanup_command.clone(),
     }
 }
 
@@ -493,11 +499,15 @@ fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
             run_id: "sample-run-1".to_string(),
             runner_id: Some("sample-runner".to_string()),
             path: "/tmp/homeboy/sample-run-1/workspace".to_string(),
+            root_bound: Some("/tmp/homeboy/sample-run-1".to_string()),
             kind: "workspace".to_string(),
             ttl: Some("P7D".to_string()),
             cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
             evidence_retention: ResourceEvidenceRetention::Manifest,
             cleanup_intent: Default::default(),
+            cleanup_command: Some(
+                "homeboy runs resources --run-id sample-run-1 --cleanup-plan".to_string(),
+            ),
             status: ResourceLifecycleResourceStatus::CleanupPending,
         }],
     }
@@ -521,11 +531,13 @@ mod tests {
             run_id: "run-1".to_string(),
             runner_id: None,
             path: "/tmp/resource".to_string(),
+            root_bound: None,
             kind: "workspace".to_string(),
             ttl: Some("P1D".to_string()),
             cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
             evidence_retention: ResourceEvidenceRetention::Metadata,
             cleanup_intent: ResourceCleanupIntent::DryRun,
+            cleanup_command: None,
             status,
         }
     }
@@ -615,7 +627,40 @@ mod tests {
 
         assert_eq!(cleanup.candidate_count, 1);
         assert_eq!(cleanup.planned_count, 1);
+        assert_eq!(cleanup.planned[0].root_bound, None);
         assert_eq!(cleanup.applied_count, 0);
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn cleanup_plan_surfaces_root_bound_and_follow_up_command() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::create_dir(&resource_path).expect("resource dir");
+        let cleanup_command = "homeboy runs resources --run-id run-1 --cleanup-plan".to_string();
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            root_bound: Some(tempdir.path().display().to_string()),
+            cleanup_command: Some(cleanup_command.clone()),
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                cleanup_plan: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup plan");
+
+        assert_eq!(cleanup.planned_count, 1);
+        assert_eq!(
+            cleanup.planned[0].root_bound,
+            Some(tempdir.path().display().to_string())
+        );
+        assert_eq!(cleanup.planned[0].cleanup_command, Some(cleanup_command));
         assert!(resource_path.exists());
     }
 

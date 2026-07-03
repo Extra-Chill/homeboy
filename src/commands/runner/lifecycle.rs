@@ -104,11 +104,16 @@ pub(super) fn lifecycle(
             .unwrap_or_else(|| "unknown".to_string()),
         runner_id: Some(runner_id.clone()),
         path: workspace.clone(),
+        root_bound: None,
         kind: "runner_workspace".to_string(),
         ttl: None,
         cleanup_policy: cleanup_policy_for_status(status),
         evidence_retention: ResourceEvidenceRetention::Manifest,
         cleanup_intent: ResourceCleanupIntent::DryRun,
+        cleanup_command: Some(format!(
+            "homeboy runs resources --run-id {} --cleanup-plan",
+            run_id.as_deref().or(job_id.as_deref()).unwrap_or("unknown")
+        )),
         status: resource_status_for_status(status),
     };
     let resource_lifecycle = ResourceLifecycle::inspect(&resource_record);
