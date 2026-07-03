@@ -1,4 +1,6 @@
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::core::engine::invocation;
@@ -49,6 +51,13 @@ pub(crate) fn execute_local_command_in_dir_with_timeout(
     execute_local_command_in_dir_impl(command, current_dir, env, Some(timeout), None)
 }
 
+#[derive(Clone, Copy)]
+enum StreamMode {
+    Capture,
+    Passthrough,
+    StderrPassthrough,
+}
+
 fn execute_local_command_in_dir_impl(
     command: &str,
     current_dir: Option<&str>,
@@ -56,9 +65,24 @@ fn execute_local_command_in_dir_impl(
     timeout: Option<Duration>,
     stdin: Option<Vec<u8>>,
 ) -> CommandOutput {
-    use std::io::{Read, Write};
-    use std::thread;
+    run_local_command(
+        command,
+        current_dir,
+        env,
+        timeout,
+        stdin,
+        StreamMode::Capture,
+    )
+}
 
+fn run_local_command(
+    command: &str,
+    current_dir: Option<&str>,
+    env: Option<&[(&str, &str)]>,
+    timeout: Option<Duration>,
+    stdin: Option<Vec<u8>>,
+    stream_mode: StreamMode,
+) -> CommandOutput {
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = Command::new("cmd");
@@ -110,19 +134,6 @@ fn execute_local_command_in_dir_impl(
     );
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
-    fn read_all<R: Read>(mut src: R) -> String {
-        let mut captured = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match src.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => captured.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-        String::from_utf8_lossy(&captured).to_string()
-    }
-
     // Stream the provided stdin bytes on a dedicated thread, then close the pipe
     // (EOF). The command's own stdin is empty for this path, so the buffer is
     // small and never deadlocks against the captured stdout/stderr pipes.
@@ -134,14 +145,20 @@ fn execute_local_command_in_dir_impl(
         })
     });
 
-    let stdout_handle = child
-        .stdout
-        .take()
-        .map(|pipe| thread::spawn(move || read_all(pipe)));
-    let stderr_handle = child
-        .stderr
-        .take()
-        .map(|pipe| thread::spawn(move || read_all(pipe)));
+    let stdout_handle = child.stdout.take().map(|pipe| {
+        thread::spawn(move || match stream_mode {
+            StreamMode::Passthrough => tee_to(pipe, std::io::stdout()),
+            StreamMode::Capture | StreamMode::StderrPassthrough => read_all(pipe),
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|pipe| {
+        thread::spawn(move || match stream_mode {
+            StreamMode::Capture => read_all(pipe),
+            StreamMode::Passthrough | StreamMode::StderrPassthrough => {
+                tee_to(pipe, std::io::stderr())
+            }
+        })
+    });
 
     let (status, delegated_failure, timed_out) =
         wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
@@ -205,6 +222,40 @@ fn execute_local_command_in_dir_impl(
         cleanup_guard.cleanup();
     }
     output
+}
+
+fn read_all<R: Read>(mut src: R) -> String {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => captured.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&captured).to_string()
+}
+
+fn tee_to<R, W>(mut src: R, mut sink: W) -> String
+where
+    R: Read,
+    W: Write,
+{
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let _ = sink.write_all(&buf[..n]);
+                let _ = sink.flush();
+                captured.extend_from_slice(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&captured).to_string()
 }
 
 pub fn execute_local_command_interactive(
@@ -277,149 +328,14 @@ fn execute_local_command_passthrough_impl(
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
 ) -> CommandOutput {
-    use std::io::{Read, Write};
-    use std::thread;
-
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", command]);
-        cmd
-    };
-
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", command]);
-        cmd
-    };
-
-    if let Some(dir) = current_dir {
-        cmd.current_dir(dir);
-    }
-
-    if let Some(env_pairs) = env {
-        cmd.envs(env_pairs.iter().copied());
-    }
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    configure_process_group_cleanup(&mut cmd);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandOutput {
-                stdout: String::new(),
-                stderr: format!("Command error: {}", e),
-                success: false,
-                exit_code: -1,
-                timed_out: false,
-                child_resource: None,
-            };
-        }
-    };
-    let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
-    let _invocation_child_guard = invocation_child_guard(
-        env,
-        child.id(),
-        cleanup_guard.as_ref().and_then(|guard| guard.pgid()),
+    run_local_command(
         command,
-    );
-    let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
-
-    // Tee each stream: copy every chunk to the parent's stdout/stderr as it
-    // arrives (preserving the live-progress UX) while buffering it for the
-    // caller. Using 4 KiB reads keeps latency low without excess syscalls.
-    fn tee_to<R, W>(mut src: R, mut sink: W) -> String
-    where
-        R: Read,
-        W: Write,
-    {
-        let mut captured = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match src.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = sink.write_all(&buf[..n]);
-                    let _ = sink.flush();
-                    captured.extend_from_slice(&buf[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        String::from_utf8_lossy(&captured).to_string()
-    }
-
-    let stdout_handle = child
-        .stdout
-        .take()
-        .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stdout())));
-    let stderr_handle = child
-        .stderr
-        .take()
-        .map(|pipe| thread::spawn(move || tee_to(pipe, std::io::stderr())));
-
-    let (status, delegated_failure, timed_out) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
-    let interrupted_signal = active_cleanup_signal();
-
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    let output = match status {
-        Ok(status) => CommandOutput {
-            stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_timeout(
-                    stderr_with_interruption(stderr, interrupted_signal),
-                    timed_out,
-                    timeout,
-                ),
-                delegated_failure.as_ref(),
-            ),
-            success: status.success()
-                && interrupted_signal.is_none()
-                && delegated_failure.is_none()
-                && !timed_out,
-            exit_code: timed_out_exit_code(
-                timed_out,
-                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
-            ),
-            timed_out,
-            child_resource: Some(monitor.finish()),
-        },
-        Err(e) => CommandOutput {
-            stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_interruption(
-                    stderr_with_timeout(
-                        format!("{stderr}\nCommand error: {}", e),
-                        timed_out,
-                        timeout,
-                    ),
-                    interrupted_signal,
-                ),
-                delegated_failure.as_ref(),
-            ),
-            success: false,
-            exit_code: timed_out_exit_code(
-                timed_out,
-                interrupted_exit_code(interrupted_signal, -1),
-            ),
-            timed_out,
-            child_resource: Some(monitor.finish()),
-        },
-    };
-    if let Some(cleanup_guard) = cleanup_guard.take() {
-        cleanup_guard.cleanup();
-    }
-    output
+        current_dir,
+        env,
+        timeout,
+        None,
+        StreamMode::Passthrough,
+    )
 }
 
 pub(crate) fn execute_local_command_stderr_passthrough(
@@ -445,156 +361,14 @@ fn execute_local_command_stderr_passthrough_impl(
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
 ) -> CommandOutput {
-    use std::io::{Read, Write};
-    use std::thread;
-
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", command]);
-        cmd
-    };
-
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", command]);
-        cmd
-    };
-
-    if let Some(dir) = current_dir {
-        cmd.current_dir(dir);
-    }
-
-    if let Some(env_pairs) = env {
-        cmd.envs(env_pairs.iter().copied());
-    }
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    configure_process_group_cleanup(&mut cmd);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return CommandOutput {
-                stdout: String::new(),
-                stderr: format!("Command error: {}", e),
-                success: false,
-                exit_code: -1,
-                timed_out: false,
-                child_resource: None,
-            };
-        }
-    };
-    let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
-    let _invocation_child_guard = invocation_child_guard(
-        env,
-        child.id(),
-        cleanup_guard.as_ref().and_then(|guard| guard.pgid()),
+    run_local_command(
         command,
-    );
-    let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
-
-    fn read_all<R: Read>(mut src: R) -> String {
-        let mut captured = Vec::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match src.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => captured.extend_from_slice(&buf[..n]),
-                Err(_) => break,
-            }
-        }
-        String::from_utf8_lossy(&captured).to_string()
-    }
-
-    fn tee_to_stderr<R: Read>(mut src: R) -> String {
-        let mut captured = Vec::new();
-        let mut buf = [0u8; 4096];
-        let mut sink = std::io::stderr();
-        loop {
-            match src.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = sink.write_all(&buf[..n]);
-                    let _ = sink.flush();
-                    captured.extend_from_slice(&buf[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        String::from_utf8_lossy(&captured).to_string()
-    }
-
-    let stdout_handle = child
-        .stdout
-        .take()
-        .map(|pipe| thread::spawn(move || read_all(pipe)));
-    let stderr_handle = child
-        .stderr
-        .take()
-        .map(|pipe| thread::spawn(move || tee_to_stderr(pipe)));
-
-    let (status, delegated_failure, timed_out) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
-    let interrupted_signal = active_cleanup_signal();
-
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    let output = match status {
-        Ok(status) => CommandOutput {
-            stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_timeout(
-                    stderr_with_interruption(stderr, interrupted_signal),
-                    timed_out,
-                    timeout,
-                ),
-                delegated_failure.as_ref(),
-            ),
-            success: status.success()
-                && interrupted_signal.is_none()
-                && delegated_failure.is_none()
-                && !timed_out,
-            exit_code: timed_out_exit_code(
-                timed_out,
-                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
-            ),
-            timed_out,
-            child_resource: Some(monitor.finish()),
-        },
-        Err(e) => CommandOutput {
-            stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_interruption(
-                    stderr_with_timeout(
-                        format!("{stderr}\nCommand error: {}", e),
-                        timed_out,
-                        timeout,
-                    ),
-                    interrupted_signal,
-                ),
-                delegated_failure.as_ref(),
-            ),
-            success: false,
-            exit_code: timed_out_exit_code(
-                timed_out,
-                interrupted_exit_code(interrupted_signal, -1),
-            ),
-            timed_out,
-            child_resource: Some(monitor.finish()),
-        },
-    };
-    if let Some(cleanup_guard) = cleanup_guard.take() {
-        cleanup_guard.cleanup();
-    }
-    output
+        current_dir,
+        env,
+        timeout,
+        None,
+        StreamMode::StderrPassthrough,
+    )
 }
 
 fn timed_out_exit_code(timed_out: bool, fallback: i32) -> i32 {
