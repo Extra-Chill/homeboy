@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::expand::expand_vars;
 use super::service::discover_newest_for_spec;
 use super::spec::{CheckSpec, NewerThanSpec, RigSpec, TimeSource};
-use crate::core::error::{Error, Result};
+use crate::core::error::{CommandEvidence, Error, Result};
 use crate::core::http_probe;
 
 /// Run a check against the current rig state. Err on fail.
@@ -250,25 +250,41 @@ fn command_check(rig: &RigSpec, cmd: &str, expect_exit: i32) -> Result<()> {
 
     let actual = output.status.code().unwrap_or(-1);
     if actual != expect_exit {
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::validation_invalid_argument(
+        let problem = format!(
+            "Command `{}` exited {} (expected {})\nstdout:\n{}\nstderr:\n{}",
+            resolved,
+            actual,
+            expect_exit,
+            stream_evidence(&stdout),
+            stream_evidence(&stderr),
+        );
+        return Err(Error::validation_invalid_argument_with_evidence(
             "check.command",
-            format!(
-                "Command `{}` exited {} (expected {}){}",
-                resolved,
-                actual,
-                expect_exit,
-                if stderr.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", stderr.trim())
-                }
-            ),
+            problem,
             None,
             None,
+            Some(CommandEvidence {
+                command: resolved,
+                cwd: None,
+                location: None,
+                exit_code: actual,
+                stdout,
+                stderr: stderr.to_string(),
+                truncated: false,
+            }),
         ));
     }
     Ok(())
+}
+
+fn stream_evidence(stream: &str) -> &str {
+    if stream.trim().is_empty() {
+        "<empty>"
+    } else {
+        stream.trim()
+    }
 }
 
 /// Mtime comparison: pass when `left > right` (left is newer).

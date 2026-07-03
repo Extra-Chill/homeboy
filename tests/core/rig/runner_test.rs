@@ -243,6 +243,35 @@ fn test_run_check() {
 }
 
 #[test]
+fn test_run_check_command_stderr_with_zero_exit_passes() {
+    with_isolated_home(|_dir| {
+        let rig: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "check-stderr-success-fixture",
+                "pipeline": {
+                    "check": [
+                        {
+                            "kind": "check",
+                            "label": "warning-only command",
+                            "command": "printf 'fixture warning\\n' >&2; exit 0"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse rig");
+
+        let report = run_check(&rig).expect("run_check succeeds");
+
+        assert!(report.success, "stderr alone must not fail a check");
+        assert_eq!(report.pipeline.failed, 0);
+        assert!(report.pipeline.steps.iter().any(|step| {
+            step.label == "warning-only command" && step.status == "pass" && step.error.is_none()
+        }));
+    });
+}
+
+#[test]
 fn test_run_check_includes_declarative_requirements() {
     with_isolated_home(|dir| {
         let marker = dir.path().join("marker.txt");

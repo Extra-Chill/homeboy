@@ -812,10 +812,33 @@ fn run_rig_workload_preflight(
         return Err(homeboy::core::Error::rig_pipeline_failed(
             &spec.id,
             "check",
-            "rig check failed; refusing to run bench against an unhealthy rig",
+            format!(
+                "rig check failed; refusing to run bench against an unhealthy rig. Failed check steps: {}",
+                failed_check_step_summary(&check.pipeline),
+            ),
         ));
     }
     Ok(())
+}
+
+fn failed_check_step_summary(pipeline: &rig::PipelineOutcome) -> String {
+    let failures = pipeline
+        .steps
+        .iter()
+        .filter(|step| step.status == "fail")
+        .map(|step| match step.error.as_deref() {
+            Some(error) if !error.trim().is_empty() => {
+                format!("{} [{}]: {}", step.label, step.kind, error)
+            }
+            _ => format!("{} [{}]", step.label, step.kind),
+        })
+        .collect::<Vec<_>>();
+
+    if failures.is_empty() {
+        "<no failed check step evidence recorded>".to_string()
+    } else {
+        failures.join("; ")
+    }
 }
 
 #[cfg(test)]
@@ -1024,6 +1047,49 @@ mod tests {
             .is_err());
 
             assert!(run_rig_workload_preflight(&rig_spec, None, &[]).is_err());
+        });
+    }
+
+    #[test]
+    fn rig_bench_preflight_failure_includes_check_command_evidence() {
+        with_isolated_home(|_| {
+            let rig_spec: RigSpec = serde_json::from_str(
+                r#"{
+                    "id": "static-site-importer-fixture-matrix",
+                    "pipeline": {
+                        "check": [
+                            {
+                                "kind": "check",
+                                "label": "fixture matrix tests",
+                                "command": "printf 'tests 100\\npass 99\\n' && printf '[fixture-matrix] real failure\\n' >&2; exit 7"
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("parse rig spec");
+
+            let err = run_rig_workload_preflight(&rig_spec, None, &[])
+                .expect_err("failed check should abort bench preflight");
+            let message = err.to_string();
+
+            assert!(message.contains("fixture matrix tests"), "error: {message}");
+            assert!(message.contains("check"), "error: {message}");
+            assert!(
+                message.contains("Command `printf 'tests 100"),
+                "error: {message}"
+            );
+            assert!(
+                message.contains("exited 7 (expected 0)"),
+                "error: {message}"
+            );
+            assert!(message.contains("stdout:"), "error: {message}");
+            assert!(message.contains("tests 100"), "error: {message}");
+            assert!(message.contains("stderr:"), "error: {message}");
+            assert!(
+                message.contains("[fixture-matrix] real failure"),
+                "error: {message}"
+            );
         });
     }
 
