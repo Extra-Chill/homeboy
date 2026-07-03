@@ -125,11 +125,16 @@ fn metadata_with_resource_lifecycle(
         run_id: artifact.run_id.clone(),
         runner_id: Some(runner_id.to_string()),
         path: artifact.path.clone(),
+        root_bound: None,
         kind: format!("artifact_{}", artifact.artifact_type),
         ttl: Some("P30D".to_string()),
         cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
         evidence_retention: ResourceEvidenceRetention::Full,
         cleanup_intent: ResourceCleanupIntent::DryRun,
+        cleanup_command: Some(format!(
+            "homeboy runs resources --run-id {} --cleanup-plan",
+            artifact.run_id
+        )),
         status: ResourceLifecycleResourceStatus::Retained,
     };
     metadata["resource_lifecycle"] =

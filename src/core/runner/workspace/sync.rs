@@ -823,11 +823,14 @@ pub(crate) fn workspace_resource_lifecycle(
         run_id: run_id.unwrap_or("materialized-workspace").to_string(),
         runner_id: Some(runner_id.to_string()),
         path: remote_path.to_string(),
+        root_bound: None,
         kind: "runner_workspace".to_string(),
         ttl: None,
         cleanup_policy,
         evidence_retention: ResourceEvidenceRetention::Metadata,
         cleanup_intent: Default::default(),
+        cleanup_command: run_id
+            .map(|run_id| format!("homeboy runs resources --run-id {run_id} --cleanup-plan")),
         status: ResourceLifecycleResourceStatus::Active,
     }
 }
@@ -1316,11 +1319,13 @@ fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()>
         run_id: "materialized-workspace".to_string(),
         runner_id: None,
         path: path.display().to_string(),
+        root_bound: Some(root.display().to_string()),
         kind: "runner_workspace".to_string(),
         ttl: None,
         cleanup_policy: ResourceCleanupPolicy::DeleteOnSuccess,
         evidence_retention: ResourceEvidenceRetention::Metadata,
         cleanup_intent: Default::default(),
+        cleanup_command: None,
         status: ResourceLifecycleResourceStatus::CleanupPending,
     };
     let cleanup_path = ResourceLifecycle::cleanup_path(root, &resource).map_err(|reason| {
