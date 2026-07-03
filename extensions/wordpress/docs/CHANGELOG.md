@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.24] - 2026-07-03
+
+### Changed
+- Prefer requested WP Codebox source setup
+
 ## [3.23.23] - 2026-07-03
 
 ### Changed
