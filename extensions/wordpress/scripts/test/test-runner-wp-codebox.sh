@@ -667,6 +667,30 @@ detect_phpunit_project_bootstrap() {
     return 1
 }
 
+resolve_wp_codebox_sandbox_host_path() {
+    local settings_json="$1"
+    local sandbox_path="$2"
+
+    if [ -e "$sandbox_path" ]; then
+        printf '%s\n' "$sandbox_path"
+        return 0
+    fi
+
+    printf '%s' "$settings_json" | jq -r --arg sandboxPath "$sandbox_path" '
+        (.wp_codebox_phpunit_mounts // [])[]
+        | select((.source // "") != "" and (.target // "") != "")
+        | (.target | rtrimstr("/")) as $target
+        | (.source | rtrimstr("/")) as $source
+        | select($sandboxPath == $target or ($sandboxPath | startswith($target + "/")))
+        | $source + ($sandboxPath | sub("^" + ($target | gsub("([][\\.^$*+?{}|()-])"; "\\\\\\1")); ""))
+    ' 2>/dev/null | while IFS= read -r candidate; do
+        if [ -e "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+}
+
 validate_project_bootstrap_ref() {
     local bootstrap_ref="$1"
 
@@ -802,24 +826,34 @@ PHPUNIT_ARGS_JSON=$(printf '%s\0' "${PASSTHROUGH_ARGS[@]}" | php -r '
 
 SELECTED_TEST_FILE_REL=""
 if [ -n "$SELECTED_TEST_FILE" ]; then
+    SELECTED_TEST_ROOT_HOST=""
+    if [ -n "$WP_CODEBOX_PHPUNIT_TEST_ROOT" ]; then
+        SELECTED_TEST_ROOT_HOST=$(resolve_wp_codebox_sandbox_host_path "${HOMEBOY_SETTINGS_JSON:-{}}" "$WP_CODEBOX_PHPUNIT_TEST_ROOT" || true)
+    fi
+    if [ -z "$SELECTED_TEST_ROOT_HOST" ]; then
+        SELECTED_TEST_ROOT_HOST="${PLUGIN_PATH}/tests"
+    fi
+
     if [ "${SELECTED_TEST_FILE#/}" != "$SELECTED_TEST_FILE" ]; then
-        selected_abs="$SELECTED_TEST_FILE"
+        selected_abs=$(resolve_wp_codebox_sandbox_host_path "${HOMEBOY_SETTINGS_JSON:-{}}" "$SELECTED_TEST_FILE" || true)
+        [ -n "$selected_abs" ] || selected_abs="$SELECTED_TEST_FILE"
     else
         selected_abs="${PLUGIN_PATH}/${SELECTED_TEST_FILE}"
+        if [ ! -f "$selected_abs" ]; then
+            selected_abs="${SELECTED_TEST_ROOT_HOST%/}/${SELECTED_TEST_FILE}"
+        fi
     fi
     if [ ! -f "$selected_abs" ]; then
         echo "ERROR: requested PHPUnit test file not found: ${SELECTED_TEST_FILE}" >&2
         exit 2
     fi
-    case "$selected_abs" in
-        "${PLUGIN_PATH}"/tests/*.php|"${PLUGIN_PATH}"/tests/*/*.php|"${PLUGIN_PATH}"/tests/*/*/*.php|"${PLUGIN_PATH}"/tests/*/*/*/*.php)
-            SELECTED_TEST_FILE_REL="${selected_abs#"${PLUGIN_PATH}/"}"
-            ;;
-        *)
-            echo "ERROR: requested PHPUnit test file must live under tests/: ${SELECTED_TEST_FILE}" >&2
-            exit 2
-            ;;
-    esac
+    selected_root_real=$(php -r 'echo realpath($argv[1]) ?: "";' "$SELECTED_TEST_ROOT_HOST" 2>/dev/null || true)
+    selected_abs_real=$(php -r 'echo realpath($argv[1]) ?: "";' "$selected_abs" 2>/dev/null || true)
+    if [ -z "$selected_root_real" ] || [ -z "$selected_abs_real" ] || [ "${selected_abs_real#"${selected_root_real%/}/"}" = "$selected_abs_real" ]; then
+        echo "ERROR: requested PHPUnit test file must live under configured test root: ${SELECTED_TEST_FILE}" >&2
+        exit 2
+    fi
+    SELECTED_TEST_FILE_REL="${selected_abs_real#"${selected_root_real%/}/"}"
 fi
 
 MOUNTS_JSON="[]"

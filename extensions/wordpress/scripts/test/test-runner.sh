@@ -160,6 +160,10 @@ homeboy_wordpress_rel_test_file() {
         abs_path="${PLUGIN_PATH}/${raw_path#wordpress/}"
     fi
 
+    if [ ! -f "$abs_path" ] && [ "${raw_path#/}" != "$raw_path" ]; then
+        abs_path=$(homeboy_wordpress_resolve_wp_codebox_sandbox_path "$raw_path" || true)
+    fi
+
     if [ ! -f "$abs_path" ]; then
         return 1
     fi
@@ -167,6 +171,60 @@ homeboy_wordpress_rel_test_file() {
     case "$abs_path" in
         "${PLUGIN_PATH}"/*)
             printf '%s\n' "${abs_path#"${PLUGIN_PATH}/"}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+homeboy_wordpress_resolve_wp_codebox_sandbox_path() {
+    local sandbox_path="$1"
+    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    [ -n "$settings_json" ] || settings_json="{}"
+
+    if [ -e "$sandbox_path" ]; then
+        printf '%s\n' "$sandbox_path"
+        return 0
+    fi
+
+    printf '%s' "$settings_json" | jq -r --arg sandboxPath "$sandbox_path" '
+        (.wp_codebox_phpunit_mounts // [])[]
+        | select((.source // "") != "" and (.target // "") != "")
+        | (.target | rtrimstr("/")) as $target
+        | (.source | rtrimstr("/")) as $source
+        | select($sandboxPath == $target or ($sandboxPath | startswith($target + "/")))
+        | $source + ($sandboxPath | sub("^" + ($target | gsub("([][\\.^$*+?{}|()-])"; "\\\\\\1")); ""))
+    ' 2>/dev/null | while IFS= read -r candidate; do
+        if [ -e "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+}
+
+homeboy_wordpress_configured_phpunit_test_root() {
+    local settings_json="${HOMEBOY_SETTINGS_JSON:-}"
+    local test_root
+    [ -n "$settings_json" ] || settings_json="{}"
+
+    test_root=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_phpunit_test_root // empty' 2>/dev/null || true)
+    [ -n "$test_root" ] || return 1
+
+    homeboy_wordpress_resolve_wp_codebox_sandbox_path "$test_root"
+}
+
+homeboy_wordpress_is_configured_phpunit_file() {
+    local target_rel="$1"
+    local test_root
+    local target_abs="${PLUGIN_PATH}/${target_rel}"
+
+    test_root=$(homeboy_wordpress_configured_phpunit_test_root || true)
+    [ -n "$test_root" ] || return 1
+
+    case "$target_abs" in
+        "${test_root%/}"/*.php|"${test_root%/}"/*/*.php|"${test_root%/}"/*/*/*.php|"${test_root%/}"/*/*/*/*.php)
+            return 0
             ;;
         *)
             return 1
@@ -365,6 +423,26 @@ if [ -n "$TARGET_FILE" ]; then
     if homeboy_wordpress_is_shell_smoke_file "$target_rel"; then
         homeboy_wordpress_run_shell_smoke_files "$target_rel"
         exit 0
+    fi
+
+    if homeboy_wordpress_is_configured_phpunit_file "$target_rel"; then
+        configured_phpunit_root=$(homeboy_wordpress_configured_phpunit_test_root || true)
+        configured_phpunit_target="${PLUGIN_PATH}/${target_rel}"
+        configured_phpunit_rel="${configured_phpunit_target#"${configured_phpunit_root%/}/"}"
+        if [ -z "$configured_phpunit_root" ] || [ "$configured_phpunit_rel" = "$configured_phpunit_target" ]; then
+            configured_phpunit_rel="$target_rel"
+        fi
+        case "$target_base" in
+            *Test.php|test-*.php)
+                WORDPRESS_RUNTIME_RUNNER="$(homeboy_wordpress_runtime_runner)" || exit $?
+                HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE="$configured_phpunit_rel" exec bash "$WORDPRESS_RUNTIME_RUNNER" "${PASSTHROUGH_ARGS[@]}"
+                ;;
+            *)
+                echo "ERROR: cannot classify requested WordPress test file under configured PHPUnit test root: ${target_rel}" >&2
+                echo "  PHPUnit files must match *Test.php or test-*.php." >&2
+                exit 2
+                ;;
+        esac
     fi
 
     case "$target_rel" in

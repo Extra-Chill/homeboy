@@ -27,7 +27,7 @@ assert_not_contains() {
 }
 
 component="${TMPDIR}/component"
-mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${TMPDIR}/stubs"
+mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
 
 cat > "${component}/tests/import-agent-ability-smoke.php" <<'PHP'
 <?php
@@ -57,6 +57,11 @@ JS
 cat > "${component}/tests/Unit/ImportAgentAbilityTest.php" <<'PHP'
 <?php
 // PHPUnit-shaped file; the WP Codebox backend owns execution.
+PHP
+
+cat > "${component}/bin/tests/i18n-tools/ExtractTest.php" <<'PHP'
+<?php
+// PHPUnit-shaped file under a configured non-default test root.
 PHP
 
 cat > "${component}/tests/helper.php" <<'PHP'
@@ -105,6 +110,7 @@ const recipe = {
     `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
     `autoload-file=${options.autoloadFile}`,
     `tests-dir=${options.testsDir}`,
+    `test-root=${options.testRoot || ''}`,
     `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
     `multisite=${options.multisite ? '1' : '0'}`,
   ] }] },
@@ -165,6 +171,7 @@ const recipe = {
     `wp-config-defines-json=${JSON.stringify(options.wpConfigDefines || {})}`,
     `autoload-file=${options.autoloadFile}`,
     `tests-dir=${options.testsDir}`,
+    `test-root=${options.testRoot || ''}`,
     `dependency-mounts=${(options.dependencyMounts || []).filter(Boolean).join(',')}`,
     `multisite=${options.multisite ? '1' : '0'}`,
   ] }] },
@@ -383,6 +390,20 @@ if [ -e "${component}/.phpunit.result.cache" ]; then
     echo "Expected WP Codebox runner to clean PHPUnit result cache" >&2
     exit 1
 fi
+
+WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-configured-root-args.txt" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_SETTINGS_JSON='{"wp_codebox_phpunit_mounts":[{"source":"'"${component}"'","target":"/home/example/public_html","mode":"readwrite"}],"wp_codebox_phpunit_test_root":"/home/example/public_html/bin/tests/i18n-tools"}' \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="${TMPDIR}/stubs/phpunit-recipe-builder.mjs" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file /home/example/public_html/bin/tests/i18n-tools/ExtractTest.php > "${TMPDIR}/wp-codebox-configured-root-file.out"
+
+assert_contains "${TMPDIR}/wp-codebox-configured-root-file.out" "WP_CODEBOX_STUB"
+assert_contains "${TMPDIR}/wp-codebox-configured-root-args.txt" "test-file=ExtractTest.php"
+assert_contains "${TMPDIR}/wp-codebox-configured-root-args.txt" '"target": "/home/example/public_html"'
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
