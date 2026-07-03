@@ -1932,6 +1932,44 @@ mod tests {
     }
 
     #[test]
+    fn runner_handoff_sample_projects_to_execution_record_and_outcome_refs() {
+        let handoff: crate::command_contract::RunnerHandoffEnvelope =
+            serde_json::from_value(runner_handoff_example()).expect("runner handoff sample");
+
+        let record = handoff.runner_execution_record();
+        let outcome = handoff.run_outcome_envelope();
+
+        assert_eq!(record.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
+        assert_eq!(record.execution_id, "job-1");
+        assert_eq!(record.runner_id, "runner-1");
+        assert_eq!(record.transport, "daemon");
+        assert_eq!(record.status, "succeeded");
+        assert_eq!(record.job_id.as_deref(), Some("job-1"));
+        assert_eq!(record.remote_run_id.as_deref(), Some("run-1"));
+        assert_eq!(record.artifact_refs[0].id, "artifact_manifest");
+        assert_eq!(record.next_actions[0].label, "runner_job_logs");
+        assert_eq!(
+            record
+                .path_materialization_plan
+                .as_ref()
+                .expect("path materialization plan")
+                .entries[0]
+                .remote_path,
+            "/home/runner/workspace"
+        );
+
+        assert_eq!(outcome.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
+        assert_eq!(outcome.status, "succeeded");
+        assert_eq!(outcome.run_id.as_deref(), Some("run-1"));
+        assert_eq!(outcome.runner_id.as_deref(), Some("runner-1"));
+        assert_eq!(outcome.artifact_refs[0].id, "artifact_manifest");
+        assert_eq!(
+            outcome.evidence_refs[0].target,
+            "homeboy://run/run-1/artifact/artifact_manifest"
+        );
+    }
+
+    #[test]
     fn validates_secret_env_plan_json_file() {
         let dir = TempDir::new().unwrap();
         let file = write_json(
