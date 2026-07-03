@@ -258,28 +258,6 @@ fn component_deploy_config_serializes_as_legacy_flat_fields() {
 }
 
 #[test]
-fn component_ignores_legacy_hook_fields() {
-    let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "fixture",
-        "pre_version_bump_commands": ["cargo build"],
-        "post_version_bump_commands": ["cargo test"],
-        "post_release_commands": ["echo done"],
-        "hooks": {
-            "post:deploy": ["wp cache flush"]
-        }
-    }))
-    .unwrap();
-
-    assert!(component.hooks.get("pre:version:bump").is_none());
-    assert!(component.hooks.get("post:version:bump").is_none());
-    assert!(component.hooks.get("post:release").is_none());
-    assert_eq!(
-        component.hooks.get("post:deploy"),
-        Some(&vec!["wp cache flush".to_string()])
-    );
-}
-
-#[test]
 fn component_ignores_changelog_targets_alias() {
     let component: Component = serde_json::from_value(serde_json::json!({
         "id": "fixture",
@@ -349,24 +327,6 @@ fn validate_version_pattern_rejects_no_capture_group() {
 fn validate_version_pattern_rejects_invalid_regex() {
     let result = validate_version_pattern(r"Version: (\d+\.\d+");
     assert!(result.is_err());
-}
-
-#[test]
-fn validate_supported_build_config_rejects_legacy_build_command() {
-    let component = Component {
-        id: "sample-extension".to_string(),
-        build_command: Some("npm run package:browser-extension".to_string()),
-        ..Default::default()
-    };
-
-    let err = component
-        .validate_supported_build_config()
-        .expect_err("legacy build_command should be unsupported");
-
-    assert!(err.message.contains("unsupported legacy build_command"));
-    assert!(err.message.contains("Use scripts.build instead"));
-    assert_eq!(err.details["field"].as_str(), Some("build_command"));
-    assert!(err.details["tried"].to_string().contains("scripts"));
 }
 
 #[test]

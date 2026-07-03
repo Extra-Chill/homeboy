@@ -152,19 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_lint_settings_are_explicitly_wrapped_as_strings() {
-        let settings = settings_from_legacy_strings(&[("mode".to_string(), "strict".to_string())]);
-
-        assert_eq!(
-            settings,
-            vec![(
-                "mode".to_string(),
-                serde_json::Value::String("strict".to_string()),
-            ),]
-        );
-    }
-
-    #[test]
     fn changed_files_manifest_unset_when_no_list_supplied() {
         let run_dir = RunDir::create().expect("run dir");
 

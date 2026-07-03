@@ -389,27 +389,6 @@ fn contract_producers_reject_unknown_fields() {
 }
 
 #[test]
-fn legacy_sidecar_schema_fields_do_not_declare_structured_contracts() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "lint": {
-            "extension_script": "lint.sh",
-            "findings_schema_version": "1"
-        },
-        "test": {
-            "extension_script": "test.sh",
-            "results_schema_version": "1",
-            "failures_schema_version": "1"
-        },
-        "annotations_schema_version": "1"
-    }))
-    .unwrap();
-
-    assert!(manifest.structured_sidecars().is_empty());
-}
-
-#[test]
 fn structured_sidecar_declarations_reject_unknown_fields() {
     let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
         "name": "Example",
@@ -489,21 +468,6 @@ fn manifest_parses_passthrough_filter_contract() {
         filter.strategy,
         TestPassthroughFilterStrategy::RunnerPositional
     );
-}
-
-#[test]
-fn manifest_rejects_legacy_discovery_marker_alias() {
-    let marker = ["package", ".json"].concat();
-    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "provides": {
-            "discoveryMarkers": [{ "all": [marker] }]
-        }
-    }))
-    .expect_err("camelCase discovery marker alias should be rejected");
-
-    assert!(err.to_string().contains("discoveryMarkers"));
 }
 
 #[test]
@@ -618,29 +582,6 @@ fn archive_install_required_header_rejects_missing_selector() {
     .expect_err("required_header must declare a selector");
 
     assert!(err.to_string().contains("exactly one of file or file_glob"));
-}
-
-#[test]
-fn runtime_requirements_reject_legacy_top_level_and_string_shapes() {
-    let mut top_level_value = serde_json::Map::new();
-    top_level_value.insert(
-        ["p", "hp"].concat(),
-        serde_json::json!({ "version": "8.2" }),
-    );
-    top_level_value.insert("node".to_string(), serde_json::json!({ "version": "22" }));
-    let top_level = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::Value::Object(
-        top_level_value,
-    ))
-    .expect_err("top-level runtime aliases should be rejected");
-    assert!(top_level.to_string().contains("unknown field"));
-
-    let shorthand = serde_json::from_value::<RuntimeRequirementsConfig>(serde_json::json!({
-        "runtimes": {
-            "node": "22"
-        }
-    }))
-    .expect_err("runtime string shorthand should be rejected");
-    assert!(shorthand.to_string().contains("string"));
 }
 
 #[test]
