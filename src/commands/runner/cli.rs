@@ -4,6 +4,7 @@ use homeboy::core::runners::RunnerKind;
 
 use super::super::DynamicSetArgs;
 use super::doctor;
+use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
 
@@ -328,6 +329,31 @@ pub(super) enum RunnerCommand {
     Env {
         /// Runner ID
         id: String,
+    },
+    /// Evaluate runner workspace lifecycle and finalization readiness without mutating state
+    Lifecycle {
+        /// Runner ID that owns the workspace
+        runner_id: String,
+
+        /// Absolute runner-side workspace path
+        #[arg(long)]
+        workspace: String,
+
+        /// Runner daemon or broker job ID associated with this workspace
+        #[arg(long)]
+        job_id: Option<String>,
+
+        /// Durable run ID associated with this workspace
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Canonical lifecycle status. When omitted, --exit-code maps 0 to succeeded and non-zero to failed.
+        #[arg(long, value_enum)]
+        status: Option<lifecycle::RunnerLifecycleStatusArg>,
+
+        /// Process exit code to project into lifecycle status and RunOutcomeEnvelope fields
+        #[arg(long)]
+        exit_code: Option<i32>,
     },
     /// Inspect or follow a runner daemon job stream
     Job {

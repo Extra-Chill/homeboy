@@ -365,7 +365,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "replays or minimizes a persisted fuzz case against local code and may write run artifacts";
         }
-        ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] => {
+        ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] | ["fuzz", "run-campaign"] => {
             metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input";
             metadata.dangerous_flags = vec!["--allow-destructive"];
         }
@@ -528,6 +528,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
             metadata.output_notes = "executes commands on a runner unless --dry-run is passed";
+        }
+        ["runner", "lifecycle"] => {
+            metadata.output_notes = "non-mutating runner workspace lifecycle/finalization readiness report suitable for RunOutcomeEnvelope embedding";
         }
         ["runner", "workspace", "sync"] => {
             metadata.mutates = true;

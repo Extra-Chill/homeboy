@@ -15,6 +15,7 @@ mod dispatch;
 mod env;
 mod exec;
 mod jobs;
+mod lifecycle;
 mod log_projection;
 mod registry;
 mod status;

@@ -11,6 +11,7 @@ use homeboy::core::EntityCrudOutput;
 use std::collections::BTreeMap;
 
 use super::doctor;
+use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
 
@@ -273,6 +274,7 @@ pub enum RunnerCommandOutput {
     Doctor(doctor::RunnerDoctorOutput),
     Execution(RunnerExecOutput),
     Env(RunnerEnvOutput),
+    Lifecycle(lifecycle::RunnerLifecycleOutput),
     Job(RunnerJobOutput),
     BrokerJob(RunnerBrokerJobOutput),
     RefreshHomeboy(homeboy::core::runners::HomeboyBinaryRefreshOutput),
