@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.22] - 2026-07-03
+
+### Changed
+- Add WP Codebox PHPUnit preload setting
+
 ## [3.23.21] - 2026-07-03
 
 ### Changed
