@@ -32,6 +32,7 @@ use crate::core::{agent_runtime_manifest, component, defaults, extension, Error}
 
 mod catalog;
 mod command_runner;
+mod config_preflight;
 mod executor;
 mod fixtures;
 mod outcome_normalization;
@@ -48,6 +49,7 @@ mod workspace_types;
 mod tests;
 
 pub use catalog::*;
+pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub(crate) use resolution::{
     resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
     selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,

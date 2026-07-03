@@ -350,7 +350,7 @@ fn bench_observation_persists_success_with_metrics_and_artifacts() {
             .viewer_url
             .as_deref()
             .expect("viewer url")
-            .starts_with("https://playground.wordpress.net/?blueprint-url="));
+            .starts_with("https://example.com/blueprint-viewer/?blueprint-url="));
         assert_eq!(
             transcript_artifact.viewer_refs.viewer_links[0].kind,
             "hosted-blueprint"

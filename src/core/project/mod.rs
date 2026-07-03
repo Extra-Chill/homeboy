@@ -91,15 +91,15 @@ pub struct Project {
 
     /// Project-scoped CLI path used by extension deploy install steps.
     ///
-    /// On any given site the WP-CLI entrypoint is fixed (`wp`, a Lando
-    /// wrapper, a project-specific tool, etc.) and shared by every component
+    /// On any given project the extension CLI entrypoint is fixed (`tool`, a
+    /// wrapper, a project-specific binary, etc.) and shared by every component
     /// deployed there,
     /// so this lives at the project layer. Component-level
     /// `ProjectComponentOverrides::cli_path` still wins as the most-specific
     /// escape hatch.
     ///
     /// If unset, callers fall back to the extension default CLI path and then
-    /// the extension tool name, usually `wp`.
+    /// the extension tool name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
 

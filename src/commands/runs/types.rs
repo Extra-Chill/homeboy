@@ -51,7 +51,7 @@ pub(super) const DEFAULT_LIMIT: i64 = 20;
 /// which stays agnostic and only owns the generic [`ArtifactViewerDescriptor`].
 pub const HOSTED_BLUEPRINT_VIEWER: ArtifactViewerDescriptor = ArtifactViewerDescriptor::new(
     "hosted-blueprint",
-    "https://playground.wordpress.net/",
+    "https://example.com/blueprint-viewer/",
     "blueprint-url",
 );
 

@@ -51,7 +51,7 @@ pub enum RenameContext {
     /// Only match inside string literals (`'term'`, `"term"`) and
     /// property access (`.term`, `->term`, `::term`).
     Key,
-    /// Only match variable references (`$term` in PHP, standalone identifiers
+    /// Only match variable references (standalone identifiers
     /// NOT inside strings or property access).
     Variable,
     /// Only match function parameter definitions (inside parentheses
@@ -142,14 +142,9 @@ fn is_key_context(line: &str, col: usize, match_len: usize) -> bool {
     false
 }
 
-/// Check if match is a variable reference (`$term` in PHP, or a standalone identifier
-/// not inside strings or property access).
+/// Check if match is a variable reference: a standalone identifier not inside
+/// strings or property access.
 fn is_variable_context(line: &str, col: usize) -> bool {
-    // PHP variable: preceded by `$`
-    if col > 0 && line.as_bytes()[col - 1] == b'$' {
-        return true;
-    }
-
     // Standalone identifier: NOT inside quotes and NOT after `.`, `->`, `::`
     let before = &line[..col];
     let trimmed = before.trim_end();
