@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn self_artifact_manifest_resolves_homeboy_crate() {
+    fn self_artifact_manifest_rejects_packaged_cargo_registry_source() {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(
             tmp.path().join("Cargo.toml"),
@@ -927,9 +927,47 @@ mod tests {
         )
         .expect("write manifest");
 
+        let err = validate_homeboy_manifest_dir(tmp.path()).expect_err("reject packaged source");
+
+        assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("is not a Homeboy source git checkout"));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("requires a source checkout, not a packaged Cargo registry source")));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("homeboy cleanup artifacts --path <PATH>")));
+    }
+
+    #[test]
+    fn self_artifact_manifest_resolves_homeboy_git_checkout() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        )
+        .expect("write manifest");
+        init_git_repository(tmp.path());
+
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
 
         assert_eq!(root, tmp.path());
+    }
+
+    #[test]
+    fn self_artifact_registry_rejection_suggests_active_checkout_when_discoverable() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        )
+        .expect("write manifest");
+
+        let err = validate_homeboy_manifest_dir(tmp.path()).expect_err("reject packaged source");
+
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("Active Homeboy checkout appears to be:")));
     }
 
     #[test]
@@ -1653,6 +1691,10 @@ mod tests {
             ],
         );
         repo
+    }
+
+    fn init_git_repository(path: &Path) {
+        git(path, &["init", "-b", "main"]);
     }
 
     fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
