@@ -1,6 +1,13 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const path = require('node:path');
+
+process.env.HOMEBOY_RUNTIME_CONTRACT_CONSTANTS_FIXTURE = path.join(
+  __dirname,
+  'fixtures',
+  'homeboy-runtime-contract-constants.generated.json'
+);
 
 const {
   CORE_PUBLISHED_CONTRACT_CONSTANTS,
@@ -21,8 +28,8 @@ const missing = probeHomeboyContractSurface({
   spawnSync: () => ({ status: 2, stdout: '', stderr: "error: unrecognized subcommand 'constants'" }),
 });
 
-assert.equal(missing.status, 'skipped');
-assert.match(missing.message, /skipped/);
+assert.equal(missing.status, 'failed');
+assert.match(missing.message, /no supported Homeboy contract command is available/);
 
 const releasedContractShape = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
@@ -115,10 +122,10 @@ const fixtureDrift = compareSchemaCatalogFixture({
 assert.match(fixtureDrift.join('; '), /homeboy\/runner-workload\/v2/);
 
 const live = probeHomeboyContractSurface();
-if (live.status === 'skipped') {
+if (live.status === 'passed') {
+  assert.equal(live.status, 'passed', live.message);
   process.stdout.write(`${live.message}\n`);
 } else {
-  assert.equal(live.status, 'passed', live.message);
   process.stdout.write(`${live.message}\n`);
 }
 
