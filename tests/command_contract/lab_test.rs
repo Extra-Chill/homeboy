@@ -47,6 +47,19 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             parsed_command(&["homeboy", "fuzz", "list", "--rig", "studio"]),
             "fuzz",
         ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "fuzz",
+                "run-campaign",
+                "--execute",
+                "--rig",
+                "studio",
+                "--campaign-workload",
+                "read-api",
+            ]),
+            "fuzz",
+        ),
         (parsed_command(&["homeboy", "trace"]), "trace"),
         (
             parsed_command(&["homeboy", "refactor", "--from", "audit"]),
