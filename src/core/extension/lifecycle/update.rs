@@ -137,9 +137,15 @@ pub(crate) fn write_source_metadata(
 ) {
     let metadata_dir = source_metadata_dir(extension_dir);
     if let Some(rev) = source_revision {
-        let _ = std::fs::write(metadata_dir.join(source_metadata_file(extension_dir, "revision")), rev);
+        let _ = std::fs::write(
+            metadata_dir.join(source_metadata_file(extension_dir, "revision")),
+            rev,
+        );
     }
-    let _ = std::fs::write(metadata_dir.join(source_metadata_file(extension_dir, "url")), source_url);
+    let _ = std::fs::write(
+        metadata_dir.join(source_metadata_file(extension_dir, "url")),
+        source_url,
+    );
 }
 
 pub fn read_source_url(extension_dir: &Path) -> Option<String> {
