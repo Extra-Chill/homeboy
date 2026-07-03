@@ -23,13 +23,13 @@ pub(crate) fn lab_offload_command_prefix(
 
 fn required_tools_for_command_prefix(argv: &[String]) -> Vec<RunnerRequiredTool> {
     let Some(program) = argv.first().map(|value| executable_name(value)) else {
-        return vec![RunnerRequiredTool::Homeboy];
+        return vec![RunnerRequiredTool::homeboy()];
     };
 
-    match program {
-        "cargo" => vec![RunnerRequiredTool::Cargo],
-        "homeboy" => vec![RunnerRequiredTool::Homeboy],
-        _ => Vec::new(),
+    if program == "homeboy" {
+        vec![RunnerRequiredTool::homeboy()]
+    } else {
+        vec![RunnerRequiredTool::new(program)]
     }
 }
 
@@ -53,7 +53,7 @@ mod tests {
         let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
 
         assert_eq!(prefix.argv, vec!["/usr/local/bin/homeboy".to_string()]);
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::Homeboy]);
+        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
     }
 
     #[test]
@@ -65,7 +65,7 @@ mod tests {
         let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
 
         assert_eq!(prefix.argv, vec!["/usr/local/bin/homeboy".to_string()]);
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::Homeboy]);
+        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
     }
 
     #[test]
@@ -75,6 +75,6 @@ mod tests {
         let prefix = lab_offload_command_prefix(dir.path(), "homeboy");
 
         assert_eq!(prefix.argv, vec!["homeboy".to_string()]);
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::Homeboy]);
+        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
     }
 }

@@ -6,15 +6,17 @@ fn command_prefix_tools_are_included_in_capability_contract() {
     let contract = lab_runner_capability_contract(
         &portable_lab_command("lint"),
         dir.path(),
-        &[RunnerRequiredTool::Cargo],
+        &[RunnerRequiredTool::new("compiler")],
     )
     .expect("capability contract");
 
-    assert!(contract.required_tools.contains(&RunnerRequiredTool::Cargo));
+    assert!(contract
+        .required_tools
+        .contains(&RunnerRequiredTool::new("compiler")));
 }
 
 #[test]
-fn full_workspace_lab_contract_infers_source_path_tools() {
+fn full_workspace_lab_contract_uses_declared_tools_only() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
     std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").expect("docker signal");
@@ -22,18 +24,14 @@ fn full_workspace_lab_contract_infers_source_path_tools() {
     let contract = lab_runner_capability_contract(
         &portable_lab_command("test"),
         dir.path(),
-        &[RunnerRequiredTool::Homeboy],
+        &[RunnerRequiredTool::homeboy()],
     )
     .expect("capability contract");
 
     assert!(contract
         .required_tools
-        .contains(&RunnerRequiredTool::Homeboy));
-    assert!(contract.required_tools.contains(&RunnerRequiredTool::Node));
-    assert!(contract.required_tools.contains(&RunnerRequiredTool::Npm));
-    assert!(contract
-        .required_tools
-        .contains(&RunnerRequiredTool::Docker));
+        .contains(&RunnerRequiredTool::homeboy()));
+    assert_eq!(contract.required_tools.len(), 1);
 }
 
 #[test]
@@ -45,17 +43,13 @@ fn workload_scoped_lab_contract_ignores_source_path_docker_signal() {
     command.routing_policy.infer_source_path_tools = false;
 
     let contract =
-        lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::Homeboy])
+        lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::homeboy()])
             .expect("capability contract");
 
     assert!(contract
         .required_tools
-        .contains(&RunnerRequiredTool::Homeboy));
-    assert!(!contract.required_tools.contains(&RunnerRequiredTool::Node));
-    assert!(!contract.required_tools.contains(&RunnerRequiredTool::Npm));
-    assert!(!contract
-        .required_tools
-        .contains(&RunnerRequiredTool::Docker));
+        .contains(&RunnerRequiredTool::homeboy()));
+    assert_eq!(contract.required_tools.len(), 1);
 }
 
 #[test]

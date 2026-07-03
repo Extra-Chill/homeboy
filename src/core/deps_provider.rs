@@ -1,20 +1,12 @@
 use crate::core::component::Component;
-use crate::core::deps::npm_provider::NpmDependencyProvider;
 use crate::core::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
 use crate::core::extension::{self, ExtensionCapability, ExtensionExecutionContext};
 use crate::core::{Error, Result};
 use serde::Deserialize;
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComposerAction {
-    Require { constraint: String },
-    Update,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProviderDependencyStatus {
@@ -43,7 +35,6 @@ pub(crate) struct DependencyProviderStatusRequest<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DependencyProviderPackageRequest<'a> {
-    pub context: DependencyProviderContext<'a>,
     pub package: &'a str,
 }
 
@@ -52,45 +43,6 @@ pub(crate) struct DependencyProviderUpdateRequest<'a> {
     pub context: DependencyProviderContext<'a>,
     pub package: &'a str,
     pub constraint: Option<&'a str>,
-}
-
-/// Generic dependency-provider adapter contract.
-///
-/// Core dependency orchestration only deals in these provider-neutral requests
-/// and results. Package-manager-specific details stay inside adapters such as
-/// composer/npm or externally supplied component/extension providers.
-pub(crate) trait DependencyProviderAdapter {
-    fn status(
-        &self,
-        request: DependencyProviderStatusRequest<'_>,
-    ) -> Result<ProviderDependencyStatus>;
-
-    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool>;
-
-    fn update(
-        &self,
-        request: DependencyProviderUpdateRequest<'_>,
-    ) -> Result<DependencyUpdateResult>;
-
-    fn install(
-        &self,
-        context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyCommandResult>>;
-
-    /// The install command this provider would run, without executing it.
-    ///
-    /// Returns `None` for providers whose install cannot be expressed as a
-    /// standalone shell command (e.g. component-script/extension providers that
-    /// run through Homeboy's extension machinery). Native providers (composer,
-    /// npm) override this so callers such as Lab workspace hydration can detect
-    /// the provider on the controller and run the same install command on the
-    /// runner (#7366).
-    fn install_command(
-        &self,
-        _context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(None)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,8 +74,6 @@ impl DependencyProviderCommand {
 
 pub(crate) enum DependencyProvider {
     Manifest(ManifestDependencyProvider),
-    Composer(ComposerDependencyProvider),
-    Npm(NpmDependencyProvider),
     // Boxed: `ExtensionDependencyProvider` carries a full execution context and
     // is far larger than the other (zero-sized) variants, so storing it inline
     // would bloat every `DependencyProvider` value (clippy::large_enum_variant).
@@ -144,8 +94,6 @@ impl DependencyProvider {
         };
         match self {
             DependencyProvider::Manifest(provider) => provider.status(request),
-            DependencyProvider::Composer(provider) => provider.status(request),
-            DependencyProvider::Npm(provider) => provider.status(request),
             DependencyProvider::Extension(provider) => provider.status(request),
             DependencyProvider::ComponentScript(provider) => provider.status(request),
         }
@@ -157,14 +105,10 @@ impl DependencyProvider {
         path: &Path,
         package: &str,
     ) -> Result<bool> {
-        let request = DependencyProviderPackageRequest {
-            context: DependencyProviderContext { component, path },
-            package,
-        };
+        let _ = (component, path);
+        let request = DependencyProviderPackageRequest { package };
         match self {
             DependencyProvider::Manifest(provider) => provider.handles_package(request),
-            DependencyProvider::Composer(provider) => provider.handles_package(request),
-            DependencyProvider::Npm(provider) => provider.handles_package(request),
             DependencyProvider::Extension(provider) => provider.handles_package(request),
             DependencyProvider::ComponentScript(provider) => provider.handles_package(request),
         }
@@ -184,8 +128,6 @@ impl DependencyProvider {
         };
         match self {
             DependencyProvider::Manifest(provider) => provider.update(request),
-            DependencyProvider::Composer(provider) => provider.update(request),
-            DependencyProvider::Npm(provider) => provider.update(request),
             DependencyProvider::Extension(provider) => provider.update(request),
             DependencyProvider::ComponentScript(provider) => provider.update(request),
         }
@@ -199,8 +141,6 @@ impl DependencyProvider {
         let context = DependencyProviderContext { component, path };
         match self {
             DependencyProvider::Manifest(provider) => provider.install(context),
-            DependencyProvider::Composer(provider) => provider.install(context),
-            DependencyProvider::Npm(provider) => provider.install(context),
             DependencyProvider::ComponentScript(provider) => provider.install(context),
             DependencyProvider::Extension(provider) => provider.install(context),
         }
@@ -214,8 +154,6 @@ impl DependencyProvider {
         let context = DependencyProviderContext { component, path };
         match self {
             DependencyProvider::Manifest(provider) => provider.install_command(context),
-            DependencyProvider::Composer(provider) => provider.install_command(context),
-            DependencyProvider::Npm(provider) => provider.install_command(context),
             DependencyProvider::ComponentScript(provider) => provider.install_command(context),
             DependencyProvider::Extension(provider) => provider.install_command(context),
         }
@@ -234,8 +172,8 @@ pub(crate) fn resolve_dependency_providers(
             format!("No dependency provider found for {}", path.display()),
             None,
             Some(vec![
-                "Link an extension with deps support, or use a component with a supported dependency provider".to_string(),
-                "Package managers are resolved through dependency providers, not core command orchestration".to_string(),
+                "Declare a dependency provider with homeboy-deps.json, a component deps script, or an extension deps provider".to_string(),
+                "Core no longer detects built-in dependency providers; package ecosystems must be declared outside core".to_string(),
             ]),
         ));
     }
@@ -246,10 +184,8 @@ pub(crate) fn resolve_dependency_providers(
 /// Resolve the dependency providers a component/workspace exposes, returning an
 /// empty vector when none are detected instead of erroring.
 ///
-/// Setup orchestration treats "no provider" as a no-op (a component with no
-/// composer.json/package.json/deps script simply has nothing to install), so it
-/// needs the empty case without the actionable error that the command-facing
-/// [`resolve_dependency_providers`] raises.
+/// Setup orchestration treats "no provider" as a no-op, so it needs the empty
+/// case without the actionable error that command-facing resolution raises.
 pub(crate) fn resolve_dependency_providers_optional(
     component: &Component,
     path: &Path,
@@ -261,18 +197,10 @@ pub(crate) fn resolve_dependency_providers_optional(
         return Ok(providers);
     }
 
-    if ComposerDependencyProvider::supports(path) {
-        providers.push(DependencyProvider::Composer(ComposerDependencyProvider));
-    }
-
     if component.has_script(ExtensionCapability::Deps) {
         providers.push(DependencyProvider::ComponentScript(
             ComponentScriptDependencyProvider,
         ));
-    }
-
-    if NpmDependencyProvider::supports(path) {
-        providers.push(DependencyProvider::Npm(NpmDependencyProvider));
     }
 
     if component
@@ -376,7 +304,7 @@ impl ManifestDependencyProvider {
     }
 }
 
-impl DependencyProviderAdapter for ManifestDependencyProvider {
+impl ManifestDependencyProvider {
     fn status(
         &self,
         request: DependencyProviderStatusRequest<'_>,
@@ -426,20 +354,13 @@ impl DependencyProviderAdapter for ManifestDependencyProvider {
             .into_iter()
             .next();
 
-        Ok(DependencyUpdateResult {
-            component_id: request.context.component.id.clone(),
-            component_path: request.context.path.display().to_string(),
-            package_manager: self.manifest.provider.clone(),
-            package: request.package.to_string(),
-            requested_constraint: request.constraint.map(str::to_string),
-            command: result.command,
+        Ok(dependency_update_result(
+            request,
+            self.manifest.provider.clone(),
+            result,
             before,
             after,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            install: None,
-            rebuild: None,
-        })
+        ))
     }
 
     fn install(
@@ -531,115 +452,9 @@ fn expand_manifest_command_arg(
         .replace("{constraint}", constraint.unwrap_or_default())
 }
 
-pub fn composer_command_args(package: &str, action: &ComposerAction) -> Vec<String> {
-    match action {
-        ComposerAction::Require { constraint } => vec![
-            "require".to_string(),
-            format!("{package}:{constraint}"),
-            "--with-dependencies".to_string(),
-            "--no-interaction".to_string(),
-        ],
-        ComposerAction::Update => vec![
-            "update".to_string(),
-            package.to_string(),
-            "--with-dependencies".to_string(),
-            "--no-interaction".to_string(),
-        ],
-    }
-}
-
-pub(crate) struct ComposerDependencyProvider;
-
-impl ComposerDependencyProvider {
-    fn supports(path: &Path) -> bool {
-        path.join("composer.json").is_file()
-    }
-}
-
-impl DependencyProviderAdapter for ComposerDependencyProvider {
-    fn status(
-        &self,
-        request: DependencyProviderStatusRequest<'_>,
-    ) -> Result<ProviderDependencyStatus> {
-        Ok(ProviderDependencyStatus {
-            package_manager: "composer".to_string(),
-            dependency_identities: composer_identities(request.context.path)?,
-            packages: read_composer_packages(request.context.path, request.package_filter)?,
-        })
-    }
-
-    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
-        Ok(package_snapshot(request.context.path, request.package)?.is_some())
-    }
-
-    fn update(
-        &self,
-        request: DependencyProviderUpdateRequest<'_>,
-    ) -> Result<DependencyUpdateResult> {
-        let path = request.context.path;
-        let package = request.package;
-        let before = package_snapshot(path, package)?;
-        let action = match request.constraint {
-            Some(constraint) => ComposerAction::Require {
-                constraint: constraint.to_string(),
-            },
-            None => ComposerAction::Update,
-        };
-        let args = composer_command_args(package, &action);
-        let command = DependencyProviderCommand::new("composer", args, path);
-        let result = run_dependency_provider_command(&command, "command")?;
-
-        let after = package_snapshot(path, package)?;
-
-        Ok(DependencyUpdateResult {
-            component_id: request.context.component.id.clone(),
-            component_path: path.display().to_string(),
-            package_manager: "composer".to_string(),
-            package: package.to_string(),
-            requested_constraint: request.constraint.map(str::to_string),
-            command: result.command,
-            before,
-            after,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            install: None,
-            rebuild: None,
-        })
-    }
-
-    fn install(
-        &self,
-        context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyCommandResult>> {
-        let path = context.path;
-        let command =
-            DependencyProviderCommand::new("composer", composer_install_command_args(), path);
-        Ok(Some(run_dependency_provider_command(&command, "install")?))
-    }
-
-    fn install_command(
-        &self,
-        context: DependencyProviderContext<'_>,
-    ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(Some(DependencyProviderCommand::new(
-            "composer",
-            composer_install_command_args(),
-            context.path,
-        )))
-    }
-}
-
-pub fn composer_install_command_args() -> Vec<String> {
-    vec![
-        "install".to_string(),
-        "--no-interaction".to_string(),
-        "--no-progress".to_string(),
-    ]
-}
-
 pub(crate) struct ComponentScriptDependencyProvider;
 
-impl DependencyProviderAdapter for ComponentScriptDependencyProvider {
+impl ComponentScriptDependencyProvider {
     fn status(
         &self,
         request: DependencyProviderStatusRequest<'_>,
@@ -702,13 +517,20 @@ impl DependencyProviderAdapter for ComponentScriptDependencyProvider {
             stderr: output.stderr,
         }))
     }
+
+    fn install_command(
+        &self,
+        _context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(None)
+    }
 }
 
 pub(crate) struct ExtensionDependencyProvider {
     context: ExtensionExecutionContext,
 }
 
-impl DependencyProviderAdapter for ExtensionDependencyProvider {
+impl ExtensionDependencyProvider {
     fn status(
         &self,
         request: DependencyProviderStatusRequest<'_>,
@@ -769,6 +591,13 @@ impl DependencyProviderAdapter for ExtensionDependencyProvider {
             stdout: output.stdout,
             stderr: output.stderr,
         }))
+    }
+
+    fn install_command(
+        &self,
+        _context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(None)
     }
 }
 
@@ -840,6 +669,29 @@ fn extension_deps_command(args: &[String]) -> Vec<String> {
     command
 }
 
+fn dependency_update_result(
+    request: DependencyProviderUpdateRequest<'_>,
+    provider: String,
+    result: DependencyCommandResult,
+    before: Option<DependencyPackage>,
+    after: Option<DependencyPackage>,
+) -> DependencyUpdateResult {
+    DependencyUpdateResult {
+        component_id: request.context.component.id.clone(),
+        component_path: request.context.path.display().to_string(),
+        package_manager: provider,
+        package: request.package.to_string(),
+        requested_constraint: request.constraint.map(str::to_string),
+        command: result.command,
+        before,
+        after,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        install: None,
+        rebuild: None,
+    }
+}
+
 pub(crate) fn run_dependency_provider_command(
     command: &DependencyProviderCommand,
     operation: &str,
@@ -899,186 +751,6 @@ fn parse_extension_output<T: for<'de> Deserialize<'de>>(stdout: &str, action: &s
     })
 }
 
-fn package_snapshot(path: &Path, package: &str) -> Result<Option<DependencyPackage>> {
-    Ok(read_composer_packages(path, Some(package))?
-        .into_iter()
-        .next())
-}
-
-fn composer_identities(path: &Path) -> Result<Vec<String>> {
-    let manifest = read_json_file(&path.join("composer.json"))?;
-    Ok(manifest
-        .get("name")
-        .and_then(Value::as_str)
-        .map(|name| vec![name.to_string()])
-        .unwrap_or_default())
-}
-
-fn read_composer_packages(
-    path: &Path,
-    package_filter: Option<&str>,
-) -> Result<Vec<DependencyPackage>> {
-    let manifest = read_json_file(&path.join("composer.json"))?;
-    let lock = read_optional_json_file(&path.join("composer.lock"))?;
-    let mut direct = BTreeMap::new();
-
-    collect_composer_manifest_section(&manifest, "require", &mut direct);
-    collect_composer_manifest_section(&manifest, "require-dev", &mut direct);
-
-    let locked = lock
-        .as_ref()
-        .map(collect_locked_packages)
-        .unwrap_or_default();
-
-    let mut names: BTreeSet<String> = direct.keys().cloned().collect();
-    names.extend(locked.keys().cloned());
-
-    let packages = names
-        .into_iter()
-        .filter(|name| package_filter.map(|filter| filter == name).unwrap_or(true))
-        .map(|name| {
-            let (manifest_section, constraint) = direct
-                .get(&name)
-                .cloned()
-                .map(|(section, constraint)| (Some(section), Some(constraint)))
-                .unwrap_or((None, None));
-            let locked = locked.get(&name);
-            DependencyPackage {
-                name,
-                manifest_section,
-                constraint,
-                locked_version: locked.and_then(|p| p.version.clone()),
-                locked_reference: locked.and_then(|p| p.reference.clone()),
-            }
-        })
-        .collect();
-
-    Ok(packages)
-}
-
-fn collect_composer_manifest_section(
-    manifest: &Value,
-    section: &str,
-    direct: &mut BTreeMap<String, (String, String)>,
-) {
-    let Some(entries) = manifest.get(section).and_then(Value::as_object) else {
-        return;
-    };
-
-    for (name, constraint) in entries {
-        if name == "php" || name.starts_with("ext-") {
-            continue;
-        }
-        if let Some(constraint) = constraint.as_str() {
-            direct.insert(name.clone(), (section.to_string(), constraint.to_string()));
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct LockedPackage {
-    version: Option<String>,
-    reference: Option<String>,
-}
-
-fn collect_locked_packages(lock: &Value) -> BTreeMap<String, LockedPackage> {
-    let mut packages = BTreeMap::new();
-
-    for section in ["packages", "packages-dev"] {
-        let Some(entries) = lock.get(section).and_then(Value::as_array) else {
-            continue;
-        };
-
-        for entry in entries {
-            let Some(name) = entry.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let version = entry
-                .get("version")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let reference = entry
-                .get("source")
-                .and_then(|source| source.get("reference"))
-                .or_else(|| entry.get("dist").and_then(|dist| dist.get("reference")))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-
-            packages.insert(name.to_string(), LockedPackage { version, reference });
-        }
-    }
-
-    packages
-}
-
-fn read_json_file(path: &Path) -> Result<Value> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw)))
-}
-
-fn read_optional_json_file(path: &Path) -> Result<Option<Value>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    read_json_file(path).map(Some)
-}
-
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().find(|line| !line.trim().is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn composer_install_runs_full_dependency_install_lifecycle() {
-        let _guard = crate::test_support::home_env_guard();
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        let bin = tempfile::tempdir().expect("bin tempdir");
-        let project = tempfile::tempdir().expect("project tempdir");
-        let composer = bin.path().join("composer");
-        std::fs::write(
-            &composer,
-            "#!/bin/sh\nprintf '%s\n' \"$@\" > composer-args.txt\n",
-        )
-        .expect("fake composer");
-        let mode = std::fs::metadata(&composer)
-            .expect("fake composer metadata")
-            .permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut mode = mode;
-            mode.set_mode(0o755);
-            std::fs::set_permissions(&composer, mode).expect("chmod fake composer");
-        }
-        std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
-        std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
-
-        let component = Component::default();
-        let result = ComposerDependencyProvider
-            .install(DependencyProviderContext {
-                component: &component,
-                path: project.path(),
-            })
-            .expect("composer install");
-
-        std::env::set_var("PATH", old_path);
-        let result = result.expect("install result");
-        // `composer install` runs with `--no-progress` for deterministic,
-        // non-interactive CI installs (see `composer_install_command_args`,
-        // #6544). The test self-provides a fake `composer` on PATH, so this
-        // asserts the exact argv the provider builds, not composer availability.
-        assert_eq!(
-            result.command,
-            vec!["composer", "install", "--no-interaction", "--no-progress"]
-        );
-        assert_eq!(
-            std::fs::read_to_string(project.path().join("composer-args.txt")).unwrap(),
-            "install\n--no-interaction\n--no-progress\n"
-        );
-    }
 }

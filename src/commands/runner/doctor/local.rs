@@ -80,18 +80,37 @@ pub fn report(
         ),
     });
 
-    for spec in probes::tool_specs() {
+    let fallback_runner;
+    let runner = match runner {
+        Some(runner) => runner,
+        None => {
+            fallback_runner = Runner {
+                id: runner_id.to_string(),
+                kind: RunnerKind::Local,
+                server_id: None,
+                workspace_root: Some(workspace_root.display().to_string()),
+                settings: Default::default(),
+                env: Default::default(),
+                secret_env: Default::default(),
+                resources: Default::default(),
+                policy: Default::default(),
+            };
+            &fallback_runner
+        }
+    };
+
+    for spec in probes::tool_specs(runner) {
         if spec.id == "homeboy" {
             continue;
         }
-        let probe = probes::local_tool_probe(spec.command, spec.version_args);
-        checks.push(checks::tool_check(*spec, &probe));
+        let probe = probes::local_tool_probe(&spec.command, &spec.version_args);
+        checks.push(checks::tool_check(spec.clone(), &probe));
         tools.insert(spec.id.to_string(), probe);
     }
 
     for command in normalized_required_tools(&options.required_tools) {
         let version_args = probes::required_tool_version_args(&command);
-        let probe = probes::local_tool_probe(&command, version_args);
+        let probe = probes::local_tool_probe(&command, &version_args);
         checks.push(checks::required_tool_check(&command, &probe));
         tools.entry(command).or_insert(probe);
     }
@@ -159,7 +178,7 @@ pub fn report(
         variant: "doctor",
         command: "runner.doctor",
         runner_id: runner_id.to_string(),
-        runner: runner_summary("local", runner, None),
+        runner: runner_summary("local", Some(runner), None),
         status: checks::overall_status(&checks),
         capabilities,
         resources,

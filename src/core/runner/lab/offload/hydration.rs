@@ -11,7 +11,7 @@
 //! detection in `core::deps` (the machinery behind `homeboy deps install`) to
 //! detect the provider on the controller-side source path — whose
 //! manifest/lockfile files travel in the snapshot — and running that provider's
-//! install command (e.g. `composer install`, `npm ci`) in the materialized
+//! install command in the materialized
 //! runner workspace root, before the executor starts. No new provider knowledge
 //! or framework-specific logic is introduced here; detection stays in `deps.rs`.
 
@@ -77,7 +77,7 @@ impl LabWorkspaceHydrationOutput {
 /// the manifest/lockfile files are part of the synced snapshot, so they expose
 /// the same providers the materialized runner workspace does. Execution runs via
 /// the existing runner `exec` path at `remote_path` (the materialized workspace
-/// root), the same primitive `bootstrap_source_cli_node_dependencies` uses, so
+/// root), the same primitive source-CLI dependency bootstrap uses, so
 /// the install is recorded as a runner job visible in `runner job logs`.
 ///
 /// A non-zero install exit fails the job before the executor starts with an
@@ -110,7 +110,7 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
                 env_materialization: None,
                 capture_patch: false,
                 // The install command is a provider-built shell argv (e.g.
-                // `composer install`), not a Homeboy-routed command, so dispatch
+                // a provider-owned install command, not a Homeboy-routed command, so dispatch
                 // it raw to the runner exactly as the provider produced it.
                 raw_exec: true,
                 source_snapshot: None,
@@ -341,9 +341,9 @@ mod tests {
     #[test]
     fn hydration_failure_classifies_as_workspace_setup() {
         let step = LabWorkspaceHydrationStep {
-            provider_id: "composer".to_string(),
+            provider_id: "declared-provider".to_string(),
             command: vec![
-                "composer".to_string(),
+                "fixture-tool".to_string(),
                 "install".to_string(),
                 "--no-interaction".to_string(),
             ],
@@ -359,7 +359,7 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(error.details["classification"], "workspace_setup");
-        assert_eq!(error.details["provider_id"], "composer");
+        assert_eq!(error.details["provider_id"], "declared-provider");
         assert_eq!(error.details["exit_code"], 2);
         assert_eq!(error.details["duration_ms"], 1234);
         assert_eq!(error.details["job_id"], "job-1");
@@ -383,8 +383,8 @@ mod tests {
     #[test]
     fn hydration_step_records_event_emission_shape() {
         let step = LabWorkspaceHydrationStep {
-            provider_id: "npm".to_string(),
-            command: vec!["npm".to_string(), "ci".to_string()],
+            provider_id: "declared-provider".to_string(),
+            command: vec!["fixture-tool".to_string(), "install".to_string()],
             duration_ms: 500,
             exit_code: 0,
             stdout: String::new(),
@@ -393,35 +393,40 @@ mod tests {
             event_count: 4,
         };
         let value = serde_json::to_value(&step).expect("serialize step");
-        assert_eq!(value["provider_id"], "npm");
-        assert_eq!(value["command"], serde_json::json!(["npm", "ci"]));
+        assert_eq!(value["provider_id"], "declared-provider");
+        assert_eq!(
+            value["command"],
+            serde_json::json!(["fixture-tool", "install"])
+        );
         assert_eq!(value["duration_ms"], 500);
         assert_eq!(value["exit_code"], 0);
         assert_eq!(value["job_id"], "job-7");
         assert_eq!(value["event_count"], 4);
     }
 
-    /// End-to-end hydration against a local runner: a detected composer
-    /// provider triggers `composer install` in the materialized workspace, the
-    /// fake composer records the argv it received, and hydration reports a
-    /// successful step with the provider id, command, and exit status.
+    /// End-to-end hydration against a local runner: a declared provider command
+    /// runs in the materialized workspace and hydration reports provider id,
+    /// command, and exit status.
     #[test]
     fn hydration_runs_detected_provider_install_on_runner() {
         crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
-                "composer",
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > composer-hydration-args.txt\n",
+                "fixture-tool",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > hydration-args.txt\n",
             );
             crate::core::runner::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
 
             let project = tempfile::tempdir().expect("project tempdir");
-            std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
+            let manifest = r#"{
+                "provider": "declared-provider",
+                "commands": { "install": { "argv": ["fixture-tool", "install", "--no-interaction", "--no-progress"] } }
+            }"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+                .expect("provider manifest");
             let remote = tempfile::tempdir().expect("remote workspace");
-            // The snapshot sync carries the manifest into the materialized
-            // workspace; mirror that so the install runs against a real manifest.
-            std::fs::write(remote.path().join("composer.json"), "{}")
-                .expect("remote composer json");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote provider manifest");
 
             let output = hydrate_lab_workspace_dependencies(
                 "lab-local",
@@ -434,21 +439,21 @@ mod tests {
             assert_eq!(output.workspace, remote.path().display().to_string());
             assert_eq!(output.steps.len(), 1);
             let step = &output.steps[0];
-            assert_eq!(step.provider_id, "composer");
+            assert_eq!(step.provider_id, "declared-provider");
             assert_eq!(step.exit_code, 0);
             assert_eq!(
                 step.command,
                 vec![
-                    "composer".to_string(),
+                    "fixture-tool".to_string(),
                     "install".to_string(),
                     "--no-interaction".to_string(),
                     "--no-progress".to_string(),
                 ]
             );
-            // The fake composer ran inside the materialized workspace root.
+            // The fake provider command ran inside the materialized workspace root.
             assert_eq!(
-                std::fs::read_to_string(remote.path().join("composer-hydration-args.txt"))
-                    .expect("composer ran"),
+                std::fs::read_to_string(remote.path().join("hydration-args.txt"))
+                    .expect("provider command ran"),
                 "install\n--no-interaction\n--no-progress\n"
             );
         });
@@ -460,17 +465,22 @@ mod tests {
     fn hydration_failure_fails_before_executor() {
         crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
-                "composer",
-                "#!/bin/sh\nprintf 'composer missing php ext' >&2\nexit 2\n",
+                "fixture-tool",
+                "#!/bin/sh\nprintf 'fixture failure' >&2\nexit 2\n",
             );
             crate::core::runner::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
 
             let project = tempfile::tempdir().expect("project tempdir");
-            std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
+            let manifest = r#"{
+                "provider": "declared-provider",
+                "commands": { "install": { "argv": ["fixture-tool", "install"] } }
+            }"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+                .expect("provider manifest");
             let remote = tempfile::tempdir().expect("remote workspace");
-            std::fs::write(remote.path().join("composer.json"), "{}")
-                .expect("remote composer json");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote provider manifest");
 
             let error = hydrate_lab_workspace_dependencies(
                 "lab-local",
@@ -481,7 +491,7 @@ mod tests {
 
             assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
             assert_eq!(error.details["classification"], "workspace_setup");
-            assert_eq!(error.details["provider_id"], "composer");
+            assert_eq!(error.details["provider_id"], "declared-provider");
             assert_eq!(error.details["exit_code"], 2);
         });
     }

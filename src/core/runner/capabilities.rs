@@ -57,32 +57,46 @@ pub enum LabRunnerGateDecision {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RunnerRequiredTool {
-    Homeboy,
-    Cargo,
-    Git,
-    Node,
-    Npm,
-    Pnpm,
-    Php,
-    Composer,
-    Docker,
-    Playwright,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RunnerRequiredTool {
+    id: String,
+}
+
+impl RunnerRequiredTool {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+
+    pub fn homeboy() -> Self {
+        Self::new("homeboy")
+    }
+
+    pub fn git() -> Self {
+        Self::new("git")
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn remediation(&self) -> String {
+        RunnerToolRegistry::spec_for_required_tool(self)
+            .map(|spec| spec.capability_remediation)
+            .unwrap_or_else(|| {
+                format!(
+                    "Install '{}' on the runner and ensure it is on PATH.",
+                    self.id()
+                )
+            })
+    }
 }
 
 pub fn prepare_lab_runner_capability(
     contract: LabRunnerCapabilityContract,
 ) -> PreparedLabRunnerCapability {
-    let mut required_tools = vec![RunnerRequiredTool::Git];
+    let mut required_tools = vec![RunnerRequiredTool::git()];
     for tool in contract.required_tools {
         push_unique(&mut required_tools, tool);
-    }
-
-    for capability in contract.required_capabilities {
-        if capability == crate::command_contract::LAB_CAPABILITY_PLAYWRIGHT {
-            push_unique(&mut required_tools, RunnerRequiredTool::Playwright);
-        }
     }
 
     PreparedLabRunnerCapability {
@@ -122,8 +136,8 @@ pub(crate) fn validate_runner_capability_preflight(
     let missing_tools = preflight
         .required_tools
         .iter()
-        .copied()
-        .filter(|tool| !capabilities.has_tool(*tool))
+        .filter(|tool| !capabilities.has_tool(tool))
+        .cloned()
         .collect::<Vec<_>>();
     let missing_components = preflight
         .required_components
@@ -197,7 +211,7 @@ pub(crate) fn validate_runner_capability_preflight(
     };
     let mut remediation = missing_tools
         .iter()
-        .map(|tool| tool.remediation().to_string())
+        .map(|tool| tool.remediation())
         .collect::<Vec<_>>();
     remediation.extend(missing_components.iter().map(|component| {
         format!("Register component '{component}' on the runner capability profile or choose a runner with that component.")
@@ -262,8 +276,8 @@ impl RunnerCapabilitySnapshot {
         })
     }
 
-    fn has_tool(&self, tool: RunnerRequiredTool) -> bool {
-        self.tools.contains(&tool)
+    fn has_tool(&self, tool: &RunnerRequiredTool) -> bool {
+        self.tools.contains(tool)
     }
 
     fn has_command(&self, command: &str) -> bool {
@@ -279,18 +293,17 @@ impl RunnerCapabilitySnapshot {
         client: &SshClient,
         preflight: &RunnerCapabilityPreflight,
     ) -> Result<RunnerCapabilityProbeResult> {
-        let tool_commands = RunnerToolRegistry::required_tools()
-            .iter()
-            .copied()
+        let tool_commands = RunnerToolRegistry::required_tools(runner, preflight)
+            .into_iter()
             .map(|tool| {
-                let command = if tool == RunnerRequiredTool::Homeboy {
-                    remote_runner_homeboy_path(runner, "runner capability preflight")?
+                let command = if tool.id() == "homeboy" {
+                    remote_runner_homeboy_path(runner, "runner capability preflight")?.to_string()
                 } else {
-                    RunnerToolRegistry::spec_for_required_tool(tool)
+                    RunnerToolRegistry::spec_for_required_tool(&tool)
                         .map(|spec| spec.command)
-                        .unwrap_or_else(|| tool.id())
+                        .unwrap_or_else(|| tool.id().to_string())
                 };
-                Ok((tool, command.to_string()))
+                Ok((tool, command))
             })
             .collect::<Result<Vec<_>>>()?;
         let command_names = normalized_command_names(&preflight.required_commands);
@@ -312,18 +325,21 @@ impl RunnerCapabilitySnapshot {
         runner: &Runner,
         preflight: &RunnerCapabilityPreflight,
     ) -> Result<RunnerCapabilityProbeResult> {
-        let tool_commands = RunnerToolRegistry::required_tools()
-            .iter()
-            .copied()
+        let tool_commands = RunnerToolRegistry::required_tools(runner, preflight)
+            .into_iter()
             .map(|tool| {
-                let command = if tool == RunnerRequiredTool::Homeboy {
-                    runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+                let command = if tool.id() == "homeboy" {
+                    runner
+                        .settings
+                        .homeboy_path
+                        .clone()
+                        .unwrap_or_else(|| "homeboy".to_string())
                 } else {
-                    RunnerToolRegistry::spec_for_required_tool(tool)
+                    RunnerToolRegistry::spec_for_required_tool(&tool)
                         .map(|spec| spec.command)
-                        .unwrap_or_else(|| tool.id())
+                        .unwrap_or_else(|| tool.id().to_string())
                 };
-                (tool, command.to_string())
+                (tool, command)
             })
             .collect::<Vec<_>>();
         let command_names = normalized_command_names(&preflight.required_commands);
@@ -347,15 +363,6 @@ impl RunnerCapabilitySnapshot {
             &command_names,
             &capability_probes,
         ))
-    }
-
-    fn playwright_condition() -> &'static str {
-        concat!(
-            "command -v playwright >/dev/null 2>&1 && (",
-            "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do ",
-            "[ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; ",
-            "done; exit 1)"
-        )
     }
 
     fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
@@ -396,12 +403,8 @@ fn batch_probe_script(
 ) -> String {
     let mut lines = Vec::new();
     lines.push("set +e".to_string());
-    for (index, (tool, command)) in tool_commands.iter().enumerate() {
-        let condition = if *tool == RunnerRequiredTool::Playwright {
-            RunnerCapabilitySnapshot::playwright_condition().to_string()
-        } else {
-            format!("command -v {} >/dev/null 2>&1", shell::quote_arg(command))
-        };
+    for (index, (_tool, command)) in tool_commands.iter().enumerate() {
+        let condition = format!("command -v {} >/dev/null 2>&1", shell::quote_arg(command));
         lines.push(format!(
             "if {condition}; then printf 'T\\t{index}\\t1\\n'; else printf 'T\\t{index}\\t0\\n'; fi"
         ));
@@ -453,7 +456,7 @@ fn parse_batch_probe_output(
         match kind {
             "T" => {
                 if let Some((tool, _)) = tool_commands.get(index) {
-                    result.tools.insert(*tool);
+                    result.tools.insert(tool.clone());
                 }
             }
             "C" => {
@@ -481,8 +484,8 @@ fn evaluate_lab_runner_capabilities(
     let missing_tools = plan
         .required_tools
         .iter()
-        .copied()
-        .filter(|tool| !capabilities.has_tool(*tool))
+        .filter(|tool| !capabilities.has_tool(tool))
+        .cloned()
         .collect::<Vec<_>>();
 
     if missing_tools.is_empty() {
@@ -502,7 +505,7 @@ fn evaluate_lab_runner_capabilities(
     };
     let mut remediation = missing_tools
         .iter()
-        .map(|tool| tool.remediation().to_string())
+        .map(|tool| tool.remediation())
         .collect::<Vec<_>>();
     match mode {
         LabRunnerGateMode::Automatic => remediation.push(
@@ -659,20 +662,6 @@ impl RunnerCapabilityPreflight {
     }
 }
 
-impl RunnerRequiredTool {
-    pub fn id(self) -> &'static str {
-        RunnerToolRegistry::spec_for_required_tool(self)
-            .map(|spec| spec.capability_id)
-            .unwrap_or("unknown")
-    }
-
-    pub(crate) fn remediation(self) -> &'static str {
-        RunnerToolRegistry::spec_for_required_tool(self)
-            .map(|spec| spec.capability_remediation)
-            .unwrap_or("Install the missing tool on the runner and ensure it is on PATH.")
-    }
-}
-
 impl From<LabRunnerGateDecision> for HomeboyGateResult {
     fn from(decision: LabRunnerGateDecision) -> Self {
         match decision {
@@ -746,13 +735,13 @@ mod tests {
         let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
             command: "lint",
             required_tools: vec![
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Npm,
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Pnpm,
-                RunnerRequiredTool::Php,
-                RunnerRequiredTool::Composer,
-                RunnerRequiredTool::Docker,
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("package-manager"),
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("workspace-manager"),
+                RunnerRequiredTool::new("language-runtime"),
+                RunnerRequiredTool::new("dependency-manager"),
+                RunnerRequiredTool::new("container-runtime"),
             ],
             required_capabilities: Vec::new(),
         });
@@ -761,13 +750,13 @@ mod tests {
         assert_eq!(
             plan.required_tools,
             vec![
-                RunnerRequiredTool::Git,
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Npm,
-                RunnerRequiredTool::Pnpm,
-                RunnerRequiredTool::Php,
-                RunnerRequiredTool::Composer,
-                RunnerRequiredTool::Docker,
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("package-manager"),
+                RunnerRequiredTool::new("workspace-manager"),
+                RunnerRequiredTool::new("language-runtime"),
+                RunnerRequiredTool::new("dependency-manager"),
+                RunnerRequiredTool::new("container-runtime"),
             ]
         );
     }
@@ -777,7 +766,10 @@ mod tests {
         let preflight: RunnerCapabilityPreflight =
             prepare_lab_runner_capability(LabRunnerCapabilityContract {
                 command: "test",
-                required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Pnpm],
+                required_tools: vec![
+                    RunnerRequiredTool::new("runtime"),
+                    RunnerRequiredTool::new("workspace-manager"),
+                ],
                 required_capabilities: Vec::new(),
             })
             .into();
@@ -786,9 +778,9 @@ mod tests {
         assert_eq!(
             preflight.required_tools,
             vec![
-                RunnerRequiredTool::Git,
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Pnpm,
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("workspace-manager"),
             ]
         );
     }
@@ -798,16 +790,16 @@ mod tests {
         let plan = PreparedLabRunnerCapability {
             command: "lint",
             required_tools: vec![
-                RunnerRequiredTool::Git,
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Pnpm,
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("workspace-manager"),
             ],
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [
-                RunnerRequiredTool::Git,
-                RunnerRequiredTool::Node,
-                RunnerRequiredTool::Pnpm,
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+                RunnerRequiredTool::new("workspace-manager"),
             ]
             .into_iter()
             .collect(),
@@ -831,10 +823,13 @@ mod tests {
     fn lab_runner_gate_reports_missing_tool_for_explicit_runner() {
         let plan = PreparedLabRunnerCapability {
             command: "test",
-            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
+            required_tools: vec![
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("workspace-manager"),
+            ],
         };
         let capabilities = RunnerCapabilitySnapshot {
-            tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             components: BTreeSet::new(),
@@ -856,9 +851,12 @@ mod tests {
         else {
             panic!("expected missing tool decision");
         };
-        assert_eq!(missing_tools, vec![RunnerRequiredTool::Pnpm]);
+        assert_eq!(
+            missing_tools,
+            vec![RunnerRequiredTool::new("workspace-manager")]
+        );
         assert!(reason.contains("Lab offload runner 'lab'"));
-        assert!(reason.contains(concat!("p", "n", "pm")));
+        assert!(reason.contains("workspace-manager"));
         assert!(remediation
             .iter()
             .any(|item| item.contains("omit --runner")));
@@ -869,9 +867,9 @@ mod tests {
         let result: HomeboyGateResult = LabRunnerGateDecision::Missing {
             runner_id: "lab".to_string(),
             command: "test",
-            missing_tools: vec![RunnerRequiredTool::Pnpm],
-            reason: concat!("lab runner is missing p", "n", "pm").to_string(),
-            remediation: vec![concat!("install p", "n", "pm").to_string()],
+            missing_tools: vec![RunnerRequiredTool::new("workspace-manager")],
+            reason: "lab runner is missing workspace-manager".to_string(),
+            remediation: vec!["install workspace-manager".to_string()],
         }
         .into();
 
@@ -881,7 +879,7 @@ mod tests {
         assert_eq!(result.status, HomeboyGateStatus::Blocked);
         assert_eq!(result.retryable, Some(false));
         assert_eq!(result.evidence["runner_id"], "lab");
-        assert_eq!(result.evidence["missing_tools"][0], concat!("p", "n", "pm"));
+        assert_eq!(result.evidence["missing_tools"][0], "workspace-manager");
         assert!(result.agent_feedback.contains("capable lab runner"));
     }
 
@@ -902,10 +900,13 @@ mod tests {
     fn lab_runner_gate_reports_local_fallback_for_auto_runner() {
         let plan = PreparedLabRunnerCapability {
             command: "trace",
-            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Playwright],
+            required_tools: vec![
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("browser-runner"),
+            ],
         };
         let capabilities = RunnerCapabilitySnapshot {
-            tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             components: BTreeSet::new(),
@@ -927,7 +928,7 @@ mod tests {
             panic!("expected local fallback decision");
         };
         assert!(reason.contains("Local fallback"));
-        assert!(reason.contains("playwright+browsers"));
+        assert!(reason.contains("browser-runner"));
         assert!(remediation.iter().any(|item| item.contains("run locally")));
     }
 
@@ -935,14 +936,17 @@ mod tests {
     fn runner_capability_preflight_reports_missing_tools_components_and_env() {
         let preflight = RunnerCapabilityPreflight {
             command: "test".to_string(),
-            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Pnpm],
+            required_tools: vec![
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("workspace-manager"),
+            ],
             required_commands: vec!["zip".to_string()],
             required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
-            tools: [RunnerRequiredTool::Git].into_iter().collect(),
+            tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
@@ -953,7 +957,7 @@ mod tests {
                 .expect_err("missing capability parity");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains(concat!("tools: p", "n", "pm")));
+        assert!(err.message.contains("tools: workspace-manager"));
         assert!(err.message.contains("commands: zip"));
         assert!(err.message.contains("components: fixture-b"));
         assert!(err.message.contains("environment: HOMEBOY_TOKEN"));
@@ -971,16 +975,22 @@ mod tests {
     fn runner_capability_preflight_accepts_matching_requirements() {
         let preflight = RunnerCapabilityPreflight {
             command: "lint".to_string(),
-            required_tools: vec![RunnerRequiredTool::Git, RunnerRequiredTool::Node],
+            required_tools: vec![
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+            ],
             required_commands: vec!["zip".to_string()],
             required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
         };
         let capabilities = RunnerCapabilitySnapshot {
-            tools: [RunnerRequiredTool::Git, RunnerRequiredTool::Node]
-                .into_iter()
-                .collect(),
+            tools: [
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("runtime"),
+            ]
+            .into_iter()
+            .collect(),
             commands: ["zip".to_string()].into_iter().collect(),
             tool_capabilities: BTreeSet::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
@@ -1070,11 +1080,14 @@ mod tests {
 
     #[test]
     fn every_required_runner_tool_has_doctor_metadata() {
-        for tool in RunnerToolRegistry::required_tools() {
-            let spec = RunnerToolRegistry::spec_for_required_tool(*tool)
+        let runner = ssh_runner();
+        for tool in
+            RunnerToolRegistry::required_tools(&runner, &RunnerCapabilityPreflight::default())
+        {
+            let spec = RunnerToolRegistry::spec_for_required_tool(&tool)
                 .unwrap_or_else(|| panic!("missing doctor metadata for {tool:?}"));
 
-            assert_eq!(spec.tool, Some(*tool));
+            assert_eq!(spec.tool, Some(tool));
             assert!(!spec.id.is_empty());
             assert!(!spec.capability_id.is_empty());
             assert!(!spec.check_id.is_empty());

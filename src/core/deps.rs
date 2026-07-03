@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 mod dependency_graph;
-#[path = "npm_deps_provider.rs"]
-pub(crate) mod npm_provider;
 #[path = "deps_provider.rs"]
 pub(crate) mod provider;
 
@@ -15,8 +13,6 @@ pub use dependency_graph::{
     DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
     DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
 };
-pub use npm_provider::npm_command_args;
-pub use provider::{composer_command_args, composer_install_command_args, ComposerAction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyPackage {
@@ -260,12 +256,11 @@ pub fn install_for_resolved(
 /// the existing machinery and run the same install command on a runner (#7366).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DependencyInstallPlanStep {
-    /// Dependency-provider id (e.g. `composer`, `npm`) reporting the manifest
-    /// that triggered detection. Matches the `package_manager` reported by
-    /// `deps status` for the same provider.
+    /// Dependency-provider id reporting the manifest that triggered detection.
+    /// Matches the `package_manager` reported by `deps status` for the same
+    /// provider.
     pub provider_id: String,
-    /// Full install argv (program + args) the provider would run, e.g.
-    /// `["composer", "install", "--no-interaction", "--no-progress"]`.
+    /// Full install argv (program + args) the provider would run.
     pub command: Vec<String>,
 }
 
@@ -273,10 +268,8 @@ pub struct DependencyInstallPlanStep {
 /// command each would run, without executing any of them.
 ///
 /// Reuses [`provider::resolve_dependency_providers_optional`] (the detection
-/// behind `homeboy deps install`) so a lockfile/manifest detected by an existing
-/// provider surfaces its install command here: `composer.json` →
-/// `composer install`, `package.json`/`package-lock.json` → `npm ci`/`npm
-/// install`, and so on for whatever providers `deps.rs` already implements.
+/// behind `homeboy deps install`) so a manifest detected by an existing provider
+/// surfaces its install command here.
 /// Providers whose install cannot be expressed as a standalone shell command
 /// (component-script/extension providers) are omitted. Returns an empty vector
 /// when no provider detects the workspace.
@@ -410,57 +403,5 @@ fn combine_provider_statuses(
         component_path: path.display().to_string(),
         package_manager,
         packages,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dependency_install_plan_detects_composer_lockfile() {
-        let _guard = crate::test_support::home_env_guard();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
-
-        let plan = dependency_install_plan(project.path()).expect("composer plan");
-
-        assert!(plan.iter().any(|step| {
-            step.provider_id == "composer"
-                && step.command
-                    == vec![
-                        "composer".to_string(),
-                        "install".to_string(),
-                        "--no-interaction".to_string(),
-                        "--no-progress".to_string(),
-                    ]
-        }));
-    }
-
-    #[test]
-    fn dependency_install_plan_detects_npm_package_lock() {
-        let _guard = crate::test_support::home_env_guard();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("package.json"), "{}").expect("package json");
-        std::fs::write(project.path().join("package-lock.json"), "{}").expect("package lock");
-
-        let plan = dependency_install_plan(project.path()).expect("npm plan");
-
-        assert!(plan.iter().any(|step| {
-            step.provider_id == "npm" && step.command == vec!["npm".to_string(), "ci".to_string()]
-        }));
-    }
-
-    #[test]
-    fn dependency_install_plan_skips_when_no_provider_detects() {
-        let _guard = crate::test_support::home_env_guard();
-        let project = tempfile::tempdir().expect("project tempdir");
-
-        let plan = dependency_install_plan(project.path()).expect("empty plan");
-
-        assert!(
-            plan.is_empty(),
-            "no lockfile/manifest should yield no steps: {plan:?}"
-        );
     }
 }
