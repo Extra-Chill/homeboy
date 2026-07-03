@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.19] - 2026-07-03
+
+### Changed
+- Use runtime contract fixtures in direct tests
+
 ## [3.23.18] - 2026-07-03
 
 ### Changed
