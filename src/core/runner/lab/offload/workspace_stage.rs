@@ -113,6 +113,13 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     let offload_args =
         inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
+    let runner = load(runner_id)?;
+    preflight_agent_task_secret_env_before_workspace_stage(
+        contract,
+        runner_id,
+        &runner,
+        &offload_args,
+    )?;
     let (offload_args, workspace_ref_resolutions) =
         resolve_path_setting_workspace_refs_in_args(&offload_args)?;
     let mut extra_workspaces = lab_extra_workspaces(source_path)?;
@@ -488,6 +495,34 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+fn preflight_agent_task_secret_env_before_workspace_stage(
+    contract: &LabOffloadCommand,
+    runner_id: &str,
+    runner: &crate::core::runner::Runner,
+    args: &[String],
+) -> Result<()> {
+    if !contract
+        .secret_env_sources
+        .contains(&crate::command_contract::LabSecretEnvSource::AgentTask)
+    {
+        return Ok(());
+    }
+
+    let handoff = build_lab_secret_env_handoff_plan(
+        &contract.secret_env_sources,
+        args,
+        std::collections::HashMap::new(),
+    )?;
+    preflight_lab_secret_env_handoff(runner_id, Some(runner), &handoff.env_delta, &handoff)?;
+    preflight_agent_task_runner_secret_env_plan(
+        runner_id,
+        runner,
+        args,
+        &handoff.env_delta,
+        &handoff.secret_env_plan,
+    )
 }
 
 pub(crate) fn validate_lab_source_snapshot_handoff(
@@ -1441,6 +1476,85 @@ mod tests {
             "/runner/workspaces/provider-runtime"
         );
         assert_eq!(plan.entries[0].materialization_mode, "git");
+    }
+
+    #[test]
+    fn preflight_agent_task_secret_env_before_workspace_stage_fails_missing_controller_secret() {
+        let _secret = RemovedEnvVar::new("HOMEBOY_LAB_EARLY_MISSING_SECRET");
+        let contract = test_lab_contract_with_agent_task_secrets();
+        let runner = test_runner();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--secret-env".to_string(),
+            "HOMEBOY_LAB_EARLY_MISSING_SECRET".to_string(),
+        ];
+
+        let err = preflight_agent_task_secret_env_before_workspace_stage(
+            &contract,
+            "lab",
+            &runner,
+            &args,
+        )
+        .expect_err("missing controller-forwarded secret should fail before workspace sync");
+
+        assert_eq!(err.details["field"].as_str(), Some("secret-env"));
+        assert!(err.message.contains("HOMEBOY_LAB_EARLY_MISSING_SECRET"));
+        assert!(!err.to_string().contains("secret-value"));
+    }
+
+    fn test_lab_contract_with_agent_task_secrets() -> LabOffloadCommand {
+        LabOffloadCommand {
+            hot_label: "agent-task.run",
+            portable: true,
+            unsupported_reason: None,
+            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+            secret_env_sources: vec![crate::command_contract::LabSecretEnvSource::AgentTask],
+            required_extensions: Vec::new(),
+            required_capabilities: Vec::new(),
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
+        }
+    }
+
+    fn test_runner() -> crate::core::runner::Runner {
+        crate::core::runner::Runner {
+            id: "lab".to_string(),
+            kind: crate::core::runner::RunnerKind::Ssh,
+            server_id: Some("server-a".to_string()),
+            workspace_root: Some("/runner/workspaces".to_string()),
+            settings: crate::core::server::RunnerSettings::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: crate::core::server::RunnerPolicy::default(),
+        }
+    }
+
+    struct RemovedEnvVar {
+        name: &'static str,
+        value: Option<String>,
+    }
+
+    impl RemovedEnvVar {
+        fn new(name: &'static str) -> Self {
+            let value = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, value }
+        }
+    }
+
+    impl Drop for RemovedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.value {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
     }
 
     fn test_synced_workspace(local_path: &str, remote_path: &str) -> RunnerWorkspaceSyncOutput {

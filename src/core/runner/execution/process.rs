@@ -237,7 +237,7 @@ pub(crate) fn prepare_runner_process(
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
         env.extend(resolve_controller_secret_env_for_command(
             &runner.secret_env,
-            &request.secret_env_names,
+            &secret_env_plan.secret_env_names(),
             &env,
         )?);
     }
