@@ -13,11 +13,9 @@ struct ExtensionProvidedDefaults {
     version_candidates: Vec<VersionCandidateConfig>,
     test_drift: TestDriftConfig,
     direct_test_file_suffixes: Vec<String>,
-    /// Ecosystem-specific code-audit detector defaults (version-guard constants
-    /// and regexes, tracker-reference URL shapes). Core ships none of these as
-    /// Rust literals; the framework set lives here in the extension-provided
-    /// defaults asset and is merged in when a component opts into builtin
-    /// profile defaults, keeping core source framework-agnostic (#2240).
+    /// Optional code-audit detector defaults supplied by an external defaults
+    /// file. Core's bundled asset leaves these empty so framework-specific
+    /// constants, regexes, and tracker hosts live outside core (#2240).
     #[serde(default)]
     detector_profile: DetectorProfileDefaults,
 }
@@ -201,21 +199,12 @@ mod tests {
     }
 
     #[test]
-    fn detector_profile_defaults_supply_framework_version_guards() {
-        // The framework-specific detector defaults live in the extension-provided
-        // asset, not core Rust literals — but they are still wired one-repo so WP
-        // detection behavior is preserved (#2240).
+    fn core_detector_profile_fallback_is_empty() {
         let profile = extension_provided_detector_profile();
 
-        assert!(profile
-            .version_guard_constants
-            .iter()
-            .any(|c| c == "JETPACK__VERSION"));
-        assert!(!profile.version_guard_regexes.is_empty());
-        assert!(profile
-            .tracker_reference_regexes
-            .iter()
-            .any(|r| r.contains("wordpress")));
+        assert!(profile.version_guard_constants.is_empty());
+        assert!(profile.version_guard_regexes.is_empty());
+        assert!(profile.tracker_reference_regexes.is_empty());
     }
 
     #[test]

@@ -37,6 +37,31 @@ fn deploy_archive_core_stays_free_of_wordpress_header_semantics() {
     );
 }
 
+#[test]
+fn bundled_core_defaults_stay_product_agnostic() {
+    let defaults = source_file("assets/defaults/extension-provided-defaults.json").to_lowercase();
+    let forbidden = [
+        "wordpress",
+        "woocommerce",
+        "gutenberg",
+        "akismet",
+        "jetpack",
+        "php_version",
+        "wp_version",
+        "wc_version",
+        "core.trac",
+        "composer.json",
+        "phpunit",
+    ];
+
+    for term in forbidden {
+        assert!(
+            !defaults.contains(term),
+            "core bundled defaults asset must not contain product/framework default `{term}`"
+        );
+    }
+}
+
 fn validate_files_for_forbidden_literals(
     root: &std::path::Path,
     path: &std::path::Path,

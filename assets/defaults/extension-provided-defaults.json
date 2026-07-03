@@ -50,21 +50,5 @@
     ".spec.ts",
     ".spec.tsx",
     ".spec.mjs"
-  ],
-  "detector_profile": {
-    "version_guard_constants": [
-      "PHP_VERSION",
-      "$wp_version",
-      "JETPACK__VERSION",
-      "WC_VERSION",
-      "GUTENBERG_VERSION",
-      "AKISMET_VERSION"
-    ],
-    "version_guard_regexes": [
-      "version_compare\\s*\\(\\s*([A-Z_][A-Z0-9_]*|\\$wp_version|PHP_VERSION)\\s*,\\s*['\"]([^'\"]+)['\"]\\s*,\\s*['\"]<=?['\"]\\s*\\)"
-    ],
-    "tracker_reference_regexes": [
-      "core\\.trac\\.wordpress\\.org/ticket/\\d+"
-    ]
-  }
+  ]
 }
