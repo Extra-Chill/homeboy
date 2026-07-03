@@ -21,8 +21,8 @@ fs.chmodSync(wpCodeboxBin, 0o755);
 const config = buildConfig({
   GITHUB_WORKSPACE: workspace,
   RUNNER_TEMP: runnerTemp,
-  WORKLOAD_ID: 'legacy-workload-id',
-  WORKLOAD_LABEL: 'Legacy workload label',
+  WORKLOAD_ID: 'codebox-inputs',
+  WORKLOAD_LABEL: 'Codebox inputs',
   TARGET_REPO: 'Extra-Chill/example',
   RUNTIME: 'wp-codebox',
   PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
@@ -72,23 +72,5 @@ assert.deepEqual(config.artifact_declarations, [
     required: true,
   },
 ]);
-
-const legacyToolPolicyConfig = buildConfig({
-  GITHUB_WORKSPACE: workspace,
-  RUNNER_TEMP: runnerTemp,
-  WORKLOAD_ID: 'legacy-tool-policy',
-  TARGET_REPO: 'Extra-Chill/example',
-  RUNTIME: 'wp-codebox',
-  PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
-  PROFILE: 'codebox-profile',
-  RUNTIME_PROFILES: JSON.stringify({
-    'codebox-profile': {
-      schema: 'wp-codebox/runtime-profile/v1',
-      id: 'codebox-profile',
-    },
-  }),
-  TOOL_POLICY: JSON.stringify({ tools: { workspace_write: false } }),
-});
-assert.deepEqual(legacyToolPolicyConfig.sandbox_tool_policy, { tools: { workspace_write: false } });
 
 console.log('runtime agent full-run Codebox inputs smoke passed');

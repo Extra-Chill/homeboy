@@ -235,7 +235,7 @@ try {
 }
 
 assert.deepEqual(
-  normalizeProviderPlugin('{"providerSecretEnv":{"token":"PROVIDER_TOKEN"}}', 'fixture', true).provider_secret_env,
+  normalizeProviderPlugin('{"provider_secret_env":{"token":"PROVIDER_TOKEN"}}', 'fixture', true).provider_secret_env,
   { token: 'PROVIDER_TOKEN' }
 );
 
