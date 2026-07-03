@@ -12,6 +12,8 @@ use homeboy::core::process::pid_is_running;
 use crate::commands::runs::RunsOutput;
 use crate::commands::CmdResult;
 
+const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
+
 #[derive(Args, Clone, Default)]
 pub struct RunsReconcileArgs {
     /// Preview orphaned running records without mutating them
@@ -38,7 +40,7 @@ pub struct ReconciledRunSummary {
     pub status: String,
     pub started_at: String,
     pub finished_at: Option<String>,
-    pub owner_pid: u32,
+    pub owner_pid: Option<u32>,
     pub reason: String,
     pub artifact_count: usize,
 }
@@ -90,14 +92,11 @@ where
     let mut reconciled = Vec::new();
 
     for run in running {
-        let Some(owner_pid) = run_owner_pid(&run) else {
+        let Some(reason) = stale_running_reason(&run, &pid_is_alive) else {
             continue;
         };
-        if pid_is_alive(owner_pid) {
-            continue;
-        }
 
-        let reason = "owner_process_not_running".to_string();
+        let owner_pid = run_owner_pid(&run);
         let artifact_count = if dry_run {
             store.list_artifacts(&run.id)?.len()
         } else {
@@ -106,12 +105,8 @@ where
         let finished = if dry_run {
             None
         } else {
-            let metadata = with_reconcile_metadata(
-                &run,
-                owner_pid,
-                &reason,
-                &reconcile_run_dir_metadata(&run),
-            );
+            let metadata =
+                with_reconcile_metadata(&run, owner_pid, reason, &reconcile_run_dir_metadata(&run));
             Some(store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?)
         };
 
@@ -123,12 +118,34 @@ where
             started_at: run.started_at,
             finished_at: finished.and_then(|run| run.finished_at),
             owner_pid,
-            reason,
+            reason: reason.to_string(),
             artifact_count,
         });
     }
 
     Ok(reconciled)
+}
+
+fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
+where
+    F: Fn(u32) -> bool,
+{
+    if let Some(owner_pid) = run_owner_pid(run) {
+        return (!pid_is_alive(owner_pid)).then_some("owner_process_not_running");
+    }
+
+    ownerless_running_is_stale(run).then_some("owner_metadata_missing")
+}
+
+fn ownerless_running_is_stale(run: &RunRecord) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&run.started_at)
+        .map(|started_at| {
+            chrono::Utc::now()
+                .signed_duration_since(started_at.with_timezone(&chrono::Utc))
+                .num_minutes()
+                >= OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
+        })
+        .unwrap_or(false)
 }
 
 pub fn running_status_note(run: &RunRecord) -> Option<String> {
@@ -137,7 +154,7 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
 
 fn with_reconcile_metadata(
     run: &RunRecord,
-    owner_pid: u32,
+    owner_pid: Option<u32>,
     reason: &str,
     run_dir_metadata: &Value,
 ) -> Value {
@@ -145,9 +162,16 @@ fn with_reconcile_metadata(
     let mut marker = serde_json::json!({
         "status": RunStatus::Stale.as_str(),
         "reason": reason,
-        "owner_pid": owner_pid,
         "reconciled_at": chrono::Utc::now().to_rfc3339(),
     });
+    if let Some(marker) = marker.as_object_mut() {
+        marker.insert(
+            "owner_pid".to_string(),
+            owner_pid
+                .map(|pid| Value::from(pid as u64))
+                .unwrap_or(Value::Null),
+        );
+    }
     if let (Some(marker), Some(run_dir_metadata)) =
         (marker.as_object_mut(), run_dir_metadata.as_object())
     {
@@ -243,7 +267,7 @@ fn read_extension_children(run_dir_path: &Path) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::observation::NewRunRecord;
+    use homeboy::core::observation::{NewRunRecord, RunRecord};
     use homeboy::test_support::with_isolated_home;
 
     struct XdgGuard(Option<String>);
@@ -275,6 +299,23 @@ mod tests {
             .rig_id(rig_id)
             .metadata(metadata)
             .build()
+    }
+
+    fn ownerless_running_run(id: &str, started_at: String) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: "agent-task".to_string(),
+            component_id: Some("homeboy".to_string()),
+            started_at,
+            finished_at: None,
+            status: RunStatus::Running.as_str().to_string(),
+            command: Some("homeboy agent-task cook".to_string()),
+            cwd: Some("/tmp/homeboy-fixture".to_string()),
+            homeboy_version: Some("test-version".to_string()),
+            git_sha: Some("abc123".to_string()),
+            rig_id: Some("homeboy-lab".to_string()),
+            metadata_json: serde_json::json!({ "source": "legacy-runner" }),
+        }
     }
 
     #[test]
@@ -316,6 +357,66 @@ mod tests {
                 "stale"
             );
             assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 1);
+        });
+    }
+
+    #[test]
+    fn reconcile_marks_old_ownerless_running_records_stale() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&ownerless_running_run(
+                    "legacy-ownerless-run",
+                    "2026-05-02T16:46:46Z".to_string(),
+                ))
+                .expect("import ownerless run");
+
+            let reconciled =
+                reconcile_orphaned_running_runs(&store, 1000, false, |_| true).expect("reconcile");
+            let updated = store
+                .get_run("legacy-ownerless-run")
+                .expect("get run")
+                .expect("run exists");
+
+            assert_eq!(reconciled.len(), 1);
+            assert_eq!(reconciled[0].id, "legacy-ownerless-run");
+            assert_eq!(reconciled[0].owner_pid, None);
+            assert_eq!(reconciled[0].reason, "owner_metadata_missing");
+            assert_eq!(updated.status, "stale");
+            assert_eq!(
+                updated.metadata_json["homeboy_reconciled"]["reason"],
+                "owner_metadata_missing"
+            );
+            assert_eq!(
+                updated.metadata_json["homeboy_reconciled"]["owner_pid"],
+                Value::Null
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_keeps_fresh_ownerless_running_records_running() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&ownerless_running_run(
+                    "fresh-ownerless-run",
+                    chrono::Utc::now().to_rfc3339(),
+                ))
+                .expect("import ownerless run");
+
+            let reconciled =
+                reconcile_orphaned_running_runs(&store, 1000, false, |_| true).expect("reconcile");
+            let unchanged = store
+                .get_run("fresh-ownerless-run")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, "running");
+            assert!(unchanged.finished_at.is_none());
         });
     }
 
