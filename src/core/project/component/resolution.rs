@@ -73,10 +73,9 @@ pub fn resolve_project_component_with_standalone_snapshot(
     // the write-side normalization `component set` already applies (#6938). A tilde
     // or absolute value is preserved as-is; a relative value is resolved against the
     // current working directory, exactly as portable discovery already interprets it.
-    resolved.local_path = crate::core::component::normalize_component_local_path(
-        &attachment_local_path,
-    )
-    .unwrap_or(attachment_local_path);
+    resolved.local_path =
+        crate::core::component::normalize_component_local_path(&attachment_local_path)
+            .unwrap_or(attachment_local_path);
 
     // Inherit project-level extensions when the component's homeboy.json doesn't
     // declare any. This handles clean tag clones from older releases where
@@ -396,8 +395,7 @@ mod tests {
 
         let project = project_with_attachment(None, noncanonical.clone());
 
-        let resolved =
-            resolve_project_component(&project, "fixture").expect("attachment resolves");
+        let resolved = resolve_project_component(&project, "fixture").expect("attachment resolves");
 
         assert!(
             std::path::Path::new(&resolved.local_path).is_absolute(),

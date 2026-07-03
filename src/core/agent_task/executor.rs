@@ -6,7 +6,7 @@ pub struct AgentTaskExecutor {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
-    #[serde(default, alias = "runtime", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_selection: Option<AgentTaskRuntimeSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
@@ -22,16 +22,11 @@ pub struct AgentTaskExecutor {
 pub struct AgentTaskRuntimeSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_id: Option<String>,
-    #[serde(default, alias = "backend", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_backend: Option<String>,
-    #[serde(
-        default,
-        alias = "selector",
-        alias = "executor_provider_selector",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_provider_id: Option<String>,
-    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -71,14 +66,6 @@ impl AgentTaskExecutor {
             .unwrap_or(&self.backend)
     }
 
-    #[cfg(test)]
-    pub(crate) fn executor_provider_id(&self) -> Option<&str> {
-        self.runtime_selection
-            .as_ref()
-            .and_then(|selection| selection.executor_provider_id.as_deref())
-            .or(self.selector.as_deref())
-    }
-
     pub fn provider(&self) -> Option<&str> {
         self.runtime_selection
             .as_ref()
@@ -93,12 +80,6 @@ impl AgentTaskExecutor {
             .or(self.model.as_deref())
     }
 
-    #[cfg(test)]
-    pub(crate) fn substrate_ref(&self) -> Option<&str> {
-        self.runtime_selection
-            .as_ref()
-            .and_then(|selection| selection.substrate_ref.as_deref())
-    }
 }
 
 fn config_str<'a>(config: &'a Value, key: &str) -> Option<&'a str> {

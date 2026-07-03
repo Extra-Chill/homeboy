@@ -319,26 +319,22 @@ impl ConfigEntity for Runner {
 }
 
 pub fn load(id: &str) -> Result<Runner> {
+    if id == "local" {
+        return Ok(builtin_local_runner());
+    }
+
     if let Ok(runner) = config::load::<Runner>(id) {
         if runner.kind == RunnerKind::Local {
             return Ok(runner);
         }
     }
 
-    if is_local_runner_alias(id) {
-        return Ok(local_alias_runner(id));
-    }
-
     load_server_runner(id)
 }
 
-fn is_local_runner_alias(id: &str) -> bool {
-    matches!(id, "local" | "localhost" | "self")
-}
-
-fn local_alias_runner(id: &str) -> Runner {
+fn builtin_local_runner() -> Runner {
     Runner {
-        id: id.to_string(),
+        id: "local".to_string(),
         kind: RunnerKind::Local,
         server_id: None,
         workspace_root: std::env::current_dir()
@@ -358,10 +354,13 @@ pub fn effective_env(id: &str) -> Result<HashMap<String, String>> {
 }
 
 pub fn list() -> Result<Vec<Runner>> {
-    let mut runners: Vec<Runner> = config::list::<Runner>()?
-        .into_iter()
-        .filter(|runner| runner.kind == RunnerKind::Local)
-        .collect();
+    let mut runners: Vec<Runner> = vec![builtin_local_runner()];
+    runners.extend(
+        config::list::<Runner>()?
+            .into_iter()
+            .filter(|runner| runner.kind == RunnerKind::Local)
+            .filter(|runner| runner.id != "local"),
+    );
     runners.extend(
         server::list()?
             .into_iter()
@@ -895,9 +894,9 @@ mod tests {
     }
 
     #[test]
-    fn local_runner_alias_does_not_require_registry_entry() {
+    fn builtin_local_runner_does_not_require_registry_entry() {
         test_support::with_isolated_home(|_| {
-            let runner = load("local").expect("load local alias");
+            let runner = load("local").expect("load local runner");
 
             assert_eq!(runner.id, "local");
             assert_eq!(runner.kind, RunnerKind::Local);
@@ -1205,7 +1204,14 @@ mod tests {
                 "server.not_found"
             );
             assert!(!exists("lab"));
-            assert!(list().expect("list runners").is_empty());
+            assert_eq!(
+                list()
+                    .expect("list runners")
+                    .into_iter()
+                    .map(|runner| runner.id)
+                    .collect::<Vec<_>>(),
+                vec!["local".to_string()]
+            );
         });
     }
 

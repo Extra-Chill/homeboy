@@ -30,8 +30,8 @@ mod types;
 pub use super::grammar_strings::find_unclosed_raw_string_on_line;
 use super::grammar_strings::{line_closes_regular_string, line_has_unclosed_regular_string};
 
-pub use extract::{extract, namespace, Symbol};
 pub(crate) use extract::cached_regex;
+pub use extract::{extract, namespace, Symbol};
 pub use loading::{load_for_extension_path, load_grammar, load_grammar_json};
 pub use parser::{ContextualLine, Region, StructuralContext};
 pub use types::{

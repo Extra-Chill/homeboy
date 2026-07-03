@@ -885,7 +885,11 @@ mod tests {
 fn rust_aggregate_grammar() -> Grammar {
     let mut grammar = rust_grammar();
     grammar.fingerprint.aggregate_seams = Some(AggregateSeamConfig {
-        method_names: vec!["new".to_string(), "builder".to_string(), "default".to_string()],
+        method_names: vec![
+            "new".to_string(),
+            "builder".to_string(),
+            "default".to_string(),
+        ],
         method_prefixes: vec!["from_".to_string(), "for_".to_string(), "with_".to_string()],
         type_method_templates: vec!["build_{type}".to_string(), "create_{type}".to_string()],
     });
@@ -906,10 +910,40 @@ fn php_callback_grammar() -> Grammar {
     // Match the WordPress grammar's PHP call skip set so free-function call
     // sites mirror the reference script.
     grammar.fingerprint.skip_calls = [
-        "if", "while", "for", "foreach", "switch", "match", "catch", "return", "echo", "print",
-        "isset", "unset", "empty", "list", "array", "function", "class", "interface", "trait",
-        "new", "require", "require_once", "include", "include_once", "define", "defined", "die",
-        "exit", "eval", "compact", "extract", "var_dump", "print_r", "var_export",
+        "if",
+        "while",
+        "for",
+        "foreach",
+        "switch",
+        "match",
+        "catch",
+        "return",
+        "echo",
+        "print",
+        "isset",
+        "unset",
+        "empty",
+        "list",
+        "array",
+        "function",
+        "class",
+        "interface",
+        "trait",
+        "new",
+        "require",
+        "require_once",
+        "include",
+        "include_once",
+        "define",
+        "defined",
+        "die",
+        "exit",
+        "eval",
+        "compact",
+        "extract",
+        "var_dump",
+        "print_r",
+        "var_export",
     ]
     .iter()
     .map(|s| s.to_string())

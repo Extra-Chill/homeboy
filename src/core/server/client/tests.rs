@@ -11,8 +11,7 @@ use super::local_exec::{
     execute_local_command_passthrough, execute_local_command_stderr_passthrough,
 };
 use super::ssh_client::{
-    build_secret_env_stdin_block, wrap_command_with_secret_env_read_loop,
-    SECRET_ENV_STDIN_SENTINEL,
+    build_secret_env_stdin_block, wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -63,9 +62,10 @@ fn secret_env_values_stream_over_stdin_not_command_argv() {
 
 #[test]
 fn empty_secret_env_block_carries_only_the_sentinel() {
-    let block =
-        String::from_utf8(build_secret_env_stdin_block(&std::collections::BTreeMap::new()))
-            .expect("utf8 block");
+    let block = String::from_utf8(build_secret_env_stdin_block(
+        &std::collections::BTreeMap::new(),
+    ))
+    .expect("utf8 block");
     assert_eq!(block, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
 }
 

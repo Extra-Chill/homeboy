@@ -524,10 +524,8 @@ impl BatchCookSpec {
             .commit_message
             .clone()
             .unwrap_or_else(|| default_cook_commit_message(self));
-        let source_worktree_path = agent_task_service::source_worktree_path(
-            self.cwd.clone(),
-            self.workspace.clone(),
-        );
+        let source_worktree_path =
+            agent_task_service::source_worktree_path(self.cwd.clone(), self.workspace.clone());
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {

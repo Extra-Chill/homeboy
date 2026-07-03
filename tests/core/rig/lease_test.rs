@@ -404,7 +404,10 @@ fn test_release_lock_requires_force_for_live_holder() {
                 forced,
                 ..
             } => {
-                assert!(!was_reclaimable, "live holder was not otherwise reclaimable");
+                assert!(
+                    !was_reclaimable,
+                    "live holder was not otherwise reclaimable"
+                );
                 assert!(forced, "force was required");
             }
             other => panic!("expected Released, got {other:?}"),

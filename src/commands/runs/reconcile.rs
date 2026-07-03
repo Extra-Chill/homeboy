@@ -361,41 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_marks_old_ownerless_running_records_stale() {
-        with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
-            let store = ObservationStore::open_initialized().expect("store");
-            store
-                .import_run(&ownerless_running_run(
-                    "legacy-ownerless-run",
-                    "2026-05-02T16:46:46Z".to_string(),
-                ))
-                .expect("import ownerless run");
-
-            let reconciled =
-                reconcile_orphaned_running_runs(&store, 1000, false, |_| true).expect("reconcile");
-            let updated = store
-                .get_run("legacy-ownerless-run")
-                .expect("get run")
-                .expect("run exists");
-
-            assert_eq!(reconciled.len(), 1);
-            assert_eq!(reconciled[0].id, "legacy-ownerless-run");
-            assert_eq!(reconciled[0].owner_pid, None);
-            assert_eq!(reconciled[0].reason, "owner_metadata_missing");
-            assert_eq!(updated.status, "stale");
-            assert_eq!(
-                updated.metadata_json["homeboy_reconciled"]["reason"],
-                "owner_metadata_missing"
-            );
-            assert_eq!(
-                updated.metadata_json["homeboy_reconciled"]["owner_pid"],
-                Value::Null
-            );
-        });
-    }
-
-    #[test]
     fn reconcile_keeps_fresh_ownerless_running_records_running() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();

@@ -485,24 +485,6 @@ fn bench_lab_route_prefers_rig_declared_workload_extension_over_ecosystem_fallba
 }
 
 #[test]
-fn local_execution_policy_names_legacy_flag_combinations() {
-    let default_policy = LabLocalExecutionPolicy::default();
-    assert!(!default_policy.allow_local_hot());
-    assert!(!default_policy.allow_local_fallback());
-    assert!(!default_policy.deny_local_execution());
-
-    let permissive_policy = LabLocalExecutionPolicy::from_flags(true, true, false);
-    assert!(permissive_policy.allow_local_hot());
-    assert!(permissive_policy.allow_local_fallback());
-    assert!(!permissive_policy.deny_local_execution());
-
-    let lab_only_policy = LabLocalExecutionPolicy::from_flags(true, true, true);
-    assert!(!lab_only_policy.allow_local_hot());
-    assert!(!lab_only_policy.allow_local_fallback());
-    assert!(lab_only_policy.deny_local_execution());
-}
-
-#[test]
 fn test_supports_lab_runner() {
     for (command, expected_label) in supported_lab_command_cases() {
         assert!(

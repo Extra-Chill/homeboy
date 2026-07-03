@@ -42,7 +42,7 @@ pub struct RefactorSourceRequest {
     pub changed_since: Option<String>,
     pub only: Vec<crate::core::code_audit::AuditFinding>,
     pub exclude: Vec<crate::core::code_audit::AuditFinding>,
-    pub settings: Vec<(String, String)>,
+    pub settings: Vec<(String, serde_json::Value)>,
     pub lint: LintSourceOptions,
     pub test: TestSourceOptions,
     pub write: bool,
@@ -53,7 +53,7 @@ pub struct RefactorSourceRequest {
 pub fn lint_refactor_request(
     component: Component,
     root: PathBuf,
-    settings: Vec<(String, String)>,
+    settings: Vec<(String, serde_json::Value)>,
     options: LintSourceOptions,
     write: bool,
 ) -> RefactorSourceRequest {
@@ -75,7 +75,7 @@ pub fn lint_refactor_request(
 pub fn build_test_refactor_request(
     component: Component,
     root: PathBuf,
-    settings: Vec<(String, String)>,
+    settings: Vec<(String, serde_json::Value)>,
     options: TestSourceOptions,
     write: bool,
 ) -> RefactorSourceRequest {
@@ -587,7 +587,7 @@ mod tests {
         let request = lint_refactor_request(
             test_component(&root),
             root,
-            vec![("key".to_string(), "value".to_string())],
+            vec![("key".to_string(), serde_json::json!("value"))],
             LintSourceOptions::default(),
             true,
         );

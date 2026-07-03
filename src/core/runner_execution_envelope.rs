@@ -1135,11 +1135,11 @@ mod tests {
                 "root": "/workspace/project"
             },
             "expected_artifacts": ["patch"],
-            "artifactDeclarations": [
+            "artifact_declarations": [
                 {
                     "name": "report",
                     "type": "json",
-                    "artifactSchema": "example/report/v1",
+                    "artifact_schema": "example/report/v1",
                     "path": "artifacts/report.json",
                     "required": true
                 }

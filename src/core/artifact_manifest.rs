@@ -21,7 +21,6 @@ pub const RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH: &str = "artifacts/agent-loop
 
 pub const RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE: &str = "transcript.json";
 pub const RUNTIME_AGENT_RESULT_ARTIFACT_FILE: &str = "agent-result.json";
-pub const RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE: &str = "agent_result.json";
 pub const RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE: &str = "patch.diff";
 pub const RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE: &str = "patch.patch";
 

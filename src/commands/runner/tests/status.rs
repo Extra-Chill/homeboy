@@ -11,7 +11,7 @@ use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, 
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    declared_executable_requirement_diagnostics, declared_run_followups_for_legacy,
+    declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
     lab_runner_homeboy_output, runner_artifact_feature_diagnostics, runner_followups,
     runner_status_operator_commands,
@@ -215,7 +215,6 @@ fn declared_runtime_reports_generic_package_paths_probe_and_mixed_source_warning
     );
 
     assert_eq!(runtime.runtime, "sample-runtime");
-    assert_eq!(runtime.legacy_output.as_deref(), Some("sample_runtime"));
     assert_eq!(
         runtime.managed_cache_source,
         "/home/chubes/.cache/homeboy/sample-runtime/source"
@@ -380,7 +379,6 @@ fn sample_runtime_diagnostics_accept_single_managed_checkout() {
 fn unknown_runtime_declaration_does_not_emit_wp_specific_guidance() {
     let declaration = AgentRuntimeToolDiagnosticDeclaration {
         tool: "other-runtime".to_string(),
-        legacy_output: None,
         configured_binary_env: vec!["OTHER_RUNTIME_BIN".to_string()],
         install_dir_env: Some("OTHER_RUNTIME_INSTALL_DIR".to_string()),
         default_install_dir: Some("${HOME}/.cache/homeboy/other-runtime".to_string()),
@@ -429,7 +427,7 @@ fn declared_executable_requirement_status_projection_is_generic() {
 
 #[test]
 fn declared_bench_followups_preserve_existing_status_guidance() {
-    let followups = declared_run_followups_for_legacy("managed_followups", Some("bench"), None);
+    let followups = declared_run_followups(Some("bench"), None);
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
     assert!(serialized.contains("latest_bench_run"));
@@ -442,7 +440,7 @@ fn declared_bench_followups_preserve_existing_status_guidance() {
 
 #[test]
 fn declared_fuzz_followups_preserve_existing_status_guidance() {
-    let followups = declared_run_followups_for_legacy("managed_followups", Some("fuzz"), None);
+    let followups = declared_run_followups(Some("fuzz"), None);
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
     assert!(serialized.contains("latest_fuzz_run"));
@@ -455,7 +453,7 @@ fn declared_fuzz_followups_preserve_existing_status_guidance() {
 
 #[test]
 fn unknown_workload_does_not_emit_declared_bench_or_fuzz_followups() {
-    let followups = declared_run_followups_for_legacy("managed_followups", Some("unknown"), None);
+    let followups = declared_run_followups(Some("unknown"), None);
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
     assert!(serialized.contains("recent_runs"));
@@ -585,7 +583,6 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
 fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {
     AgentRuntimeToolDiagnosticDeclaration {
         tool: "sample-runtime".to_string(),
-        legacy_output: Some("selected_runtime".to_string()),
         configured_binary_env: vec![
             "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
             "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),
@@ -605,7 +602,6 @@ fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration 
 fn sample_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
     AgentRuntimeRuntimeDiagnosticDeclaration {
         tool: "sample-runtime".to_string(),
-        legacy_output: Some("sample_runtime".to_string()),
         configured_binary_env: vec![
             "HOMEBOY_SAMPLE_RUNTIME_BIN".to_string(),
             "HOMEBOY_SETTINGS_SAMPLE_RUNTIME_BIN".to_string(),

@@ -360,32 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn write_drops_legacy_component_lab_config() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::write(
-            dir.path().join("homeboy.json"),
-            r#"{
-                "id":"test-comp",
-                "lab":{"self_command_prefix":["cargo","run","--quiet","--bin","homeboy","--"]}
-            }"#,
-        )
-        .expect("write legacy homeboy.json");
-        let component = Component::new(
-            "test-comp".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "wp-content/plugins/test".to_string(),
-            None,
-        );
-
-        write_portable_config(dir.path(), &component).expect("write should succeed");
-
-        let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
-        let result: Value = serde_json::from_str(&content).unwrap();
-
-        assert!(result.get("lab").is_none());
-    }
-
-    #[test]
     fn write_does_not_blank_remote_path() {
         let dir = TempDir::new().expect("temp dir");
 

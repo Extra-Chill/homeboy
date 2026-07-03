@@ -1722,10 +1722,7 @@ mod tests {
         ];
 
         let err = preflight_agent_task_secret_env_before_workspace_stage(
-            &contract,
-            "lab",
-            &runner,
-            &args,
+            &contract, "lab", &runner, &args,
         )
         .expect_err("missing controller-forwarded secret should fail before workspace sync");
 

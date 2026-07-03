@@ -1295,7 +1295,12 @@ fn extract_call_sites(content: &str, grammar: &Grammar) -> Vec<CallSite> {
     let compiled: Vec<(Option<regex::Regex>, bool)> = cfg
         .patterns
         .iter()
-        .map(|pattern| (grammar::cached_regex(&pattern.regex), pattern.apply_skip_calls))
+        .map(|pattern| {
+            (
+                grammar::cached_regex(&pattern.regex),
+                pattern.apply_skip_calls,
+            )
+        })
         .collect();
 
     let mut sites = Vec::new();

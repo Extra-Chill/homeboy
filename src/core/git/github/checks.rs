@@ -103,10 +103,22 @@ mod tests {
 
     #[test]
     fn classifies_terminal_outcomes() {
-        assert_eq!(classify_check(&check("COMPLETED", "SUCCESS")), CheckClass::Passed);
-        assert_eq!(classify_check(&check("COMPLETED", "NEUTRAL")), CheckClass::Passed);
-        assert_eq!(classify_check(&check("COMPLETED", "SKIPPED")), CheckClass::Skipped);
-        assert_eq!(classify_check(&check("COMPLETED", "FAILURE")), CheckClass::Failed);
+        assert_eq!(
+            classify_check(&check("COMPLETED", "SUCCESS")),
+            CheckClass::Passed
+        );
+        assert_eq!(
+            classify_check(&check("COMPLETED", "NEUTRAL")),
+            CheckClass::Passed
+        );
+        assert_eq!(
+            classify_check(&check("COMPLETED", "SKIPPED")),
+            CheckClass::Skipped
+        );
+        assert_eq!(
+            classify_check(&check("COMPLETED", "FAILURE")),
+            CheckClass::Failed
+        );
         assert_eq!(
             classify_check(&check("COMPLETED", "ACTION_REQUIRED")),
             CheckClass::Failed
@@ -119,19 +131,22 @@ mod tests {
             classify_check(&check("COMPLETED", "TIMED_OUT")),
             CheckClass::Rerunnable
         );
-        assert_eq!(classify_check(&check("COMPLETED", "BOGUS")), CheckClass::Unknown);
+        assert_eq!(
+            classify_check(&check("COMPLETED", "BOGUS")),
+            CheckClass::Unknown
+        );
     }
 
     #[test]
     fn classifies_waiting_outcomes() {
         assert_eq!(classify_check(&check("QUEUED", "")), CheckClass::Queued);
         assert_eq!(classify_check(&check("REQUESTED", "")), CheckClass::Queued);
-        assert_eq!(classify_check(&check("IN_PROGRESS", "")), CheckClass::Running);
-        assert_eq!(classify_check(&check("PENDING", "")), CheckClass::Pending);
         assert_eq!(
-            classify_check(&serde_json::json!({})),
-            CheckClass::Pending
+            classify_check(&check("IN_PROGRESS", "")),
+            CheckClass::Running
         );
+        assert_eq!(classify_check(&check("PENDING", "")), CheckClass::Pending);
+        assert_eq!(classify_check(&serde_json::json!({})), CheckClass::Pending);
     }
 
     #[test]
@@ -151,8 +166,14 @@ mod tests {
 
     #[test]
     fn matches_are_case_insensitive() {
-        assert_eq!(classify_check(&check("completed", "failure")), CheckClass::Failed);
-        assert_eq!(classify_check(&check("in_progress", "")), CheckClass::Running);
+        assert_eq!(
+            classify_check(&check("completed", "failure")),
+            CheckClass::Failed
+        );
+        assert_eq!(
+            classify_check(&check("in_progress", "")),
+            CheckClass::Running
+        );
     }
 
     #[test]

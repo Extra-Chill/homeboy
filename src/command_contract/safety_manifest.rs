@@ -1030,22 +1030,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_audit_reports_mutating_commands_without_action_metadata() {
-        let manifest = current_command_safety_manifest();
-        let report = command_safety_manifest_audit(&manifest);
-
-        assert!(report.report_only);
-
-        let findings = report
-            .missing_action_metadata
-            .iter()
-            .map(|finding| finding.path.join(" "))
-            .collect::<Vec<_>>();
-        assert!(findings.contains(&"config set".to_string()));
-        assert!(findings.contains(&"project set".to_string()));
-    }
-
-    #[test]
     fn high_risk_action_commands_have_explicit_action_metadata() {
         let manifest = current_command_safety_manifest();
 

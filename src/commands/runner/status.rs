@@ -295,7 +295,6 @@ pub(crate) fn declared_runtime_diagnostics(
 
     RunnerRuntimeDiagnostics {
         runtime: declaration.tool.clone(),
-        legacy_output: declaration.legacy_output.clone(),
         configured_binary: configured,
         configured_binary_source,
         managed_cache_source: managed_cache_source.clone(),
@@ -709,7 +708,7 @@ fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
 }
 
 pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
-    let mut followups = declared_run_followups_for_legacy("managed_followups", None, runner_id);
+    let mut followups = declared_run_followups(None, runner_id);
     let Some(runner_id) = runner_id else {
         return followups;
     };
@@ -758,11 +757,7 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             purpose: "Reclaim safe orphaned Lab workspaces in bounded passes when the runner workspace filesystem is under disk pressure.".to_string(),
         },
     ]);
-    followups.extend(declared_followups_for_legacy(
-        "managed_followups",
-        None,
-        Some(runner_id),
-    ));
+    followups.extend(declared_followups(None, Some(runner_id)));
     if let Ok(path) = std::env::current_dir() {
         followups.push(LabFollowup {
             label: "workspace_sync".to_string(),
@@ -776,39 +771,27 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
     followups
 }
 
-pub(crate) fn declared_run_followups_for_legacy(
-    legacy_output: &str,
+pub(crate) fn declared_run_followups(
     run_kind: Option<&str>,
     _runner_id: Option<&str>,
 ) -> Vec<LabFollowup> {
     default_run_followup_declarations()
         .iter()
-        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
+        .filter(|followup| followup_matches(followup, run_kind))
         .map(declared_run_followup)
         .collect()
 }
 
-fn declared_followups_for_legacy(
-    legacy_output: &str,
-    run_kind: Option<&str>,
-    runner_id: Option<&str>,
-) -> Vec<LabFollowup> {
+fn declared_followups(run_kind: Option<&str>, runner_id: Option<&str>) -> Vec<LabFollowup> {
     declared_diagnostics_contracts()
         .iter()
         .flat_map(|contract| contract.followups.iter())
-        .filter(|followup| followup_matches(followup, legacy_output, run_kind))
+        .filter(|followup| followup_matches(followup, run_kind))
         .map(|followup| declared_followup(followup, runner_id))
         .collect()
 }
 
-fn followup_matches(
-    followup: &AgentRuntimeDiagnosticFollowup,
-    legacy_output: &str,
-    run_kind: Option<&str>,
-) -> bool {
-    if followup.legacy_output.as_deref() != Some(legacy_output) {
-        return false;
-    }
+fn followup_matches(followup: &AgentRuntimeDiagnosticFollowup, run_kind: Option<&str>) -> bool {
     let declared_kind = followup
         .run_kind
         .as_deref()
@@ -875,7 +858,6 @@ fn run_followup(
 ) -> AgentRuntimeDiagnosticFollowup {
     AgentRuntimeDiagnosticFollowup {
         label: label.to_string(),
-        legacy_output: Some("managed_followups".to_string()),
         run_kind: run_kind.map(str::to_string),
         workload: None,
         command_script: command_script.to_string(),

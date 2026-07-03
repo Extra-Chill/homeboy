@@ -174,117 +174,6 @@ fn agent_tool_evidence_redaction_removes_sensitive_values() {
 }
 
 #[test]
-fn executor_runtime_selection_synthesizes_legacy_fields() {
-    let executor = AgentTaskExecutor {
-        backend: "sample-runtime".to_string(),
-        selector: Some("claude-code".to_string()),
-        runtime_selection: None,
-        required_capabilities: Vec::new(),
-        secret_env: Vec::new(),
-        model: Some("opus-4.7".to_string()),
-        config: json!({ "provider": "claude-code" }),
-    };
-
-    let selection = executor.runtime_selection();
-
-    assert_eq!(selection.runtime_id, None);
-    assert_eq!(
-        selection.executor_backend.as_deref(),
-        Some("sample-runtime")
-    );
-    assert_eq!(
-        selection.executor_provider_id.as_deref(),
-        Some("claude-code")
-    );
-    assert_eq!(selection.ai_provider_id.as_deref(), Some("claude-code"));
-    assert_eq!(selection.model.as_deref(), Some("opus-4.7"));
-    assert_eq!(selection.substrate_ref, None);
-    assert_eq!(executor.executor_backend(), "sample-runtime");
-    assert_eq!(executor.executor_provider_id(), Some("claude-code"));
-    assert_eq!(executor.provider(), Some("claude-code"));
-    assert_eq!(executor.model(), Some("opus-4.7"));
-}
-
-#[test]
-fn executor_runtime_selection_round_trips_aliases() {
-    let value = json!({
-        "backend": "legacy-backend",
-        "selector": "legacy-selector",
-        "runtime": {
-            "runtime_id": "runtime-a",
-            "backend": "runtime-backend",
-            "selector": "runtime-selector",
-            "provider": "example-oauth",
-            "model": "gpt-5.5",
-            "substrate_ref": "sample-runtime://sandbox/123"
-        }
-    });
-
-    let executor: AgentTaskExecutor = serde_json::from_value(value).expect("decode executor");
-    let selection = executor.runtime_selection();
-    let serialized = serde_json::to_value(&executor).expect("serialize executor");
-
-    assert_eq!(executor.runtime_id(), Some("runtime-a"));
-    assert_eq!(executor.executor_backend(), "runtime-backend");
-    assert_eq!(executor.executor_provider_id(), Some("runtime-selector"));
-    assert_eq!(executor.provider(), Some("example-oauth"));
-    assert_eq!(executor.model(), Some("gpt-5.5"));
-    assert_eq!(
-        executor.substrate_ref(),
-        Some("sample-runtime://sandbox/123")
-    );
-    assert_eq!(
-        selection.executor_backend.as_deref(),
-        Some("runtime-backend")
-    );
-    assert_eq!(
-        selection.executor_provider_id.as_deref(),
-        Some("runtime-selector")
-    );
-    assert_eq!(
-        serialized["runtime_selection"]["executor_backend"],
-        "runtime-backend"
-    );
-    assert_eq!(
-        serialized["runtime_selection"]["executor_provider_id"],
-        "runtime-selector"
-    );
-    assert_eq!(
-        serialized["runtime_selection"]["ai_provider_id"],
-        "example-oauth"
-    );
-    assert!(serialized.get("runtime").is_none());
-}
-
-#[test]
-fn request_deserializes_legacy_expected_artifacts_and_declaration_alias() {
-    let request: AgentTaskRequest = serde_json::from_value(json!({
-        "schema": AGENT_TASK_REQUEST_SCHEMA,
-        "task_id": "task-typed-artifacts",
-        "executor": { "backend": "sample-runtime" },
-        "instructions": "Return the declared typed report.",
-        "expected_artifacts": ["legacy-report.json"],
-        "artifactDeclarations": [{
-            "name": "analysis_report",
-            "type": "AnalysisReport",
-            "artifact_schema": "example/analysis-report/v1",
-            "path": "artifacts/analysis-report.json",
-            "required": true
-        }]
-    }))
-    .expect("decode request with typed artifact declarations");
-
-    assert_eq!(request.expected_artifacts, vec!["legacy-report.json"]);
-    assert_eq!(request.artifact_declarations.len(), 1);
-    assert_eq!(request.artifact_declarations[0].name, "analysis_report");
-    assert_eq!(
-        request.artifact_declarations[0].artifact_type.as_deref(),
-        Some("AnalysisReport")
-    );
-    assert!(request.artifact_declarations[0].required);
-}
-
-#[test]
 fn request_canonicalizes_artifact_declarations_from_expected_artifacts() {
     let mut request: AgentTaskRequest = serde_json::from_value(json!({
         "schema": AGENT_TASK_REQUEST_SCHEMA,
@@ -294,12 +183,12 @@ fn request_canonicalizes_artifact_declarations_from_expected_artifacts() {
         "expected_artifacts": [" patch ", "analysis_report", ""],
         "artifact_declarations": [{
             "name": " analysis_report ",
-            "kind": "AnalysisReport",
-            "contentSchema": "example/analysis-report/v1",
+            "type": "AnalysisReport",
+            "artifact_schema": "example/analysis-report/v1",
             "required": false
         }]
     }))
-    .expect("decode request with artifact aliases");
+    .expect("decode request with artifact declarations");
 
     request.normalize_artifact_declarations();
 

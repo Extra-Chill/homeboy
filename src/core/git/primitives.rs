@@ -237,7 +237,11 @@ pub fn default_branch_name(path: &Path) -> Option<String> {
 pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     let remote = resolve_default_remote(git_root);
     let old_branch = current_branch(git_root);
-    run_git(git_root, &["fetch", &remote], &format!("git fetch {remote}"))?;
+    run_git(
+        git_root,
+        &["fetch", &remote],
+        &format!("git fetch {remote}"),
+    )?;
     let mut detached_default_branch: Option<String> = None;
 
     if let Some(remote_branch) = default_remote_branch(git_root) {
@@ -454,7 +458,12 @@ mod tests {
         );
         git(
             tmp.path(),
-            &["clone", "-q", remote.to_str().unwrap(), seed.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
         );
         git(&seed, &["config", "user.email", "t@x.test"]);
         git(&seed, &["config", "user.name", "T"]);
@@ -468,7 +477,12 @@ mod tests {
         // is deliberately NOT named origin.
         git(
             tmp.path(),
-            &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
         );
         git(&clone, &["remote", "rename", "origin", "upstream"]);
 
