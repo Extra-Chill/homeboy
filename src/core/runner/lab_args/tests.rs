@@ -1195,6 +1195,8 @@ mod run_plan_remap_tests {
 
 mod prompt_files_tests {
     use super::*;
+    use crate::core::agent_task_prompts;
+    use crate::test_support::with_isolated_home;
 
     #[test]
     fn inline_agent_task_prompt_files_reads_absolute_prompt_file() {
@@ -1236,6 +1238,29 @@ mod prompt_files_tests {
 
         assert_eq!(out[3], "--task=Fix issue 1");
         assert_eq!(out[5], "[\"Fix issue 2\"]");
+    }
+
+    #[test]
+    fn inline_agent_task_prompt_files_resolves_stored_prompt_references() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            agent_task_prompts::save_prompt("homeboy-7388", "Cook from the store")
+                .expect("save prompt");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "@prompt:homeboy-7388".to_string(),
+                "--task=prompt:homeboy-7388".to_string(),
+            ];
+
+            let out =
+                inline_agent_task_prompt_files_in_args(&args, temp.path()).expect("inline prompt");
+
+            assert_eq!(out[4], "Cook from the store");
+            assert_eq!(out[5], "--task=Cook from the store");
+        });
     }
 
     #[test]
@@ -1726,6 +1751,23 @@ mod lab_args_rewrite_tests {
                 format!("--config={}", specs[0].remote_spec),
             ]
         );
+    }
+
+    #[test]
+    fn lab_args_at_file_preflight_ignores_stored_prompt_references() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "@prompt:homeboy-7388".to_string(),
+            "--task=@prompt:homeboy-7388".to_string(),
+        ];
+
+        let specs = lab_at_file_specs(&args, dir.path(), "/runner/workspace").expect("specs");
+
+        assert!(specs.is_empty());
     }
 
     #[test]

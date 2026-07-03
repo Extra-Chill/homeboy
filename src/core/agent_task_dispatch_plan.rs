@@ -7,6 +7,7 @@
 //! cook-handoff orchestration.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::agent_task::{
     AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
@@ -99,10 +100,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .then(|| runtime_dependency_graph.to_evidence_value());
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
-        let instructions = dispatch_instructions(
-            read_text_spec(&prompt_spec.prompt, "prompt")?,
-            request.task_url.as_deref(),
-        );
+        let resolved_prompt = read_prompt_spec(&prompt_spec.prompt)?;
+        let instructions =
+            dispatch_instructions(resolved_prompt.content.clone(), request.task_url.as_deref());
         let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
             request
                 .task_id
@@ -116,6 +116,13 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 kind: "task".to_string(),
                 uri: task_url.clone(),
                 revision: None,
+            });
+        }
+        if let Some(source) = &resolved_prompt.stored_prompt {
+            source_refs.push(AgentTaskSourceRef {
+                kind: "prompt".to_string(),
+                uri: source.reference.clone(),
+                revision: Some(source.sha256.clone()),
             });
         }
 
@@ -188,6 +195,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
                 "task_url": request.task_url,
                 "prompt_source": &prompt_spec.prompt,
+                "prompt_store": resolved_prompt.stored_prompt,
                 "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
                 "runtime_dependency_graph": runtime_dependency_graph_evidence,
@@ -626,6 +634,39 @@ fn read_text_spec(spec: &str, label: &str) -> Result<String> {
     })
 }
 
+#[derive(Clone, serde::Serialize)]
+struct StoredPromptSource {
+    id: String,
+    reference: String,
+    sha256: String,
+}
+
+struct ResolvedPromptSpec {
+    content: String,
+    stored_prompt: Option<StoredPromptSource>,
+}
+
+fn read_prompt_spec(spec: &str) -> Result<ResolvedPromptSpec> {
+    if let Some(id) = agent_task_prompts::stored_prompt_ref_id(spec) {
+        let content = agent_task_prompts::read_prompt(id)?;
+        let sha256 = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let id = agent_task_prompts::prompt_id(id)?;
+        return Ok(ResolvedPromptSpec {
+            content,
+            stored_prompt: Some(StoredPromptSource {
+                reference: format!("{}{}", agent_task_prompts::PROMPT_REF_PREFIX, id),
+                id,
+                sha256,
+            }),
+        });
+    }
+
+    Ok(ResolvedPromptSpec {
+        content: read_text_spec(spec, "prompt")?,
+        stored_prompt: None,
+    })
+}
+
 struct DispatchPromptSpec {
     prompt: String,
     task_id: Option<String>,
@@ -818,6 +859,7 @@ mod tests {
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
     use crate::core::agent_task_lifecycle::{self as lifecycle, AgentTaskRunState};
+    use crate::core::agent_task_prompts;
     use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
@@ -868,6 +910,49 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn builds_dispatch_plan_from_stored_prompt_reference() {
+        with_isolated_home(|_| {
+            agent_task_prompts::save_prompt("homeboy-7388", "Use the prompt store.")
+                .expect("save prompt");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("@prompt:homeboy-7388".to_string()),
+                repo: Some("homeboy".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert_eq!(plan.tasks[0].instructions, "Use the prompt store.");
+            assert_eq!(plan.tasks[0].source_refs.len(), 1);
+            assert_eq!(plan.tasks[0].source_refs[0].kind, "prompt");
+            assert_eq!(plan.tasks[0].source_refs[0].uri, "prompt:homeboy-7388");
+            assert!(plan.tasks[0].source_refs[0]
+                .revision
+                .as_deref()
+                .expect("prompt revision")
+                .starts_with("sha256:"));
+            assert_eq!(plan.tasks[0].metadata["prompt_store"]["id"], "homeboy-7388");
+        });
+    }
+
+    #[test]
+    fn builds_dispatch_plan_from_stored_task_reference_without_at_prefix() {
+        with_isolated_home(|_| {
+            agent_task_prompts::save_prompt("task-ref", "Cook this task.").expect("save prompt");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                tasks: vec!["prompt:task-ref".to_string()],
+                repo: Some("homeboy".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert_eq!(plan.tasks[0].instructions, "Cook this task.");
+            assert_eq!(plan.tasks[0].source_refs[0].uri, "prompt:task-ref");
+        });
     }
 
     #[test]

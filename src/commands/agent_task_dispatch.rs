@@ -131,7 +131,9 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_task::AgentTaskRequest;
+    use homeboy::core::agent_task_prompts;
     use homeboy::core::agent_tasks::dispatch_service;
+    use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
     use homeboy::core::agent_tasks::scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
@@ -170,6 +172,44 @@ mod tests {
                 .as_str()
                 .expect("plan path")
                 .ends_with("plan.json"));
+        });
+    }
+
+    #[test]
+    fn dispatch_adapter_resolves_stored_prompt_reference_before_queueing_plan() {
+        with_isolated_home(|_| {
+            agent_task_prompts::save_prompt("homeboy-7388", "Cook from stored prompt.")
+                .expect("save prompt");
+
+            let (value, exit_code) = dispatch_service::run_dispatch_command(
+                dispatch_args(DispatchArgOverrides {
+                    prompt: Some("@prompt:homeboy-7388".to_string()),
+                    run_id: Some("dispatch-stored-prompt".to_string()),
+                    core: DispatchCoreInputs {
+                        queue_only: true,
+                        ..DispatchCoreInputs::default()
+                    },
+                    ..DispatchArgOverrides::default()
+                })
+                .into(),
+                NoopExecutor,
+            )
+            .expect("dispatch queued");
+
+            assert_eq!(exit_code, 0);
+            let plan_path = value["plan_path"].as_str().expect("plan path");
+            let raw = std::fs::read_to_string(plan_path).expect("read queued plan");
+            let plan: AgentTaskPlan = serde_json::from_str(&raw).expect("decode queued plan");
+
+            assert_eq!(plan.tasks[0].instructions, "Cook from stored prompt.");
+            assert_eq!(
+                plan.tasks[0].metadata["prompt_source"],
+                "@prompt:homeboy-7388"
+            );
+            assert_eq!(
+                plan.tasks[0].metadata["prompt_store"]["reference"],
+                "prompt:homeboy-7388"
+            );
         });
     }
 

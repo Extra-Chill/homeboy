@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::core::agent_task_prompts;
 use crate::core::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,12 +82,12 @@ fn at_file_tokens(args: &[String]) -> Vec<String> {
             passthrough = true;
             continue;
         }
-        if arg.starts_with('@') {
+        if arg.starts_with('@') && agent_task_prompts::stored_prompt_ref_id(arg).is_none() {
             tokens.push(arg.clone());
             continue;
         }
         if let Some((_, value)) = arg.split_once('=') {
-            if value.starts_with('@') {
+            if value.starts_with('@') && agent_task_prompts::stored_prompt_ref_id(value).is_none() {
                 tokens.push(value.to_string());
             }
         }
