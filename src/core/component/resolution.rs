@@ -610,8 +610,18 @@ fn resolve_effective_inner(
         } else {
             let id_path = Path::new(id);
             if accept_bare_directory && id_path.is_dir() {
+                // The positional identifier resolves to a directory, so treat it as
+                // a bare-directory target. Normalize it to an absolute `local_path`:
+                // a relative value like `studio-native` (a sibling dir of the CWD)
+                // would otherwise be stored verbatim and later rejected by
+                // `validate_local_path` ("has relative local_path ... cannot be
+                // resolved"), even though `component set` and `deploy` resolve the
+                // same component to an absolute checkout. Normalizing here keeps all
+                // three in agreement (#7410).
+                let local_path = normalize_component_local_path(id).unwrap_or_else(|_| id.to_string());
+
                 if let Some(mut discovered) = try_discover_from_portable(id_path)? {
-                    discovered.local_path = id.to_string();
+                    discovered.local_path = local_path;
                     discovered.resolve_remote_path();
                     return Ok(discovered);
                 }
@@ -623,7 +633,7 @@ fn resolve_effective_inner(
 
                 return Ok(Component {
                     id: name,
-                    local_path: id.to_string(),
+                    local_path,
                     ..Component::default()
                 });
             }
@@ -798,6 +808,40 @@ mod tests {
 
         assert_eq!(component.id, "raw-repo");
         assert_eq!(component.local_path, repo.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_effective_normalizes_relative_bare_directory_to_absolute() {
+        // Regression for #7410: `homeboy release studio-native` run from a
+        // directory that contains a `studio-native` sibling resolves the
+        // positional id as a bare directory. The resulting `local_path` must be
+        // absolute so it agrees with what `component set` persists and `deploy`
+        // resolves — a relative value here is later rejected by
+        // `validate_local_path` ("has relative local_path ... cannot be resolved").
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = dir.path().join("studio-native");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        let component = with_cwd(dir.path(), || {
+            resolve_effective(Some("studio-native"), None, None)
+                .expect("relative bare directory should resolve")
+        });
+
+        assert!(
+            Path::new(&component.local_path).is_absolute(),
+            "bare-directory local_path must be absolute, got {:?}",
+            component.local_path
+        );
+        // And it must resolve to the real checkout, matching `component set`'s
+        // write-side normalization of the same relative value.
+        assert_eq!(
+            Path::new(&component.local_path)
+                .canonicalize()
+                .expect("canonical resolved path"),
+            repo.canonicalize().expect("canonical repo path"),
+        );
+        // release's own validation must now accept it.
+        assert!(validate_local_path(&component).is_ok());
     }
 
     #[test]
