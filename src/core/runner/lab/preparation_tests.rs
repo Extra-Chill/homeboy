@@ -504,6 +504,7 @@ fn connected_direct_session(
         local_url: local_url.map(str::to_string),
         tunnel_pid: None,
         remote_daemon_pid: Some(42),
+        remote_daemon_lease_id: Some("lease-42".to_string()),
         homeboy_version: "homeboy 0.0.0".to_string(),
         homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
         connected_at: "2026-06-03T00:00:00Z".to_string(),

@@ -302,6 +302,7 @@ mod tests {
             local_url: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
             homeboy_build_identity: None,
             connected_at: "now".to_string(),
