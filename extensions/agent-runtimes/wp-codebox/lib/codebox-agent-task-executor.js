@@ -651,7 +651,7 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
       explicitProviderPluginPathsFromConfig(config, mergedOptions),
       providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, mergedOptions)
     ),
-    runtimeOverlays: firstNonEmptyArray(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, mergedOptions.runtimeOverlays),
+    runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, mergedOptions.runtimeOverlays),
     runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, mergedOptions.runtimeEnv, mergedOptions.runtime_env),
     runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, mergedOptions.runtimeEnvAliases, mergedOptions.runtime_env_aliases),
     runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, mergedOptions.runtimeStateMounts, mergedOptions.runtime_state_mounts),
@@ -821,7 +821,7 @@ function mergeRuntimeRequirements(...requirements) {
   if (normalized.length === 0) {
     return {};
   }
-  return {
+  return withoutEmptyArrayValues({
     ...Object.assign({}, ...normalized),
     ability_requirements: uniqueStrings(normalized.flatMap((requirement) => normalizeArray(requirement.ability_requirements || requirement.abilityRequirements))),
     component_contracts: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.component_contracts))),
@@ -830,7 +830,11 @@ function mergeRuntimeRequirements(...requirements) {
     mu_plugins: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.mu_plugins))),
     plugins: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.plugins))),
     runtime_overlays: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.runtime_overlays))),
-  };
+  });
+}
+
+function withoutEmptyArrayValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => !Array.isArray(entry) || entry.length > 0));
 }
 
 function uniqueRuntimeRequirementObjects(entries) {
