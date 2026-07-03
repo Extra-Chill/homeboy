@@ -2,9 +2,7 @@
   "name": "homeboy-runtime-agent-ci",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
   "exports": {
-    ".": "./index.js",
     "./generic-orchestration": "./generic-orchestration.js",
     "./provider-adapters": "./provider-adapters.js",
     "./controller-loop-proof-validator": "./lib/controller-loop-proof-validator.js",

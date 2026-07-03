@@ -20,10 +20,7 @@ function main() {
   };
 
   if (includeCredentials) {
-    const providerSecretEnv = jqAlternative(
-      providerPlugin.provider_secret_env || providerPlugin.providerSecretEnv || providerPlugin.provider_secret_env_mapping || providerPlugin.providerSecretEnvMapping || providerPlugin.credentials,
-      {}
-    );
+    const providerSecretEnv = jqAlternative(providerPlugin.provider_secret_env, {});
     if (!providerSecretEnv || Array.isArray(providerSecretEnv) || typeof providerSecretEnv !== 'object') {
       throw new Error('provider_plugin.provider_secret_env must be a JSON object');
     }

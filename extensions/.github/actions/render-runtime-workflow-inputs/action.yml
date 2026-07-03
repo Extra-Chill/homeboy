@@ -47,7 +47,7 @@ runs:
       shell: bash
       env:
         RUNTIME: ${{ inputs.runtime }}
-        RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
+        PROFILE: ${{ inputs.runtime_profile }}
         RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
         TOOL_PROFILE: ${{ inputs.tool_profile }}
         RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}

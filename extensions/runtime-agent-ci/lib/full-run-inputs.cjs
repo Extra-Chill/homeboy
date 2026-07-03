@@ -56,10 +56,7 @@ function normalizeProviderPlugin(rawInput, provider, includeCredentials) {
   };
 
   if (includeCredentials) {
-    const providerSecretEnv = jqAlternative(
-      providerSecretEnvCompat(providerPlugin),
-      {}
-    );
+    const providerSecretEnv = jqAlternative(providerPlugin.provider_secret_env, {});
     if (!providerSecretEnv || Array.isArray(providerSecretEnv) || typeof providerSecretEnv !== 'object') {
       throw new Error('provider_plugin.provider_secret_env must be a JSON object');
     }
@@ -71,14 +68,6 @@ function normalizeProviderPlugin(rawInput, provider, includeCredentials) {
 
 function jqAlternative(value, fallback) {
   return value === undefined || value === null || value === false ? fallback : value;
-}
-
-function providerSecretEnvCompat(providerPlugin) {
-  return providerPlugin.provider_secret_env
-    || providerPlugin.providerSecretEnv
-    || providerPlugin.provider_secret_env_mapping
-    || providerPlugin.providerSecretEnvMapping
-    || providerPlugin.credentials;
 }
 
 function normalizeCommandList(name, value) {
@@ -222,7 +211,6 @@ module.exports = {
   normalizeProviderPlugin,
   normalizeWritablePaths,
   parseJsonInput,
-  providerSecretEnvCompat,
   readJsonFile,
   requireRepo,
   run,

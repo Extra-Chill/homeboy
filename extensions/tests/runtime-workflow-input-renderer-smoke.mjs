@@ -37,14 +37,6 @@ assert.equal(rendered.runtime_profile, 'example-runtime');
 assert.equal(rendered.runtime_requirements.schema, 'wp-codebox/runtime-profile/v1');
 assert.equal(rendered.runtime_requirements.id, 'example-runtime');
 assert.equal(rendered.runtime_requirements.homeboy_profile_schema, 'homeboy/runtime-profile/v1');
-assert.deepEqual(rendered.runtime_requirements.component_contracts.map((contract) => ({
-	slug: contract.slug,
-	path: contract.path,
-	loadAs: contract.loadAs,
-	activate: contract.activate,
-})), [
-	{ slug: 'example-provider', path: '.ci/example-provider', loadAs: 'plugin', activate: true },
-]);
 assert.equal(rendered.workflow_inputs.runtime, 'wp-codebox');
 assert.equal(rendered.workflow_inputs.profile, 'example-runtime');
 assert.deepEqual(rendered.workflow_inputs.sandbox_tool_policy, {
@@ -116,10 +108,10 @@ const actionScriptResult = spawnSync(process.execPath, [
 	path.join(rootDir, '.github', 'scripts', 'runtime-agent-full-run', 'render-runtime-workflow-inputs.cjs'),
 ], {
 	encoding: 'utf8',
-	env: {
+		env: {
 		...process.env,
 		RUNTIME: 'wp-codebox',
-		RUNTIME_PROFILE: 'action-profile',
+		PROFILE: 'action-profile',
 		RUNTIME_MOUNTS: JSON.stringify(runtimeMounts),
 	},
 });

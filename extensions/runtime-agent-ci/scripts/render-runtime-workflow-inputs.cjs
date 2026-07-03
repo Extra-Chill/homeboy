@@ -11,9 +11,9 @@ function main(argv = process.argv.slice(2), env = process.env) {
 	const rendered = renderRuntimeWorkflowInputs({
 		...input,
 		runtime: firstDefined(args.runtime, env.RUNTIME, input.runtime),
-		runtime_profile: firstDefined(parseProfile(args.runtimeProfile), parseProfile(env.RUNTIME_PROFILE), parseProfile(env.PROFILE), input.runtime_profile),
+		runtime_profile: firstDefined(parseProfile(args.runtimeProfile), parseProfile(env.PROFILE), input.runtime_profile),
 		runtime_profiles: firstDefined(jsonValue('runtime_profiles', args.runtimeProfiles, undefined), jsonValue('runtime_profiles', env.RUNTIME_PROFILES, undefined), input.runtime_profiles),
-		tool_profile: firstDefined(jsonValue('tool_profile', args.toolProfile, undefined), jsonValue('tool_profile', env.TOOL_PROFILE, undefined), jsonValue('tool_policy', env.TOOL_POLICY, undefined), input.tool_profile),
+		tool_profile: firstDefined(jsonValue('tool_profile', args.toolProfile, undefined), jsonValue('tool_profile', env.TOOL_PROFILE, undefined), input.tool_profile),
 		runtime_mounts: firstDefined(jsonValue('runtime_mounts', args.runtimeMounts, undefined), jsonValue('runtime_mounts', env.RUNTIME_MOUNTS, undefined), input.runtime_mounts, input.mounts),
 		runtime_state_mounts: firstDefined(jsonValue('runtime_state_mounts', args.runtimeStateMounts, undefined), jsonValue('runtime_state_mounts', env.RUNTIME_STATE_MOUNTS, undefined), input.runtime_state_mounts),
 		runtime_config_mounts: firstDefined(jsonValue('runtime_config_mounts', args.runtimeConfigMounts, undefined), jsonValue('runtime_config_mounts', env.RUNTIME_CONFIG_MOUNTS, undefined), input.runtime_config_mounts),

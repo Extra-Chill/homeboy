@@ -22,9 +22,7 @@ helper contract.
 Generic runtime loop, fanout/reconcile, proof, and lifecycle primitives are
 exported from `homeboy-runtime-agent-ci/generic-orchestration`; provider and
 workflow adapters are exported from `homeboy-runtime-agent-ci/provider-adapters`.
-The legacy `homeboy-runtime-agent-ci` root export is intentionally empty and
-only emits a deprecation warning. Module internals live in `runtime-agent-ci/lib/`
-and are documented in
+Module internals live in `runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
 Declarative dependency adapter manifests live in
@@ -146,14 +144,9 @@ shorthand for direct ability execution. Mount downloaded GitHub Actions
 artifacts with `runtime_mounts`, and enforce typed outputs with
 `artifact_declarations` plus `runtime_output_projections`.
 
-New callers should select runtimes with `runtime` and `profile`. Omitting
-`runtime` selects the neutral `local-shell` runtime for generic contract smokes;
-WordPress callers must pass `runtime: wp-codebox` explicitly. Deprecated
-compatibility aliases remain available only for existing callers:
-`runtime_provider` and `backend` map to `runtime`, `runtime_profile` maps to
-`profile`, and `tool_policy` maps to `tool_profile`. The legacy `codebox`
-runtime value is not accepted by the generic runtime registry; use `wp-codebox`.
-Do not add new callers or examples that depend on those aliases.
+Callers select runtimes with `runtime` and `profile`. Omitting `runtime` selects
+the neutral `local-shell` runtime for generic contract smokes; WordPress callers
+must pass `runtime: wp-codebox` explicitly.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
 agent runs. WP Codebox callers use the same workflow with `runtime: wp-codebox`
@@ -193,8 +186,7 @@ loop, fanout, and review publication primitives. Use
 `homeboy-runtime-agent-ci/fanout-reconcile-runner`,
 `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs`, and the
 `.github/scripts/runtime-agent-full-run/*` workflow helpers directly. The
-deprecated `homeboy-runtime-agent-ci` root export is intentionally empty and
-only emits a deprecation warning for compatibility discovery.
+package exposes only explicit subpath exports for those public surfaces.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
