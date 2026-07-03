@@ -139,7 +139,8 @@ pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWo
 pub use workspace::{
     list_workspaces, plan_workspace_pull, prune_workspaces, pull_workspace, sync_workspace,
     workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
-    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
+    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,

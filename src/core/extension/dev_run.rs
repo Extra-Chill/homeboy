@@ -857,20 +857,18 @@ mod tests {
             runner_id: runner_id.to_string(),
             local_path: local_path.to_string(),
             remote_path: remote_path.to_string(),
-            materialization_plan: crate::core::runners::RunnerWorkspaceMaterializationPlan {
-                workspace_root: "/remote".to_string(),
-                local_path: local_path.to_string(),
-                local_basename: Path::new(local_path)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("demo")
-                    .to_string(),
-                remote_path: remote_path.to_string(),
-                sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-                identity: "snapshot-1".to_string(),
-                path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
-                run_isolation_token: None,
-            },
+            materialization_plan:
+                crate::core::runners::RunnerWorkspaceMaterializationPlan::from_test_parts(
+                    "/remote",
+                    local_path,
+                    Path::new(local_path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("demo"),
+                    remote_path,
+                    RunnerWorkspaceSyncMode::Snapshot,
+                    "snapshot-1",
+                ),
             current_workspace: RunnerWorkspaceCurrentSummary {
                 local_path: local_path.to_string(),
                 remote_path: remote_path.to_string(),

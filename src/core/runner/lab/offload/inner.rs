@@ -13,7 +13,7 @@ use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 /// Derive a sibling directory (a `-homeboy-artifacts` suffix on the checkout
 /// path) so the artifact lives OUTSIDE the git checkout and never dirties it.
 pub(crate) fn remote_lab_artifact_dir(checkout_root: &str) -> String {
-    format!("{}-homeboy-artifacts", checkout_root.trim_end_matches('/'))
+    RunnerWorkspaceOutputPaths::artifact_dir_for_workspace(checkout_root)
 }
 
 /// Remote path for the Lab structured-output JSON file.

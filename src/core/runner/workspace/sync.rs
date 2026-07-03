@@ -71,9 +71,9 @@ pub fn sync_workspace(
         }
     }
     let mut includes = runner.policy.snapshot_includes.clone();
-    for pattern in options.snapshot_includes {
-        if !includes.contains(&pattern) {
-            includes.push(pattern);
+    for pattern in &options.snapshot_includes {
+        if !includes.contains(pattern) {
+            includes.push(pattern.clone());
         }
     }
     let excludes = effective_snapshot_excludes(excludes, &includes);
@@ -90,13 +90,19 @@ pub fn sync_workspace(
                 ),
                 "",
             );
+            let workspace_cleanliness = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                "snapshot_synthetic_git_unique_workspace"
+            } else {
+                "snapshot_unique_workspace"
+            };
             let materialization_plan = workspace_materialization_plan(
                 workspace_root,
                 &local_path,
                 &remote_path,
-                options.mode,
                 &snapshot,
-                options.run_isolation_token.as_deref(),
+                &options,
+                &includes,
+                workspace_cleanliness,
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             let synthetic_checkout_commit = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
@@ -161,11 +167,7 @@ pub fn sync_workspace(
                     counts: stats,
                     excludes,
                     includes,
-                    workspace_cleanliness: if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                        "snapshot_synthetic_git_unique_workspace".to_string()
-                    } else {
-                        "snapshot_unique_workspace".to_string()
-                    },
+                    workspace_cleanliness: workspace_cleanliness.to_string(),
                     validation_dependencies,
                 },
                 0,
@@ -175,7 +177,7 @@ pub fn sync_workspace(
             let git = git_snapshot(
                 &local_path,
                 options.changed_since_base.as_deref(),
-                options.git_fetch_refs,
+                options.git_fetch_refs.clone(),
             )?;
             let remote_path = deterministic_remote_path(
                 workspace_root,
@@ -183,13 +185,19 @@ pub fn sync_workspace(
                 &git.head,
                 options.run_isolation_token.as_deref(),
             );
+            let workspace_cleanliness = if options.allow_dirty_lab_workspace {
+                "dirty_remote_overwrite_allowed"
+            } else {
+                "clean_remote_required"
+            };
             let materialization_plan = workspace_materialization_plan(
                 workspace_root,
                 &local_path,
                 &remote_path,
-                RunnerWorkspaceSyncMode::Git,
                 &git.head,
-                options.run_isolation_token.as_deref(),
+                &options,
+                &includes,
+                workspace_cleanliness,
             );
             if options.controller_routed_git
                 || git.branch.is_none()
@@ -279,11 +287,7 @@ pub fn sync_workspace(
                     counts: ByteFileCounts::default(),
                     excludes,
                     includes,
-                    workspace_cleanliness: if options.allow_dirty_lab_workspace {
-                        "dirty_remote_overwrite_allowed".to_string()
-                    } else {
-                        "clean_remote_required".to_string()
-                    },
+                    workspace_cleanliness: workspace_cleanliness.to_string(),
                     validation_dependencies,
                 },
                 0,
@@ -296,26 +300,29 @@ pub(crate) fn workspace_materialization_plan(
     workspace_root: &str,
     local_path: &Path,
     remote_path: &str,
-    sync_mode: RunnerWorkspaceSyncMode,
     identity: &str,
-    run_isolation_token: Option<&str>,
+    options: &RunnerWorkspaceSyncOptions,
+    snapshot_includes: &[String],
+    workspace_cleanliness: &str,
 ) -> RunnerWorkspaceMaterializationPlan {
-    RunnerWorkspaceMaterializationPlan {
-        workspace_root: workspace_root.trim_end_matches('/').to_string(),
-        local_path: local_path.display().to_string(),
-        local_basename: local_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("workspace")
-            .to_string(),
-        remote_path: remote_path.to_string(),
-        sync_mode,
-        identity: identity.to_string(),
-        path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
-        run_isolation_token: run_isolation_token
-            .filter(|token| !token.trim().is_empty())
-            .map(ToString::to_string),
-    }
+    let local_path_string = local_path.display().to_string();
+    let local_basename = local_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+    let path_strategy = "workspace_root_lab_workspaces_sanitized_basename_identity_digest";
+    RunnerWorkspaceMaterializationPlan::from_sync_options(
+        workspace_root,
+        &local_path_string,
+        &local_basename,
+        remote_path,
+        identity,
+        path_strategy,
+        options,
+        snapshot_includes,
+        workspace_cleanliness,
+    )
 }
 
 pub fn prune_workspaces(

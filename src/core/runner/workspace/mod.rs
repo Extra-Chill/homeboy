@@ -22,7 +22,8 @@ pub(crate) use sync::workspace_resource_lifecycle;
 pub use sync::{list_workspaces, prune_workspaces, workspace_snapshots};
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
-    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationContract,
+    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
