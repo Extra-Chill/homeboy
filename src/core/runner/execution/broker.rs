@@ -51,6 +51,7 @@ pub(super) fn exec_via_reverse_broker(
         env,
         secret_env_names,
         secret_env_plan: Default::default(),
+        env_materialization: None,
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
         runner_workload: runner_workload.clone(),

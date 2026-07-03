@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::redaction::RedactionPolicy;
 
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
@@ -38,6 +39,8 @@ pub struct SecretEnvPlan {
         skip_serializing_if = "SecretEnvInheritancePolicy::is_default_policy"
     )]
     pub inheritance: SecretEnvInheritancePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_materialization: Option<EnvMaterializationPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,6 +349,7 @@ impl Default for SecretEnvPlan {
             status: Vec::new(),
             redaction: SecretEnvRedactionPolicy::default(),
             inheritance: SecretEnvInheritancePolicy::default(),
+            env_materialization: None,
         }
     }
 }
@@ -454,6 +458,9 @@ impl SecretEnvPlan {
         }
         if plan.inheritance != SecretEnvInheritancePolicy::default() {
             self.inheritance = plan.inheritance;
+        }
+        if plan.env_materialization.is_some() {
+            self.env_materialization = plan.env_materialization;
         }
     }
 
@@ -647,7 +654,7 @@ impl SecretEnvPlan {
         removed
     }
 
-    fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {
+    pub(crate) fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {
         let mut requirements = self
             .requirements
             .iter()
@@ -844,7 +851,7 @@ fn upsert_requirement(
 }
 
 impl SecretEnvRequirement {
-    fn source_env_candidates(&self) -> Vec<String> {
+    pub(crate) fn source_env_candidates(&self) -> Vec<String> {
         if self.source_env_names.is_empty() {
             vec![self.name.clone()]
         } else {

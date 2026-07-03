@@ -33,6 +33,7 @@ use crate::core::artifacts::{
     RUN_ARTIFACT_RESULTS_FILE, RUN_ARTIFACT_STATUS_FILE,
 };
 use crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA;
+use crate::core::env_materialization_plan::ENV_MATERIALIZATION_PLAN_SCHEMA;
 use crate::core::fuzz::FUZZ_ARTIFACT_SCHEMA;
 use crate::core::matrix_artifact_summary::{
     GENERIC_MATRIX_SUMMARY_SCHEMA, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
@@ -64,6 +65,7 @@ pub enum ContractConstants {
     ArtifactPostprocess(ArtifactPostprocessConstants),
     Loop(LoopConstants),
     SecretEnvPlan(SecretEnvPlanConstants),
+    EnvMaterializationPlan(EnvMaterializationPlanConstants),
     ResourceLifecycleIndex(ResourceLifecycleIndexConstants),
     HostMutationLifecycle(HostMutationLifecycleConstants),
     RunLocationIndex(RunLocationIndexConstants),
@@ -83,6 +85,7 @@ pub struct AllContractConstants {
     pub artifact_postprocess: ArtifactPostprocessConstants,
     pub loop_contracts: LoopConstants,
     pub secret_env_plan: SecretEnvPlanConstants,
+    pub env_materialization_plan: EnvMaterializationPlanConstants,
     pub resource_lifecycle_index: ResourceLifecycleIndexConstants,
     pub host_mutation_lifecycle: HostMutationLifecycleConstants,
     pub run_location_index: RunLocationIndexConstants,
@@ -127,6 +130,11 @@ pub struct LoopConstants {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SecretEnvPlanConstants {
+    pub schema_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EnvMaterializationPlanConstants {
     pub schema_id: String,
 }
 
@@ -232,6 +240,7 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             artifact_postprocess: artifact_postprocess_constants(),
             loop_contracts: loop_constants(),
             secret_env_plan: secret_env_plan_constants(),
+            env_materialization_plan: env_materialization_plan_constants(),
             resource_lifecycle_index: resource_lifecycle_index_constants(),
             host_mutation_lifecycle: host_mutation_lifecycle_constants(),
             run_location_index: run_location_index_constants(),
@@ -250,6 +259,9 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         }
         "loop" | "loop-contracts" => ContractConstants::Loop(loop_constants()),
         "secret-env-plan" => ContractConstants::SecretEnvPlan(secret_env_plan_constants()),
+        "env-materialization-plan" => {
+            ContractConstants::EnvMaterializationPlan(env_materialization_plan_constants())
+        }
         "resource-lifecycle-index" => {
             ContractConstants::ResourceLifecycleIndex(resource_lifecycle_index_constants())
         }
@@ -323,6 +335,12 @@ pub fn loop_constants() -> LoopConstants {
 pub fn secret_env_plan_constants() -> SecretEnvPlanConstants {
     SecretEnvPlanConstants {
         schema_id: registry_schema_id("secret-env-plan"),
+    }
+}
+
+pub fn env_materialization_plan_constants() -> EnvMaterializationPlanConstants {
+    EnvMaterializationPlanConstants {
+        schema_id: ENV_MATERIALIZATION_PLAN_SCHEMA.to_string(),
     }
 }
 

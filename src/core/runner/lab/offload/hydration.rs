@@ -107,6 +107,7 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
                 env: HashMap::new(),
                 secret_env_names: Vec::new(),
                 secret_env_plan: None,
+                env_materialization: None,
                 capture_patch: false,
                 // The install command is a provider-built shell argv (e.g.
                 // `composer install`), not a Homeboy-routed command, so dispatch

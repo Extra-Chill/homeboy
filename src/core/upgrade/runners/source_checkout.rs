@@ -123,6 +123,7 @@ pub fn runner_source_checkout_prepare_options(
         env: runner.env.clone(),
         secret_env_names: Vec::new(),
         secret_env_plan: None,
+        env_materialization: None,
         capture_patch: false,
         raw_exec: false,
         source_snapshot: None,

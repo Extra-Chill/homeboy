@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
+use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
@@ -106,6 +107,7 @@ pub struct RunnerExecOptions {
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
     pub secret_env_plan: Option<SecretEnvPlan>,
+    pub env_materialization: Option<EnvMaterializationPlan>,
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
