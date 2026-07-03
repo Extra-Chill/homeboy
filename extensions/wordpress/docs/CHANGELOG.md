@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.21] - 2026-07-03
+
+### Changed
+- Add WordPress fuzz campaign orchestrator
+
 ## [3.23.20] - 2026-07-03
 
 ### Changed
