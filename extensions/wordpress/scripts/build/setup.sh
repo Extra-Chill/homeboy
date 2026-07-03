@@ -107,7 +107,13 @@ install_wp_codebox() {
         return 0
     fi
 
-    if [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
+    local source_install_requested=0
+    if [ -n "${HOMEBOY_WP_CODEBOX_SOURCE:-}" ] || [ -n "${HOMEBOY_WP_CODEBOX_REF:-}" ] || [ "${HOMEBOY_WP_CODEBOX_INSTALL_MODE:-}" = "source" ]; then
+        source_install_requested=1
+        export HOMEBOY_WP_CODEBOX_INSTALL_MODE="source"
+    fi
+
+    if [ "${source_install_requested}" -eq 0 ] && [ -n "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -x "${HOMEBOY_WP_CODEBOX_BIN}" ]; then
         echo "WP Codebox already configured: ${HOMEBOY_WP_CODEBOX_BIN}"
         if resolve_core_module_from_known_locations; then
             return 0
@@ -115,7 +121,7 @@ install_wp_codebox() {
         echo "WP Codebox CLI is configured without a runtime core module; (re)installing source module" >&2
     fi
 
-    if command -v wp-codebox >/dev/null 2>&1; then
+    if [ "${source_install_requested}" -eq 0 ] && command -v wp-codebox >/dev/null 2>&1; then
         local detected_bin
         detected_bin="$(command -v wp-codebox)"
         echo "WP Codebox already available: ${detected_bin}"

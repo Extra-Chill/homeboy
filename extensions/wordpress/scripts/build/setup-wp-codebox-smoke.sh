@@ -16,7 +16,12 @@ OVERRIDE_GITHUB_ENV_FILE="${TMPDIR}/override-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
-mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist"
+
+cat > "${EXTENSION_DIR}/scripts/build/persist-wp-codebox-overrides.mjs" <<'NODE'
+#!/usr/bin/env node
+process.exit(0);
+NODE
 
 cat > "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox" <<'SH'
 #!/usr/bin/env bash
@@ -286,6 +291,43 @@ if grep -q "${STALE_ROOT}" "${OVERRIDE_GITHUB_ENV_FILE}"; then
     exit 1
 fi
 
+SOURCE_PRECEDENCE_HOME="${TMPDIR}/source-precedence-home"
+SOURCE_PRECEDENCE_INSTALL_DIR="${TMPDIR}/source-precedence-install"
+SOURCE_PRECEDENCE_GITHUB_ENV_FILE="${TMPDIR}/source-precedence-github-env"
+SOURCE_PRECEDENCE_STALE_BIN="${SOURCE_PRECEDENCE_HOME}/.local/bin/wp-codebox"
+
+mkdir -p "${SOURCE_PRECEDENCE_HOME}/.local/bin"
+cat > "${SOURCE_PRECEDENCE_STALE_BIN}" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'stale configured wp-codebox'
+SH
+chmod +x "${SOURCE_PRECEDENCE_STALE_BIN}"
+
+(
+    cd "${EXTENSION_DIR}"
+    HOME="${SOURCE_PRECEDENCE_HOME}" \
+    PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+    GITHUB_ENV="${SOURCE_PRECEDENCE_GITHUB_ENV_FILE}" \
+    HOMEBOY_WP_CODEBOX_BIN="${SOURCE_PRECEDENCE_STALE_BIN}" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${SOURCE_PRECEDENCE_INSTALL_DIR}" \
+    HOMEBOY_WP_CODEBOX_SOURCE="https://example.test/wp-codebox.git" \
+    HOMEBOY_WP_CODEBOX_REF="main" \
+    bash "${ROOT_DIR}/scripts/build/setup.sh" > "${TMPDIR}/source-precedence-setup.out"
+)
+
+source_precedence_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${SOURCE_PRECEDENCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
+
+if [ "${source_precedence_wp_codebox_bin}" != "${SOURCE_PRECEDENCE_INSTALL_DIR}/source/packages/cli/dist/index.js" ]; then
+    echo "Expected HOMEBOY_WP_CODEBOX_SOURCE to replace stale configured CLI, got: ${source_precedence_wp_codebox_bin}" >&2
+    cat "${TMPDIR}/source-precedence-setup.out" >&2
+    exit 1
+fi
+
+if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${source_precedence_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
+    echo "Expected source-precedence setup to execute built WP Codebox CLI" >&2
+    exit 1
+fi
+
 (
     cd "${EXTENSION_DIR}"
     HOME="${HOME_DIR}" \
@@ -311,8 +353,8 @@ if [ "${missing_release_wp_codebox_bin}" != "${TMPDIR}/missing-release-install/s
     exit 1
 fi
 
-if ! grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
-    echo "Expected missing release artifact message" >&2
+if grep -q 'WP Codebox release artifact not published' "${TMPDIR}/missing-release-setup.err"; then
+    echo "Explicit source/ref setup should not probe release artifacts before source install" >&2
     exit 1
 fi
 
