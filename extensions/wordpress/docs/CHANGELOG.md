@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.20] - 2026-07-03
+
+### Changed
+- Prefer managed WP Codebox fuzz contracts
+
 ## [3.23.19] - 2026-07-03
 
 ### Changed
