@@ -5,6 +5,7 @@
 //! homeboy versions.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -20,6 +21,7 @@ use super::pipeline::{
     run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
     PipelineStepOutcome,
 };
+use super::resource_lifecycle::{rig_resource_lifecycle_index, RigResourceLifecycleOptions};
 use super::service::{self, ServiceStatus};
 use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
 use super::state::{
@@ -28,6 +30,9 @@ use super::state::{
 use crate::core::engine::command::run_in_optional;
 use crate::core::error::{Error, Result};
 use crate::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use crate::core::resource_lifecycle_index::{
+    ResourceLifecycleIndex, ResourceLifecycleResourceStatus,
+};
 
 /// Report from `rig up`.
 #[derive(Debug, Clone, Serialize)]
@@ -921,6 +926,7 @@ impl RigRunObserver {
         let _ = observer
             .store
             .finish_run(&observer.run_id, status, Some(metadata));
+        observer.record_resource_lifecycle_index(rig, status, pipeline);
         artifact_index::for_completed_rig_run(
             &observer.store,
             rig,
@@ -928,6 +934,82 @@ impl RigRunObserver {
             status.as_str(),
             pipeline,
         )
+    }
+
+    fn record_resource_lifecycle_index(
+        &self,
+        rig: &RigSpec,
+        status: RunStatus,
+        pipeline: Option<&PipelineOutcome>,
+    ) {
+        let resources = match self.command.as_str() {
+            "up" if status == RunStatus::Pass => super::expand::expand_resources(rig),
+            "up" => super::expand::expand_resources(rig),
+            "check" => super::expand::expand_resources(rig),
+            "down" => RigState::load(&rig.id)
+                .ok()
+                .and_then(|state| {
+                    state
+                        .materialized
+                        .map(|materialized| materialized.resources)
+                })
+                .unwrap_or_else(|| super::expand::expand_resources(rig)),
+            _ => return,
+        };
+        if resources.is_empty() {
+            return;
+        }
+
+        let lifecycle_status = match self.command.as_str() {
+            "up" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Active,
+            "up" => ResourceLifecycleResourceStatus::Failed,
+            "check" => ResourceLifecycleResourceStatus::Declared,
+            "down" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Cleaned,
+            "down" => ResourceLifecycleResourceStatus::CleanupPending,
+            _ => return,
+        };
+        let index = rig_resource_lifecycle_index(
+            &rig.id,
+            &resources,
+            RigResourceLifecycleOptions::new(&self.run_id, lifecycle_status),
+        );
+        if index.resources.is_empty() || index.validate().is_err() {
+            return;
+        }
+
+        let _ = self.write_resource_lifecycle_index_artifact(&index, pipeline);
+    }
+
+    fn write_resource_lifecycle_index_artifact(
+        &self,
+        index: &ResourceLifecycleIndex,
+        pipeline: Option<&PipelineOutcome>,
+    ) -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "homeboy-rig-resource-lifecycle-{}-{}.json",
+            self.run_id,
+            std::process::id()
+        ));
+        let json = serde_json::to_vec_pretty(index).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize rig resource lifecycle index".to_string()),
+            )
+        })?;
+        fs::write(&path, json).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("write {}", path.display())))
+        })?;
+        let record = self.store.record_artifact_with_metadata(
+            &self.run_id,
+            "rig_resource_lifecycle_index",
+            &path,
+            serde_json::json!({
+                "resource_lifecycle_index": index,
+                "pipeline": pipeline,
+            }),
+        );
+        let _ = fs::remove_file(path);
+        record.map(|_| ())
     }
 }
 

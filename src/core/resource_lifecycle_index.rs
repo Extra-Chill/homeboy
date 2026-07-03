@@ -264,6 +264,22 @@ pub fn resource_lifecycle_index_from_artifacts(
 ) -> Result<Option<ResourceLifecycleIndex>> {
     let mut resources = Vec::new();
     for artifact in artifacts {
+        if let Some(value) = artifact.metadata_json.get("resource_lifecycle_index") {
+            let index: ResourceLifecycleIndex =
+                serde_json::from_value(value.clone()).map_err(|err| {
+                    Error::internal_json(
+                        err.to_string(),
+                        Some(format!(
+                            "parse resource lifecycle index metadata for artifact {}",
+                            artifact.id
+                        )),
+                    )
+                })?;
+            index.validate()?;
+            resources.extend(index.resources);
+            continue;
+        }
+
         let Some(value) = artifact.metadata_json.get("resource_lifecycle") else {
             continue;
         };
@@ -366,6 +382,39 @@ mod tests {
     #[test]
     fn validates_resource_lifecycle_index() {
         index().validate().unwrap();
+    }
+
+    #[test]
+    fn extracts_resource_lifecycle_index_artifact_metadata() {
+        let source = ResourceLifecycleIndex {
+            schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+            resources: vec![record()],
+        };
+        let artifact = ArtifactRecord {
+            id: "artifact-1".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "resource_lifecycle_index".to_string(),
+            artifact_type: "file".to_string(),
+            path: "/tmp/index.json".to_string(),
+            url: None,
+            public_url: None,
+            viewer_url: None,
+            viewer_links: Vec::new(),
+            sha256: None,
+            size_bytes: None,
+            mime: None,
+            metadata_json: serde_json::json!({
+                "resource_lifecycle_index": source,
+            }),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let index = resource_lifecycle_index_from_artifacts(&[artifact])
+            .expect("parse index metadata")
+            .expect("index present");
+
+        assert_eq!(index.resources.len(), 1);
+        assert_eq!(index.resources[0].kind, "workspace");
     }
 
     #[test]
