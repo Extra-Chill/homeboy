@@ -753,6 +753,65 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_job_secret_env_plan_matches_legacy_secret_env_names_diagnostics() {
+        let legacy_store = JobStore::default();
+        let mut legacy = remote_runner_request("homeboy-lab", Some("extrachill"));
+        legacy.env.insert(
+            "RUNNER_SECRET_TOKEN".to_string(),
+            "homeboy-secret-sentinel".to_string(),
+        );
+        legacy.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
+
+        let plan_store = JobStore::default();
+        let mut plan_request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        plan_request.env.insert(
+            "RUNNER_SECRET_TOKEN".to_string(),
+            "homeboy-secret-sentinel".to_string(),
+        );
+        plan_request.secret_env_plan =
+            crate::core::secret_env_plan::SecretEnvPlan::from_secret_env_names([
+                "RUNNER_SECRET_TOKEN".to_string(),
+            ]);
+
+        let legacy_job = legacy_store
+            .submit_remote_runner_job(legacy)
+            .expect("legacy request queues");
+        let plan_job = plan_store
+            .submit_remote_runner_job(plan_request)
+            .expect("plan request queues");
+
+        let legacy_inner = legacy_store.inner.lock().expect("job store mutex poisoned");
+        let legacy_remote = legacy_inner
+            .jobs
+            .get(&legacy_job.id)
+            .and_then(|stored| stored.remote_runner.as_ref())
+            .expect("legacy remote runner job");
+        let plan_inner = plan_store.inner.lock().expect("job store mutex poisoned");
+        let plan_remote = plan_inner
+            .jobs
+            .get(&plan_job.id)
+            .and_then(|stored| stored.remote_runner.as_ref())
+            .expect("plan remote runner job");
+
+        assert_eq!(
+            legacy_remote.request.secret_env_names,
+            plan_remote.request.secret_env_names
+        );
+        assert_eq!(
+            legacy_remote.request.secret_env_plan.secret_env_names(),
+            plan_remote.request.secret_env_plan.secret_env_names()
+        );
+        assert_eq!(
+            legacy_remote.request.env.get("RUNNER_SECRET_TOKEN"),
+            plan_remote.request.env.get("RUNNER_SECRET_TOKEN")
+        );
+        assert_eq!(
+            plan_remote.request.env.get("RUNNER_SECRET_TOKEN"),
+            Some(&"<redacted>".to_string())
+        );
+    }
+
+    #[test]
     fn remote_runner_job_env_is_scoped_to_submitted_job() {
         let store = JobStore::default();
         let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
@@ -1449,6 +1508,7 @@ mod tests {
             cwd: Some("/srv/extrachill".to_string()),
             env: HashMap::new(),
             secret_env_names: Vec::new(),
+            secret_env_plan: Default::default(),
             capture_patch: true,
             source_snapshot: Some(SourceSnapshot::existing_remote(
                 runner_id,

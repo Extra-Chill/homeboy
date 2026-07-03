@@ -301,7 +301,7 @@ fn run_once_output(
             command: claim.request.command.clone(),
             env: claim.request.env.clone(),
             secret_env_names: claim.request.secret_env_names.clone(),
-            secret_env_plan: None,
+            secret_env_plan: Some(claim.request.secret_env_plan.clone()),
             capture_patch: claim.request.capture_patch,
             raw_exec: false,
             source_snapshot: claim.request.source_snapshot.clone(),
