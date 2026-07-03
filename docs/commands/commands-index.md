@@ -2,6 +2,7 @@
 
 - [api](api.md)
 - [agent-task](agent-task.md)
+- [artifact-postprocess](artifact-postprocess.md) — generic helper-driven postprocessing for persisted artifact roots
 - [audit](audit.md) — code convention drift and structural analysis
 - [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [auth](auth.md)
