@@ -2,6 +2,10 @@
 
 use super::*;
 use crate::core::rig;
+use crate::core::runner_execution_envelope::{
+    PathMaterializationEntry, PathMaterializationPlan,
+    PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+};
 
 pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) plan: HomeboyPlan,
@@ -387,7 +391,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         &offload_args,
         &remote_cwd,
     );
-    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps)?;
+    let provider_config_materialization_plan =
+        provider_config_path_materialization_plan(contract, sync_mode, &workspace_mapping);
+    let remapped_args = remap_provider_config_with_materialization_plan_in_args(
+        &remapped_args,
+        &provider_config_materialization_plan,
+    )?;
     let agent_task_specs = materialize_agent_task_specs_in_args(
         &remapped_args,
         &path_remaps,
@@ -571,6 +580,37 @@ pub(crate) fn path_remaps_from_workspace_mapping(
     }
 
     remaps
+}
+
+fn provider_config_path_materialization_plan(
+    contract: &LabOffloadCommand,
+    sync_mode: RunnerWorkspaceSyncMode,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> PathMaterializationPlan {
+    let materialization_mode = lab_path_materialization_mode(contract, sync_mode);
+    PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
+        PathMaterializationEntry::new(
+            entry.role(),
+            PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+            Some(entry.local_path().to_string()),
+            entry.remote_path(),
+            materialization_mode.clone(),
+            PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+        )
+    }))
+}
+
+fn lab_path_materialization_mode(
+    contract: &LabOffloadCommand,
+    sync_mode: RunnerWorkspaceSyncMode,
+) -> String {
+    if matches!(
+        contract.workspace_mode_policy,
+        LabOffloadWorkspaceModePolicy::RunnerResident
+    ) {
+        return "existing_remote".to_string();
+    }
+    sync_mode.label().to_string()
 }
 
 fn rewrite_lab_offload_remote_command_args(
@@ -1362,6 +1402,45 @@ mod tests {
         assert!(!command
             .iter()
             .any(|arg| arg == &requested_source.display().to_string()));
+    }
+
+    #[test]
+    fn provider_config_materialization_plan_projects_lab_policy_and_mappings() {
+        let synced = test_synced_workspace(
+            "/controller/workspaces/provider-runtime",
+            "/runner/workspaces/provider-runtime",
+        );
+        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+        let contract = LabOffloadCommand {
+            hot_label: "agent-task.run",
+            portable: true,
+            unsupported_reason: None,
+            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
+            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+            secret_env_sources: Vec::new(),
+            required_extensions: Vec::new(),
+            required_capabilities: Vec::new(),
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
+        };
+
+        let plan = provider_config_path_materialization_plan(
+            &contract,
+            RunnerWorkspaceSyncMode::Git,
+            &workspace_mapping,
+        );
+
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].role, "primary");
+        assert_eq!(plan.entries[0].owner, "lab.provider_config");
+        assert_eq!(
+            plan.entries[0].local_path.as_deref(),
+            Some("/controller/workspaces/provider-runtime")
+        );
+        assert_eq!(
+            plan.entries[0].remote_path,
+            "/runner/workspaces/provider-runtime"
+        );
+        assert_eq!(plan.entries[0].materialization_mode, "git");
     }
 
     fn test_synced_workspace(local_path: &str, remote_path: &str) -> RunnerWorkspaceSyncOutput {

@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::config::read_json_spec_to_string;
 use crate::core::defaults;
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::{Error, Result};
 
 use super::envelope::{ArgValue, ExecutionEnvelope};
@@ -123,6 +124,32 @@ pub(in crate::core::runner) fn remap_provider_config_in_args(
     });
 
     envelope.try_rewrite_provider_config_values(|spec| remap_provider_config_spec(spec, &ordered))
+}
+
+pub(in crate::core::runner) fn remap_provider_config_with_materialization_plan_in_args(
+    args: &[String],
+    plan: &PathMaterializationPlan,
+) -> Result<Vec<String>> {
+    let mappings = provider_config_path_remaps_from_materialization_plan(plan);
+    remap_provider_config_in_args(args, &mappings)
+}
+
+fn provider_config_path_remaps_from_materialization_plan(
+    plan: &PathMaterializationPlan,
+) -> Vec<LabPathRemap> {
+    plan.projection_entries()
+        .into_iter()
+        .filter_map(|entry| {
+            let local = entry.local_path?;
+            if local.trim().is_empty() || entry.remote_path.trim().is_empty() {
+                return None;
+            }
+            Some(LabPathRemap {
+                local,
+                remote: entry.remote_path,
+            })
+        })
+        .collect()
 }
 
 pub(in crate::core::runner) fn inject_agent_task_default_provider_config_in_args(

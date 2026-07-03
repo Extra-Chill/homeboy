@@ -353,6 +353,44 @@ mod provider_config_remap_tests {
     }
 
     #[test]
+    fn remap_provider_config_uses_typed_materialization_plan_projection() {
+        let plan = crate::core::runner_execution_envelope::PathMaterializationPlan::new(vec![
+            crate::core::runner_execution_envelope::PathMaterializationEntry::primary_workspace_materialized(
+                crate::core::runner_execution_envelope::PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+                Some("/Users/user/Developer/provider-runtime".to_string()),
+                "/home/user/_lab_workspaces/provider-runtime",
+                "snapshot",
+            ),
+        ]);
+        let config = serde_json::json!({
+            "workspace_root": "/Users/user/Developer/provider-runtime",
+            "provider_plugin_paths": ["/Users/user/Developer/provider-runtime/provider"]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            config,
+        ];
+
+        let out = remap_provider_config_with_materialization_plan_in_args(&args, &plan)
+            .expect("remap provider config");
+        let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+        let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+        assert_eq!(
+            remapped["workspace_root"],
+            "/home/user/_lab_workspaces/provider-runtime"
+        );
+        assert_eq!(
+            remapped["provider_plugin_paths"][0],
+            "/home/user/_lab_workspaces/provider-runtime/provider"
+        );
+    }
+
+    #[test]
     fn remap_inlines_and_rewrites_dispatch_provider_config_local_paths() {
         let mappings = vec![
             LabPathRemap {
