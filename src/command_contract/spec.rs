@@ -13,14 +13,13 @@ pub struct CommandSpec {
     pub name: &'static str,
     pub json_family: CommandJsonFamily,
     pub docs_slug: Option<&'static str>,
+    pub representative_argv: Option<&'static [&'static str]>,
     pub safety: CommandSafetySpec,
     pub output_notes: &'static str,
     pub lab_supported: bool,
     pub lab_notes: &'static str,
     pub lab_support_summary: &'static [CommandLabSupportSummary],
 }
-
-pub type CommandRegistryEntry = CommandSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandLabSupportSummary {
@@ -118,6 +117,7 @@ const fn command_spec(name: &'static str, json_family: CommandJsonFamily) -> Com
         name,
         json_family,
         docs_slug: Some(name),
+        representative_argv: None,
         safety: CommandSafetySpec::read_only(),
         output_notes: "standard CLI output contract",
         lab_supported: false,
@@ -157,6 +157,13 @@ const fn command_spec_with_output_notes(
     CommandSpec {
         output_notes,
         ..command_spec(name, json_family)
+    }
+}
+
+const fn command_spec_without_docs(spec: CommandSpec) -> CommandSpec {
+    CommandSpec {
+        docs_slug: None,
+        ..spec
     }
 }
 
@@ -206,6 +213,16 @@ const fn lab_command_spec_with_output_notes_and_summary(
     CommandSpec {
         lab_support_summary,
         ..lab_command_spec_with_output_notes(name, json_family, lab_notes, output_notes)
+    }
+}
+
+const fn command_spec_with_representative_argv(
+    representative_argv: &'static [&'static str],
+    spec: CommandSpec,
+) -> CommandSpec {
+    CommandSpec {
+        representative_argv: Some(representative_argv),
+        ..spec
     }
 }
 
@@ -420,55 +437,73 @@ const fn guarded_safety(dangerous_flags: &'static [&'static str]) -> CommandSafe
 }
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
-    lab_command_spec_with_summary(
-        "agent-task",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
-        AGENT_TASK_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "agent-task", "providers"],
+        lab_command_spec_with_summary(
+            "agent-task",
+            CommandJsonFamily::Workspace,
+            "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
+            AGENT_TASK_LAB_SUPPORT,
+        ),
     ),
     command_spec("project", CommandJsonFamily::Workspace),
     command_spec("ssh", CommandJsonFamily::Ops),
     command_spec("server", CommandJsonFamily::Ops),
-    lab_command_spec_with_summary(
-        "test",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for test runs",
-        TEST_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "test"],
+        lab_command_spec_with_summary(
+            "test",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for test runs",
+            TEST_LAB_SUPPORT,
+        ),
     ),
-    lab_command_spec_with_summary(
-        "bench",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for benchmark runs",
-        BENCH_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "bench"],
+        lab_command_spec_with_summary(
+            "bench",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for benchmark runs",
+            BENCH_LAB_SUPPORT,
+        ),
     ),
     CommandSpec {
         safety: guarded_safety(FUZZ_DANGEROUS_FLAGS),
-        ..lab_command_spec_with_summary(
-            "fuzz",
-            CommandJsonFamily::Quality,
-            "fuzz is measurement-only by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input",
-            FUZZ_LAB_SUPPORT,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "fuzz"],
+            lab_command_spec_with_summary(
+                "fuzz",
+                CommandJsonFamily::Quality,
+                "fuzz is measurement-only by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input",
+                FUZZ_LAB_SUPPORT,
+            ),
         )
     },
     CommandSpec {
         safety: mutating_safety(),
-        ..lab_command_spec_with_output_notes_and_summary(
-            "trace",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for trace runs",
-            "runs trace workflows and records observation artifacts unless using read-only subcommands",
-            TRACE_LAB_SUPPORT,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "trace"],
+            lab_command_spec_with_output_notes_and_summary(
+                "trace",
+                CommandJsonFamily::Quality,
+                "portable Lab offload is available for trace runs",
+                "runs trace workflows and records observation artifacts unless using read-only subcommands",
+                TRACE_LAB_SUPPORT,
+            ),
         )
     },
     command_spec("observe", CommandJsonFamily::Quality),
     CommandSpec {
         safety: guarded_safety(LINT_DANGEROUS_FLAGS),
-        ..lab_command_spec_with_output_notes_and_summary(
-            "lint",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for changed-scope lint runs",
-            "runs lint workflows; pass --fix to apply auto-fixable findings in place",
-            LINT_LAB_SUPPORT,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "lint"],
+            lab_command_spec_with_output_notes_and_summary(
+                "lint",
+                CommandJsonFamily::Quality,
+                "portable Lab offload is available for changed-scope lint runs",
+                "runs lint workflows; pass --fix to apply auto-fixable findings in place",
+                LINT_LAB_SUPPORT,
+            ),
         )
     },
     command_spec("db", CommandJsonFamily::Ops),
@@ -494,17 +529,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
     ),
-    command_spec_with_output_notes(
-        "artifact-postprocess",
-        CommandJsonFamily::Workspace,
-        "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
+    command_spec_without_docs(
+        command_spec_with_output_notes(
+            "artifact-postprocess",
+            CommandJsonFamily::Workspace,
+            "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
+        ),
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
-    lab_command_spec_with_summary(
-        "extension",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers runner extension refresh/update/dev-run workflows",
-        EXTENSION_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "extension", "refresh", "."],
+        lab_command_spec_with_summary(
+            "extension",
+            CommandJsonFamily::Workspace,
+            "Lab runner routing covers runner extension refresh/update/dev-run workflows",
+            EXTENSION_LAB_SUPPORT,
+        ),
     ),
     command_spec("status", CommandJsonFamily::Ops),
     command_spec("docs", CommandJsonFamily::Workspace),
@@ -534,17 +574,23 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         operator_safety(Some("--dry-run"), RELEASE_DANGEROUS_FLAGS),
     ),
     command_spec("report", CommandJsonFamily::Workspace),
-    lab_command_spec_with_summary(
-        "review",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for release-gate review runs",
-        REVIEW_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "review"],
+        lab_command_spec_with_summary(
+            "review",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for release-gate review runs",
+            REVIEW_LAB_SUPPORT,
+        ),
     ),
-    lab_command_spec_with_summary(
-        "audit",
-        CommandJsonFamily::Quality,
-        "portable Lab offload is available for audit source runs",
-        AUDIT_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "audit"],
+        lab_command_spec_with_summary(
+            "audit",
+            CommandJsonFamily::Quality,
+            "portable Lab offload is available for audit source runs",
+            AUDIT_LAB_SUPPORT,
+        ),
     ),
     command_spec("audit-baseline", CommandJsonFamily::Quality),
     CommandSpec {
@@ -555,39 +601,69 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             risk_exemption: None,
             dangerous_flags: REFACTOR_DANGEROUS_FLAGS,
         },
-        ..lab_command_spec_with_output_notes_and_summary(
-            "refactor",
-            CommandJsonFamily::Workspace,
-            "portable Lab offload is available for refactor source runs",
-            "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
-            REFACTOR_LAB_SUPPORT,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "refactor", "--all"],
+            lab_command_spec_with_output_notes_and_summary(
+                "refactor",
+                CommandJsonFamily::Workspace,
+                "portable Lab offload is available for refactor source runs",
+                "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
+                REFACTOR_LAB_SUPPORT,
+            ),
         )
     },
     command_spec("refs", CommandJsonFamily::Workspace),
-    lab_command_spec_with_summary(
-        "rig",
-        CommandJsonFamily::Workspace,
-        "portable Lab offload is available for rig check workflows",
-        RIG_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "rig", "check", "example-rig"],
+        lab_command_spec_with_summary(
+            "rig",
+            CommandJsonFamily::Workspace,
+            "portable Lab offload is available for rig check workflows",
+            RIG_LAB_SUPPORT,
+        ),
     ),
     command_spec("runner", CommandJsonFamily::Workspace),
-    lab_command_spec_with_summary(
-        "runtime",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers runtime package refresh workflows",
-        RUNTIME_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &[
+            "homeboy",
+            "runtime",
+            "refresh",
+            "example-runtime",
+            "--source",
+            ".",
+        ],
+        lab_command_spec_with_summary(
+            "runtime",
+            CommandJsonFamily::Workspace,
+            "Lab runner routing covers runtime package refresh workflows",
+            RUNTIME_LAB_SUPPORT,
+        ),
     ),
-    lab_command_spec_with_summary(
-        "worktree",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers runner-resident task worktree cleanup",
-        WORKTREE_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &["homeboy", "worktree", "cleanup"],
+        lab_command_spec_with_summary(
+            "worktree",
+            CommandJsonFamily::Workspace,
+            "Lab runner routing covers runner-resident task worktree cleanup",
+            WORKTREE_LAB_SUPPORT,
+        ),
     ),
-    lab_command_spec_with_summary(
-        "tunnel",
-        CommandJsonFamily::Workspace,
-        "Lab runner routing covers tunnel preview and service workflows",
-        TUNNEL_LAB_SUPPORT,
+    command_spec_with_representative_argv(
+        &[
+            "homeboy",
+            "tunnel",
+            "service",
+            "start",
+            "example-service",
+            "--command",
+            "npm start",
+        ],
+        lab_command_spec_with_summary(
+            "tunnel",
+            CommandJsonFamily::Workspace,
+            "Lab runner routing covers tunnel preview and service workflows",
+            TUNNEL_LAB_SUPPORT,
+        ),
     ),
     command_spec("runs", CommandJsonFamily::Workspace),
     command_spec("self", CommandJsonFamily::Ops),
@@ -608,8 +684,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         operator_safety(None, UPGRADE_DANGEROUS_FLAGS),
     ),
 ];
-
-pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = COMMAND_SPECS;
 
 pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
     CommandDocSpec {
