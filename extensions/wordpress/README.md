@@ -83,27 +83,6 @@ WP Codebox browser request-coverage workloads. The helper normalizes
 This is a contract helper only. WP Codebox still owns recipe execution and
 browser artifact semantics; product rigs own their scenario files and setup code.
 
-### Deterministic Expensive WooCommerce Shipping
-
-`/homeboy-extension/scripts/bench/lib/woocommerce-expensive-shipping.php`
-registers a local-only WooCommerce shipping method that simulates expensive rate
-calculation without external network calls. Supported knobs include:
-
-- `synthetic_rules` for deterministic rule count.
-- `cpu_iterations` for deterministic CPU work per rule.
-- `db_queries` for optional local database/query-heavy mode.
-- `delay_ms` for an optional per-package delay budget.
-- `rate_cost`, `rate_label`, and `method_id` for rate shape.
-
-The helper exposes counters through
-`homeboy_wordpress_woocommerce_expensive_shipping_metrics()` and a bench payload
-via `homeboy_wordpress_woocommerce_expensive_shipping_payload()`. Metrics include
-shipping calculate calls, packages seen, synthetic rules, CPU iterations, local
-DB queries, configured delay, elapsed milliseconds, and a deterministic digest.
-
-Store API and classic checkout request probes are intentionally left to follow-up
-issue #1091: https://github.com/Extra-Chill/homeboy-extensions/issues/1091
-
 ### REST Route Discovery
 
 `lib/wordpress-rest-route-discovery.js` provides generic WordPress REST route

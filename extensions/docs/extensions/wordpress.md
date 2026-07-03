@@ -126,15 +126,10 @@ agent-task request schema and make runtime selection outside the adapter.
 ## Product Adapter Boundaries
 
 Generic WordPress helpers keep default profiling and helper manifests scoped to
-WordPress itself. Product-specific helpers are exposed behind explicit adapter
-declarations so callers opt in when they need product semantics:
-
-- `getWordPressHelperManifest().productAdapters.woocommerce.helpers` exposes
-  WooCommerce bench fixture helper paths.
-- `WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS.woocommerce` declares the
-  WooCommerce Store API waterfall group and marks it first-party only when the
-  caller passes `productAdapters: ["woocommerce"]` (or the equivalent adapter
-  object) to `summarizeThirdPartyWaterfall()`.
+WordPress itself. Product-specific fixtures and helper paths live in product rig
+packages, not in the generic WordPress extension manifest. Callers that need
+product waterfall attribution pass explicit adapter objects to
+`summarizeThirdPartyWaterfall()`.
 
 ## WordPress Hook Surface Discovery
 
@@ -710,48 +705,6 @@ transient option row without workload SQL. Both helpers report existence/missing
 state, serialized byte size, value type, array entry count when applicable, and
 sample context such as `sample_index`, `label`, and `sampled_at_unix_ms`. Pass
 `network => true` in the transient context to sample a site transient.
-
-### WordPress benchmark WooCommerce fixture profiles
-
-WooCommerce bench workloads can seed reusable store shapes by requiring the
-WooCommerce fixture helper mounted with the WordPress extension:
-
-```php
-<?php
-require_once '/homeboy-extension/scripts/bench/lib/woocommerce-fixtures.php';
-
-return homeboy_wordpress_bench_wc_apply_fixture_profile(
-    'small-shortcode-checkout',
-    [
-        'run_id' => getenv('HOMEBOY_RUN_ID') ?: 'local-checkout-run',
-        'product_count' => 150,
-    ]
-);
-```
-
-The helper returns the normal workload payload shape with numeric `metrics` and
-structured `metadata.woocommerce_fixture`. Fixture objects are scoped by a
-normalized run id and deterministic prefix so repeated workloads can explain the
-generated store shape in Homeboy artifacts.
-
-Built-in profiles:
-
-- `small-shortcode-checkout`: shortcode checkout, HPOS off, COD enabled, about
-  150 products and 125 variations by default.
-- `large-admin-catalog`: larger mixed virtual/physical catalog, categories,
-  Woo admin/onboarding options, coupons, customers, and historical orders.
-- `account-heavy-store`: many customers with repeat historical orders for account
-  and login workloads.
-- `shipping-package-matrix`: physical catalog with configurable shipping zones,
-  methods, package count, and items per package metadata.
-
-Common overrides include `run_id`, `product_count`, `variable_product_count`,
-`variations_per_product`, `category_count`, `customer_count`,
-`orders_per_customer`, `guest_order_count`, `coupon_count`,
-`shipping_zone_count`, `shipping_methods_per_zone`, `hpos`, and `checkout`.
-Profiles use WooCommerce APIs when WooCommerce is loaded; outside a WooCommerce
-runtime the helper returns a structured `woocommerce_unavailable` failure instead
-of fatalling, which keeps smoke tests and matrix diagnostics readable.
 
 Playground grader workloads may also return a normalized reward payload:
 
