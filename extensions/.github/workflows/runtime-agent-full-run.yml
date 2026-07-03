@@ -256,6 +256,10 @@ name: Runtime Agent Full Run (reusable)
         description: JSON object merged into the generated runner config for caller-owned runtime fields.
         type: string
         default: '{}'
+      path_materialization_plan:
+        description: JSON homeboy/path-materialization-plan/v1 declaration for runner/workload paths and runtime mounts.
+        type: string
+        default: '{}'
       workload_run_before:
         description: JSON array of pre-run hooks executed before the main workload.
         type: string
@@ -512,6 +516,7 @@ jobs:
           RUNTIME_OVERLAYS: ${{ inputs.runtime_overlays }}
           RUNTIME_ENV: ${{ inputs.runtime_env }}
           RUNTIME_CONFIG: ${{ inputs.runtime_config }}
+          PATH_MATERIALIZATION_PLAN: ${{ inputs.path_materialization_plan }}
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
           WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}

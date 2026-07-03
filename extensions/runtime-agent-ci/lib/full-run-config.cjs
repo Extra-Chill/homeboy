@@ -28,6 +28,9 @@ const {
   secretEnvNamesFromRequirements,
   validateEnvName,
 } = require('./secret-env-plan.cjs');
+const {
+  parsePathMaterializationPlan,
+} = require('./path-materialization-plan.cjs');
 
 function main() {
   writeFullRunConfig(process.env);
@@ -101,6 +104,7 @@ function buildConfig(env) {
   const componentContracts = parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []);
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
+  const pathMaterializationPlan = parsePathMaterializationPlan(env.PATH_MATERIALIZATION_PLAN || '', { workspace });
   const loopPolicy = loopPolicyFromEnv(env);
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
   const renderedRuntimeInputs = renderRuntimeWorkflowInputs({
@@ -119,7 +123,7 @@ function buildConfig(env) {
   const effectiveRuntimeProfiles = renderedRuntimeInputs.runtime_profiles;
   const runnerWorkspace = parseJsonInput('runner_workspace', env.RUNNER_WORKSPACE_CONFIG || '{}', 'object', {});
   const runnerWorkspaceRepo = targetRepo.split('/')[1].replace(/\.git$/, '');
-  const runnerWorkspaceGuestCheckout = `/workspace/${runnerWorkspaceRepo}`;
+  const runnerWorkspaceGuestCheckout = pathMaterializationPlan.runner_workspace_guest_checkout || `/workspace/${runnerWorkspaceRepo}`;
   const runnerWorkspaceMounts = runnerWorkspace.enabled === true ? [{
     type: 'directory',
     source: workspace,
@@ -127,6 +131,7 @@ function buildConfig(env) {
     mode: 'readwrite',
     metadata: { kind: 'runner-workspace', artifactExcludePaths: ['.ci/**'] },
   }] : [];
+  const pathMaterializationMounts = pathMaterializationPlan.runtime_mounts || [];
   const effectiveRunnerWorkspace = runnerWorkspace.enabled === true ? { ...runnerWorkspace, checkout_path: runnerWorkspaceGuestCheckout } : runnerWorkspace;
   const appTokenRepos = splitCsv(env.APP_TOKEN_REPOS || targetRepo);
   const allowedRepos = parseJsonInput('allowed_repos', env.ALLOWED_REPOS || '[]', 'array', []);
@@ -167,7 +172,7 @@ function buildConfig(env) {
     execution_kind: env.EXECUTION_KIND || (runtimeTask ? 'runtime_task' : 'runtime_execution'),
     runtime_mounts: [
       ...runtimeMounts,
-      ...runnerWorkspaceMounts,
+      ...(pathMaterializationMounts.length > 0 ? pathMaterializationMounts : runnerWorkspaceMounts),
     ],
     wp_config_defines: runtimeProjection.wp_config_defines,
     runtime_overlays: runtimeOverlays,
@@ -232,6 +237,7 @@ function buildConfig(env) {
     ability_tools: parseJsonInput('ability_tools', env.ABILITY_TOOLS || '[]', 'array', []),
     ability_requirements: parseJsonInput('ability_requirements', env.ABILITY_REQUIREMENTS || '[]', 'array', []),
     evidence_projections: evidenceProjections,
+    ...(Object.keys(pathMaterializationPlan).length > 0 ? { path_materialization_plan: pathMaterializationPlan } : {}),
     runner_workspace: effectiveRunnerWorkspace,
     ignored_workspace_paths: parseJsonInput('ignored_workspace_paths', env.IGNORED_WORKSPACE_PATHS || '[]', 'array', []),
     callback_data: parseJsonInput('callback_data', env.CALLBACK_DATA || '{}', 'object', {}),
@@ -382,6 +388,7 @@ function executableInPath(command, searchPath) {
 function projectRuntimeConfig({ env, runtime, workspace, componentId, componentPath, workloadId, runnerWorkspaceGuestCheckout }) {
   const projection = runtime?.manifest?.runner_config_projection || {};
   const artifactDeclarations = parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []);
+  const pathMaterializationPlan = parsePathMaterializationPlan(env.PATH_MATERIALIZATION_PLAN || '', { workspace });
   const context = {
     component_id: componentId,
     component_path: componentPath,
@@ -394,12 +401,12 @@ function projectRuntimeConfig({ env, runtime, workspace, componentId, componentP
     transcript_host_dir: renderTemplate(
       projection.transcript_host_dir_template,
       context,
-      path.join(workspace, 'runtime-agent-artifacts', workloadId)
+      pathMaterializationPlan.transcript_host_dir || path.join(workspace, 'runtime-agent-artifacts', workloadId)
     ),
     transcript_dir: renderTemplate(
       projection.transcript_guest_dir_template,
       context,
-      `${runnerWorkspaceGuestCheckout}/runtime-agent-artifacts/${workloadId}`
+      pathMaterializationPlan.transcript_dir || `${runnerWorkspaceGuestCheckout}/runtime-agent-artifacts/${workloadId}`
     ),
     wp_config_defines: {
       ...(plainObject(projection.wp_config_defines) ? projection.wp_config_defines : {}),
@@ -408,7 +415,7 @@ function projectRuntimeConfig({ env, runtime, workspace, componentId, componentP
   };
   const adapter = runtimeProjectionAdapter(runtime, projection);
   if (!adapter) {
-    return manifestProjection;
+    return applyPathMaterializationProjection(manifestProjection, pathMaterializationPlan);
   }
   const adapterProjection = adapter({
     env,
@@ -421,7 +428,15 @@ function projectRuntimeConfig({ env, runtime, workspace, componentId, componentP
     artifactDeclarations,
     manifestProjection,
   });
-  return mergeProjection(manifestProjection, adapterProjection);
+  return applyPathMaterializationProjection(mergeProjection(manifestProjection, adapterProjection), pathMaterializationPlan);
+}
+
+function applyPathMaterializationProjection(projection, pathMaterializationPlan) {
+  return {
+    ...projection,
+    ...(pathMaterializationPlan.transcript_host_dir ? { transcript_host_dir: pathMaterializationPlan.transcript_host_dir } : {}),
+    ...(pathMaterializationPlan.transcript_dir ? { transcript_dir: pathMaterializationPlan.transcript_dir } : {}),
+  };
 }
 
 function runtimeProjectionAdapter(runtime, projection) {
