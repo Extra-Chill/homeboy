@@ -257,6 +257,7 @@ fn copy_shared_refresh_assets(source_root: Option<&Path>, durable_root: &Path) -
 
     for shared_dir in [
         "scripts/lib",
+        "dependency-adapters",
         "agent-runtimes",
         "runtime-agent-ci",
         "agent-task-contracts",
@@ -307,7 +308,9 @@ mod update;
 #[cfg(test)]
 use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_source_metadata;
-pub use update::{check_update_available, read_source_revision, read_source_url, update, UpdateAvailable};
+pub use update::{
+    check_update_available, read_source_revision, read_source_url, update, UpdateAvailable,
+};
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
 /// - Symlinked extensions: removes symlink only (source preserved)
@@ -489,6 +492,19 @@ mod tests {
             "module.exports = { contract: 'fixture' };\n",
         )
         .expect("agent task contract");
+
+        let dependency_adapter = root.join("dependency-adapters/examples/nodejs.json");
+        fs::create_dir_all(
+            dependency_adapter
+                .parent()
+                .expect("dependency adapter parent"),
+        )
+        .expect("dependency adapter dir");
+        fs::write(
+            &dependency_adapter,
+            r#"{"schema":"fixture","ecosystem":"nodejs"}"#,
+        )
+        .expect("dependency adapter manifest");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -739,6 +755,7 @@ exec '{}' "$@"
             let home = home.path();
             let lab_source = home.join("Developer/_lab_workspaces/run-123");
             write_extension_fixture(&lab_source, "alpha");
+            write_shared_runtime_fixture(&lab_source);
 
             let result = refresh(
                 &lab_source.join("alpha").to_string_lossy(),
@@ -759,6 +776,9 @@ exec '{}' "$@"
             let linked_target = fs::read_link(&result.path).expect("refresh install link target");
             assert!(linked_target.ends_with(".config/homeboy/extension-sources/alpha/alpha"));
             assert!(linked_target.exists());
+            assert!(home
+                .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
+                .exists());
         });
     }
 
@@ -830,7 +850,10 @@ exec '{}' "$@"
                 !source.join("wordpress/.source-revision").exists(),
                 "linked install metadata should not dirty the source checkout"
             );
-            assert_eq!(read_source_revision("wordpress").as_deref(), Some("abc1234"));
+            assert_eq!(
+                read_source_revision("wordpress").as_deref(),
+                Some("abc1234")
+            );
             assert_eq!(
                 read_source_url(&result.path).as_deref(),
                 Some(source.join("wordpress").to_string_lossy().as_ref())
@@ -983,6 +1006,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
                 .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
+                .exists());
         });
     }
 
@@ -1047,6 +1073,9 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
                 .exists());
         });
     }
@@ -1148,6 +1177,10 @@ exec '{}' "$@"
                     home.join(".config/homeboy/extensions/scripts/lib"),
                     source.join("scripts/lib"),
                 ),
+                (
+                    home.join(".config/homeboy/extensions/dependency-adapters"),
+                    source.join("dependency-adapters"),
+                ),
             ] {
                 let meta = fs::symlink_metadata(&target)
                     .unwrap_or_else(|_| panic!("shared target exists: {}", target.display()));
@@ -1185,13 +1218,18 @@ exec '{}' "$@"
             // Edit the shared asset in the source worktree after install. Because
             // the install symlinks the tree, the edit must be visible at the live
             // install path with no reinstall — the iteration-blocker fix.
-            let source_contract = source.join("agent-task-contracts/agent-task-provider-contract.js");
-            fs::write(&source_contract, "module.exports = { contract: 'edited-live' };\n")
-                .expect("edit shared source file");
+            let source_contract =
+                source.join("agent-task-contracts/agent-task-provider-contract.js");
+            fs::write(
+                &source_contract,
+                "module.exports = { contract: 'edited-live' };\n",
+            )
+            .expect("edit shared source file");
 
             let installed_contract =
                 home.join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js");
-            let observed = fs::read_to_string(&installed_contract).expect("read installed contract");
+            let observed =
+                fs::read_to_string(&installed_contract).expect("read installed contract");
             assert!(
                 observed.contains("edited-live"),
                 "edit to the symlinked shared tree should be visible to the install, got: {observed}"

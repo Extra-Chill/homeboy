@@ -17,7 +17,10 @@ use crate::core::paths;
 use super::super::execution::run_setup;
 use super::super::load_extension;
 use super::super::manifest::ExtensionManifest;
-use super::{derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata, InstallResult};
+use super::{
+    derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata,
+    InstallResult,
+};
 
 pub(super) fn install_configured_extension(
     source: &str,
@@ -212,8 +215,9 @@ enum SharedAssetMode {
     /// Symlink the install target to its live source tree. Used for linked/dev
     /// installs (local-path source): edits to the shared monorepo assets
     /// (`agent-runtimes`, `runtime-agent-ci`, `scripts/lib`,
-    /// `agent-task-contracts`) in the source worktree are visible to the live
-    /// install immediately, with no reinstall or release. See #6396 / #1954.
+    /// `dependency-adapters`, `agent-task-contracts`) in the source worktree
+    /// are visible to the live install immediately, with no reinstall or
+    /// release. See #6396 / #1954.
     Symlink,
 }
 
@@ -241,6 +245,7 @@ fn install_shared_assets_from_root(
 
     for shared_dir in [
         "scripts/lib",
+        "dependency-adapters",
         "agent-runtimes",
         "runtime-agent-ci",
         "agent-task-contracts",
@@ -253,6 +258,7 @@ fn install_shared_assets_from_root(
         let target = match shared_dir {
             "agent-runtimes" => paths::agent_runtimes()?,
             "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
+            "dependency-adapters" => extensions_dir.join(shared_dir),
             // Shared extension libraries install under the extensions root so
             // installed wrappers can source `../../../scripts/lib/...`.
             _ => extensions_dir.join(shared_dir),
@@ -326,16 +332,21 @@ fn symlink_shared_asset(source: &Path, target: &Path, shared_dir: &str) -> Resul
 /// Materialize shared monorepo assets for a linked (local-path) install.
 ///
 /// Linked installs symlink the shared trees to their live source so that edits
-/// to `agent-runtimes`, `runtime-agent-ci`, `scripts/lib`, and
-/// `agent-task-contracts` in the source worktree take effect immediately,
-/// enabling rapid local iteration without a reinstall or release.
+/// to `agent-runtimes`, `runtime-agent-ci`, `scripts/lib`,
+/// `dependency-adapters`, and `agent-task-contracts` in the source worktree
+/// take effect immediately, enabling rapid local iteration without a reinstall
+/// or release.
 pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
-        return install_shared_assets_from_root(source_root, extension_dir, SharedAssetMode::Symlink);
+        return install_shared_assets_from_root(
+            source_root,
+            extension_dir,
+            SharedAssetMode::Symlink,
+        );
     }
 
     if let Some(parent) = source.parent() {
