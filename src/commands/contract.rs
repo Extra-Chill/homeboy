@@ -870,6 +870,28 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                 example: runner_execution_envelope_example(),
             },
             ContractSchemaEntry {
+                id: PATH_MATERIALIZATION_PLAN_SCHEMA,
+                version: 1,
+                description: "Canonical runner-side path materialization plan. The top-level shape is exactly { schema, entries }; consumers must not substitute paths/runtime_mounts aliases.",
+                fields: vec![
+                    field(
+                        "schema",
+                        "string",
+                        "Schema ID for the path materialization plan.",
+                        true,
+                    ),
+                    field("entries", "array", "Path materialization entries.", true),
+                    field("entries[].role", "string", "Generic role for the path, such as primary_workspace or required_path.", true),
+                    field("entries[].owner", "string", "Generic producer/owner of the path declaration.", true),
+                    field("entries[].local_path", "string|null", "Controller/local source path when applicable.", false),
+                    field("entries[].remote_path", "string", "Runner-side path to validate or materialize.", true),
+                    field("entries[].materialization_mode", "string", "Materialization mode enum: existing_remote, git, or snapshot.", true),
+                    field("entries[].validation_status", "string", "Validation/materialization status enum: validated or materialized.", true),
+                ],
+                required: vec!["schema", "entries"],
+                example: path_materialization_plan_example(),
+            },
+            ContractSchemaEntry {
                 id: ARTIFACT_POSTPROCESS_SCHEMA,
                 version: 1,
                 description:
@@ -1139,6 +1161,29 @@ fn artifact_manifest_example() -> Value {
                 "label": "Final runtime output",
                 "content_type": "text/markdown",
                 "metadata": {}
+            }
+        ]
+    })
+}
+
+fn path_materialization_plan_example() -> Value {
+    json!({
+        "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+        "entries": [
+            {
+                "role": "primary_workspace",
+                "owner": "runner_exec.source_snapshot",
+                "local_path": "/local/project",
+                "remote_path": "/runner/project",
+                "materialization_mode": "snapshot",
+                "validation_status": "materialized"
+            },
+            {
+                "role": "required_path",
+                "owner": "runner_exec.require_paths",
+                "remote_path": "/runner/cache",
+                "materialization_mode": "existing_remote",
+                "validation_status": "validated"
             }
         ]
     })
@@ -1754,6 +1799,34 @@ mod tests {
             .unwrap()
             .iter()
             .any(|contract| contract["id"] == RUNNER_EXECUTION_ENVELOPE_SCHEMA));
+        let path_materialization = catalog["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == PATH_MATERIALIZATION_PLAN_SCHEMA)
+            .expect("path materialization contract export");
+        assert_eq!(
+            path_materialization["required"],
+            json!(["schema", "entries"])
+        );
+        let fields: Vec<_> = path_materialization["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["name"].as_str().unwrap())
+            .collect();
+        assert!(fields.contains(&"schema"));
+        assert!(fields.contains(&"entries"));
+        assert!(fields.contains(&"entries[].remote_path"));
+        assert!(fields.contains(&"entries[].materialization_mode"));
+        assert_eq!(
+            path_materialization["example"]["schema"],
+            PATH_MATERIALIZATION_PLAN_SCHEMA
+        );
+        assert!(path_materialization["example"].get("paths").is_none());
+        assert!(path_materialization["example"]
+            .get("runtime_mounts")
+            .is_none());
         assert!(catalog["contracts"]
             .as_array()
             .unwrap()
@@ -2173,6 +2246,48 @@ mod tests {
 
         assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
         assert!(output.valid);
+    }
+
+    #[test]
+    fn rejects_drifted_path_materialization_plan_shape() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "path-materialization-plan-drifted.json",
+            json!({
+                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+                "paths": ["/runner/project"],
+                "runtime_mounts": []
+            }),
+        );
+
+        let err = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file)
+            .expect_err("drifted path materialization shape should fail validation");
+
+        assert!(err.details["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field `paths`"));
+    }
+
+    #[test]
+    fn rejects_path_materialization_plan_without_entries() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "path-materialization-plan-missing-entries.json",
+            json!({
+                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA
+            }),
+        );
+
+        let err = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file)
+            .expect_err("entries is the canonical required field");
+
+        assert!(err.details["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing field `entries`"));
     }
 
     #[test]
