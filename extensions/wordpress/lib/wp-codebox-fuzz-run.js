@@ -331,8 +331,42 @@ function wpCodeboxRuntimeContractSourceOptions(options = {}) {
 	if (options.wpCodeboxCoreModule || options.coreModule) {
 		return options;
 	}
+	const managedCoreModule = wpCodeboxManagedRuntimeCoreModule(options);
+	if (managedCoreModule) {
+		return { ...options, wpCodeboxCoreModule: managedCoreModule };
+	}
 	const identity = createCodeboxClient(options).identity();
 	return { ...options, wpCodeboxCoreModule: identity.coreModulePath };
+}
+
+function wpCodeboxManagedRuntimeCoreModule(options = {}) {
+	const env = { ...process.env, ...(options.env || {}) };
+	return firstExistingFile([
+		options.wpCodeboxSourceRoot && path.resolve(options.wpCodeboxSourceRoot, 'packages/runtime-core/dist/contracts.js'),
+		options.wp_codebox_source_root && path.resolve(options.wp_codebox_source_root, 'packages/runtime-core/dist/contracts.js'),
+		options.sourceRoot && path.resolve(options.sourceRoot, 'packages/runtime-core/dist/contracts.js'),
+		options.source_root && path.resolve(options.source_root, 'packages/runtime-core/dist/contracts.js'),
+		env.HOMEBOY_WP_CODEBOX_SOURCE_ROOT && path.resolve(env.HOMEBOY_WP_CODEBOX_SOURCE_ROOT, 'packages/runtime-core/dist/contracts.js'),
+		env.WP_CODEBOX_SOURCE_ROOT && path.resolve(env.WP_CODEBOX_SOURCE_ROOT, 'packages/runtime-core/dist/contracts.js'),
+		options.wpCodeboxInstallDir && path.resolve(options.wpCodeboxInstallDir, 'source/packages/runtime-core/dist/contracts.js'),
+		options.wpCodeboxInstallRoot && path.resolve(options.wpCodeboxInstallRoot, 'source/packages/runtime-core/dist/contracts.js'),
+		options.installRoot && path.resolve(options.installRoot, 'source/packages/runtime-core/dist/contracts.js'),
+		env.HOMEBOY_WP_CODEBOX_INSTALL_DIR && path.resolve(env.HOMEBOY_WP_CODEBOX_INSTALL_DIR, 'source/packages/runtime-core/dist/contracts.js'),
+		env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT && path.resolve(env.HOMEBOY_WP_CODEBOX_INSTALL_ROOT, 'source/packages/runtime-core/dist/contracts.js'),
+	]);
+}
+
+function firstExistingFile(values) {
+	for (const value of values.filter(Boolean)) {
+		try {
+			if (fs.statSync(value).isFile()) {
+				return value;
+			}
+		} catch {
+			// Missing managed runtime candidates do not contribute to precedence.
+		}
+	}
+	return undefined;
 }
 
 function missingWpCodeboxFuzzRuntimeContractPaths(manifest) {
@@ -1134,7 +1168,9 @@ function stageWordPressRunWorkloadPhpFiles(workload = {}, options = {}) {
 		}
 		return stagedStep;
 	})]));
-	return changed || stagedFiles.length !== originalStagedFileCount ? { ...workload, ...phases, staged_files: stagedFiles, stagedFiles: undefined } : workload;
+	const normalizedWorkload = { ...workload };
+	delete normalizedWorkload.stagedFiles;
+	return changed || stagedFiles.length !== originalStagedFileCount ? { ...normalizedWorkload, ...phases, staged_files: stagedFiles } : workload;
 }
 
 function stageWordPressRunWorkloadPhpStep(step = {}, { stagedFiles = [], packageRoot } = {}) {
@@ -1410,7 +1446,9 @@ function stageArtifactPostprocessHelpers(input = {}, runtimeRequirements = {}, o
 			return fuzzCase;
 		}
 		changed = true;
-		return { ...fuzzCase, input: { ...workload, mounts, staged_files: stagedFiles, stagedFiles: undefined } };
+		const normalizedWorkload = { ...workload };
+		delete normalizedWorkload.stagedFiles;
+		return { ...fuzzCase, input: { ...normalizedWorkload, mounts, staged_files: stagedFiles } };
 	});
 	return changed ? { ...input, cases } : input;
 }
