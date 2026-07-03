@@ -89,6 +89,10 @@ Settings are extension-defined. Use `--settings-json-file <FILE>` or `--settings
 
 Merge order is extension defaults, component settings, settings profile files, explicit `--setting`, then explicit `--setting-json`. Later values win for the same key, so command-line overrides take precedence over profile files.
 
+## Disposable Local Databases
+
+Homeboy materializes `HOMEBOY_RUNTIME_DISPOSABLE_LOCAL_DB` for extension runners that need an isolated local MySQL/MariaDB service. Source that helper and call `homeboy_disposable_local_db_start` with caller-owned environment variable names, for example `--env-database TEST_DB_NAME --env-user TEST_DB_USER --env-password TEST_DB_PASSWORD --env-socket TEST_DB_SOCKET`. The helper initializes a temporary datadir, starts a socket-only server with networking disabled, creates one database/user, exports only the requested env vars, and registers cleanup on process exit. Framework-specific mapping belongs in the extension or caller profile.
+
 ## Output
 
 Returns JSON with test results:

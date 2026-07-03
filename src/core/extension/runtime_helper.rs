@@ -17,6 +17,7 @@ pub const EMIT_LINT_FINDING_ENV: &str = "HOMEBOY_RUNTIME_EMIT_LINT_FINDING";
 pub const EMIT_TEST_FAILURE_ENV: &str = "HOMEBOY_RUNTIME_EMIT_TEST_FAILURE";
 pub const SIDECAR_WRITER_ENV: &str = "HOMEBOY_RUNTIME_SIDECAR_WRITER";
 pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
+pub const DISPOSABLE_LOCAL_DB_ENV: &str = "HOMEBOY_RUNTIME_DISPOSABLE_LOCAL_DB";
 pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
 pub const BENCH_HELPER_JS_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_JS";
 pub const BENCH_HELPER_PHP_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_PHP";
@@ -87,6 +88,12 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "resolve-context.sh",
         content: assets::RESOLVE_CONTEXT_SH,
         env_var: RESOLVE_CONTEXT_ENV,
+        legacy_fallback: false,
+    },
+    RuntimeHelper {
+        filename: "disposable-local-db.sh",
+        content: assets::DISPOSABLE_LOCAL_DB_SH,
+        env_var: DISPOSABLE_LOCAL_DB_ENV,
         legacy_fallback: false,
     },
     RuntimeHelper {

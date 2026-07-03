@@ -8,6 +8,7 @@ pub(super) const EMIT_LINT_FINDING_SH: &str = include_str!("../runtime/emit-lint
 pub(super) const EMIT_TEST_FAILURE_SH: &str = include_str!("../runtime/emit-test-failure.sh");
 pub(super) const SIDECAR_WRITER_SH: &str = include_str!("../runtime/sidecar-writer.sh");
 pub(super) const RESOLVE_CONTEXT_SH: &str = include_str!("../runtime/resolve-context.sh");
+pub(super) const DISPOSABLE_LOCAL_DB_SH: &str = include_str!("../runtime/disposable-local-db.sh");
 pub(super) const BENCH_HELPER_SH: &str = include_str!("../runtime/bench-helper.sh");
 pub(super) const BENCH_HELPER_JS: &str = include_str!("../runtime/bench-helper.mjs");
 pub(super) const BENCH_HELPER_PHP: &str = include_str!(concat!(
@@ -34,6 +35,7 @@ mod tests {
             EMIT_TEST_FAILURE_SH,
             SIDECAR_WRITER_SH,
             RESOLVE_CONTEXT_SH,
+            DISPOSABLE_LOCAL_DB_SH,
             BENCH_HELPER_SH,
             BENCH_HELPER_JS,
             BENCH_HELPER_PHP,
