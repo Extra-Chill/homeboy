@@ -110,6 +110,10 @@ impl AgentTaskRunRecord {
             return;
         }
 
+        if self.runner_job_id().is_some() && self.has_fresh_update() {
+            return;
+        }
+
         let reason = if self.runner_job_id().is_some() {
             "runner_job_unverified_after_daemon_restart"
         } else if self.owner_pid().is_some() {
@@ -148,6 +152,18 @@ impl AgentTaskRunRecord {
             .get("runner_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
+    }
+
+    fn has_fresh_update(&self) -> bool {
+        self.updated_at
+            .as_deref()
+            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+            .is_some_and(|updated_at| {
+                chrono::Utc::now()
+                    .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
+                    .num_minutes()
+                    < 30
+            })
     }
 
     /// A run is runner-backed when its durable record carries a runner id or

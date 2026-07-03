@@ -69,6 +69,37 @@ fn submit_plan_persists_queued_status() {
 }
 
 #[test]
+fn detached_lab_handoff_persists_inspectable_running_record() {
+    with_isolated_home(|_| {
+        let record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-detached",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+        })
+        .expect("detached handoff recorded");
+
+        let loaded = status("agent-task-detached").expect("status resolves");
+        let log = logs("agent-task-detached").expect("logs resolve");
+        let artifacts = artifacts("agent-task-detached").expect("artifacts resolve");
+
+        assert_eq!(record.run_id, "agent-task-detached");
+        assert_eq!(loaded.state, AgentTaskRunState::Running);
+        assert_eq!(loaded.tasks[0].state, AgentTaskState::Running);
+        assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(loaded.metadata["runner_job_id"], "job-123");
+        assert!(loaded.metadata.get("stale_running").is_none());
+        assert_eq!(log.events.len(), 1);
+        assert!(artifacts.evidence_refs.is_empty());
+    });
+}
+
+#[test]
 fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     with_isolated_home(|_| {
         let plan = test_plan();

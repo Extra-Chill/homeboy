@@ -246,6 +246,111 @@ pub fn run_record_exists(run_id: &str) -> Result<bool> {
     store::record_exists(&sanitize_run_id(run_id))
 }
 
+#[derive(Debug, Clone)]
+pub struct DetachedLabRunRecord<'a> {
+    pub run_id: &'a str,
+    pub runner_id: &'a str,
+    pub runner_job_id: &'a str,
+    pub remote_workspace: &'a str,
+    pub remote_command: &'a [String],
+}
+
+pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(input.run_id);
+    let plan = detached_lab_plan(&run_id, &input);
+    let mut record = match store::read_record(&run_id) {
+        Ok(record) => record,
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+            submit_plan(&plan, Some(&run_id))?
+        }
+        Err(error) => return Err(error),
+    };
+    record.updated_at = Some(now_timestamp());
+    set_run_state(&mut record, AgentTaskRunState::Running);
+    for task in &mut record.tasks {
+        if task.state == AgentTaskState::Queued {
+            task.state = AgentTaskState::Running;
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("kind".to_string(), json!("lab_offload_detached_handoff"));
+    metadata.insert("runner_id".to_string(), json!(input.runner_id));
+    metadata.insert("runner_job_id".to_string(), json!(input.runner_job_id));
+    metadata.insert(
+        "remote_workspace".to_string(),
+        json!(input.remote_workspace),
+    );
+    metadata.insert("remote_command".to_string(), json!(input.remote_command));
+    metadata.insert("retryable".to_string(), json!(true));
+    metadata.remove("stale_running");
+    metadata.remove("stale_running_reason");
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+fn detached_lab_plan(run_id: &str, input: &DetachedLabRunRecord<'_>) -> AgentTaskPlan {
+    let task = AgentTaskRequest {
+        schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+        task_id: format!("{run_id}-lab-handoff"),
+        group_key: Some("lab-offload".to_string()),
+        parent_plan_id: None,
+        executor: AgentTaskExecutor {
+            backend: "homeboy-lab".to_string(),
+            selector: Some(input.runner_id.to_string()),
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: Value::Null,
+        },
+        instructions: "Detached Lab agent-task run handed off to a durable runner job.".to_string(),
+        inputs: json!({
+            "runner_id": input.runner_id,
+            "runner_job_id": input.runner_job_id,
+            "remote_workspace": input.remote_workspace,
+            "remote_command": input.remote_command,
+        }),
+        source_refs: vec![AgentTaskSourceRef {
+            kind: "lab-offload-runner-job".to_string(),
+            uri: format!(
+                "homeboy://runner/{}/job/{}",
+                input.runner_id, input.runner_job_id
+            ),
+            revision: None,
+        }],
+        workspace: AgentTaskWorkspace {
+            mode: AgentTaskWorkspaceMode::Existing,
+            root: Some(input.remote_workspace.to_string()),
+            kind: Some("lab-offload".to_string()),
+            cleanup: Some("preserve".to_string()),
+            materialization: json!({
+                "runner_id": input.runner_id,
+                "runner_job_id": input.runner_job_id,
+            }),
+            ..AgentTaskWorkspace::default()
+        },
+        component_contracts: Vec::new(),
+        policy: AgentTaskPolicy::default(),
+        limits: AgentTaskLimits::default(),
+        expected_artifacts: Vec::new(),
+        artifact_declarations: Vec::new(),
+        metadata: json!({
+            "kind": "lab_offload_detached_handoff",
+            "runner_id": input.runner_id,
+            "runner_job_id": input.runner_job_id,
+        }),
+    };
+    let mut plan = AgentTaskPlan::new(format!("{run_id}-lab-offload"), vec![task]);
+    plan.group_key = Some("lab-offload".to_string());
+    plan.metadata = json!({
+        "kind": "lab_offload_detached_handoff",
+        "runner_id": input.runner_id,
+        "runner_job_id": input.runner_job_id,
+        "remote_workspace": input.remote_workspace,
+    });
+    plan
+}
+
 pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     if matches!(

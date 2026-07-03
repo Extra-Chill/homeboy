@@ -920,6 +920,19 @@ pub(crate) fn run_lab_offload_inner(
         // ownership off so the RAII handle never reaps it out from under the
         // live job.
         materialized_workspace.preserve();
+        if let (Some(run_id), Some(job_id)) =
+            (agent_task_run_id.as_deref(), exec_output.job_id.as_deref())
+        {
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id,
+                    runner_job_id: job_id,
+                    remote_workspace: &remote_cwd,
+                    remote_command: &remote_command,
+                },
+            )?;
+        }
         let mut stderr = String::new();
         for message in messages {
             stderr.push_str(&message);
