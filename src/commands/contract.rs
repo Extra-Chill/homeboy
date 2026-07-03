@@ -83,7 +83,7 @@ pub enum ContractCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractConstantsArgs {
-    /// Contract ID: all, artifact-manifest, artifact-paths, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, runtime-artifacts, runner-artifact-manifest-ref, reviewer-facing-ref.
+    /// Contract ID: all, artifact-manifest, artifact-paths, loop, secret-env-plan, resource-lifecycle-index, host-mutation-lifecycle, run-location-index, runner-execution-record, path-materialization-plan, run-outcome-envelope, run-artifact-files, runtime-artifacts, runner-artifact-manifest-ref, reviewer-facing-ref.
     pub contract_id: String,
 }
 

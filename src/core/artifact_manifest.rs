@@ -25,6 +25,14 @@ pub const RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE: &str = "agent_re
 pub const RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE: &str = "patch.diff";
 pub const RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE: &str = "patch.patch";
 
+pub const RUN_ARTIFACT_EVENTS_FILE: &str = "events.json";
+pub const RUN_ARTIFACT_STATUS_FILE: &str = "status.json";
+pub const RUN_ARTIFACT_RESULTS_FILE: &str = "results.json";
+pub const RUN_ARTIFACT_OUTCOME_FILE: &str = "outcome.json";
+pub const RUN_ARTIFACT_FANOUT_RUN_FILE: &str = "fanout-run.json";
+pub const RUN_ARTIFACT_LOOP_RESULT_FILE: &str = "loop-result.json";
+pub const RUN_ARTIFACT_LOOP_POLICY_FILE: &str = "loop-policy.json";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactManifest {
     #[serde(default = "default_schema")]
