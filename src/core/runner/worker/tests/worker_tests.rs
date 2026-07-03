@@ -425,7 +425,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
             .expect("submit job");
         let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (broker_url, handle) =
-            spawn_cancelling_on_second_snapshot_broker(store.clone(), 4, Some(seen_paths.clone()));
+            spawn_cancelling_on_second_snapshot_broker(store.clone(), 5, Some(seen_paths.clone()));
         write_reverse_controller_session(&broker_url);
 
         let (output, exit_code) =
