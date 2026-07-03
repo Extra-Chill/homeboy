@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.18] - 2026-07-03
+
+### Changed
+- Promote runtime materialization helpers
+
 ## [3.23.17] - 2026-07-03
 
 ### Changed
