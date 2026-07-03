@@ -97,6 +97,49 @@ assert.equal(preservedJson.registration.request.target.id, 'calypso-start');
 assert.equal(preservedJson.registration.request.target.routes.start, 'http://calypso.localhost:3000/start');
 assert.equal(preservedJson.registration.request.target.routes.builder_handoff, 'http://calypso.localhost:3000/setup/ai-site-builder');
 
+const brokerLifecycle = await listenBrokerLifecycle();
+try {
+  const backend = await runBackendUntilRegistered([
+    scriptPath,
+    '--local-url',
+    'http://127.0.0.1:7331',
+    '--public-url',
+    'https://preview-broker.example/runs/run-123',
+    '--broker-url',
+    `http://127.0.0.1:${brokerLifecycle.port}/api/managed-previews`,
+  ]);
+  assert.equal(backend.started.status, 'starting');
+  assert.equal(backend.started.registration.lifecycle.session_id, 'session-123');
+  assert.equal(backend.started.registration.lifecycle.unregister_method, 'DELETE');
+  assert.equal(backend.started.registration.lifecycle.heartbeat.supported, false);
+  backend.child.kill('SIGTERM');
+  const backendExit = await backend.closed;
+  assert.equal(backendExit.status === 143 || backendExit.signal === 'SIGTERM', true, backendExit.stderr);
+  assert.equal(brokerLifecycle.requests.filter((request) => request.method === 'POST').length, 2);
+  assert.equal(brokerLifecycle.requests.some((request) => request.method === 'DELETE' && request.url === '/api/managed-previews/session-123'), true);
+} finally {
+  brokerLifecycle.server.close();
+}
+
+const invalidJsonBroker = await listenInvalidJsonBroker();
+try {
+  const invalidJson = await runAsync([
+    scriptPath,
+    '--local-url',
+    'http://127.0.0.1:7331',
+    '--public-url',
+    'https://preview-broker.example/runs/run-123',
+    '--broker-url',
+    `http://127.0.0.1:${invalidJsonBroker.port}/api/managed-previews`,
+  ]);
+  assert.equal(invalidJson.status, 1, invalidJson.stderr);
+  const invalidJsonError = JSON.parse(invalidJson.stderr);
+  assert.equal(invalidJsonError.schema, 'homeboy/managed-preview-backend-error/v1');
+  assert.match(invalidJsonError.error, /registration response was not valid JSON/);
+} finally {
+  invalidJsonBroker.server.close();
+}
+
 const runtimeServer = await listen('runtime-ready');
 const mismatchServer = await listen('fetch failed');
 const tmpRoot = mkdtempSync(join(os.tmpdir(), 'homeboy-public-preview-'));
@@ -194,6 +237,92 @@ function runAsync(args) {
     });
     child.on('close', (status) => {
       resolveRun({ status, stdout, stderr });
+    });
+  });
+}
+
+function runBackendUntilRegistered(args) {
+  return new Promise((resolveRun, reject) => {
+    const child = spawn(process.execPath, args, {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let resolved = false;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (resolved) {
+        return;
+      }
+      try {
+        const started = JSON.parse(stdout);
+        resolved = true;
+        resolveRun({ child, started, closed });
+      } catch (_error) {}
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const closed = new Promise((resolveClosed) => {
+      child.on('close', (status, signal) => {
+        resolveClosed({ status, signal, stdout, stderr });
+      });
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      if (!resolved) {
+        reject(new Error(`Backend exited before registration with status ${status}: ${stderr}`));
+      }
+    });
+  });
+}
+
+function listenBrokerLifecycle() {
+  const requests = [];
+  let registerAttempts = 0;
+  const server = http.createServer((request, response) => {
+    requests.push({ method: request.method, url: request.url });
+    if (request.method === 'POST' && request.url === '/api/managed-previews') {
+      registerAttempts += 1;
+      if (registerAttempts === 1) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'temporary broker outage' }));
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ session_id: 'session-123' }));
+      return;
+    }
+    if (request.method === 'DELETE' && request.url === '/api/managed-previews/session-123') {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    response.writeHead(404, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: 'not found' }));
+  });
+
+  return listenServer(server, requests);
+}
+
+function listenInvalidJsonBroker() {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{not-json');
+  });
+
+  return listenServer(server, []);
+}
+
+function listenServer(server, requests) {
+  return new Promise((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      resolveListen({ server, port: address.port, requests });
     });
   });
 }

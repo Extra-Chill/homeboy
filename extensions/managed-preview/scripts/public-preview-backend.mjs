@@ -3,6 +3,17 @@
 import { spawn } from 'node:child_process';
 import { URL } from 'node:url';
 
+const PROVIDERS = {
+  'external-broker': {
+    buildPlan,
+    registerPreview,
+  },
+};
+
+const REGISTER_RETRY_DELAYS_MS = [250, 750];
+const REQUEST_TIMEOUT_MS = 5000;
+const CLEANUP_TIMEOUT_MS = 3000;
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const provider = options.provider || process.env.HOMEBOY_PREVIEW_BACKEND_PROVIDER || 'external-broker';
@@ -15,7 +26,12 @@ async function main() {
   const target = buildTargetMetadata(options);
 
   const brokerUrl = brokerUrlValue ? parseUrl(brokerUrlValue, 'broker URL') : null;
-  const plan = buildPlan({ provider, localUrl, publicUrl, brokerUrl, options });
+  const strategy = PROVIDERS[provider];
+  if (!strategy) {
+    throw new Error(`Unsupported preview backend provider: ${provider}`);
+  }
+
+  const plan = strategy.buildPlan({ provider, localUrl, publicUrl, brokerUrl, options });
   const preservation = evaluateHostPreservation({
     localUrl,
     publicUrl,
@@ -44,7 +60,7 @@ async function main() {
     return;
   }
 
-  const registration = await registerPreview({
+  const registration = await strategy.registerPreview({
     dryRun: options.dryRun,
     brokerUrl,
     provider,
@@ -53,6 +69,8 @@ async function main() {
     preservation,
     target,
   });
+  const heartbeat = startHeartbeat(registration);
+  const cleanup = createCleanup({ registration, heartbeat });
 
   const startEvidence = {
     schema: 'homeboy/managed-preview-backend-start/v1',
@@ -66,9 +84,8 @@ async function main() {
     host_preservation: preservation,
     registration,
   };
-  process.stdout.write(`${JSON.stringify(startEvidence, null, 2)}\n`);
-
   if (options.dryRun) {
+    process.stdout.write(`${JSON.stringify(startEvidence, null, 2)}\n`);
     return;
   }
 
@@ -80,27 +97,37 @@ async function main() {
       HOMEBOY_TUNNEL_PUBLIC_URL: publicUrl.href,
     },
   });
+  let shuttingDown = false;
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
+    process.on(signal, async () => {
+      if (shuttingDown) {
+        return;
+      }
+      shuttingDown = true;
       child.kill(signal);
+      await waitForChildExit(child, 1000);
+      await cleanup();
+      process.exit(signalExitCode(signal));
     });
   }
 
-  child.on('exit', (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
+  child.on('exit', async (code, signal) => {
+    if (shuttingDown) {
       return;
     }
+    shuttingDown = true;
+    await cleanup();
     process.exitCode = code ?? 1;
+    if (signal) {
+      process.exit(signalExitCode(signal));
+    }
   });
+
+  process.stdout.write(`${JSON.stringify(startEvidence, null, 2)}\n`);
 }
 
 function buildPlan({ provider, localUrl, publicUrl, brokerUrl, options }) {
-  if (provider !== 'external-broker') {
-    throw new Error(`Unsupported preview backend provider: ${provider}`);
-  }
-
   return {
     command: options.keepaliveCommand || process.env.HOMEBOY_PREVIEW_KEEPALIVE_COMMAND || 'node',
     args: ['-e', `setInterval(() => {}, 2147483647)`],
@@ -169,21 +196,177 @@ async function registerPreview({ dryRun, brokerUrl, provider, localUrl, publicUr
     };
   }
 
-  const response = await fetch(brokerUrl.href, {
+  const response = await fetchWithRetry(brokerUrl.href, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request),
   });
 
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  const payload = parseJsonResponse(response.text, 'Preview broker registration response');
   if (!response.ok) {
-    throw new Error(`Preview broker rejected request with HTTP ${response.status}: ${text}`);
+    throw new Error(`Preview broker rejected request with HTTP ${response.status}: ${response.text}`);
   }
   if (preservation.required && payload?.capabilities?.hostname_preserving_browser_origin !== true) {
     throw new Error('Preview broker response did not prove hostname-preserving browser-origin capability');
   }
-  return payload;
+  return normalizeRegistration(payload, brokerUrl);
+}
+
+async function fetchWithRetry(url, init) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= REGISTER_RETRY_DELAYS_MS.length; attempt += 1) {
+    const response = await fetchWithTimeout(url, init, REQUEST_TIMEOUT_MS);
+    if (!isTransientResponse(response) || attempt === REGISTER_RETRY_DELAYS_MS.length) {
+      return response;
+    }
+    lastError = new Error(`HTTP ${response.status}`);
+    await sleep(REGISTER_RETRY_DELAYS_MS[attempt]);
+  }
+  throw lastError;
+}
+
+async function fetchWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: await response.text(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      text: error.name === 'AbortError' ? `Timed out after ${timeoutMs}ms` : error.message,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isTransientResponse(response) {
+  return response.status === 0 || response.status === 408 || response.status === 429 || response.status >= 500;
+}
+
+function parseJsonResponse(text, label) {
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label} was not valid JSON: ${error.message}`);
+  }
+}
+
+function normalizeRegistration(payload, brokerUrl) {
+  const sessionId = firstString(payload, ['session_id', 'sessionId', 'registration_id', 'registrationId', 'id']);
+  const explicitUnregisterUrl = firstString(payload, ['unregister_url', 'unregisterUrl', 'delete_url', 'deleteUrl', 'cleanup_url', 'cleanupUrl']);
+  const sessionUrl = firstString(payload, ['session_url', 'sessionUrl', 'url']);
+  const unregisterUrlValue = explicitUnregisterUrl || sessionUrl || (sessionId ? new URL(encodeURIComponent(sessionId), ensureTrailingSlash(brokerUrl)).href : null);
+  const unregisterUrl = unregisterUrlValue ? resolveUrl(unregisterUrlValue, brokerUrl) : null;
+  const heartbeatUrl = firstString(payload, ['heartbeat_url', 'heartbeatUrl']) || firstString(payload?.heartbeat, ['url']);
+  const heartbeatIntervalMs = positiveInteger(
+    payload?.heartbeat_interval_ms || payload?.heartbeatIntervalMs || payload?.heartbeat?.interval_ms || payload?.heartbeat?.intervalMs
+  );
+
+  return {
+    ...payload,
+    lifecycle: {
+      session_id: sessionId,
+      unregister_url: unregisterUrl,
+      unregister_method: unregisterUrl ? 'DELETE' : null,
+      heartbeat: heartbeatUrl ? {
+        supported: true,
+        url: resolveUrl(heartbeatUrl, brokerUrl),
+        interval_ms: heartbeatIntervalMs || 30000,
+        method: 'POST',
+      } : {
+        supported: false,
+        reason: 'Broker registration response did not include a heartbeat URL.',
+      },
+    },
+  };
+}
+
+function startHeartbeat(registration) {
+  const heartbeat = registration?.lifecycle?.heartbeat;
+  if (!heartbeat?.supported || !heartbeat.url) {
+    return null;
+  }
+  const timer = setInterval(() => {
+    fetchWithTimeout(heartbeat.url, { method: heartbeat.method || 'POST' }, REQUEST_TIMEOUT_MS).catch(() => {});
+  }, heartbeat.interval_ms);
+  timer.unref?.();
+  return timer;
+}
+
+function createCleanup({ registration, heartbeat }) {
+  let cleanupPromise = null;
+  return async () => {
+    if (cleanupPromise) {
+      return cleanupPromise;
+    }
+    cleanupPromise = (async () => {
+      if (heartbeat) {
+        clearInterval(heartbeat);
+      }
+      const unregisterUrl = registration?.lifecycle?.unregister_url;
+      if (!unregisterUrl) {
+        return;
+      }
+      await fetchWithTimeout(unregisterUrl, { method: registration.lifecycle.unregister_method || 'DELETE' }, CLEANUP_TIMEOUT_MS);
+    })().catch(() => {});
+    return cleanupPromise;
+  };
+}
+
+function firstString(source, keys) {
+  if (!source || typeof source !== 'object') {
+    return null;
+  }
+  for (const key of keys) {
+    if (typeof source[key] === 'string' && source[key]) {
+      return source[key];
+    }
+  }
+  return null;
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function ensureTrailingSlash(url) {
+  return url.href.endsWith('/') ? url : new URL(`${url.href}/`);
+}
+
+function resolveUrl(value, baseUrl) {
+  return new URL(value, baseUrl).href;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function signalExitCode(signal) {
+  return signal === 'SIGINT' ? 130 : 143;
 }
 
 function buildTargetMetadata(options) {
