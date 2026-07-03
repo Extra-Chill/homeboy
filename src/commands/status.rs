@@ -9,6 +9,9 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use super::CmdResult;
+use serde_json::Value;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 mod dashboard_table;
 use dashboard_table::log_dashboard_table;
@@ -158,6 +161,17 @@ pub struct StatusOutput {
     pub clean: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct UnregisteredContextStatusOutput {
+    pub command: &'static str,
+    pub status: &'static str,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_root: Option<String>,
+    pub suggestion: String,
+    pub action: &'static str,
+}
+
 /// A single row in the project status dashboard.
 #[derive(Debug, Serialize)]
 pub struct ProjectStatusRow {
@@ -236,6 +250,7 @@ fn is_zero(value: &usize) -> bool {
 
 pub enum StatusResult {
     Summary(StatusOutput),
+    UnregisteredContext(UnregisteredContextStatusOutput),
     Full(homeboy::core::context::report::ContextReport),
     Dashboard(ProjectDashboardOutput),
 }
@@ -247,6 +262,7 @@ impl serde::Serialize for StatusResult {
     {
         match self {
             StatusResult::Summary(output) => output.serialize(serializer),
+            StatusResult::UnregisteredContext(output) => output.serialize(serializer),
             StatusResult::Full(output) => output.serialize(serializer),
             StatusResult::Dashboard(output) => output.serialize(serializer),
         }
@@ -261,6 +277,12 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
     // Project dashboard mode: `homeboy status <project-id>`
     if let Some(ref project_id) = args.project {
         return run_project_dashboard(project_id, &args);
+    }
+
+    if !args.full && !args.all {
+        if let Some(output) = unregistered_cwd_status_output() {
+            return Ok((StatusResult::UnregisteredContext(output), 0));
+        }
     }
 
     if args.full {
@@ -278,6 +300,23 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
         .cloned()
         .collect();
 
+    if relevant_ids.is_empty() && !args.all {
+        return Ok((
+            StatusResult::UnregisteredContext(UnregisteredContextStatusOutput {
+                command: "status",
+                status: "unregistered_context",
+                cwd: context_output.cwd,
+                git_root: context_output.git_root,
+                suggestion: context_output.suggestion.unwrap_or_else(|| {
+                    "Repo not attached. Prefer: `homeboy project components attach-path <project-id> <path>`"
+                        .to_string()
+                }),
+                action: "Run `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+            }),
+            0,
+        ));
+    }
+
     let all_components = component::inventory().unwrap_or_default();
 
     let show_all = args.all || relevant_ids.is_empty();
@@ -292,6 +331,120 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
     };
 
     summarize_components(components, &args)
+}
+
+fn unregistered_cwd_status_output() -> Option<UnregisteredContextStatusOutput> {
+    let cwd = std::env::current_dir().ok()?;
+    let git_root = git::get_git_root(&cwd.to_string_lossy()).ok().map(PathBuf::from);
+    let candidates = [Some(cwd.as_path()), git_root.as_deref()];
+
+    if candidates
+        .into_iter()
+        .flatten()
+        .any(path_is_registered_context)
+    {
+        return None;
+    }
+
+    let git_root_string = git_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let suggestion = if let Some(ref git_root) = git_root_string {
+        format!(
+            "Repo not attached. Prefer: `homeboy project components attach-path <project-id> {}`",
+            git_root
+        )
+    } else {
+        "Repo not attached. Prefer: `homeboy project components attach-path <project-id> <path>`"
+            .to_string()
+    };
+
+    Some(UnregisteredContextStatusOutput {
+        command: "status",
+        status: "unregistered_context",
+        cwd: cwd.to_string_lossy().to_string(),
+        git_root: git_root_string,
+        suggestion,
+        action: "Run `homeboy status --all` to inspect every configured component, or attach this checkout to a project/component first.",
+    })
+}
+
+fn path_is_registered_context(path: &Path) -> bool {
+    registered_local_paths().into_iter().any(|registered| {
+        path_is_at_or_inside(&registered, path) || path_is_at_or_inside(path, &registered)
+    })
+}
+
+fn registered_local_paths() -> Vec<PathBuf> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    let config_root = PathBuf::from(home).join(".config").join("homeboy");
+    [config_root.join("components"), config_root.join("projects")]
+        .into_iter()
+        .flat_map(json_files_under)
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .flat_map(|value| {
+            let mut paths = Vec::new();
+            collect_local_paths(&value, &mut paths);
+            paths
+        })
+        .collect()
+}
+
+fn json_files_under(root: PathBuf) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_json_files(&root, &mut files);
+    files
+}
+
+fn collect_json_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            files.push(path.to_path_buf());
+        }
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        collect_json_files(&entry.path(), files);
+    }
+}
+
+fn collect_local_paths(value: &Value, paths: &mut Vec<PathBuf>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if matches!(key.as_str(), "local_path" | "localPath") {
+                    if let Some(path) = value.as_str().filter(|path| !path.trim().is_empty()) {
+                        paths.push(expand_user_path(path));
+                    }
+                }
+                collect_local_paths(value, paths);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_local_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expand_user_path(path: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(path).into_owned())
+}
+
+fn path_is_at_or_inside(parent: &Path, path: &Path) -> bool {
+    match (parent.canonicalize().ok(), path.canonicalize().ok()) {
+        (Some(parent), Some(path)) => path == parent || path.starts_with(parent),
+        _ => false,
+    }
 }
 
 fn summarize_components(
@@ -889,15 +1042,35 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::GlobalArgs;
     use clap::Parser;
+    use std::env;
     use std::fs;
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
     use tempfile::TempDir;
+
+    static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn status_args(project: Option<String>, path: String, full: bool) -> StatusArgs {
         StatusArgs {
             project,
             path: Some(path),
             full,
+            uncommitted: false,
+            needs_release: false,
+            ready: false,
+            docs_only: false,
+            all: false,
+            outdated: false,
+            unreleased: false,
+        }
+    }
+
+    fn default_status_args() -> StatusArgs {
+        StatusArgs {
+            project: None,
+            path: None,
+            full: false,
             uncommitted: false,
             needs_release: false,
             ready: false,
@@ -1053,6 +1226,39 @@ mod tests {
                 assert!(output.upstream_drift.is_empty());
             }
             _ => panic!("expected summary output"),
+        }
+    }
+
+    #[test]
+    fn default_status_from_unregistered_cwd_returns_actionable_context_without_global_scan() {
+        let _guard = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let original_cwd = env::current_dir().expect("current dir");
+        let dir = TempDir::new().expect("tempdir");
+        env::set_current_dir(dir.path()).expect("set unregistered cwd");
+
+        let started = Instant::now();
+        let result = run(default_status_args(), &GlobalArgs {});
+        let elapsed = started.elapsed();
+
+        env::set_current_dir(original_cwd).expect("restore cwd");
+        let (result, code) = result.expect("status succeeds from unregistered cwd");
+
+        assert_eq!(code, 0);
+        assert!(
+            elapsed.as_secs() < 2,
+            "unregistered status should fast-return, elapsed={elapsed:?}"
+        );
+        match result {
+            StatusResult::UnregisteredContext(output) => {
+                assert_eq!(output.status, "unregistered_context");
+                assert_eq!(
+                    PathBuf::from(&output.cwd).canonicalize().ok(),
+                    dir.path().canonicalize().ok()
+                );
+                assert!(output.suggestion.contains("attach"));
+                assert!(output.action.contains("homeboy status --all"));
+            }
+            _ => panic!("expected unregistered context output"),
         }
     }
 
