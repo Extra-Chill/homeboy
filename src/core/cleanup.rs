@@ -6,6 +6,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::defaults::HomeboyConfig;
+use crate::core::resource_cleanup_intent::ResourceCleanupIntent;
+use crate::core::worktree_providers::{
+    cleanup_worktree_providers_from_config, WorktreeProviderCleanupOptions,
+    WorktreeProviderCleanupOutput,
+};
 use crate::core::{git, Error, Result};
 
 mod self_artifacts;
@@ -14,12 +20,6 @@ mod self_artifacts;
 use self_artifacts::validate_homeboy_manifest_dir;
 use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
-const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
-    ("build", "generated_build"),
-    ("target", "build_target"),
-    ("node_modules", "node_modules"),
-    ("dist", "generated_dist"),
-];
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -43,6 +43,28 @@ pub enum ArtifactCleanupSort {
     #[default]
     Discovery,
     Size,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResourceCleanupOptions {
+    pub intent: ResourceCleanupIntent,
+    pub artifacts: Option<ArtifactCleanupOptions>,
+    pub worktree_providers: Option<WorktreeProviderCleanupOptions>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ResourceCleanupOutput {
+    pub command: &'static str,
+    pub mode: &'static str,
+    pub candidate_count: usize,
+    pub applied_count: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub reclaimed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<ArtifactCleanupOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_providers: Option<WorktreeProviderCleanupOutput>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -239,6 +261,61 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     })
 }
 
+pub fn cleanup_resources_from_config(
+    mut options: ResourceCleanupOptions,
+    config: HomeboyConfig,
+) -> Result<ResourceCleanupOutput> {
+    let apply = options.intent.is_apply();
+    let mut artifacts = None;
+    let mut providers = None;
+
+    if let Some(mut artifact_options) = options.artifacts.take() {
+        artifact_options.apply = apply;
+        artifacts = Some(cleanup_artifacts(artifact_options)?);
+    }
+
+    if let Some(mut provider_options) = options.worktree_providers.take() {
+        provider_options.apply = apply;
+        providers = Some(cleanup_worktree_providers_from_config(
+            provider_options,
+            config,
+        )?);
+    }
+
+    let candidate_count = artifacts
+        .as_ref()
+        .map(|output| output.candidate_count)
+        .unwrap_or(0);
+    let applied_count = artifacts
+        .as_ref()
+        .map(|output| output.applied_count)
+        .unwrap_or(0);
+    let reclaimed_bytes = artifacts
+        .as_ref()
+        .map(|output| output.reclaimed_bytes)
+        .unwrap_or(0);
+    let success_count = providers
+        .as_ref()
+        .map(|output| output.success_count)
+        .unwrap_or(0);
+    let failure_count = providers
+        .as_ref()
+        .map(|output| output.failure_count)
+        .unwrap_or(0);
+
+    Ok(ResourceCleanupOutput {
+        command: "cleanup.resources",
+        mode: options.intent.as_str(),
+        candidate_count,
+        applied_count,
+        success_count,
+        failure_count,
+        reclaimed_bytes,
+        artifacts,
+        worktree_providers: providers,
+    })
+}
+
 fn order_and_limit_candidates(
     candidates: &mut Vec<ArtifactCleanupCandidate>,
     sort: ArtifactCleanupSort,
@@ -399,13 +476,6 @@ fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
 
 pub(crate) fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>> {
     let mut declarations = Vec::new();
-    for (relative_path, kind) in BUILTIN_ARTIFACT_PATHS {
-        declarations.push(ArtifactDeclaration {
-            relative_path: (*relative_path).to_string(),
-            kind: (*kind).to_string(),
-            declared_by: "builtin".to_string(),
-        });
-    }
 
     let config_path = worktree.join("homeboy.json");
     if config_path.exists() {
@@ -670,8 +740,13 @@ fn git_root(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::process::Command;
     use tempfile::TempDir;
+
+    use crate::core::defaults::{
+        WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
+    };
 
     #[test]
     fn safe_artifact_paths_are_repo_relative() {
@@ -702,7 +777,6 @@ mod tests {
 
         let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-        assert!(declarations.iter().any(|row| row.relative_path == "target"));
         assert!(declarations
             .iter()
             .any(|row| row.relative_path == "runtime/generated-fixture"));
@@ -713,6 +787,120 @@ mod tests {
                 .count(),
             1,
             "declared paths should not duplicate builtins"
+        );
+    }
+
+    #[test]
+    fn artifact_declarations_do_not_include_ecosystem_defaults() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        let declarations = artifact_declarations(tmp.path()).expect("declarations");
+
+        assert!(declarations.is_empty());
+    }
+
+    #[test]
+    fn clean_contract_dry_run_aggregates_artifacts_and_provider_preview() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+        let script = fake_provider_script();
+
+        let output = cleanup_resources_from_config(
+            ResourceCleanupOptions {
+                intent: ResourceCleanupIntent::DryRun,
+                artifacts: Some(ArtifactCleanupOptions {
+                    path: Some(repo.path().to_path_buf()),
+                    apply: true,
+                    self_artifacts: false,
+                    temp_roots: Vec::new(),
+                    sort: ArtifactCleanupSort::Discovery,
+                    limit: None,
+                    merged_only: false,
+                }),
+                worktree_providers: Some(WorktreeProviderCleanupOptions {
+                    provider: vec!["fixture".to_string()],
+                    all_providers: false,
+                    apply: true,
+                }),
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    cleanup_preview: Some(vec![script, "dry_run".to_string()]),
+                    ..Default::default()
+                },
+            }),
+        )
+        .expect("aggregate dry run cleanup");
+
+        assert_eq!(output.command, "cleanup.resources");
+        assert_eq!(output.mode, "dry_run");
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.success_count, 1);
+        assert!(repo.path().join("target/debug/app").exists());
+        assert_eq!(
+            output
+                .worktree_providers
+                .as_ref()
+                .expect("providers")
+                .providers[0]
+                .parsed_payload,
+            Some(serde_json::json!({ "mode": "dry_run" }))
+        );
+    }
+
+    #[test]
+    fn clean_contract_apply_aggregates_artifact_removal_and_provider_apply() {
+        let repo = git_repo();
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+        let script = fake_provider_script();
+
+        let output = cleanup_resources_from_config(
+            ResourceCleanupOptions {
+                intent: ResourceCleanupIntent::Apply,
+                artifacts: Some(ArtifactCleanupOptions {
+                    path: Some(repo.path().to_path_buf()),
+                    apply: false,
+                    self_artifacts: false,
+                    temp_roots: Vec::new(),
+                    sort: ArtifactCleanupSort::Discovery,
+                    limit: None,
+                    merged_only: false,
+                }),
+                worktree_providers: Some(WorktreeProviderCleanupOptions {
+                    provider: vec!["fixture".to_string()],
+                    all_providers: false,
+                    apply: false,
+                }),
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    cleanup_apply: Some(vec![script, "apply".to_string()]),
+                    ..Default::default()
+                },
+            }),
+        )
+        .expect("aggregate apply cleanup");
+
+        assert_eq!(output.mode, "apply");
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.applied_count, 1);
+        assert_eq!(output.success_count, 1);
+        assert!(!repo.path().join("target").exists());
+        assert_eq!(
+            output
+                .worktree_providers
+                .as_ref()
+                .expect("providers")
+                .providers[0]
+                .parsed_payload,
+            Some(serde_json::json!({ "mode": "apply" }))
         );
     }
 
@@ -1447,7 +1635,11 @@ mod tests {
         let repo = TempDir::new().expect("repo tempdir");
         git(repo.path(), &["init", "-b", "main"]);
         write_file(&repo.path().join("src/lib.rs"), "source");
-        git(repo.path(), &["add", "src/lib.rs"]);
+        write_file(
+            &repo.path().join("homeboy.json"),
+            r#"{"artifact_cleanup_paths":["target","node_modules","dist"]}"#,
+        );
+        git(repo.path(), &["add", "src/lib.rs", "homeboy.json"]);
         git(
             repo.path(),
             &[
@@ -1462,6 +1654,36 @@ mod tests {
         );
         repo
     }
+
+    fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
+        let mut providers = HashMap::new();
+        providers.insert("fixture".to_string(), provider);
+        HomeboyConfig {
+            worktree_providers: providers,
+            ..HomeboyConfig::default()
+        }
+    }
+
+    fn fake_provider_script() -> String {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let script = dir.join("provider");
+        fs::write(&script, "#!/bin/sh\nprintf '{\"mode\":\"%s\"}\n' \"$1\"\n")
+            .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 
     fn temp_homeboy_checkout(temp_root: &Path, name: &str) -> PathBuf {
         let checkout = temp_root.join(name);

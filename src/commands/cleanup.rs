@@ -1,8 +1,12 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use homeboy::core::cleanup::{self, ArtifactCleanupOptions, ArtifactCleanupSort};
-use homeboy::core::worktree_providers::{self, WorktreeProviderCleanupOptions};
+use homeboy::core::cleanup::{
+    self, ArtifactCleanupOptions, ArtifactCleanupSort, ResourceCleanupOptions,
+};
+use homeboy::core::defaults;
+use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
+use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
 use serde_json::Value;
 
 use super::CmdResult;
@@ -78,18 +82,25 @@ pub struct CleanupWorktreesArgs {
 
 pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
     match args.command {
-        CleanupCommand::Artifacts(args) => cleanup::cleanup_artifacts(ArtifactCleanupOptions {
-            path: args.path,
-            apply: args.apply,
-            self_artifacts: args.self_artifacts,
-            temp_roots: args.temp_root,
-            sort: match args.sort {
-                CleanupArtifactsSortArg::Discovery => ArtifactCleanupSort::Discovery,
-                CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
+        CleanupCommand::Artifacts(args) => cleanup::cleanup_resources_from_config(
+            ResourceCleanupOptions {
+                intent: cleanup_intent(args.apply),
+                artifacts: Some(ArtifactCleanupOptions {
+                    path: args.path,
+                    apply: args.apply,
+                    self_artifacts: args.self_artifacts,
+                    temp_roots: args.temp_root,
+                    sort: match args.sort {
+                        CleanupArtifactsSortArg::Discovery => ArtifactCleanupSort::Discovery,
+                        CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
+                    },
+                    limit: args.limit,
+                    merged_only: args.merged_only,
+                }),
+                worktree_providers: None,
             },
-            limit: args.limit,
-            merged_only: args.merged_only,
-        })
+            defaults::load_config(),
+        )
         .and_then(|output| {
             serde_json::to_value(output).map_err(|err| {
                 homeboy::core::Error::internal_json(
@@ -99,26 +110,45 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
             })
         })
         .map(|output| (output, 0)),
-        CleanupCommand::Worktrees(args) => {
-            worktree_providers::cleanup_worktree_providers(WorktreeProviderCleanupOptions {
-                provider: args.provider,
-                all_providers: args.all_providers,
-                apply: args.apply,
+        CleanupCommand::Worktrees(args) => cleanup::cleanup_resources_from_config(
+            ResourceCleanupOptions {
+                intent: cleanup_intent(args.apply),
+                artifacts: None,
+                worktree_providers: Some(WorktreeProviderCleanupOptions {
+                    provider: args.provider,
+                    all_providers: args.all_providers,
+                    apply: args.apply,
+                }),
+            },
+            defaults::load_config(),
+        )
+        .and_then(|output| {
+            serde_json::to_value(output).map_err(|err| {
+                homeboy::core::Error::internal_json(
+                    err.to_string(),
+                    Some("serialize cleanup worktrees output".to_string()),
+                )
             })
-            .and_then(|output| {
-                serde_json::to_value(output).map_err(|err| {
-                    homeboy::core::Error::internal_json(
-                        err.to_string(),
-                        Some("serialize cleanup worktrees output".to_string()),
-                    )
-                })
-            })
-            .map(|output| (output, 0))
-        }
+        })
+        .map(|output| (output, 0)),
+    }
+}
+
+fn cleanup_intent(apply: bool) -> ResourceCleanupIntent {
+    if apply {
+        ResourceCleanupIntent::Apply
+    } else {
+        ResourceCleanupIntent::DryRun
     }
 }
 
 pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String> {
+    let payload = if payload.get("command").and_then(Value::as_str)? == "cleanup.resources" {
+        payload.get("artifacts")?
+    } else {
+        payload
+    };
+
     if payload.get("command").and_then(Value::as_str)? != "cleanup.artifacts" {
         return None;
     }
