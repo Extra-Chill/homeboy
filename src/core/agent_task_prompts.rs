@@ -108,10 +108,16 @@ pub fn list_prompts() -> Result<Vec<AgentTaskPromptRecord>> {
 }
 
 pub fn resolve_stored_prompt_ref(spec: &str) -> Result<Option<String>> {
-    let Some(name) = spec.strip_prefix(PROMPT_REF_PREFIX) else {
+    let Some(name) = stored_prompt_ref_id(spec) else {
         return Ok(None);
     };
     Ok(Some(read_prompt(name)?))
+}
+
+pub fn stored_prompt_ref_id(spec: &str) -> Option<&str> {
+    spec.strip_prefix('@')
+        .unwrap_or(spec)
+        .strip_prefix(PROMPT_REF_PREFIX)
 }
 
 pub fn read_prompt_input(spec: &str) -> Result<String> {
@@ -121,6 +127,10 @@ pub fn read_prompt_input(spec: &str) -> Result<String> {
             Error::internal_io(error.to_string(), Some("read stdin".to_string()))
         })?;
         return Ok(buf);
+    }
+
+    if let Some(prompt) = resolve_stored_prompt_ref(spec)? {
+        return Ok(prompt);
     }
 
     if let Some(path) = spec.strip_prefix('@') {
@@ -162,13 +172,22 @@ fn prompt_io_error(
     error: std::io::Error,
 ) -> Error {
     if error.kind() == std::io::ErrorKind::NotFound {
+        let mut hints =
+            vec!["Run `homeboy agent-task prompts list` to see stored prompts".to_string()];
+        if let Ok(records) = list_prompts() {
+            let ids = records
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>();
+            if !ids.is_empty() {
+                hints.push(format!("Available stored prompt ids: {}", ids.join(", ")));
+            }
+        }
         return Error::validation_invalid_argument(
             field,
             format!("stored agent-task prompt '{}' was not found", name),
             Some(name.to_string()),
-            Some(vec![
-                "Run `homeboy agent-task prompts list` to see stored prompts".to_string(),
-            ]),
+            Some(hints),
         );
     }
     Error::internal_io(error.to_string(), Some(path.display().to_string()))
@@ -209,6 +228,10 @@ mod tests {
             assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
             assert_eq!(
                 resolve_stored_prompt_ref("prompt:alpha").expect("resolve ref"),
+                Some("first".to_string())
+            );
+            assert_eq!(
+                resolve_stored_prompt_ref("@prompt:alpha").expect("resolve at ref"),
                 Some("first".to_string())
             );
             assert_eq!(

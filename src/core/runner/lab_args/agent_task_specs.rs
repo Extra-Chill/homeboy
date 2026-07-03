@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::core::agent_task_prompts;
 use crate::core::config::read_json_spec_to_string;
 use crate::core::{Error, Result};
 
@@ -334,7 +335,14 @@ fn read_agent_task_text_spec_to_inline(
     field: &str,
 ) -> Result<String> {
     if spec == "-" || !spec.starts_with('@') {
+        if let Some(prompt) = agent_task_prompts::resolve_stored_prompt_ref(spec)? {
+            return Ok(prompt);
+        }
         return Ok(spec.to_string());
+    }
+
+    if let Some(prompt) = agent_task_prompts::resolve_stored_prompt_ref(spec)? {
+        return Ok(prompt);
     }
 
     let raw_path = spec.trim_start_matches('@');
