@@ -5,8 +5,8 @@
 //!   `// Hack`, `until merged`, `legacy fallback`, …) AND a concrete tracker
 //!   reference (an issue/PR/ticket URL, or `@see <url>`) co-located in the
 //!   same contiguous comment block. Bare `#NNN` does not qualify on its own.
-//!   The concrete tracker URL shapes are configured ecosystem defaults, not
-//!   hardcoded here.
+//!   Generic tracker URL shapes are built in; ecosystem tracker hosts are
+//!   supplied by component or external defaults configuration.
 //! - **B (Info):** `version_compare(<KNOWN_CONSTANT>, '<X>', '<' | '<=')`
 //!   guards against a known version constant for an opted-in ecosystem.
 //!
@@ -80,19 +80,18 @@ const DEFAULT_MARKER_REGEXES: &[&str] = &[
 // Tier A requires a marker AND a concrete URL/ticket, never a bare reference.
 // Generic code-host URL shapes live in the agnostic conventions home
 // (`builtin_tracker_reference_regexes`); framework-specific tracker hosts come
-// from the extension-provided defaults asset, not inline here, so this detector
-// stays free of hardcoded ecosystem literals (#2240).
+// from component or external defaults configuration, not inline here, so this
+// detector stays free of hardcoded ecosystem literals (#2240).
 
 // ============================================================================
 // Tier B — version-compare guard catalogue
 // ============================================================================
 
-// Recognized version-constant names and the `version_compare(...)` guard regex
-// are ecosystem-specific (constant naming + comparison syntax), so core ships
-// none of them as Rust literals. The framework set is supplied by the
-// extension-provided defaults asset and merged in when a component opts into
-// builtin profile defaults (#2240). Version-guard language gating likewise
-// lives in the agnostic conventions home (`builtin_version_guard_tokens`).
+// Recognized version-constant names and guard regexes are ecosystem-specific
+// (constant naming + comparison syntax), so core ships none of them as Rust
+// literals. Component or external defaults configuration supplies those values
+// when needed (#2240). Version-guard language gating likewise lives in the
+// agnostic conventions home (`builtin_version_guard_tokens`).
 const DEFAULT_VENDORED_PATH_MARKERS: &[&str] =
     &["/vendor/", "vendor/", "/node_modules/", "node_modules/"];
 
@@ -277,15 +276,16 @@ impl EffectiveDetectorProfile {
                 DetectorProfileField::VendoredPathMarker,
             );
 
-            // Framework-specific version-guard and tracker defaults ship in the
-            // extension-provided defaults asset, not core Rust literals, so core
-            // stays generic while WP detection behavior is preserved (#2240).
+            // The bundled defaults asset is intentionally empty for these fields;
+            // external defaults can still extend builtin profiles without adding
+            // framework literals to core source (#2240).
             let ext = crate::core::defaults::extension_provided_detector_profile();
             profile.extend_owned_strings(
                 &ext.version_guard_constants,
                 DetectorProfileField::VersionGuardConstant,
             );
-            profile.extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
+            profile
+                .extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
             profile.extend_owned_regexes(
                 &ext.tracker_reference_regexes,
                 DetectorRegexKind::TrackerReference,
@@ -468,14 +468,25 @@ mod tests {
         DetectorProfileConfig::default()
     }
 
+    fn runtime_version_guard_config() -> DetectorProfileConfig {
+        DetectorProfileConfig {
+            version_guard_regexes: vec![
+                r#"runtime_version_less_than\((RUNTIME_VERSION),\s*\"([^\"]+)\"\)"#.to_string(),
+            ],
+            version_guard_constants: vec!["RUNTIME_VERSION".to_string()],
+            version_guard_languages: vec!["rust".to_string()],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_run_combines_tier_a_and_tier_b() {
         let fp = make_fp(
-            "src/example.php",
-            Language::Php,
-            "<?php\n/**\n * transitional shim\n * @see https://github.com/foo/bar/issues/1\n */\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {}\n",
+            "src/example.rs",
+            Language::Rust,
+            "// transitional shim\n// @see https://github.com/foo/bar/issues/1\nfn compat() { if runtime_version_less_than(RUNTIME_VERSION, \"2.0\") {} }\n",
         );
-        let findings = run(&[&fp], &default_config());
+        let findings = run(&[&fp], &runtime_version_guard_config());
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().any(|f| f.severity == Severity::Warning));
         assert!(findings.iter().any(|f| f.severity == Severity::Info));
@@ -513,30 +524,35 @@ mod tests {
     }
 
     #[test]
-    fn test_hack_comment_with_trac_ticket() {
+    fn test_hack_comment_with_custom_tracker_ticket() {
         let fp = make_fp(
             "vendor-src/HtmlConverter.php",
             Language::Php,
-            "<?php\n// Hack to load utf-8 HTML\n// see https://core.trac.wordpress.org/ticket/24730\n$x = 1;\n",
+            "<?php\n// Hack to load utf-8 HTML\n// see https://tracker.example.test/ticket/24730\n$x = 1;\n",
         );
-        let findings = run(&[&fp], &default_config());
+        let config = DetectorProfileConfig {
+            tracker_reference_regexes: vec![r"tracker\.example\.test/ticket/\d+".to_string()],
+            ..Default::default()
+        };
+
+        let findings = run(&[&fp], &config);
         assert_eq!(findings.len(), 1);
         assert!(findings[0]
             .suggestion
-            .contains("core.trac.wordpress.org/ticket/24730"));
+            .contains("tracker.example.test/ticket/24730"));
     }
 
     #[test]
-    fn test_version_compare_guard_emits_finding() {
+    fn test_configured_version_guard_emits_finding() {
         let fp = make_fp(
-            "akismet/class.akismet-admin.php",
-            Language::Php,
-            "<?php\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {\n    Jetpack::load_xml_rpc_client();\n}\n",
+            "src/runtime.rs",
+            Language::Rust,
+            "fn compat() { if runtime_version_less_than(RUNTIME_VERSION, \"2.0\") {} }\n",
         );
-        let findings = run(&[&fp], &default_config());
+        let findings = run(&[&fp], &runtime_version_guard_config());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
-        assert!(findings[0].description.contains("JETPACK__VERSION"));
+        assert!(findings[0].description.contains("RUNTIME_VERSION"));
     }
 
     #[test]
@@ -609,18 +625,15 @@ mod tests {
     }
 
     #[test]
-    fn builtin_profile_pulls_framework_version_guards_from_extension_asset() {
-        // Behavior preservation: with builtin defaults the framework version
-        // constants + guard regexes are wired in from the extension-provided
-        // defaults asset, so WP-style detection still fires (#2240).
+    fn builtin_profile_does_not_bundle_framework_version_guards() {
         let profile = EffectiveDetectorProfile::from_config(&default_config());
 
+        assert!(profile.version_guard_constants.is_empty());
+        assert!(profile.version_guard_regexes.is_empty());
         assert!(profile
-            .version_guard_constants
+            .tracker_reference_regexes
             .iter()
-            .any(|c| c == "JETPACK__VERSION"));
-        assert!(!profile.version_guard_regexes.is_empty());
-        assert!(!profile.tracker_reference_regexes.is_empty());
+            .all(|regex| !regex.as_str().contains("wordpress")));
     }
 
     #[test]
