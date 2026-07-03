@@ -8,6 +8,7 @@ pub(crate) mod http;
 mod keys;
 mod process_cleanup;
 mod session;
+pub(crate) mod ssh_args;
 pub mod transfer;
 
 pub(crate) use client::DELEGATED_RUN_STATUS_FILE_ENV;

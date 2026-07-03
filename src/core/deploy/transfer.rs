@@ -62,21 +62,16 @@ fn rsync_directory(
     // Remote deploy: rsync over SSH
     let mut rsync_args = vec!["-a".to_string(), "--delete".to_string()];
 
-    // Build SSH command with the same options as scp
     let mut ssh_cmd_parts = vec!["ssh".to_string()];
-    if let Some(identity_file) = &ssh_client.identity_file {
-        ssh_cmd_parts.extend(["-i".to_string(), identity_file.clone()]);
-    }
-    if ssh_client.port != 22 {
-        ssh_cmd_parts.extend(["-p".to_string(), ssh_client.port.to_string()]);
-    }
-    // Use same safety options as SSH client
-    ssh_cmd_parts.extend([
-        "-o".to_string(),
-        "BatchMode=yes".to_string(),
-        "-o".to_string(),
-        "ConnectTimeout=10".to_string(),
-    ]);
+    ssh_cmd_parts.extend(crate::core::server::ssh_args::client_option_args(
+        &ssh_client,
+        crate::core::server::ssh_args::SshArgOptions {
+            batch_mode: true,
+            connect_timeout: true,
+            port_flag: Some(crate::core::server::ssh_args::SshPortFlag::Lowercase),
+            ..crate::core::server::ssh_args::SshArgOptions::default()
+        },
+    ));
 
     rsync_args.extend(["-e".to_string(), ssh_cmd_parts.join(" ")]);
     rsync_args.push(local_str.clone());

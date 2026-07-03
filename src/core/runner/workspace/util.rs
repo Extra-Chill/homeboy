@@ -153,30 +153,18 @@ pub(super) fn tar_exclude_args(excludes: &[String]) -> String {
 }
 
 pub(super) fn ssh_args(client: &SshClient) -> String {
-    let mut args = vec![
-        "-o BatchMode=yes".to_string(),
-        "-o ConnectTimeout=10".to_string(),
-        "-o ServerAliveInterval=15".to_string(),
-        "-o ServerAliveCountMax=3".to_string(),
-    ];
-    if let Some(identity_file) = &client.identity_file {
-        args.push(format!("-i {}", shell::quote_arg(identity_file)));
-    }
-    if let Some(session) = &client.auth {
-        args.push("-o ControlMaster=auto".to_string());
-        args.push(format!(
-            "-o ControlPath={}",
-            shell::quote_arg(&session.control_path)
-        ));
-        args.push(format!(
-            "-o ControlPersist={}",
-            shell::quote_arg(&session.persist)
-        ));
-    }
-    if client.port != 22 {
-        args.push(format!("-p {}", client.port));
-    }
-    args.join(" ")
+    crate::core::server::ssh_args::shell_join_args(
+        &crate::core::server::ssh_args::client_option_args(
+            client,
+            crate::core::server::ssh_args::SshArgOptions {
+                batch_mode: true,
+                connect_timeout: true,
+                keepalive: true,
+                port_flag: Some(crate::core::server::ssh_args::SshPortFlag::Lowercase),
+                ..crate::core::server::ssh_args::SshArgOptions::default()
+            },
+        ),
+    )
 }
 
 pub(crate) fn parent_remote_path(path: &str) -> String {
