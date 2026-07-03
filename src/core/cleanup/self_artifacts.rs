@@ -40,13 +40,7 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
         ));
     }
 
-    let raw = fs::read_to_string(&cargo_toml).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read {}", cargo_toml.display())),
-        )
-    })?;
-    if !raw.lines().any(|line| line.trim() == "name = \"homeboy\"") {
+    if !cargo_manifest_package_is_homeboy(&cargo_toml)? {
         return Err(Error::validation_invalid_argument(
             "self_artifacts",
             format!("{} is not the Homeboy crate manifest", cargo_toml.display()),
@@ -55,7 +49,59 @@ pub(super) fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathB
         ));
     }
 
+    if !is_git_checkout(manifest_dir) {
+        let mut error = Error::validation_invalid_argument(
+            "self_artifacts",
+            format!(
+                "{} is not a Homeboy source git checkout",
+                manifest_dir.display()
+            ),
+            None,
+            None,
+        )
+        .with_hint("`homeboy cleanup artifacts --self` requires a source checkout, not a packaged Cargo registry source.")
+        .with_hint("Pass an explicit checkout with `homeboy cleanup artifacts --path <PATH>`, or configure and run from a source checkout.");
+
+        if let Some(checkout) = discover_active_homeboy_checkout()? {
+            error = error.with_hint(format!(
+                "Active Homeboy checkout appears to be: {}; retry with `homeboy cleanup artifacts --path {}`.",
+                checkout.display(),
+                checkout.display()
+            ));
+        }
+
+        return Err(error);
+    }
+
     Ok(manifest_dir.to_path_buf())
+}
+
+fn is_git_checkout(path: &Path) -> bool {
+    git::run_git(
+        path,
+        &["rev-parse", "--is-inside-work-tree"],
+        "git checkout",
+    )
+    .map(|output| output.trim() == "true")
+    .unwrap_or(false)
+}
+
+fn discover_active_homeboy_checkout() -> Result<Option<PathBuf>> {
+    let Ok(current_dir) = std::env::current_dir() else {
+        return Ok(None);
+    };
+
+    for candidate in current_dir.ancestors() {
+        let manifest = candidate.join("Cargo.toml");
+        if manifest.is_file()
+            && is_git_checkout(candidate)
+            && cargo_manifest_package_is_homeboy(&manifest)?
+        {
+            return Ok(Some(candidate.to_path_buf()));
+        }
+    }
+
+    Ok(None)
 }
 
 pub(super) fn self_temp_artifact_candidates(
