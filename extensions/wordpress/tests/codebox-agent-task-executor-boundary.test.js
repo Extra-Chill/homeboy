@@ -630,19 +630,10 @@ const runtimeProfileDependencyTaskInput = codeboxTaskRequestFromAgentTaskRequest
 });
 assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.components, [{ slug: 'runtime-component', path: '/components/runtime-component' }]);
 assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.plugins, [{ slug: 'runtime-plugin', path: '/plugins/runtime-plugin' }]);
-assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.component_contracts.map((contract) => ({
-  slug: contract.slug,
-  path: contract.path,
-  loadAs: contract.loadAs,
-  activate: contract.activate,
-})), [
-  { slug: 'runtime-component', path: '/components/runtime-component', loadAs: 'mu-plugin', activate: false },
-  { slug: 'runtime-plugin', path: '/plugins/runtime-plugin', loadAs: 'plugin', activate: true },
-]);
-assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.extra_plugins.map((plugin) => plugin.slug), ['runtime-component', 'runtime-plugin']);
-assert.deepEqual(runtimeProfileDependencyTaskInput.component_contracts.map((contract) => contract.slug), ['runtime-component', 'runtime-plugin']);
-assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].id, 'parent-tool-bridge');
-assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].adapter_behavior, 'declare_requirement_only');
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.component_contracts, undefined);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.extra_plugins, undefined);
+assert.deepEqual(runtimeProfileDependencyTaskInput.component_contracts, []);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements, undefined);
 
 const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

@@ -10,7 +10,7 @@ process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixt
 const { codeboxTaskRequestFromAgentTaskRequest } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js')
 );
-const { codeboxRuntimeComponentContracts, codeboxRuntimeExtraPlugins, codeboxRuntimeProfilePayload } = require(
+const { codeboxRuntimeComponentContracts, codeboxRuntimeProfilePayload } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-runtime-profile.js')
 );
 
@@ -89,21 +89,10 @@ try {
 		'agents-api',
 		'codebox-parent-tools',
 	]);
-	assert.deepEqual(genericProfileTaskInput.runtime_requirements.component_contracts.map((contract) => contract.slug), [
-		'agents-api',
-		'codebox-parent-tools',
-		'runtime-tools',
-		'provider-plugin',
-	]);
-	assert.deepEqual(genericProfileTaskInput.component_contracts.map((contract) => contract.slug), [
-		'agents-api',
-		'codebox-parent-tools',
-		'runtime-tools',
-		'provider-plugin',
-	]);
-	assert.equal(genericProfileTaskInput.runtime_requirements.component_contracts[0].loadAs, 'mu-plugin');
-	assert.equal(genericProfileTaskInput.runtime_requirements.component_contracts[3].loadAs, 'plugin');
+	assert.equal(genericProfileTaskInput.runtime_requirements.component_contracts, undefined);
+	assert.deepEqual(genericProfileTaskInput.component_contracts, []);
 	assert.equal(genericProfileTaskInput.runtime_requirements.homeboy_parent_tool_bridge, undefined);
+	assert.equal(genericProfileTaskInput.runtime_requirements.upstream_primitive_requirements, undefined);
 	assert.deepEqual(genericProfileTaskInput.runtime_requirements.provider_plugins, [{ path: '/runtime/provider-plugin' }]);
 	assert.equal(genericProfileTaskInput.runtime_requirements.env.EXAMPLE_RUNTIME, '1');
 
@@ -144,21 +133,17 @@ try {
 		profile: {
 			components: [{ slug: 'runtime-tools', source: '/runtime/tools' }],
 			plugins: [{ slug: 'runtime-provider', source: '/runtime/provider', activate: true }],
+			component_contracts: [{ slug: 'profile-contract', path: '/runtime/profile' }],
 		},
 		runtimeRequirements: {
 			component_contracts: [{ slug: 'existing-contract', path: '/runtime/existing' }],
 		},
 		componentContracts: [{ slug: 'request-contract', path: '/runtime/request' }],
 	}).map((contract) => ({ slug: contract.slug, path: contract.path, loadAs: contract.loadAs, activate: contract.activate })), [
+		{ slug: 'profile-contract', path: '/runtime/profile', loadAs: undefined, activate: undefined },
 		{ slug: 'existing-contract', path: '/runtime/existing', loadAs: undefined, activate: undefined },
-		{ slug: 'runtime-tools', path: '/runtime/tools', loadAs: 'mu-plugin', activate: false },
-		{ slug: 'runtime-provider', path: '/runtime/provider', loadAs: 'plugin', activate: true },
 		{ slug: 'request-contract', path: '/runtime/request', loadAs: undefined, activate: undefined },
 	]);
-	assert.deepEqual(codeboxRuntimeExtraPlugins({
-		profile: { extra_plugins: [{ slug: 'profile-plugin', source: '/runtime/profile-plugin' }] },
-		componentContracts: [{ slug: 'request-contract', path: '/runtime/request' }],
-	}).map((plugin) => plugin.slug), ['profile-plugin', 'request-contract']);
 
 	console.log('wp-codebox runtime profile defaults smoke passed');
 } finally {

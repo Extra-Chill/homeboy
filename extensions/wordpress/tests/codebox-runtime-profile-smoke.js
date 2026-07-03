@@ -35,8 +35,12 @@ const payload = codeboxRuntimeProfilePayload({
 });
 
 assert.equal(payload.component_contracts.length, 1);
-assert.equal(payload.component_contracts[0].sourceRoot, '/workspace/repo');
-assert.equal(payload.component_contracts[0].sourceSubpath, 'plugins/monorepo-component');
-assert.equal(payload.component_contracts[0].activate, true);
+assert.equal(payload.component_contracts[0].sourceRoot, undefined);
+assert.equal(payload.component_contracts[0].sourceSubpath, undefined);
+assert.equal(payload.component_contracts[0].activate, undefined);
+assert.equal(payload.extra_plugins.length, 1);
+assert.equal(payload.extra_plugins[0].sourceRoot, '/workspace/repo');
+assert.equal(payload.extra_plugins[0].sourceSubpath, 'plugins/monorepo-component');
+assert.equal(payload.extra_plugins[0].activate, true);
 
 console.log('codebox-runtime-profile-smoke: ok');

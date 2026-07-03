@@ -10,15 +10,6 @@ const WP_CODEBOX_RUNTIME_PROFILE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.runtimeBounda
 const WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA = 'wp-codebox/parent-tool-bridge/v1';
 const WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA = 'wp-codebox/upstream-primitive-requirement/v1';
 
-const RUNTIME_PROFILE_DEPENDENCY_FIELDS = ['components', 'plugins', 'mu_plugins', 'themes', 'overlays'];
-const COMPONENT_CONTRACT_DEPENDENCY_FIELDS = {
-  components: { loadAs: 'mu-plugin', activate: false },
-  mu_plugins: { loadAs: 'mu-plugin', activate: false },
-  plugins: { loadAs: 'plugin', activate: true },
-  themes: { loadAs: 'theme', activate: false },
-  overlays: {},
-};
-
 function codeboxRuntimeProfilePayload({
   id,
   profile = {},
@@ -35,7 +26,6 @@ function codeboxRuntimeProfilePayload({
 } = {}) {
   const normalizedProfile = plainObject(profile);
   const normalizedRuntimeRequirements = plainObject(runtimeRequirements);
-  const runtimeProfileDependencies = runtimeProfileDependencyFields(normalizedProfile, normalizedRuntimeRequirements);
   const normalizedRuntimeOverlays = uniqueObjectsByRuntimeIdentity([
     ...normalizeArray(normalizedProfile.runtime_overlays),
     ...normalizeArray(normalizedRuntimeRequirements.runtime_overlays),
@@ -53,11 +43,6 @@ function codeboxRuntimeProfilePayload({
     runtimeRequirements: normalizedRuntimeRequirements,
     componentContracts,
   });
-  const normalizedExtraPlugins = codeboxRuntimeExtraPlugins({
-    profile: normalizedProfile,
-    runtimeRequirements: normalizedRuntimeRequirements,
-    componentContracts,
-  });
   const normalizedProviderPlugins = uniqueObjectsByRuntimeIdentity([
     ...providerPluginEntries(normalizedProfile.provider_plugins),
     ...providerPluginEntries(normalizedRuntimeRequirements.provider_plugins),
@@ -69,16 +54,13 @@ function codeboxRuntimeProfilePayload({
     schema: WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
     id: normalizedRuntimeRequirements.id || normalizedProfile.id || id,
     homeboy_profile_schema: normalizedProfile.schema && normalizedProfile.schema !== WP_CODEBOX_RUNTIME_PROFILE_SCHEMA ? normalizedProfile.schema : undefined,
-    ...runtimeProfileDependencies,
     component_contracts: normalizedComponentContracts,
-    extra_plugins: normalizedExtraPlugins,
     runtime_overlays: normalizedRuntimeOverlays,
     runtime_mounts: runtimeMounts,
     env: normalizedRuntimeEnv,
     provider_plugins: normalizedProviderPlugins,
     runtime_state_mounts: runtimeStateMounts,
     runtime_config_mounts: runtimeConfigMounts,
-    ...parentToolBridgeProfileFields(normalizedProfile, normalizedRuntimeRequirements, runtimeProfileDependencies, normalizedComponentContracts),
   });
   const coreNormalizer = firstFunction(normalizeRuntimeProfilePayload, normalizeRuntimeProfile);
   if (coreNormalizer) {
@@ -101,36 +83,6 @@ function codeboxRuntimeProfilePayload({
   return payload;
 }
 
-function componentContractsFromDependencies(runtimeProfileDependencies = {}) {
-  return [
-    ...dependencyComponentContracts(runtimeProfileDependencies.components, 'mu-plugin'),
-    ...dependencyComponentContracts(runtimeProfileDependencies.mu_plugins, 'mu-plugin'),
-    ...dependencyComponentContracts(runtimeProfileDependencies.plugins, 'plugin'),
-    ...dependencyComponentContracts(runtimeProfileDependencies.themes, 'theme'),
-    ...dependencyComponentContracts(runtimeProfileDependencies.overlays),
-  ];
-}
-
-function dependencyComponentContracts(entries, defaultLoadAs) {
-  return normalizeArray(entries).map((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      return null;
-    }
-    const slug = entry.slug || entry.id || entry.name;
-    const contractPath = entry.path || entry.source || entry.target;
-    if (!slug || !contractPath) {
-      return null;
-    }
-    return withoutEmptyObjectValues({
-      slug,
-      path: contractPath,
-      loadAs: entry.loadAs || entry.load_as || defaultLoadAs,
-      pluginFile: entry.pluginFile || entry.plugin_file,
-      metadata: entry.metadata,
-    });
-  }).filter(Boolean);
-}
-
 function providerPluginEntries(value) {
   return normalizeArray(value).flatMap((entry) => {
     if (typeof entry === 'string') {
@@ -144,70 +96,8 @@ function codeboxRuntimeComponentContracts({ profile = {}, runtimeRequirements = 
   return uniqueObjectsByRuntimeIdentity([
     ...normalizeArray(profile.component_contracts),
     ...normalizeArray(runtimeRequirements.component_contracts),
-    ...normalizeArray(profile.extra_plugins),
-    ...normalizeArray(runtimeRequirements.extra_plugins),
-    ...normalizeRuntimeDependencyComponentContracts(profile),
-    ...normalizeRuntimeDependencyComponentContracts(runtimeRequirements),
     ...normalizeArray(componentContracts),
   ]);
-}
-
-function codeboxRuntimeExtraPlugins({ profile = {}, runtimeRequirements = {}, componentContracts = [] } = {}) {
-  return uniqueObjectsByRuntimeIdentity([
-    ...normalizeArray(profile.extra_plugins),
-    ...normalizeArray(runtimeRequirements.extra_plugins),
-    ...normalizeArray(componentContracts),
-  ]);
-}
-
-function normalizeRuntimeDependencyComponentContracts(source = {}) {
-  if (!isPlainObject(source)) {
-    return [];
-  }
-  return Object.entries(COMPONENT_CONTRACT_DEPENDENCY_FIELDS).flatMap(([field, defaults]) => (
-    normalizeArray(source[field]).map((entry) => componentContractFromRuntimeDependency(entry, defaults)).filter(Boolean)
-  ));
-}
-
-function componentContractFromRuntimeDependency(entry, defaults = {}) {
-  if (!isPlainObject(entry)) {
-    return null;
-  }
-  const source = entry.path || entry.source || entry.target;
-  const slug = entry.slug || entry.id || slugFromPath(source);
-  if (!slug || !source) {
-    return null;
-  }
-  return cleanObject({
-    ...entry,
-    slug,
-    path: entry.path || entry.source || source,
-    loadAs: entry.loadAs || entry.load_as || defaults.loadAs,
-    activate: entry.activate === undefined ? defaults.activate : entry.activate,
-  });
-}
-
-function parentToolBridgeProfileFields(profile = {}, runtimeRequirements = {}, runtimeProfileDependencies = {}, componentContracts = []) {
-  if (hasCodeboxParentToolBridge(profile, runtimeRequirements, runtimeProfileDependencies, componentContracts)) {
-    return {};
-  }
-  return {
-    upstream_primitive_requirements: uniqueObjectsByRuntimeIdentity([
-      ...normalizeArray(profile.upstream_primitive_requirements),
-      ...normalizeArray(runtimeRequirements.upstream_primitive_requirements),
-      codeboxParentToolBridgeRequirement(),
-    ]),
-  };
-}
-
-function runtimeProfileDependencyFields(profile = {}, runtimeRequirements = {}) {
-  return Object.fromEntries(RUNTIME_PROFILE_DEPENDENCY_FIELDS.map((field) => [
-    field,
-    uniqueObjectsByRuntimeIdentity([
-      ...normalizeArray(profile[field]),
-      ...normalizeArray(runtimeRequirements[field]),
-    ]),
-  ]));
 }
 
 function hasCodeboxParentToolBridge(...values) {
@@ -229,7 +119,7 @@ function hasCodeboxParentToolBridge(...values) {
     if (Array.isArray(value.parent_tool_bridges) && value.parent_tool_bridges.length > 0) {
       return true;
     }
-    for (const key of [...RUNTIME_PROFILE_DEPENDENCY_FIELDS, 'runtime_components', 'component_contracts', 'extra_plugins']) {
+    for (const key of ['components', 'plugins', 'mu_plugins', 'themes', 'overlays', 'runtime_components', 'component_contracts', 'extra_plugins']) {
       if (Array.isArray(value[key])) {
         queue.push(...value[key]);
       }
@@ -272,10 +162,6 @@ function plainObject(value) {
 
 function isPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function slugFromPath(value) {
-  return String(value || '').split(/[\\/]/).filter(Boolean).pop() || '';
 }
 
 function normalizeArray(value) {
@@ -340,16 +226,11 @@ function withoutEmptyObjectValues(value) {
   }));
 }
 
-function cleanObject(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== ''));
-}
-
 module.exports = {
   WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
   WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
   WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA,
   codeboxRuntimeComponentContracts,
-  codeboxRuntimeExtraPlugins,
   codeboxRuntimeProfilePayload,
   codeboxParentToolBridgeRequirement,
   hasCodeboxParentToolBridge,
