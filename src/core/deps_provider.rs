@@ -121,6 +121,7 @@ impl DependencyProviderCommand {
 }
 
 pub(crate) enum DependencyProvider {
+    Manifest(ManifestDependencyProvider),
     Composer(ComposerDependencyProvider),
     Npm(NpmDependencyProvider),
     // Boxed: `ExtensionDependencyProvider` carries a full execution context and
@@ -142,6 +143,7 @@ impl DependencyProvider {
             package_filter,
         };
         match self {
+            DependencyProvider::Manifest(provider) => provider.status(request),
             DependencyProvider::Composer(provider) => provider.status(request),
             DependencyProvider::Npm(provider) => provider.status(request),
             DependencyProvider::Extension(provider) => provider.status(request),
@@ -160,6 +162,7 @@ impl DependencyProvider {
             package,
         };
         match self {
+            DependencyProvider::Manifest(provider) => provider.handles_package(request),
             DependencyProvider::Composer(provider) => provider.handles_package(request),
             DependencyProvider::Npm(provider) => provider.handles_package(request),
             DependencyProvider::Extension(provider) => provider.handles_package(request),
@@ -180,6 +183,7 @@ impl DependencyProvider {
             constraint,
         };
         match self {
+            DependencyProvider::Manifest(provider) => provider.update(request),
             DependencyProvider::Composer(provider) => provider.update(request),
             DependencyProvider::Npm(provider) => provider.update(request),
             DependencyProvider::Extension(provider) => provider.update(request),
@@ -194,6 +198,7 @@ impl DependencyProvider {
     ) -> Result<Option<DependencyCommandResult>> {
         let context = DependencyProviderContext { component, path };
         match self {
+            DependencyProvider::Manifest(provider) => provider.install(context),
             DependencyProvider::Composer(provider) => provider.install(context),
             DependencyProvider::Npm(provider) => provider.install(context),
             DependencyProvider::ComponentScript(provider) => provider.install(context),
@@ -208,6 +213,7 @@ impl DependencyProvider {
     ) -> Result<Option<DependencyProviderCommand>> {
         let context = DependencyProviderContext { component, path };
         match self {
+            DependencyProvider::Manifest(provider) => provider.install_command(context),
             DependencyProvider::Composer(provider) => provider.install_command(context),
             DependencyProvider::Npm(provider) => provider.install_command(context),
             DependencyProvider::ComponentScript(provider) => provider.install_command(context),
@@ -249,6 +255,11 @@ pub(crate) fn resolve_dependency_providers_optional(
     path: &Path,
 ) -> Result<Vec<DependencyProvider>> {
     let mut providers = Vec::new();
+
+    if let Some(provider) = ManifestDependencyProvider::load(path)? {
+        providers.push(DependencyProvider::Manifest(provider));
+        return Ok(providers);
+    }
 
     if ComposerDependencyProvider::supports(path) {
         providers.push(DependencyProvider::Composer(ComposerDependencyProvider));
@@ -304,6 +315,220 @@ pub(crate) fn dependency_provider_snapshot(
     }
 
     Ok(snapshot)
+}
+
+const DEPENDENCY_ADAPTER_MANIFEST: &str = "homeboy-deps.json";
+
+#[derive(Debug, Clone)]
+pub(crate) struct ManifestDependencyProvider {
+    manifest: DependencyAdapterManifest,
+}
+
+impl ManifestDependencyProvider {
+    fn load(path: &Path) -> Result<Option<Self>> {
+        let manifest_path = path.join(DEPENDENCY_ADAPTER_MANIFEST);
+        if !manifest_path.is_file() {
+            return Ok(None);
+        }
+
+        let manifest = read_dependency_adapter_manifest(&manifest_path)?;
+        Ok(Some(Self { manifest }))
+    }
+
+    fn command(
+        &self,
+        command: &DependencyAdapterCommand,
+        context: DependencyProviderContext<'_>,
+        package: Option<&str>,
+        constraint: Option<&str>,
+    ) -> DependencyProviderCommand {
+        let mut argv = command.argv.clone();
+        for arg in &mut argv {
+            *arg = expand_manifest_command_arg(arg, package, constraint);
+        }
+        argv.retain(|arg| !arg.is_empty());
+        let program = argv.first().cloned().unwrap_or_default();
+        let args = argv.into_iter().skip(1).collect();
+        let cwd = command
+            .cwd
+            .as_ref()
+            .map(|cwd| context.path.join(cwd))
+            .unwrap_or_else(|| context.path.to_path_buf());
+        DependencyProviderCommand::new(program, args, cwd)
+    }
+
+    fn status_with_filter(&self, package_filter: Option<&str>) -> ProviderDependencyStatus {
+        ProviderDependencyStatus {
+            package_manager: self.manifest.provider.clone(),
+            dependency_identities: self.manifest.dependency_identities.clone(),
+            packages: self
+                .manifest
+                .packages
+                .iter()
+                .filter(|package| {
+                    package_filter
+                        .map(|filter| filter == package.name)
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+impl DependencyProviderAdapter for ManifestDependencyProvider {
+    fn status(
+        &self,
+        request: DependencyProviderStatusRequest<'_>,
+    ) -> Result<ProviderDependencyStatus> {
+        Ok(self.status_with_filter(request.package_filter))
+    }
+
+    fn handles_package(&self, request: DependencyProviderPackageRequest<'_>) -> Result<bool> {
+        Ok(self
+            .manifest
+            .packages
+            .iter()
+            .any(|package| package.name == request.package)
+            || self.manifest.commands.update.is_some())
+    }
+
+    fn update(
+        &self,
+        request: DependencyProviderUpdateRequest<'_>,
+    ) -> Result<DependencyUpdateResult> {
+        let Some(command) = &self.manifest.commands.update else {
+            return Err(Error::validation_invalid_argument(
+                "dependency_provider",
+                format!(
+                    "Dependency adapter '{}' does not define an update command",
+                    self.manifest.provider
+                ),
+                Some(self.manifest.provider.clone()),
+                None,
+            ));
+        };
+        let before = self
+            .status_with_filter(Some(request.package))
+            .packages
+            .into_iter()
+            .next();
+        let command = self.command(
+            command,
+            request.context,
+            Some(request.package),
+            request.constraint,
+        );
+        let result = run_dependency_provider_command(&command, "command")?;
+        let after = self
+            .status_with_filter(Some(request.package))
+            .packages
+            .into_iter()
+            .next();
+
+        Ok(DependencyUpdateResult {
+            component_id: request.context.component.id.clone(),
+            component_path: request.context.path.display().to_string(),
+            package_manager: self.manifest.provider.clone(),
+            package: request.package.to_string(),
+            requested_constraint: request.constraint.map(str::to_string),
+            command: result.command,
+            before,
+            after,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            install: None,
+            rebuild: None,
+        })
+    }
+
+    fn install(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyCommandResult>> {
+        let Some(command) = &self.manifest.commands.install else {
+            return Ok(None);
+        };
+        let command = self.command(command, context, None, None);
+        Ok(Some(run_dependency_provider_command(&command, "install")?))
+    }
+
+    fn install_command(
+        &self,
+        context: DependencyProviderContext<'_>,
+    ) -> Result<Option<DependencyProviderCommand>> {
+        Ok(self
+            .manifest
+            .commands
+            .install
+            .as_ref()
+            .map(|command| self.command(command, context, None, None)))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DependencyAdapterManifest {
+    provider: String,
+    #[serde(default)]
+    dependency_identities: Vec<String>,
+    #[serde(default)]
+    packages: Vec<DependencyPackage>,
+    #[serde(default)]
+    commands: DependencyAdapterCommands,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DependencyAdapterCommands {
+    install: Option<DependencyAdapterCommand>,
+    update: Option<DependencyAdapterCommand>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DependencyAdapterCommand {
+    argv: Vec<String>,
+    cwd: Option<PathBuf>,
+}
+
+fn read_dependency_adapter_manifest(path: &Path) -> Result<DependencyAdapterManifest> {
+    let raw = fs::read_to_string(path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;
+    let manifest: DependencyAdapterManifest = serde_json::from_str(&raw).map_err(|e| {
+        Error::validation_invalid_json(e, Some(path.display().to_string()), Some(raw))
+    })?;
+    if manifest.provider.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "provider",
+            "Dependency adapter manifest provider must not be empty".to_string(),
+            None,
+            None,
+        ));
+    }
+    for command in [
+        manifest.commands.install.as_ref(),
+        manifest.commands.update.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if command.argv.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "commands.argv",
+                "Dependency adapter command argv must not be empty".to_string(),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+fn expand_manifest_command_arg(
+    arg: &str,
+    package: Option<&str>,
+    constraint: Option<&str>,
+) -> String {
+    arg.replace("{package}", package.unwrap_or_default())
+        .replace("{constraint}", constraint.unwrap_or_default())
 }
 
 pub fn composer_command_args(package: &str, action: &ComposerAction) -> Vec<String> {
