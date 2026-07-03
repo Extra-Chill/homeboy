@@ -26,8 +26,9 @@ pub fn run_command_output(
     output_file: Option<&str>,
 ) -> JsonCommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
+    let command_name = command.top_level_name();
 
-    match command {
+    let run = match command {
         Commands::AgentTask(args) => {
             let run_from_spec_output_ref =
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
@@ -140,7 +141,9 @@ pub fn run_command_output(
             let (stdout_result, exit_code) = dispatch(command, global);
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
-    }
+    };
+
+    run.with_command(command_name)
 }
 
 fn agent_task_controller_run_from_spec_output_ref_eligible<'a>(

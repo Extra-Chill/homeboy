@@ -62,8 +62,12 @@ fn validation_error_writes_json_output_file() {
             .expect("output file json");
 
     assert_eq!(file_json, stdout_json);
+    assert_eq!(file_json["schema"], "homeboy/command-result/v2");
     assert_eq!(file_json["success"], false);
-    assert_eq!(file_json["error"]["code"], "validation.invalid_argument");
+    assert_eq!(
+        file_json["diagnostics"]["code"],
+        "validation.invalid_argument"
+    );
     assert!(file_json.get("data").is_none());
 }
 
@@ -89,9 +93,13 @@ fn bare_json_output_format_is_rejected_as_footgun() {
         );
 
         let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+        assert_eq!(stdout_json["schema"], "homeboy/command-result/v2");
         assert_eq!(stdout_json["success"], false);
-        assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
-        assert!(stdout_json["error"]["message"]
+        assert_eq!(
+            stdout_json["diagnostics"]["code"],
+            "validation.invalid_argument"
+        );
+        assert!(stdout_json["diagnostics"]["message"]
             .as_str()
             .expect("message")
             .contains("looks like an output format"));
@@ -118,7 +126,9 @@ fn rig_up_runner_error_points_to_offloadable_rig_paths() {
     assert_eq!(output.status.code(), Some(2));
 
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    let message = stdout_json["error"]["message"].as_str().unwrap_or_default();
+    let message = stdout_json["diagnostics"]["message"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         message.contains("--runner is unavailable for this local-only resource-pressure command"),
         "runner error should identify the unsupported local-only command: {message}"
@@ -155,7 +165,9 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
     assert!(!output.status.success());
 
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    let message = stdout_json["error"]["message"].as_str().unwrap_or_default();
+    let message = stdout_json["diagnostics"]["message"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         !message.contains("looks like an output format"),
         "command-owned --output should not be validated as the global envelope path: {message}"
@@ -247,7 +259,10 @@ fn explicit_json_path_is_allowed() {
     let file_json: Value =
         serde_json::from_str(&std::fs::read_to_string(output_path).expect("read output file"))
             .expect("output file json");
-    assert_eq!(file_json["error"]["code"], "validation.invalid_argument");
+    assert_eq!(
+        file_json["diagnostics"]["code"],
+        "validation.invalid_argument"
+    );
 }
 
 fn homeboy_bin() -> PathBuf {
