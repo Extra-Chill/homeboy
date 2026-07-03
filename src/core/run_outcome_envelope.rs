@@ -7,6 +7,7 @@ use crate::core::runner::{RunnerArtifactRef, RunnerHandoff};
 use crate::core::runner_execution_envelope::{RunnerExecutionArtifactRef, RunnerExecutionRecord};
 
 pub const RUN_OUTCOME_ENVELOPE_SCHEMA: &str = "homeboy/run-outcome-envelope/v1";
+pub const RUN_OUTCOME_ENVELOPE_FILE: &str = "run-outcome-envelope.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunOutcomeEnvelope {

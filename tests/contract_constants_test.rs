@@ -81,6 +81,26 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
             .any(|mode| mode == "snapshot")
     );
     assert_eq!(
+        value["constants"]["run_outcome_envelope"]["schema_id"],
+        "homeboy/run-outcome-envelope/v1"
+    );
+    assert_eq!(
+        value["constants"]["run_outcome_envelope"]["file_name"],
+        "run-outcome-envelope.json"
+    );
+    assert_eq!(
+        value["constants"]["run_artifact_files"]["events"],
+        "events.json"
+    );
+    assert_eq!(
+        value["constants"]["run_artifact_files"]["run_outcome_envelope"],
+        "run-outcome-envelope.json"
+    );
+    assert_eq!(
+        value["constants"]["run_artifact_files"]["fanout_run"],
+        "fanout-run.json"
+    );
+    assert_eq!(
         value["constants"]["runtime_artifacts"]["runtime_agent_paths"]["transcript"],
         "artifacts/agent-loop/transcript.json"
     );
@@ -91,6 +111,10 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
     assert_eq!(
         value["constants"]["runtime_artifacts"]["canonical_filenames"]["agent_result"],
         "agent-result.json"
+    );
+    assert_eq!(
+        value["constants"]["runtime_artifacts"]["run_artifact_files"]["loop_policy"],
+        "loop-policy.json"
     );
     assert_eq!(
         value["constants"]["runtime_artifacts"]["executor_evidence"]["input_file_name"],
@@ -118,6 +142,63 @@ fn contract_constants_exports_homeboy_owned_contract_ids() {
             .expect("accepted schemes")
             .iter()
             .any(|scheme| scheme == "runner-artifact://")
+    );
+}
+
+#[test]
+fn contract_constants_all_cli_exports_runtime_contract_surface() {
+    let output = homeboy_command()
+        .args(["contract", "constants", "all"])
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json stdout");
+    let constants = &value["data"]["constants"];
+
+    for (name, schema_id) in [
+        ("artifact_manifest", "homeboy/artifact-manifest/v1"),
+        ("secret_env_plan", "homeboy/secret-env-plan/v1"),
+        ("run_location_index", "homeboy/run-location-index/v1"),
+        ("artifact_paths", "homeboy/runtime-agent-artifact-paths/v1"),
+        (
+            "runner_artifact_manifest_ref",
+            "homeboy/runner-artifact-manifest-ref/v1",
+        ),
+        (
+            "runner_execution_record",
+            "homeboy/runner-execution-record/v1",
+        ),
+        (
+            "path_materialization_plan",
+            "homeboy/path-materialization-plan/v1",
+        ),
+        ("run_outcome_envelope", "homeboy/run-outcome-envelope/v1"),
+    ] {
+        assert_eq!(constants[name]["schema_id"], schema_id, "missing {name}");
+    }
+
+    assert_eq!(
+        constants["artifact_manifest"]["file_name"],
+        "homeboy-artifact-manifest.json"
+    );
+    assert_eq!(
+        constants["run_outcome_envelope"]["file_name"],
+        "run-outcome-envelope.json"
+    );
+    assert_eq!(constants["run_artifact_files"]["status"], "status.json");
+    assert_eq!(constants["run_artifact_files"]["results"], "results.json");
+    assert_eq!(constants["run_artifact_files"]["outcome"], "outcome.json");
+    assert_eq!(
+        constants["run_artifact_files"]["loop_result"],
+        "loop-result.json"
     );
 }
 

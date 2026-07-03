@@ -28,13 +28,16 @@ use crate::core::artifacts::{
     RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH, RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE,
     RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE,
     RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE,
-    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH, RUN_ARTIFACT_EVENTS_FILE, RUN_ARTIFACT_FANOUT_RUN_FILE,
+    RUN_ARTIFACT_LOOP_POLICY_FILE, RUN_ARTIFACT_LOOP_RESULT_FILE, RUN_ARTIFACT_OUTCOME_FILE,
+    RUN_ARTIFACT_RESULTS_FILE, RUN_ARTIFACT_STATUS_FILE,
 };
 use crate::core::change_artifact::CHANGE_ARTIFACT_SCHEMA;
 use crate::core::fuzz::FUZZ_ARTIFACT_SCHEMA;
 use crate::core::matrix_artifact_summary::{
     GENERIC_MATRIX_SUMMARY_SCHEMA, MATRIX_ARTIFACT_SUMMARY_SCHEMA,
 };
+use crate::core::run_outcome_envelope::{RUN_OUTCOME_ENVELOPE_FILE, RUN_OUTCOME_ENVELOPE_SCHEMA};
 use crate::core::runner_execution_envelope::{
     PATH_MATERIALIZATION_MODE_EXISTING_REMOTE, PATH_MATERIALIZATION_MODE_GIT,
     PATH_MATERIALIZATION_MODE_SNAPSHOT, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
@@ -66,6 +69,8 @@ pub enum ContractConstants {
     RunLocationIndex(RunLocationIndexConstants),
     RunnerExecutionRecord(RunnerExecutionRecordConstants),
     PathMaterializationPlan(PathMaterializationPlanConstants),
+    RunOutcomeEnvelope(RunOutcomeEnvelopeConstants),
+    RunArtifactFiles(RunArtifactFilesConstants),
     RuntimeArtifacts(RuntimeArtifactConstants),
     RunnerArtifactManifestRef(RunnerArtifactManifestRefConstants),
     ReviewerFacingRef(ReviewerFacingRefConstants),
@@ -83,6 +88,8 @@ pub struct AllContractConstants {
     pub run_location_index: RunLocationIndexConstants,
     pub runner_execution_record: RunnerExecutionRecordConstants,
     pub path_materialization_plan: PathMaterializationPlanConstants,
+    pub run_outcome_envelope: RunOutcomeEnvelopeConstants,
+    pub run_artifact_files: RunArtifactFilesConstants,
     pub runtime_artifacts: RuntimeArtifactConstants,
     pub runner_artifact_manifest_ref: RunnerArtifactManifestRefConstants,
     pub reviewer_facing_ref: ReviewerFacingRefConstants,
@@ -154,9 +161,28 @@ pub struct PathMaterializationPlanConstants {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunOutcomeEnvelopeConstants {
+    pub schema_id: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunArtifactFilesConstants {
+    pub events: String,
+    pub status: String,
+    pub results: String,
+    pub outcome: String,
+    pub run_outcome_envelope: String,
+    pub fanout_run: String,
+    pub loop_result: String,
+    pub loop_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuntimeArtifactConstants {
     pub runtime_agent_paths: RuntimeAgentArtifactPaths,
     pub canonical_filenames: RuntimeArtifactFilenames,
+    pub run_artifact_files: RunArtifactFilesConstants,
     pub executor_evidence: ExecutorEvidenceConstants,
 }
 
@@ -211,6 +237,8 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
             run_location_index: run_location_index_constants(),
             runner_execution_record: runner_execution_record_constants(),
             path_materialization_plan: path_materialization_plan_constants(),
+            run_outcome_envelope: run_outcome_envelope_constants(),
+            run_artifact_files: run_artifact_files_constants(),
             runtime_artifacts: runtime_artifact_constants(),
             runner_artifact_manifest_ref: runner_artifact_manifest_ref_constants(),
             reviewer_facing_ref: reviewer_facing_ref_constants(),
@@ -235,6 +263,10 @@ pub fn contract_constants(contract_id: &str) -> Option<ContractConstantsOutput> 
         "path-materialization-plan" => {
             ContractConstants::PathMaterializationPlan(path_materialization_plan_constants())
         }
+        "run-outcome-envelope" => {
+            ContractConstants::RunOutcomeEnvelope(run_outcome_envelope_constants())
+        }
+        "run-artifact-files" => ContractConstants::RunArtifactFiles(run_artifact_files_constants()),
         "runtime-artifacts" | "runtime-agent-artifacts" => {
             ContractConstants::RuntimeArtifacts(runtime_artifact_constants())
         }
@@ -355,10 +387,31 @@ pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants
     }
 }
 
+pub fn run_outcome_envelope_constants() -> RunOutcomeEnvelopeConstants {
+    RunOutcomeEnvelopeConstants {
+        schema_id: RUN_OUTCOME_ENVELOPE_SCHEMA.to_string(),
+        file_name: RUN_OUTCOME_ENVELOPE_FILE.to_string(),
+    }
+}
+
+pub fn run_artifact_files_constants() -> RunArtifactFilesConstants {
+    RunArtifactFilesConstants {
+        events: RUN_ARTIFACT_EVENTS_FILE.to_string(),
+        status: RUN_ARTIFACT_STATUS_FILE.to_string(),
+        results: RUN_ARTIFACT_RESULTS_FILE.to_string(),
+        outcome: RUN_ARTIFACT_OUTCOME_FILE.to_string(),
+        run_outcome_envelope: RUN_OUTCOME_ENVELOPE_FILE.to_string(),
+        fanout_run: RUN_ARTIFACT_FANOUT_RUN_FILE.to_string(),
+        loop_result: RUN_ARTIFACT_LOOP_RESULT_FILE.to_string(),
+        loop_policy: RUN_ARTIFACT_LOOP_POLICY_FILE.to_string(),
+    }
+}
+
 pub fn runtime_artifact_constants() -> RuntimeArtifactConstants {
     RuntimeArtifactConstants {
         runtime_agent_paths: runtime_agent_artifact_paths(),
         canonical_filenames: runtime_artifact_filenames(),
+        run_artifact_files: run_artifact_files_constants(),
         executor_evidence: ExecutorEvidenceConstants {
             input_kind: EXECUTOR_INPUT_EVIDENCE_KIND.to_string(),
             input_file_name: EXECUTOR_INPUT_FILE.to_string(),

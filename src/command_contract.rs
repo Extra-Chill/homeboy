@@ -32,12 +32,13 @@ pub use constants::{
     artifact_manifest_constants, artifact_paths_constants, artifact_postprocess_constants,
     contract_constants, loop_constants, path_materialization_plan_constants,
     resource_lifecycle_index_constants, reviewer_facing_ref_constants,
-    run_location_index_constants, runner_artifact_manifest_ref_constants,
-    runner_execution_record_constants, runtime_artifact_constants, secret_env_plan_constants,
-    AllContractConstants, ArtifactManifestConstants, ArtifactPathsConstants,
-    ArtifactPostprocessConstants, ContractConstants, ContractConstantsOutput,
-    ExecutorEvidenceConstants, LoopConstants, PathMaterializationPlanConstants,
-    ResourceLifecycleIndexConstants, ReviewerFacingRefConstants, RunLocationIndexConstants,
+    run_artifact_files_constants, run_location_index_constants, run_outcome_envelope_constants,
+    runner_artifact_manifest_ref_constants, runner_execution_record_constants,
+    runtime_artifact_constants, secret_env_plan_constants, AllContractConstants,
+    ArtifactManifestConstants, ArtifactPathsConstants, ArtifactPostprocessConstants,
+    ContractConstants, ContractConstantsOutput, ExecutorEvidenceConstants, LoopConstants,
+    PathMaterializationPlanConstants, ResourceLifecycleIndexConstants, ReviewerFacingRefConstants,
+    RunArtifactFilesConstants, RunLocationIndexConstants, RunOutcomeEnvelopeConstants,
     RunnerArtifactManifestRefConstants, RunnerExecutionRecordConstants, RuntimeAgentArtifactPaths,
     RuntimeArtifactConstants, RuntimeArtifactFilenames, SecretEnvPlanConstants,
     CONTRACT_CONSTANTS_SCHEMA,
@@ -93,11 +94,14 @@ pub use crate::core::artifacts::{
     RUNTIME_AGENT_FINAL_OUTPUT_ARTIFACT_PATH, RUNTIME_AGENT_PATCH_DIFF_ARTIFACT_FILE,
     RUNTIME_AGENT_PATCH_PATCH_ARTIFACT_FILE, RUNTIME_AGENT_RESULT_ARTIFACT_FILE,
     RUNTIME_AGENT_RESULT_ARTIFACT_FILE_LEGACY_UNDERSCORE, RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_FILE,
-    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH,
+    RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH, RUN_ARTIFACT_EVENTS_FILE, RUN_ARTIFACT_FANOUT_RUN_FILE,
+    RUN_ARTIFACT_LOOP_POLICY_FILE, RUN_ARTIFACT_LOOP_RESULT_FILE, RUN_ARTIFACT_OUTCOME_FILE,
+    RUN_ARTIFACT_RESULTS_FILE, RUN_ARTIFACT_STATUS_FILE,
 };
 pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
 pub use crate::core::run_outcome_envelope::{
-    RunOutcomeEnvelope, RunOutcomeHandoffRef, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
+    RunOutcomeEnvelope, RunOutcomeHandoffRef, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_FILE,
+    RUN_OUTCOME_ENVELOPE_SCHEMA,
 };
 pub use crate::core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationMode, PathMaterializationPlan,

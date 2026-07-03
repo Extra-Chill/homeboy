@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.10] - 2026-07-03
+
+### Changed
+- Install dependency adapter shared assets
+
+### Fixed
+- stop runner daemon on disconnect
+
 ## [0.280.9] - 2026-07-03
 
 ### Changed
