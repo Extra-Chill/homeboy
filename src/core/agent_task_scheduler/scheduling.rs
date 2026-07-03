@@ -1004,6 +1004,145 @@ impl AgentTaskScheduleSupport {
         }
     }
 
+    /// Effective provider rotation policy for one task: a per-task
+    /// `metadata.provider_rotation` object overrides the plan-level
+    /// `options.rotation` policy. Returns `None` when no policy with entries is
+    /// configured so unconfigured behavior stays byte-for-byte unchanged.
+    pub(super) fn rotation_policy_for_request(
+        request: &AgentTaskRequest,
+        plan_rotation: Option<&AgentTaskProviderRotationPolicy>,
+    ) -> Option<AgentTaskProviderRotationPolicy> {
+        request
+            .metadata
+            .get("provider_rotation")
+            .and_then(|value| {
+                serde_json::from_value::<AgentTaskProviderRotationPolicy>(value.clone()).ok()
+            })
+            .or_else(|| plan_rotation.cloned())
+            .filter(|policy| !policy.entries.is_empty())
+    }
+
+    /// Rotation triggers only on provider capacity failures (`provider`,
+    /// `transient`, `timeout` classifications). Task-level failures
+    /// (`execution_failed`, `policy_denied`, `invalid_input`,
+    /// `capability_missing`, `unknown`) never rotate so a provider swap cannot
+    /// mask a real task failure or policy denial (#6978).
+    pub(super) fn should_rotate_provider(
+        outcome: &AgentTaskOutcome,
+        policy: &AgentTaskProviderRotationPolicy,
+        rotation_index: usize,
+        attempt: u32,
+    ) -> bool {
+        rotation_index < policy.entries.len()
+            && attempt < policy.max_total_attempts()
+            && !matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Succeeded
+                    | AgentTaskOutcomeStatus::NoOp
+                    | AgentTaskOutcomeStatus::Cancelled
+            )
+            && matches!(
+                outcome.failure_classification,
+                Some(
+                    AgentTaskFailureClassification::Provider
+                        | AgentTaskFailureClassification::Transient
+                        | AgentTaskFailureClassification::Timeout
+                )
+            )
+    }
+
+    /// Apply one rotation entry onto the re-dispatched request's executor.
+    /// Unset entry fields inherit the failing attempt's values; the entry's
+    /// `provider_config` object is merged over the executor config, mirroring
+    /// the dispatch provider-config layering.
+    pub(super) fn apply_rotation_entry(
+        request: &mut AgentTaskRequest,
+        entry: &AgentTaskProviderRotationEntry,
+    ) {
+        let executor = &mut request.executor;
+        if let Some(backend) = &entry.backend {
+            executor.backend = backend.clone();
+        }
+        if let Some(selector) = &entry.selector {
+            executor.selector = Some(selector.clone());
+        }
+        if let Some(model) = &entry.model {
+            executor.model = Some(model.clone());
+        }
+        if let Some(overrides) = entry.provider_config.as_object() {
+            if !overrides.is_empty() {
+                if !executor.config.is_object() {
+                    executor.config = Value::Object(serde_json::Map::new());
+                }
+                executor
+                    .config
+                    .as_object_mut()
+                    .expect("executor config object")
+                    .extend(overrides.clone());
+            }
+        }
+        if let Some(selection) = executor.runtime_selection.as_mut() {
+            if entry.backend.is_some() {
+                selection.executor_backend = entry.backend.clone();
+            }
+            if entry.selector.is_some() {
+                selection.executor_provider_id = entry.selector.clone();
+            }
+            if entry.model.is_some() {
+                selection.model = entry.model.clone();
+            }
+            if let Some(provider) = entry
+                .provider_config
+                .get("provider")
+                .and_then(Value::as_str)
+            {
+                selection.ai_provider_id = Some(provider.to_string());
+            }
+        }
+    }
+
+    /// Evidence record for one dispatch attempt under a rotation policy.
+    pub(super) fn rotation_attempt_record(
+        request: &AgentTaskRequest,
+        outcome: &AgentTaskOutcome,
+        attempt: u32,
+        rotation_index: usize,
+    ) -> AgentTaskProviderRotationAttempt {
+        AgentTaskProviderRotationAttempt {
+            attempt,
+            rotation_index,
+            backend: request.executor.backend.clone(),
+            selector: request.executor.selector.clone(),
+            model: request.executor.model().map(str::to_string),
+            status: outcome.status,
+            failure_classification: outcome.failure_classification,
+            summary: outcome.summary.clone(),
+        }
+    }
+
+    /// Attach the ordered attempt sequence to the final outcome under
+    /// `metadata.provider_rotation.attempts` so durable run records and
+    /// `agent-task status|logs|latest` show what happened per attempt.
+    pub(super) fn attach_rotation_evidence(
+        outcome: &mut AgentTaskOutcome,
+        attempts: &[AgentTaskProviderRotationAttempt],
+    ) {
+        if attempts.is_empty() {
+            return;
+        }
+        if !outcome.metadata.is_object() {
+            outcome.metadata = serde_json::json!({});
+        }
+        outcome
+            .metadata
+            .as_object_mut()
+            .expect("outcome metadata object")
+            .insert(
+                "provider_rotation".to_string(),
+                serde_json::json!({ "attempts": attempts }),
+            );
+    }
+
     pub(super) fn should_retry(
         outcome: &AgentTaskOutcome,
         attempt: u32,

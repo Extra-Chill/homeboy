@@ -332,6 +332,280 @@ mod resource_budget_tests {
     }
 }
 
+mod provider_rotation_tests {
+    use super::*;
+
+    fn rotation_policy(
+        entries: Vec<AgentTaskProviderRotationEntry>,
+    ) -> AgentTaskProviderRotationPolicy {
+        AgentTaskProviderRotationPolicy {
+            entries,
+            max_attempts: None,
+        }
+    }
+
+    fn entry(backend: &str) -> AgentTaskProviderRotationEntry {
+        AgentTaskProviderRotationEntry {
+            backend: Some(backend.to_string()),
+            ..AgentTaskProviderRotationEntry::default()
+        }
+    }
+
+    fn provider_failure() -> (
+        AgentTaskOutcomeStatus,
+        Option<AgentTaskFailureClassification>,
+    ) {
+        (
+            AgentTaskOutcomeStatus::ProviderError,
+            Some(AgentTaskFailureClassification::Provider),
+        )
+    }
+
+    fn success() -> (
+        AgentTaskOutcomeStatus,
+        Option<AgentTaskFailureClassification>,
+    ) {
+        (AgentTaskOutcomeStatus::Succeeded, None)
+    }
+
+    #[test]
+    fn rotates_to_next_entry_on_provider_failure_and_stops_at_first_success() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![
+            AgentTaskProviderRotationEntry {
+                backend: Some("fallback-backend-a".to_string()),
+                selector: Some("fallback-a.agent-task-executor".to_string()),
+                model: Some("fallback-model-a".to_string()),
+                provider_config: json!({ "provider": "fallback-provider-a" }),
+            },
+            entry("fallback-backend-b"),
+        ]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(observed[0].executor.backend, "test");
+        assert_eq!(observed[1].executor.backend, "fallback-backend-a");
+        assert_eq!(
+            observed[1].executor.selector.as_deref(),
+            Some("fallback-a.agent-task-executor")
+        );
+        assert_eq!(
+            observed[1].executor.model.as_deref(),
+            Some("fallback-model-a")
+        );
+        assert_eq!(
+            observed[1]
+                .executor
+                .config
+                .get("provider")
+                .and_then(Value::as_str),
+            Some("fallback-provider-a")
+        );
+
+        let attempts = aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .and_then(Value::as_array)
+            .expect("rotation attempts evidence");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["attempt"], 1);
+        assert_eq!(attempts[0]["backend"], "test");
+        assert_eq!(attempts[0]["failure_classification"], "provider");
+        assert_eq!(attempts[0]["status"], "provider_error");
+        assert_eq!(attempts[1]["attempt"], 2);
+        assert_eq!(attempts[1]["backend"], "fallback-backend-a");
+        assert_eq!(attempts[1]["status"], "succeeded");
+        assert!(aggregate.events.iter().any(|event| {
+            event.message.as_deref() == Some("provider rotation queued: entry 1 of 2")
+        }));
+    }
+
+    #[test]
+    fn rotates_on_transient_and_timeout_classifications() {
+        for classification in [
+            AgentTaskFailureClassification::Transient,
+            AgentTaskFailureClassification::Timeout,
+        ] {
+            let status = if classification == AgentTaskFailureClassification::Timeout {
+                AgentTaskOutcomeStatus::Timeout
+            } else {
+                AgentTaskOutcomeStatus::ProviderError
+            };
+            let executor =
+                RotationScriptedExecutor::new(vec![(status, Some(classification)), success()]);
+            let calls = Arc::clone(&executor.calls);
+            let scheduler = AgentTaskScheduler::new(executor);
+            let mut plan = plan_with_tasks(1);
+            plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+            let aggregate = scheduler.run(plan);
+
+            assert_eq!(
+                aggregate.status,
+                AgentTaskAggregateStatus::Succeeded,
+                "classification {classification:?} should rotate"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn does_not_rotate_on_task_level_failure_classifications() {
+        for classification in [
+            AgentTaskFailureClassification::ExecutionFailed,
+            AgentTaskFailureClassification::PolicyDenied,
+            AgentTaskFailureClassification::InvalidInput,
+            AgentTaskFailureClassification::CapabilityMissing,
+        ] {
+            let executor = RotationScriptedExecutor::new(vec![
+                (AgentTaskOutcomeStatus::Failed, Some(classification)),
+                success(),
+            ]);
+            let calls = Arc::clone(&executor.calls);
+            let scheduler = AgentTaskScheduler::new(executor);
+            let mut plan = plan_with_tasks(1);
+            plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+            let aggregate = scheduler.run(plan);
+
+            assert_eq!(
+                aggregate.status,
+                AgentTaskAggregateStatus::Failed,
+                "classification {classification:?} must not rotate"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "classification {classification:?} must not re-dispatch"
+            );
+            assert_eq!(
+                aggregate.outcomes[0].failure_classification,
+                Some(classification)
+            );
+            assert!(aggregate.outcomes[0]
+                .metadata
+                .pointer("/provider_rotation")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn rotation_exhausts_entries_and_records_attempt_sequence_in_order() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![
+            entry("fallback-backend-a"),
+            entry("fallback-backend-b"),
+        ]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(observed.len(), 3);
+        assert_eq!(observed[1].executor.backend, "fallback-backend-a");
+        assert_eq!(observed[2].executor.backend, "fallback-backend-b");
+        let attempts = aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .and_then(Value::as_array)
+            .expect("rotation attempts evidence");
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt["rotation_index"].as_u64().expect("rotation index"))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(attempts
+            .iter()
+            .all(|attempt| attempt["failure_classification"] == "provider"));
+    }
+
+    #[test]
+    fn rotation_respects_configured_max_attempts_bound() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                entry("fallback-backend-a"),
+                entry("fallback-backend-b"),
+                entry("fallback-backend-c"),
+            ],
+            max_attempts: Some(2),
+        });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let attempts = aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .and_then(Value::as_array)
+            .expect("rotation attempts evidence");
+        assert_eq!(attempts.len(), 2);
+    }
+
+    #[test]
+    fn request_metadata_rotation_overrides_plan_policy() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("plan-fallback")]));
+        plan.tasks[0].metadata = json!({
+            "provider_rotation": {
+                "entries": [{ "backend": "request-fallback" }]
+            }
+        });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(observed[1].executor.backend, "request-fallback");
+    }
+
+    #[test]
+    fn no_rotation_policy_keeps_single_attempt_behavior_unchanged() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let plan = plan_with_tasks(1);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::Provider)
+        );
+        assert!(aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation")
+            .is_none());
+        assert!(!aggregate.events.iter().any(|event| event
+            .message
+            .as_deref()
+            .is_some_and(|message| { message.contains("provider rotation") })));
+    }
+}
+
 mod timeout_tests {
     use super::*;
 
