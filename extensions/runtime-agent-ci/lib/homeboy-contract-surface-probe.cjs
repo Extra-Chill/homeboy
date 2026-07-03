@@ -3,7 +3,7 @@
 const { spawnSync } = require('node:child_process');
 
 const {
-  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
+  RUNTIME_CONTRACT_CONSTANTS,
   runtimeContractConstantsFromHomeboyOutput,
 } = require('./runtime-contracts.cjs');
 
@@ -13,8 +13,9 @@ const CONTRACT_COMMANDS = Object.freeze([
   ['contract', 'constants', 'secret-env-plan'],
 ]);
 
-const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
-const CORE_PUBLISHED_CONTRACT_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS;
+const HOMEBOY_RUNTIME_CONTRACT_CONSTANTS = RUNTIME_CONTRACT_CONSTANTS;
+const LOCAL_ARTIFACT_MANIFEST_CONSTANTS = HOMEBOY_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
+const CORE_PUBLISHED_CONTRACT_CONSTANTS = HOMEBOY_RUNTIME_CONTRACT_CONSTANTS;
 
 function probeHomeboyContractSurface(options = {}) {
   const command = options.homeboyCommand || process.env.HOMEBOY_COMMAND || 'homeboy';
@@ -29,7 +30,7 @@ function probeHomeboyContractSurface(options = {}) {
     attempts.push({ argv, status: result.status, stdout, stderr, error: result.error ? result.error.message : '' });
 
     if (result.error && result.error.code === 'ENOENT') {
-      return skip(`homeboy contract surface probe skipped: ${command} was not found`, attempts);
+      return fail(`homeboy contract surface probe failed: ${command} was not found`, attempts);
     }
 
     if (result.status !== 0 || !stdout) {
@@ -49,7 +50,7 @@ function probeHomeboyContractSurface(options = {}) {
     }
   }
 
-  return skip('homeboy contract surface probe skipped: no supported Homeboy contract command is available yet', attempts);
+  return fail('homeboy contract surface probe failed: no supported Homeboy contract command is available', attempts);
 }
 
 function validateRuntimeContractConstants({ contract, command, argv, attempts }) {
@@ -57,7 +58,7 @@ function validateRuntimeContractConstants({ contract, command, argv, attempts })
   const expectedConstants = expectedConstantsForCommand(argv);
   const comparableConstants = comparableConstantsForProbe(actualConstants, expectedConstants, argv);
   if (Object.keys(actualConstants).length === 0 || Object.keys(comparableConstants).length === 0) {
-    return skip(`homeboy contract surface probe skipped: ${argv.join(' ')} did not expose runtime-agent constants`, attempts);
+    return fail(`homeboy contract surface probe failed: ${argv.join(' ')} did not expose runtime-agent constants`, attempts);
   }
 
   const errors = [];
@@ -90,9 +91,10 @@ function validateRuntimeContractConstants({ contract, command, argv, attempts })
 
 function comparableConstantsForProbe(actualConstants, expectedConstants, argv) {
   const contractId = argv[2] || '';
-  return Object.fromEntries(
-    Object.entries(expectedConstants).filter(([contractName]) => actualConstants[contractName] || contractId !== 'all')
-  );
+  if (contractId === 'all') {
+    return expectedConstants;
+  }
+  return Object.fromEntries(Object.entries(expectedConstants).filter(([contractName]) => actualConstants[contractName]));
 }
 
 function expectedConstantsForCommand(argv) {
