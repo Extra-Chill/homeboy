@@ -87,6 +87,35 @@ fn extension_dev_run_command_parses() {
 }
 
 #[test]
+fn rig_package_lint_and_fuzz_stable_plan_parse() {
+    Cli::try_parse_from(["homeboy", "rig", "package", "lint", "./fixtures"])
+        .expect("rig package lint should parse");
+
+    Cli::try_parse_from([
+        "homeboy",
+        "fuzz",
+        "stable",
+        "plan",
+        "--manifest",
+        "manifests/stable-workloads.json",
+        "--stable-id",
+        "api,checkout",
+        "--runner",
+        "lab",
+        "--artifact-root",
+        "artifacts",
+        "--run-id-prefix",
+        "stable-demo",
+        "--tracker-ref",
+        "issue:123",
+        "--detach-after-handoff",
+        "--component",
+        "component-a",
+    ])
+    .expect("fuzz stable plan should parse");
+}
+
+#[test]
 fn agent_task_dispatch_is_not_public_cli_surface() {
     let surface = current_command_surface();
 
