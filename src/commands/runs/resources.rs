@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use homeboy::core::observation::{ObservationStore, RunListFilter};
 use homeboy::core::resource_lifecycle_index::{
-    resource_lifecycle_record_is_actionable, resource_lifecycle_record_is_cleanup_eligible,
-    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycle,
-    ResourceLifecycleCleanupOperation, ResourceLifecycleIndex, ResourceLifecycleRecord,
-    ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
+    resource_lifecycle_index_from_artifacts, resource_lifecycle_record_is_actionable,
+    resource_lifecycle_record_is_cleanup_eligible, ResourceCleanupPolicy,
+    ResourceEvidenceRetention, ResourceLifecycle, ResourceLifecycleCleanupOperation,
+    ResourceLifecycleIndex, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
+    RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
 use homeboy::core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -14,11 +16,11 @@ use super::{CmdResult, RunsOutput};
 
 #[derive(Args, Clone)]
 pub struct RunsResourcesArgs {
-    /// Resource lifecycle index JSON file. Repeatable until producers publish a canonical store.
+    /// Resource lifecycle index JSON file. Repeatable. Defaults to the local observation store.
     #[arg(long = "file", value_name = "PATH")]
     pub file: Vec<PathBuf>,
 
-    /// Emit a contract-valid sample index instead of reading files.
+    /// Emit a contract-valid sample index instead of reading files or the observation store.
     #[arg(long, conflicts_with = "file")]
     pub sample: bool,
 
@@ -152,18 +154,6 @@ pub struct RunsResourcesSourceOutput {
 
 pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
     validate_cleanup_args(&args)?;
-
-    if !args.sample && args.file.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "file",
-            "provide at least one --file path, or pass --sample for a contract-valid sample resource index",
-            None,
-            Some(vec![
-                "Until resource producers publish a canonical store, this command reads explicit resource lifecycle index JSON files.".to_string(),
-                "Run `homeboy runs resources --sample` to inspect the expected output contract.".to_string(),
-            ]),
-        ));
-    }
 
     let loaded = load_indexes(&args)?;
     let source_count = loaded.len();
@@ -403,7 +393,45 @@ fn load_indexes(args: &RunsResourcesArgs) -> Result<Vec<LoadedResourceIndex>> {
         }]);
     }
 
-    args.file.iter().map(|path| load_index_file(path)).collect()
+    if !args.file.is_empty() {
+        return args.file.iter().map(|path| load_index_file(path)).collect();
+    }
+
+    let store = ObservationStore::open_initialized()?;
+    load_observation_store_index(&store, args.run_id.as_deref())
+}
+
+fn load_observation_store_index(
+    store: &ObservationStore,
+    run_id: Option<&str>,
+) -> Result<Vec<LoadedResourceIndex>> {
+    let artifacts = if let Some(run_id) = run_id {
+        store.list_artifacts(run_id)?
+    } else {
+        store
+            .list_run_artifacts(
+                RunListFilter {
+                    limit: Some(1000),
+                    ..Default::default()
+                },
+                None,
+            )?
+            .into_iter()
+            .map(|run_artifact| run_artifact.artifact)
+            .collect()
+    };
+
+    let Some(index) = resource_lifecycle_index_from_artifacts(&artifacts)? else {
+        return Ok(Vec::new());
+    };
+
+    Ok(vec![LoadedResourceIndex {
+        source: match run_id {
+            Some(run_id) => format!("observation-store:{run_id}"),
+            None => "observation-store".to_string(),
+        },
+        index,
+    }])
 }
 
 fn load_index_file(path: &Path) -> Result<LoadedResourceIndex> {
@@ -477,9 +505,15 @@ fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
 
 #[cfg(test)]
 mod tests {
+    use homeboy::core::observation::{NewRunRecord, ObservationStore};
     use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 
     use super::*;
+
+    fn temp_store(tempdir: &tempfile::TempDir) -> ObservationStore {
+        ObservationStore::open_initialized_at(tempdir.path().join("homeboy.sqlite"))
+            .expect("temp observation store")
+    }
 
     fn record(status: ResourceLifecycleResourceStatus) -> ResourceLifecycleRecord {
         ResourceLifecycleRecord {
@@ -494,6 +528,25 @@ mod tests {
             cleanup_intent: ResourceCleanupIntent::DryRun,
             status,
         }
+    }
+
+    fn record_store_resource(
+        store: &ObservationStore,
+        run_id: &str,
+        artifact_path: &Path,
+        resource: ResourceLifecycleRecord,
+    ) {
+        store
+            .record_artifact_with_metadata(
+                run_id,
+                "runner-workspace",
+                artifact_path,
+                serde_json::json!({
+                    "resource_lifecycle": serde_json::to_value(resource)
+                        .expect("resource lifecycle metadata"),
+                }),
+            )
+            .expect("artifact with resource lifecycle metadata");
     }
 
     #[test]
@@ -563,6 +616,98 @@ mod tests {
         assert_eq!(cleanup.candidate_count, 1);
         assert_eq!(cleanup.planned_count, 1);
         assert_eq!(cleanup.applied_count, 0);
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn default_store_discovery_loads_resource_lifecycle_metadata() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = temp_store(&tempdir);
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let artifact_path = tempdir.path().join("artifact.json");
+        std::fs::write(&artifact_path, "{}").expect("artifact file");
+        let resource = ResourceLifecycleRecord {
+            run_id: run.id.clone(),
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+        record_store_resource(&store, &run.id, &artifact_path, resource.clone());
+
+        let indexes = load_observation_store_index(&store, None).expect("store index");
+
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].source, "observation-store");
+        assert_eq!(indexes[0].index.resources, vec![resource]);
+    }
+
+    #[test]
+    fn store_discovered_cleanup_plan_remains_read_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = temp_store(&tempdir);
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let artifact_path = tempdir.path().join("artifact.json");
+        std::fs::write(&artifact_path, "{}").expect("artifact file");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource file");
+        let resource = ResourceLifecycleRecord {
+            run_id: run.id.clone(),
+            path: resource_path.display().to_string(),
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+        record_store_resource(&store, &run.id, &artifact_path, resource);
+        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+
+        let cleanup = build_cleanup_output(
+            &indexes[0].index.resources,
+            &RunsResourcesArgs {
+                cleanup_plan: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup plan");
+
+        assert_eq!(cleanup.planned_count, 1);
+        assert_eq!(cleanup.applied_count, 0);
+        assert!(resource_path.exists());
+    }
+
+    #[test]
+    fn store_discovered_apply_still_requires_apply_intent() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = temp_store(&tempdir);
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let artifact_path = tempdir.path().join("artifact.json");
+        std::fs::write(&artifact_path, "{}").expect("artifact file");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource file");
+        let resource = ResourceLifecycleRecord {
+            run_id: run.id.clone(),
+            path: resource_path.display().to_string(),
+            cleanup_intent: ResourceCleanupIntent::DryRun,
+            ..record(ResourceLifecycleResourceStatus::CleanupPending)
+        };
+        record_store_resource(&store, &run.id, &artifact_path, resource);
+        let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+
+        let cleanup = build_cleanup_output(
+            &indexes[0].index.resources,
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 0);
+        assert_eq!(cleanup.skipped_count, 1);
+        assert!(cleanup.skipped[0].reason.contains("explicit apply intent"));
         assert!(resource_path.exists());
     }
 
