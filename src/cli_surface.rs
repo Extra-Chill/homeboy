@@ -938,7 +938,7 @@ mod tests {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let index = commands_index();
 
-        for entry in crate::command_contract::COMMAND_REGISTRY {
+        for entry in crate::command_contract::COMMAND_SPECS {
             let Some(path) = entry.docs_path() else {
                 continue;
             };
@@ -966,14 +966,14 @@ mod tests {
             .filter(|subcommand| !subcommand.is_hide_set())
             .map(|subcommand| subcommand.get_name().to_string())
             .collect::<BTreeSet<_>>();
-        let registry_names = crate::command_contract::COMMAND_REGISTRY
+        let registry_names = crate::command_contract::COMMAND_SPECS
             .iter()
             .map(|entry| entry.name.to_string())
             .collect::<BTreeSet<_>>();
         assert_eq!(registry_names, parser_names);
 
         let manifest = current_command_safety_manifest();
-        for entry in crate::command_contract::COMMAND_REGISTRY {
+        for entry in crate::command_contract::COMMAND_SPECS {
             let manifest_entry = manifest
                 .find_path(&[entry.name])
                 .unwrap_or_else(|| panic!("manifest missing registered command `{}`", entry.name));
@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn core_command_docs_do_not_drift_from_registry() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let registered_docs = crate::command_contract::COMMAND_REGISTRY
+        let registered_docs = crate::command_contract::COMMAND_SPECS
             .iter()
             .filter_map(|entry| entry.docs_slug)
             .collect::<BTreeSet<_>>();

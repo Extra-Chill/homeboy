@@ -340,51 +340,15 @@ fn registered_json_envelope_descriptor(
 
 #[cfg(test)]
 mod tests {
-    use super::super::spec::{COMMAND_REGISTRY, DEFAULT_LAB_UNSUPPORTED_NOTES};
+    use super::super::spec::{COMMAND_SPECS, DEFAULT_LAB_UNSUPPORTED_NOTES};
     use super::*;
     use crate::cli_surface::{Cli, Commands};
-    use clap::CommandFactory;
     use clap::Parser;
-    use std::collections::BTreeSet;
 
     fn parsed_command(args: &[&str]) -> Commands {
         Cli::try_parse_from(args)
             .expect("CLI args should parse")
             .command
-    }
-
-    fn lab_supported_registry_sample_argv(command_name: &str) -> Option<&'static [&'static str]> {
-        match command_name {
-            "agent-task" => Some(&["homeboy", "agent-task", "providers"]),
-            "test" => Some(&["homeboy", "test"]),
-            "bench" => Some(&["homeboy", "bench"]),
-            "fuzz" => Some(&["homeboy", "fuzz"]),
-            "trace" => Some(&["homeboy", "trace"]),
-            "lint" => Some(&["homeboy", "lint"]),
-            "review" => Some(&["homeboy", "review"]),
-            "audit" => Some(&["homeboy", "audit"]),
-            "refactor" => Some(&["homeboy", "refactor", "--all"]),
-            "runtime" => Some(&[
-                "homeboy",
-                "runtime",
-                "refresh",
-                "example-runtime",
-                "--source",
-                ".",
-            ]),
-            "rig" => Some(&["homeboy", "rig", "check", "example-rig"]),
-            "worktree" => Some(&["homeboy", "worktree", "cleanup"]),
-            "tunnel" => Some(&[
-                "homeboy",
-                "tunnel",
-                "service",
-                "start",
-                "example-service",
-                "--command",
-                "npm start",
-            ]),
-            _ => None,
-        }
     }
 
     #[test]
@@ -463,22 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn command_registry_covers_top_level_parser_surface() {
-        let parser_names = Cli::command()
-            .get_subcommands()
-            .map(|subcommand| subcommand.get_name().to_string())
-            .collect::<BTreeSet<_>>();
-        let registry_names = COMMAND_REGISTRY
-            .iter()
-            .map(|entry| entry.name.to_string())
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(registry_names, parser_names);
-    }
-
-    #[test]
     fn command_registry_lab_metadata_is_explicit() {
-        for entry in COMMAND_REGISTRY {
+        for entry in COMMAND_SPECS {
             if entry.lab_supported {
                 assert_ne!(
                     entry.lab_notes, DEFAULT_LAB_UNSUPPORTED_NOTES,
@@ -502,8 +452,8 @@ mod tests {
 
     #[test]
     fn command_registry_lab_metadata_matches_command_support_for_parseable_samples() {
-        for entry in COMMAND_REGISTRY.iter().filter(|entry| entry.lab_supported) {
-            let argv = lab_supported_registry_sample_argv(entry.name).unwrap_or_else(|| {
+        for entry in COMMAND_SPECS.iter().filter(|entry| entry.lab_supported) {
+            let argv = entry.representative_argv.unwrap_or_else(|| {
                 panic!(
                     "Lab-supported registry command `{}` needs a representative parseable argv sample",
                     entry.name
@@ -534,7 +484,7 @@ mod tests {
 
     #[test]
     fn command_registry_docs_path_is_present_for_commands_with_docs() {
-        for entry in COMMAND_REGISTRY {
+        for entry in COMMAND_SPECS {
             if let Some(slug) = entry.docs_slug {
                 assert_eq!(
                     entry.docs_path().as_deref(),

@@ -11,7 +11,7 @@ use crate::command_contract::{
     contract_constants, registered_contract, registered_contracts, ArtifactPostprocessPlan,
     CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
     CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, ContractConstantsOutput,
-    ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_REGISTRY,
+    ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_SPECS,
     PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_FILE,
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_HANDOFF_ENVELOPE_SCHEMA, RUNNER_WORKLOAD_SCHEMA,
@@ -741,7 +741,7 @@ fn command_registry_export() -> CommandRegistryExport {
             field("lab", "object", "Lab runner support metadata.", true),
         ],
         required: vec!["name", "json_family", "dispatch_family", "safety", "output", "lab"],
-        commands: COMMAND_REGISTRY
+        commands: COMMAND_SPECS
             .iter()
             .map(|entry| CommandContractExport {
                 name: entry.name,
