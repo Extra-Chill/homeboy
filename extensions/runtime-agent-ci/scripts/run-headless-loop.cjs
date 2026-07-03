@@ -14,14 +14,18 @@ const {
 } = require('../lib/headless-production-loop-spec');
 
 (async () => {
+let args = {};
+let rawSpec = null;
+let spec = null;
+let result = null;
 try {
-  const args = parseArgs(process.argv.slice(2));
+  args = parseArgs(process.argv.slice(2));
   const specPath = args.spec || args.config || process.env.HOMEBOY_RUNTIME_AGENT_CONFIG_PATH || '';
   if (!specPath) {
     throw new Error('Pass --spec <path>, --config <path>, or HOMEBOY_RUNTIME_AGENT_CONFIG_PATH.');
   }
   const repoRoot = path.resolve(__dirname, '..', '..');
-  const rawSpec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+  rawSpec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
   // Fill required secret env names from declared fallbacks before any preflight
   // runs. The provider's canonical key (e.g. OPENAI_API_KEY) is sourced from the
   // caller's generic credential secret, and the Homeboy app token falls back to
@@ -29,7 +33,7 @@ try {
   // happens through the secret-env-names-only boundary; only this process's env
   // is populated so the names resolve.
   applySecretEnvFallbacks(rawSpec.secret_env_fallbacks);
-  const spec = materializeHeadlessProductionLoopSpec(rawSpec, {
+  spec = materializeHeadlessProductionLoopSpec(rawSpec, {
     revolutions: args.revolutions || args.max_revolutions || process.env.HOMEBOY_HEADLESS_LOOP_REVOLUTIONS,
     runtime_id: args.runtime_id || process.env.HOMEBOY_AGENT_RUNTIME,
     runtime_profile: args.runtime_profile || process.env.HOMEBOY_AGENT_RUNTIME_PROFILE,
@@ -43,7 +47,7 @@ try {
     runtime_config_mounts: parseJsonArray(args.runtime_config_mounts || process.env.HOMEBOY_AGENT_RUNTIME_CONFIG_MOUNTS, 'runtime_config_mounts'),
     runtime_state_mounts: parseJsonArray(args.runtime_state_mounts || process.env.HOMEBOY_AGENT_RUNTIME_STATE_MOUNTS, 'runtime_state_mounts'),
   });
-  const result = await runHeadlessDeterministicLoop({
+  result = await runHeadlessDeterministicLoop({
     spec,
     configPath: specPath,
     repoRoot,
@@ -58,10 +62,25 @@ try {
     resultsFile: args.results || process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE || '',
     eventsFile: args.events || process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE || '',
     loopResultFile: args.result || process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE || '',
+    exitCode: result.status === 'succeeded' ? 0 : 1,
   });
   process.stdout.write(`${JSON.stringify(result.outcome || result, null, 2)}\n`);
   process.exitCode = result.status === 'succeeded' ? 0 : 1;
 } catch (error) {
+  result = failureResult(error, spec || rawSpec);
+  try {
+    writeHeadlessDeterministicLoopArtifacts({
+      ...(spec || rawSpec || {}),
+      result,
+      outcomeFile: args.outcome || process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE || '',
+      resultsFile: args.results || process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE || '',
+      eventsFile: args.events || process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE || '',
+      loopResultFile: args.result || process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE || '',
+      exitCode: 1,
+    });
+  } catch (artifactError) {
+    process.stderr.write(`failed to write headless loop failure artifacts: ${artifactError && artifactError.message ? artifactError.message : String(artifactError)}\n`);
+  }
   process.stderr.write(`${error && error.message ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }
@@ -113,4 +132,32 @@ function applySecretEnvFallbacks(fallbacks) {
       }
     }
   }
+}
+
+function failureResult(error, plan = {}) {
+  const taskId = plan?.task_id || plan?.workload_id || plan?.loop_id || 'headless-deterministic-loop';
+  const now = new Date().toISOString();
+  const message = error && error.message ? error.message : String(error);
+  const outcome = {
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: taskId,
+    status: 'failed',
+    summary: message,
+    diagnostics: [{ class: 'homeboy.headless_loop.execution_failed', message }],
+  };
+  return {
+    schema: 'homeboy/headless-deterministic-loop-result/v1',
+    loop_id: plan?.loop_id || plan?.plan_id || plan?.workload_id || 'headless-deterministic-loop',
+    status: 'failed',
+    dry_run: plan?.dry_run === true,
+    started_at: now,
+    completed_at: now,
+    runtime: { id: plan?.runtime_id || plan?.runtime || '', backend: '' },
+    tasks: [{ task_id: taskId, outcome, results: { scenarios: [] }, loop_policy: null, loop_result: null, state: null }],
+    outcome,
+    results: { scenarios: [] },
+    state: null,
+    fanout: { schema: 'homeboy/fanout-reconcile-run/v1', status: 'failed', summary: { total: 1, completed: 0, failed: 1 }, records: [] },
+    events: [{ schema: 'homeboy/headless-deterministic-loop-event/v1', sequence: 1, type: 'loop_failed', timestamp: now, error: message }],
+  };
 }

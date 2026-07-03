@@ -18,6 +18,11 @@ const LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS = validatedLocalSchemaFallba
   CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope,
   Object.freeze({ schema_id: 'homeboy/run-outcome-envelope/v1' })
 );
+const LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS = validatedLocalSchemaFallback(
+  'runner_execution_record',
+  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record,
+  Object.freeze({ schema_id: 'homeboy/runner-execution-record/v1' })
+);
 
 // Extension-local artifact schemas. These remain here until Homeboy core exports
 // contract constants for the runtime artifact path/ref boundary.
@@ -32,12 +37,14 @@ const EXTENSION_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
 
 const CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS = Object.freeze(Object.keys({
   ...(CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope ? {} : { run_outcome_envelope: LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS }),
+  ...(CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record ? {} : { runner_execution_record: LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS }),
   ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
 }));
 
 const RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
   ...CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
   run_outcome_envelope: CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope || LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS,
+  runner_execution_record: CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record || LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS,
   ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
 });
 
@@ -47,6 +54,7 @@ const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
 const SECRET_ENV_PLAN_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
 const RUN_LOCATION_INDEX_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
 const RUN_OUTCOME_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id;
+const RUNNER_EXECUTION_RECORD_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.runner_execution_record.schema_id;
 const ARTIFACT_PATHS_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
 const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const {
@@ -59,6 +67,7 @@ const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   results: 'results.json',
   outcome: 'outcome.json',
   run_outcome_envelope: 'run-outcome-envelope.json',
+  runner_execution_record: 'runner-execution-record.json',
   fanout_run: 'fanout-run.json',
   loop_result: 'loop-result.json',
   loop_policy: 'loop-policy.json',
@@ -127,6 +136,7 @@ module.exports = {
   EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
   RUN_LOCATION_INDEX_SCHEMA,
   RUN_OUTCOME_ENVELOPE_SCHEMA,
+  RUNNER_EXECUTION_RECORD_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
   RUNTIME_CONTRACT_CONSTANTS,
   SECRET_ENV_PLAN_SCHEMA,
