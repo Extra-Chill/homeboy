@@ -8,7 +8,7 @@ source "$PROJECT_SCRIPTS_HELPER"
 # Verify the resolved component is actually a Node.js project.
 # Walks up to find package.json (so monorepo subpackages also pass).
 homeboy_require_package_json() {
-    homeboy_project_init --ecosystem node --path "${1:-$PROJECT_PATH}"
+    homeboy_project_init --ecosystem nodejs --path "${1:-$PROJECT_PATH}"
 }
 
 # Detect which package manager the project uses, in priority order:
@@ -16,7 +16,7 @@ homeboy_require_package_json() {
 # Sets PKG_MANAGER and PKG_RUN ("pnpm run", "yarn", "npm run", "npx").
 homeboy_detect_package_manager() {
     if [ -z "${HOMEBOY_PROJECT_ECOSYSTEM:-}" ]; then
-        homeboy_project_init --ecosystem node --path "${1:-$PROJECT_PATH}"
+        homeboy_project_init --ecosystem nodejs --path "${1:-$PROJECT_PATH}"
     fi
     PKG_MANAGER="$HOMEBOY_PROJECT_PACKAGE_MANAGER"
     PKG_RUN="$HOMEBOY_PROJECT_RUN_CMD"
@@ -26,7 +26,7 @@ homeboy_detect_package_manager() {
 # Prepare dependencies for clean runner snapshots. Lab offload intentionally
 # excludes node_modules, so package scripts need a deterministic install step.
 homeboy_ensure_node_dependencies() {
-    [ -n "${1:-}" ] && homeboy_project_init --ecosystem node --path "$1"
+    [ -n "${1:-}" ] && homeboy_project_init --ecosystem nodejs --path "$1"
     homeboy_project_ensure_dependencies
 }
 

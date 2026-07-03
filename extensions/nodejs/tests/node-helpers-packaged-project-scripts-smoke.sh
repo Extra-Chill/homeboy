@@ -27,7 +27,7 @@ touch "$PNPM_PROJECT/pnpm-lock.yaml"
 
 bash -c '
     source "$1"
-    homeboy_project_init --ecosystem node --path "$2/subdir"
+    homeboy_project_init --ecosystem nodejs --path "$2/subdir"
     [ "$HOMEBOY_PROJECT_ROOT" = "$2" ]
     [ "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" = "$2" ]
     [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = "pnpm" ]
@@ -46,7 +46,7 @@ touch "$WORKSPACE_PROJECT/pnpm-lock.yaml" "$WORKSPACE_PROJECT/pnpm-workspace.yam
 
 bash -c '
     source "$1"
-    homeboy_project_init --ecosystem node --path "$2/packages/plugin/subdir"
+    homeboy_project_init --ecosystem nodejs --path "$2/packages/plugin/subdir"
     [ "$HOMEBOY_PROJECT_ROOT" = "$2/packages/plugin" ]
     [ "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" = "$2" ]
     [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = "pnpm" ]
