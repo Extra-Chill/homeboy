@@ -392,9 +392,10 @@ homeboy fuzz plan my-wordpress-component \
 ```
 
 The WordPress extension boundary is the data contract: fuzz manifests, surface
-discovery, WordPress fuzz plans, runtime capabilities, and the Codebox-owned
-`wp-codebox/fuzz-suite/v1` payload. The extension does not assemble
-`homeboy fuzz ...` shell commands for workflow callers.
+discovery, WordPress fuzz plans, runtime capabilities, the Codebox-owned
+`wp-codebox/fuzz-suite/v1` payload, and the product-agnostic campaign
+orchestrator API. The extension does not assemble `homeboy fuzz ...` shell
+commands for workflow callers.
 
 ### Surface discovery and fuzz schemas
 
@@ -433,6 +434,46 @@ test.
   ]
 }
 ```
+
+### WordPress fuzz campaign orchestrator
+
+`runWordPressFuzzCampaign()` is the reusable production WordPress fuzz campaign
+primitive for callers that need one API instead of hand-rolling discovery,
+planning, WP Codebox execution, result aggregation, artifact validation, and
+summary persistence.
+
+The orchestrator accepts either a normalized discovery artifact or live discovery
+configuration. It compiles the discovery through `compileWordPressFuzzCampaign()`,
+executes the generated `wp-codebox/fuzz-suite/v1` request, aggregates coverage
+and gaps, validates required artifacts, and optionally writes a JSON summary.
+Product-specific selection, fixtures, assertions, and runtime inputs remain
+caller-owned.
+
+```js
+const {
+  runWordPressFuzzCampaign,
+} = require('homeboy-extension-wordpress/wordpress-fuzz-campaign');
+
+const summary = await runWordPressFuzzCampaign({
+  id: 'production-fuzz-campaign',
+  destructive: true,
+  discovery,
+  target: { type: 'wordpress-plugin', slug: 'sample-plugin' },
+  summaryPath: 'artifacts/fuzz/campaign-summary.json',
+}, {
+  runFuzzSuite: wpCodeboxRunner,
+});
+```
+
+When destructive mode is requested, the campaign is treated as production-grade
+and the run summary fails validation unless the result exports all required
+guardrail artifacts: sandbox isolation proof, mutation isolation, delete
+boundary, external side-effect guardrail, runtime access, coverage, and hotspots.
+
+The returned summary uses `homeboy/wordpress-fuzz-campaign-run/v1` and includes
+the compiled campaign, normalized WP Codebox result, aggregate coverage/gap
+report, and `homeboy/wordpress-fuzz-campaign-artifact-validation/v1` validation
+block.
 
 ### Live runtime surface discovery
 

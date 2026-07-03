@@ -1,6 +1,12 @@
 'use strict';
 
 /**
+ * External dependencies
+ */
+const fs = require('node:fs');
+const path = require('node:path');
+
+/**
  * Internal dependencies
  */
 const {
@@ -17,8 +23,12 @@ const {
 	buildWordPressPerformanceObservation,
 } = require('./wordpress-performance-observation-aggregate');
 const {
+	runWordPressLiveSurfaceDiscoveryWorkload,
+} = require('./wordpress-live-surface-discovery');
+const {
 	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORDPRESS_HOTSPOTS_SCHEMA,
+	runWpCodeboxFuzzSuite,
 	wordpressFuzzPostprocessArtifactDeclarations,
 	wordpressFuzzPostprocessBinding,
 	wordpressFuzzPostprocessExpectedArtifacts,
@@ -30,8 +40,102 @@ const {
 } = require('./wordpress-fuzz-runtime-workload-operations');
 
 const WORDPRESS_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/wordpress-fuzz-campaign/v1';
+const WORDPRESS_FUZZ_CAMPAIGN_RUN_SCHEMA = 'homeboy/wordpress-fuzz-campaign-run/v1';
+const WORDPRESS_FUZZ_CAMPAIGN_ARTIFACT_VALIDATION_SCHEMA = 'homeboy/wordpress-fuzz-campaign-artifact-validation/v1';
 const HOMEBOY_FUZZ_WORKLOAD_SCHEMA = 'homeboy/fuzz-workload/v1';
 const WORDPRESS_FUZZ_PLAN_RESULT_GAP_REPORT_SCHEMA = 'homeboy/wordpress-fuzz-plan-result-gap-report/v1';
+const DESTRUCTIVE_CAMPAIGN_REQUIRED_ARTIFACTS = [
+	{ semantic_key: 'fuzz.disposable.sandbox_isolation_proof', label: 'sandbox isolation proof' },
+	{ semantic_key: 'fuzz.mutation.isolation', label: 'mutation isolation artifact' },
+	{ semantic_key: 'fuzz.delete.boundary', label: 'delete boundary artifact' },
+	{ semantic_key: 'fuzz.external_http.guardrail', label: 'external side-effect guardrail' },
+	{ semantic_key: 'fuzz.runtime.access', label: 'runtime access artifact' },
+	{ semantic_key: 'fuzz.coverage', alternatives: ['fuzz.coverage.summary'], label: 'coverage artifact' },
+	{ semantic_key: 'fuzz.hotspot.summary', alternatives: ['fuzz.hotspot.codebox'], label: 'hotspots artifact' },
+];
+
+async function runWordPressFuzzCampaign(input = {}, options = {}) {
+	const discovery = await resolveCampaignDiscovery(input, options);
+	const destructive = isDestructiveCampaign(input, options);
+	const campaign = compileWordPressFuzzCampaign({
+		...input,
+		discovery,
+		production: input.production || input.production_campaign || destructive || undefined,
+	}, options);
+	const result = await runWpCodeboxFuzzSuite({
+		...(objectOrUndefined(options.execution) || objectOrUndefined(options.execute) || {}),
+		...(objectOrUndefined(input.execution) || objectOrUndefined(input.execute) || {}),
+		taskId: campaign.wp_codebox.task_request.task_id || campaign.wp_codebox.task_request.id || campaign.id,
+		input: campaign.wp_codebox.input,
+		request: campaign.wp_codebox.task_request,
+		artifactDeclarations: campaign.wp_codebox.task_request.artifact_declarations,
+		expectedArtifacts: campaign.wp_codebox.task_request.expected_artifacts,
+		runtimeId: input.runtime_id || input.runtimeId || options.runtime_id || options.runtimeId || 'wp-codebox',
+		runFuzzSuite: input.runFuzzSuite || options.runFuzzSuite || input.run_fuzz_suite || options.run_fuzz_suite,
+	});
+	const aggregate = aggregateWordPressFuzzCampaignResult({
+		campaign,
+		result,
+		coverage: result.coverage || result.coverage_summary || result.artifacts,
+		performance: result.performance || result.performance_observation || result.performanceObservation,
+	});
+	const artifactValidation = validateWordPressFuzzCampaignArtifacts({
+		campaign,
+		result,
+		destructive,
+		requiredArtifacts: options.requiredArtifacts || options.required_artifacts || input.requiredArtifacts || input.required_artifacts,
+	});
+	const status = resultStatus(result, artifactValidation);
+	const summary = stripUndefined({
+		schema: WORDPRESS_FUZZ_CAMPAIGN_RUN_SCHEMA,
+		status,
+		succeeded: status === 'succeeded',
+		campaign,
+		result,
+		aggregate,
+		artifact_validation: artifactValidation,
+		metadata: {
+			destructive_campaign: destructive || undefined,
+		},
+	});
+	writeCampaignSummary(summary, input.summary_path || input.summaryPath || options.summary_path || options.summaryPath);
+	return summary;
+}
+
+async function resolveCampaignDiscovery(input = {}, options = {}) {
+	const supplied = input.discovery || input.surfaceDiscovery || input.surface_discovery || options.discovery || options.surfaceDiscovery || options.surface_discovery;
+	if (supplied) {
+		return supplied;
+	}
+	const liveDiscoveryOptions = objectOrUndefined(input.live_discovery || input.liveDiscovery || input.discovery_config || input.discoveryConfig || options.live_discovery || options.liveDiscovery || options.discovery_config || options.discoveryConfig);
+	if (liveDiscoveryOptions) {
+		return (await runWordPressLiveSurfaceDiscoveryWorkload(liveDiscoveryOptions)).artifact;
+	}
+	return input;
+}
+
+function validateWordPressFuzzCampaignArtifacts(input = {}) {
+	const destructive = Boolean(input.destructive);
+	const requiredArtifacts = normalizeRequiredCampaignArtifacts(
+		input.requiredArtifacts || input.required_artifacts || (destructive ? DESTRUCTIVE_CAMPAIGN_REQUIRED_ARTIFACTS : [])
+	);
+	const artifacts = campaignResultArtifacts(input.result);
+	const missing = requiredArtifacts.filter((requirement) => !hasSuccessfulCampaignArtifact(artifacts, requirement));
+	return {
+		schema: WORDPRESS_FUZZ_CAMPAIGN_ARTIFACT_VALIDATION_SCHEMA,
+		status: missing.length === 0 ? 'passed' : 'failed',
+		destructive_campaign: destructive,
+		required_artifacts: requiredArtifacts,
+		observed_artifacts: artifacts.map((artifact) => stripUndefined({
+			name: artifact.name,
+			role: artifact.role,
+			semantic_key: artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey,
+			schema: artifact.schema || artifact.metadata?.schema,
+			status: artifact.status || artifact.metadata?.status,
+		})),
+		missing_artifacts: missing,
+	};
+}
 
 function compileWordPressFuzzCampaign(input = {}, options = {}) {
 	const production = Boolean(input.production || options.production || input.production_campaign || options.production_campaign);
@@ -349,6 +453,72 @@ function normalizeStatus(value) {
 	return String(value || '').trim().toLowerCase().replace(/_/g, '-');
 }
 
+function normalizeRequiredCampaignArtifacts(requirements = []) {
+	return arrayOf(requirements).map((requirement) => {
+		const entry = typeof requirement === 'string' ? { semantic_key: requirement } : objectOrUndefined(requirement);
+		return entry ? stripUndefined({
+			semantic_key: entry.semantic_key || entry.semanticKey || entry.key,
+			alternatives: arrayOf(entry.alternatives || entry.alternative_semantic_keys || entry.alternativeSemanticKeys),
+			label: entry.label || entry.name,
+		}) : undefined;
+	}).filter((requirement) => requirement?.semantic_key);
+}
+
+function campaignResultArtifacts(result = {}) {
+	return [
+		...arrayOf(result.artifacts),
+		...arrayOf(result.wp_codebox_result?.artifacts),
+		...arrayOf(result.result?.artifacts),
+		...arrayOf(result.derived_artifacts?.artifacts),
+		...arrayOf(result.wp_codebox_result?.derived_artifacts?.artifacts),
+	].filter(objectOrUndefined);
+}
+
+function hasSuccessfulCampaignArtifact(artifacts = [], requirement = {}) {
+	const keys = new Set([requirement.semantic_key, ...arrayOf(requirement.alternatives)].filter(Boolean));
+	return artifacts.some((artifact) => {
+		const status = normalizeStatus(artifact.status || artifact.metadata?.status);
+		const semanticKey = artifact.semantic_key || artifact.semanticKey || artifact.metadata?.semantic_key || artifact.metadata?.semanticKey;
+		return keys.has(semanticKey) && !['failed', 'errored', 'error', 'missing'].includes(status);
+	});
+}
+
+function isDestructiveCampaign(input = {}, options = {}) {
+	const value = input.destructive || input.destructive_mode || input.destructiveMode || options.destructive || options.destructive_mode || options.destructiveMode;
+	if (value !== undefined) {
+		return Boolean(value);
+	}
+	const mutationMode = String(input.mutation_mode || input.mutationMode || options.mutation_mode || options.mutationMode || '').toLowerCase();
+	return ['aggressive', 'destructive', 'production-destructive', 'production_destructive'].includes(mutationMode);
+}
+
+function resultStatus(result = {}, artifactValidation = {}) {
+	if (artifactValidation.status === 'failed') {
+		return 'failed';
+	}
+	const status = normalizeStatus(result.status);
+	if (!status || ['succeeded', 'success', 'passed', 'ok'].includes(status)) {
+		return 'succeeded';
+	}
+	return status;
+}
+
+function writeCampaignSummary(summary, summaryPath) {
+	if (!summaryPath) {
+		return;
+	}
+	const resolvedPath = path.resolve(String(summaryPath));
+	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+	fs.writeFileSync(resolvedPath, `${JSON.stringify(summary, null, 2)}\n`);
+}
+
+function stripUndefined(value) {
+	if (!objectOrUndefined(value)) {
+		return value;
+	}
+	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 function arrayOf(value) {
 	return Array.isArray(value) ? value.filter(Boolean) : [];
 }
@@ -359,10 +529,15 @@ function objectOrUndefined(value) {
 
 module.exports = {
 	HOMEBOY_FUZZ_WORKLOAD_SCHEMA,
+	DESTRUCTIVE_CAMPAIGN_REQUIRED_ARTIFACTS,
+	WORDPRESS_FUZZ_CAMPAIGN_ARTIFACT_VALIDATION_SCHEMA,
+	WORDPRESS_FUZZ_CAMPAIGN_RUN_SCHEMA,
 	WORDPRESS_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_PLAN_RESULT_GAP_REPORT_SCHEMA,
 	aggregateWordPressFuzzCampaignResult,
 	buildWordPressFuzzCampaignWorkload,
 	compileWordPressFuzzCampaign,
 	detectWordPressFuzzPlanResultGaps,
+	runWordPressFuzzCampaign,
+	validateWordPressFuzzCampaignArtifacts,
 };
