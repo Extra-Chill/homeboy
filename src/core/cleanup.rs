@@ -22,6 +22,7 @@ use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactCleanupOptions {
@@ -475,7 +476,14 @@ fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
 }
 
 pub(crate) fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>> {
-    let mut declarations = Vec::new();
+    let mut declarations: Vec<ArtifactDeclaration> = BUILTIN_ARTIFACT_PATHS
+        .iter()
+        .map(|(relative_path, kind)| ArtifactDeclaration {
+            relative_path: (*relative_path).to_string(),
+            kind: (*kind).to_string(),
+            declared_by: "homeboy:builtin_artifact_paths".to_string(),
+        })
+        .collect();
 
     let config_path = worktree.join("homeboy.json");
     if config_path.exists() {
@@ -771,7 +779,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(
             tmp.path().join("homeboy.json"),
-            r#"{"artifact_cleanup_paths":["runtime/generated-fixture","dist"]}"#,
+            r#"{"artifact_cleanup_paths":["runtime/generated-fixture","target"]}"#,
         )
         .expect("write config");
 
@@ -783,20 +791,77 @@ mod tests {
         assert_eq!(
             declarations
                 .iter()
-                .filter(|row| row.relative_path == "dist")
+                .filter(|row| row.relative_path == "target")
                 .count(),
             1,
             "declared paths should not duplicate builtins"
         );
+        let target = declarations
+            .iter()
+            .find(|row| row.relative_path == "target")
+            .expect("target declaration");
+        assert_eq!(target.kind, "rust_target");
+        assert_eq!(target.declared_by, "homeboy:builtin_artifact_paths");
     }
 
     #[test]
-    fn artifact_declarations_do_not_include_ecosystem_defaults() {
+    fn artifact_declarations_include_builtin_rust_target() {
         let tmp = TempDir::new().expect("tempdir");
 
         let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-        assert!(declarations.is_empty());
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].relative_path, "target");
+        assert_eq!(declarations[0].kind, "rust_target");
+        assert_eq!(
+            declarations[0].declared_by,
+            "homeboy:builtin_artifact_paths"
+        );
+    }
+
+    #[test]
+    fn dry_run_detects_builtin_target_without_homeboy_json() {
+        let repo = TempDir::new().expect("repo tempdir");
+        git(repo.path(), &["init", "-b", "main"]);
+        write_file(
+            &repo.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\n",
+        );
+        write_file(&repo.path().join("src/lib.rs"), "source");
+        git(repo.path(), &["add", "Cargo.toml", "src/lib.rs"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: false,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
+            merged_only: false,
+        })
+        .expect("dry-run cleanup");
+
+        let target = output
+            .candidates
+            .iter()
+            .find(|row| row.relative_path == "target")
+            .expect("target candidate");
+        assert_eq!(target.kind, "rust_target");
+        assert_eq!(target.declared_by, "homeboy:builtin_artifact_paths");
+        assert!(repo.path().join("target/debug/app").exists());
     }
 
     #[test]

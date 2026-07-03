@@ -196,10 +196,19 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         lines.push(format!("  - {reason}: {count}"));
     }
 
-    let candidate_lines = artifact_candidate_lines(payload, 10);
+    let candidate_display_limit = 10;
+    let candidate_lines = artifact_candidate_lines(payload, candidate_display_limit);
     if !candidate_lines.is_empty() {
-        lines.push("Rebuildable artifacts:".to_string());
+        lines.push(format!(
+            "Rebuildable artifacts (showing {} of {candidate_count}):",
+            candidate_lines.len()
+        ));
         lines.extend(candidate_lines);
+        if candidate_count > candidate_display_limit as u64 {
+            lines.push(format!(
+                "Full candidate list is available in JSON output; use --sort size --limit {candidate_display_limit} for a bounded largest-first review."
+            ));
+        }
     }
 
     let next = if mode == "apply" {
@@ -370,9 +379,36 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use serde_json::json;
 
+    use crate::cli_surface::{Cli, Commands};
+
     use super::*;
+
+    #[test]
+    fn cleanup_artifacts_cli_accepts_bounded_review_flags() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "cleanup",
+            "artifacts",
+            "--sort",
+            "size",
+            "--limit",
+            "7",
+            "--merged-only",
+        ]);
+
+        let Commands::Cleanup(args) = cli.command else {
+            panic!("expected cleanup command");
+        };
+        let CleanupCommand::Artifacts(args) = args.command else {
+            panic!("expected cleanup artifacts command");
+        };
+        assert!(matches!(args.sort, CleanupArtifactsSortArg::Size));
+        assert_eq!(args.limit, Some(7));
+        assert!(args.merged_only);
+    }
 
     #[test]
     fn cleanup_artifacts_summary_emphasizes_operator_counts() {
@@ -456,9 +492,41 @@ mod tests {
 
         let summary = render_artifact_cleanup_summary(&payload).expect("summary");
 
+        assert!(summary.contains("Rebuildable artifacts (showing 2 of 2):"));
         let first = summary.find("  - 2.0 KiB /tmp/repo/node_modules").unwrap();
         let second = summary.find("  - 1.0 KiB /tmp/repo/dist").unwrap();
         assert!(first < second);
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_marks_truncated_candidate_list() {
+        let candidates: Vec<_> = (0..12)
+            .map(|index| {
+                json!({
+                    "path": format!("/tmp/repo/target-{index}"),
+                    "size_bytes": 1024
+                })
+            })
+            .collect();
+        let payload = json!({
+            "command": "cleanup.artifacts",
+            "mode": "dry_run",
+            "root": "/tmp/repo",
+            "candidate_count": 12,
+            "skipped_count": 0,
+            "applied_count": 0,
+            "estimated_bytes": 12288,
+            "reclaimed_bytes": 0,
+            "candidates": candidates,
+            "skipped": []
+        });
+
+        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Rebuildable artifacts (showing 10 of 12):"));
+        assert!(summary.contains("Full candidate list is available in JSON output"));
+        assert!(summary.contains("--sort size --limit 10"));
+        assert!(!summary.contains("/tmp/repo/target-10"));
     }
 
     #[test]
