@@ -43,6 +43,7 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub run_id: String,
     pub run: S,
     pub homeboy_version: Option<String>,
+    pub homeboy_provenance: EvidenceHomeboyProvenance,
     pub metadata: EvidenceMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracker_refs: Vec<TrackerRef>,
@@ -106,6 +107,7 @@ pub fn build_run_evidence_report<S: Serialize>(
     let failure = evidence_failure_summary(&run);
     let retention = evidence_retention(&artifact_root, &run.id);
     let evidence_links = evidence_links(&artifacts);
+    let homeboy_provenance = evidence_homeboy_provenance(&run);
     let agent_task_lifecycle_event = evidence_agent_task_lifecycle_event(&run.metadata_json);
     let matrix_summary = evidence_matrix_summary(&run, &artifacts);
     let (evidence_manifest, evidence_manifest_errors) = evidence_manifest(&run, &artifacts);
@@ -127,6 +129,7 @@ pub fn build_run_evidence_report<S: Serialize>(
         run_id: run.id.clone(),
         run: run_summary,
         homeboy_version: run.homeboy_version.clone(),
+        homeboy_provenance,
         metadata,
         tracker_refs,
         heartbeat,
@@ -140,6 +143,27 @@ pub fn build_run_evidence_report<S: Serialize>(
         evidence_manifest,
         evidence_manifest_errors,
     }
+}
+
+#[derive(Serialize)]
+pub struct EvidenceHomeboyProvenance {
+    pub schema: &'static str,
+    pub identities: Vec<EvidenceHomeboyIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct EvidenceHomeboyIdentity {
+    pub role: &'static str,
+    pub owner: &'static str,
+    pub source: &'static str,
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_job_id: Option<String>,
+    pub purpose: &'static str,
 }
 
 #[derive(Serialize)]
@@ -259,6 +283,81 @@ pub fn evidence_metadata(metadata: &Value) -> EvidenceMetadata {
         ),
         runtime: pick_metadata(metadata, &["runtime", "runner", "ci_context", "rig_state"]),
     }
+}
+
+fn evidence_homeboy_provenance(run: &RunRecord) -> EvidenceHomeboyProvenance {
+    let mut identities = vec![EvidenceHomeboyIdentity {
+        role: "observation_run_binary",
+        owner: "command_process_that_started_this_observation_run",
+        source: "run.homeboy_version",
+        version: run.homeboy_version.clone(),
+        runner_id: None,
+        runner_job_id: None,
+        purpose: "Version recorded by the Homeboy process that created this observation run; in runner workflows this is the child command/run binary, not proof of the controller CLI, active daemon, or configured runner job binary.",
+    }];
+
+    if let Some((runner_id, runner_job_id, source)) = runner_job_context(&run.metadata_json) {
+        identities.push(EvidenceHomeboyIdentity {
+            role: "runner_job_handoff",
+            owner: "runner_broker_or_lab_offload",
+            source,
+            version: None,
+            runner_id: Some(runner_id),
+            runner_job_id,
+            purpose: "Runner job context associated with this observation run. Use runner status/job logs to compare controller_cli, active_daemon, and configured_job_binary identities for the same runner.",
+        });
+    }
+
+    let warnings = if identities
+        .iter()
+        .any(|identity| identity.role == "runner_job_handoff")
+    {
+        vec!["Runner-backed evidence can involve separate controller_cli, active_daemon, configured_job_binary, and observation_run_binary Homeboy identities; do not interpret top-level homeboy_version as daemon or controller provenance.".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    EvidenceHomeboyProvenance {
+        schema: "homeboy/homeboy-provenance/v1",
+        identities,
+        warnings,
+    }
+}
+
+fn runner_job_context(metadata: &Value) -> Option<(String, Option<String>, &'static str)> {
+    if let Some(lab_offload) = metadata.get("lab_offload") {
+        if let Some(runner_id) = string_field(lab_offload, "runner_id") {
+            return Some((
+                runner_id,
+                string_field(lab_offload, "runner_job_id"),
+                "metadata.lab_offload",
+            ));
+        }
+    }
+
+    if let Some(identity) = evidence_agent_task_lifecycle_event(metadata).and_then(|event| {
+        event
+            .get("identity")
+            .and_then(|identity| identity.as_object())
+            .cloned()
+    }) {
+        if let Some(runner_id) = identity.get("runner_id").and_then(Value::as_str) {
+            return Some((
+                runner_id.to_string(),
+                identity
+                    .get("runner_job_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                "metadata.lab.remote_events.agent_task_lifecycle_event.identity",
+            ));
+        }
+    }
+
+    None
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 pub fn evidence_agent_task_lifecycle_event(metadata: &Value) -> Option<Value> {
