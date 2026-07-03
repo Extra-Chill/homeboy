@@ -29,6 +29,12 @@ assert.doesNotMatch(descriptorSource, /run-agent-task', '--help/);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'wp-codebox.json'), 'utf8'));
 assert.equal(manifest.component_path_defaults, undefined);
+const providerPreflight = manifest.agent_task_executors[0].config_preflights.find((preflight) => preflight.id === 'recipe-command-compatibility');
+assert.equal(providerPreflight.label, 'WP Codebox recipe command compatibility');
+assert.deepEqual(providerPreflight.required_values.keys, ['command']);
+assert.equal(providerPreflight.supported_values.scoped_keys.includes('supported_recipe_commands'), true);
+assert.deepEqual(providerPreflight.reference_key_contains, ['recipe']);
+assert.equal(providerPreflight.binary_probe.path_env.includes('HOMEBOY_WP_CODEBOX_BIN'), true);
 
 const executorSource = fs.readFileSync(path.join(runtimeRoot, 'lib', 'codebox-agent-task-executor.js'), 'utf8');
 assert.doesNotMatch(executorSource, /function defaultRuntimeRequirements/);

@@ -622,6 +622,50 @@
           "evidence_refs"
         ]
       },
+      "config_preflights": [
+        {
+          "id": "recipe-command-compatibility",
+          "label": "WP Codebox recipe command compatibility",
+          "required_values": {
+            "keys": ["command"]
+          },
+          "supported_values": {
+            "scoped_keys": [
+              "commands",
+              "supported_commands",
+              "recipe_commands",
+              "supported_recipe_commands"
+            ],
+            "scope_key_contains": ["codebox", "recipe"],
+            "scope_value_contains": ["codebox", "recipe"],
+            "enum_keys": ["command"]
+          },
+          "reference_key_contains": ["recipe"],
+          "binary_probe": {
+            "path_keys": [
+              "codebox_binary_path",
+              "wp_codebox_binary_path",
+              "wp_codebox_binary",
+              "binary_path",
+              "executable_path",
+              "binary"
+            ],
+            "path_env": ["HOMEBOY_WP_CODEBOX_BIN", "WP_CODEBOX_BIN"],
+            "json_commands": [["commands", "--json"], ["schema", "--json"]],
+            "version_command": ["--version"],
+            "fingerprint_command": ["fingerprint"],
+            "version_keys": ["codebox_version", "wp_codebox_version", "version"],
+            "fingerprint_keys": [
+              "codebox_fingerprint",
+              "wp_codebox_fingerprint",
+              "fingerprint",
+              "commit",
+              "revision"
+            ]
+          },
+          "remediation": "Refresh or upgrade the selected WP Codebox runner so its recipe schema advertises every generated workflow command before dispatching."
+        }
+      ],
       "role_aliases": {
         "artifact_roles": {
           "artifact_bundle": ["codebox-artifact-bundle", "artifact-bundle", "codebox-artifact-directory", "codebox-session-artifacts"],
