@@ -465,7 +465,7 @@ fn prune_candidates_for_runner(
 /// (`RunnerLifecycleOwner::Controller`, surfaced via the workspace lease built
 /// by [`workspace_lease`]), so reaping the exact path this run materialized is
 /// safe without the source-path-missing heuristic the bulk orphan prune applies.
-pub(crate) fn reap_run_workspace(
+pub fn reap_run_workspace(
     runner_id: &str,
     remote_path: &str,
     artifact_dir: Option<&str>,
