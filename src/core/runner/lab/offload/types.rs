@@ -43,6 +43,7 @@ pub struct LabOffloadCommand {
     pub unsupported_reason: Option<&'static str>,
     pub source_path_mode: LabOffloadSourcePathMode,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
+    pub secret_env_sources: Vec<crate::command_contract::LabSecretEnvSource>,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
     /// Routing-policy flags shared across the Lab command layers

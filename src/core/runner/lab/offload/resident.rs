@@ -124,7 +124,11 @@ pub(crate) fn run_runner_resident_lab_offload(
         "command_paths": "runner_side",
     });
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
-    let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
+    let secret_env_handoff = build_lab_secret_env_handoff_plan(
+        &contract.secret_env_sources,
+        &remapped_args,
+        Default::default(),
+    )?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     lab_metadata["env_resolution"] = lab_env_resolution_report(vec![

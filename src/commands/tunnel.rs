@@ -25,8 +25,9 @@ use std::path::PathBuf;
 
 use super::{CmdResult, DynamicSetArgs};
 use crate::command_contract::{
-    CommandPortabilityContract, LabCommandContract, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-    TUNNEL_SERVICE_EXPOSE_LAB_LABEL, TUNNEL_SERVICE_START_LAB_LABEL,
+    CommandPortabilityContract, LabCommandContract, LAB_TUNNEL_SECRET_ENV_SOURCES,
+    TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL, TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
+    TUNNEL_SERVICE_START_LAB_LABEL,
 };
 
 mod service;
@@ -129,9 +130,10 @@ impl TunnelArgs {
             ));
         }
         if self.is_service_start() {
-            return CommandPortabilityContract::lab(LabCommandContract::runner_resident(
-                TUNNEL_SERVICE_START_LAB_LABEL,
-            ));
+            return CommandPortabilityContract::lab(
+                LabCommandContract::runner_resident(TUNNEL_SERVICE_START_LAB_LABEL)
+                    .with_secret_env_sources(LAB_TUNNEL_SECRET_ENV_SOURCES),
+            );
         }
         if self.is_service_expose() {
             return CommandPortabilityContract::lab(LabCommandContract::runner_resident(

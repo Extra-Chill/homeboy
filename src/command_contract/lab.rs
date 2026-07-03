@@ -71,6 +71,20 @@ pub struct LabCommandRouteContract {
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+pub enum LabSecretEnvSource {
+    AgentTask,
+    Trace,
+    Tunnel,
+}
+
+pub const LAB_NO_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[];
+pub(crate) const LAB_AGENT_TASK_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
+    &[LabSecretEnvSource::AgentTask];
+pub(crate) const LAB_TRACE_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Trace];
+pub(crate) const LAB_TUNNEL_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
+    &[LabSecretEnvSource::Tunnel];
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub struct LabCommandContract {
     pub hot_label: &'static str,
     pub portability: LabCommandPortability,
@@ -79,6 +93,7 @@ pub struct LabCommandContract {
     pub capture_mutation_patch: bool,
     pub mutation_flag: Option<&'static str>,
     pub extra_required_capabilities: &'static [&'static str],
+    pub secret_env_sources: &'static [LabSecretEnvSource],
     /// Routing-policy flags shared across the Lab command layers.
     pub routing_policy: LabRoutingPolicy,
 }
@@ -683,7 +698,8 @@ impl Commands {
                 None,
                 true,
                 LAB_NO_EXTRA_CAPABILITIES,
-            ),
+            )
+            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
@@ -697,7 +713,8 @@ impl Commands {
                 None,
                 true,
                 LAB_NO_EXTRA_CAPABILITIES,
-            ),
+            )
+            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
@@ -708,7 +725,8 @@ impl Commands {
                 None,
                 true,
                 LAB_NO_EXTRA_CAPABILITIES,
-            ),
+            )
+            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
@@ -716,7 +734,8 @@ impl Commands {
                     }),
             }) => LabCommandContract::explicit_runner_simple(
                 AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
-            ),
+            )
+            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
@@ -744,7 +763,8 @@ impl Commands {
                 None,
                 false,
                 LAB_NO_EXTRA_CAPABILITIES,
-            ),
+            )
+            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
@@ -962,6 +982,7 @@ impl LabCommandContract {
             capture_mutation_patch: mutation_flag.is_some(),
             mutation_flag,
             extra_required_capabilities,
+            secret_env_sources: LAB_NO_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
                 infer_source_path_tools: true,
@@ -1056,6 +1077,7 @@ impl LabCommandContract {
             capture_mutation_patch: false,
             mutation_flag: None,
             extra_required_capabilities: LAB_NO_EXTRA_CAPABILITIES,
+            secret_env_sources: LAB_NO_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: false,
                 infer_source_path_tools: false,
@@ -1071,6 +1093,14 @@ impl LabCommandContract {
     /// stale-runner local fallback when a default Lab runner is configured.
     pub(crate) const fn release_gate(mut self) -> Self {
         self.routing_policy.release_gate = true;
+        self
+    }
+
+    pub(crate) const fn with_secret_env_sources(
+        mut self,
+        sources: &'static [LabSecretEnvSource],
+    ) -> Self {
+        self.secret_env_sources = sources;
         self
     }
 }

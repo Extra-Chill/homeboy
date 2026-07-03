@@ -33,6 +33,7 @@ pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
         unsupported_reason: None,
         source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
         workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        secret_env_sources: Vec::new(),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         routing_policy: crate::command_contract::LabRoutingPolicy {
@@ -52,6 +53,7 @@ pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand 
         unsupported_reason: Some(reason),
         source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
         workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+        secret_env_sources: Vec::new(),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         routing_policy: crate::command_contract::LabRoutingPolicy::default(),

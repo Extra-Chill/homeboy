@@ -388,6 +388,51 @@ fn lab_route_contract_carries_command_specific_requirements() {
             .routing_policy
             .infer_source_path_tools
     );
+    assert_eq!(
+        route_contract.command.secret_env_sources,
+        &[LabSecretEnvSource::Trace]
+    );
+
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@cook",
+        "--verify",
+        "true",
+        "--no-finalize",
+        "--prompt",
+        "cook",
+    ]);
+    let route_contract = command
+        .lab_route_contract()
+        .expect("route contract resolves")
+        .expect("agent-task has a Lab route contract");
+    assert_eq!(
+        route_contract.command.secret_env_sources,
+        &[LabSecretEnvSource::AgentTask]
+    );
+
+    let command = parsed_command(&[
+        "homeboy",
+        "tunnel",
+        "service",
+        "start",
+        "preview",
+        "--cwd",
+        "/runner/workspaces/site",
+        "--command",
+        "npm run dev",
+    ]);
+    let route_contract = command
+        .lab_route_contract()
+        .expect("route contract resolves")
+        .expect("tunnel service start has a Lab route contract");
+    assert_eq!(
+        route_contract.command.secret_env_sources,
+        &[LabSecretEnvSource::Tunnel]
+    );
 }
 
 #[test]

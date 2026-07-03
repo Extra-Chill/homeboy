@@ -479,6 +479,7 @@ mod tests {
             unsupported_reason: None,
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            secret_env_sources: Vec::new(),
             required_extensions: vec!["browser".to_string()],
             required_capabilities: vec![RunnerWorkloadCapability {
                 name: "playwright".to_string(),
