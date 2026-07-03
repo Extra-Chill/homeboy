@@ -929,14 +929,6 @@ mod agent_task_checkout {
                 dispatch: args,
                 ..
             }) => {
-                let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                    || args
-                        .workspace
-                        .as_ref()
-                        .is_some_and(|workspace| !workspace.trim().is_empty());
-                if !has_workspace {
-                    return false;
-                }
                 let backend = args.backend.clone().or_else(default_backend);
                 backend.as_ref().is_some_and(|backend| {
                     provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
