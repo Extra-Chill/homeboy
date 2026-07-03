@@ -286,37 +286,60 @@ pub(super) fn resolve_controller_secret_env_for_command(
     required_names: &[String],
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    let mut resolved = HashMap::new();
-    let fallback_sources = provider_secret_sources_for_discovered_providers();
+    resolve_controller_secret_env_for_command_with_fallbacks(
+        secret_env,
+        required_names,
+        env,
+        &provider_secret_sources_for_discovered_providers(),
+    )
+}
+
+pub(super) fn resolve_controller_secret_env_for_command_with_fallbacks(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+    fallback_sources: &HashMap<String, crate::core::defaults::AgentTaskSecretSource>,
+) -> Result<HashMap<String, String>> {
+    let mut controller_secret_env = HashMap::new();
+    let mut controller_required_names = Vec::new();
     for name in required_names {
         if env.contains_key(name.as_str()) {
             continue;
         }
         let Some(source) = secret_env.get(name.as_str()) else {
+            controller_required_names.push(name.clone());
             continue;
         };
-        if source
-            .secret
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            resolved.extend(resolve_runner_secret_env(&HashMap::from([(
-                name.clone(),
-                source.clone(),
-            )]))?);
+        if is_runner_deferred_secret_env_ref(source) {
             continue;
         }
-
-        if fallback_sources.contains_key(name) {
-            if let Ok(values) = agent_task_secrets::resolve_secret_env_with_fallbacks(
-                std::slice::from_ref(name),
-                &fallback_sources,
-            ) {
-                resolved.extend(values);
-            }
-        }
+        controller_required_names.push(name.clone());
+        controller_secret_env.insert(name.clone(), source.clone());
     }
-    Ok(resolved)
+
+    resolve_runner_secret_env_for_command_with_fallbacks(
+        &controller_secret_env,
+        &controller_required_names,
+        env,
+        fallback_sources,
+    )
+}
+
+fn is_runner_deferred_secret_env_ref(source: &server::RunnerSecretEnvRef) -> bool {
+    let has_env = source
+        .env
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_file = source
+        .file
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_secret = source
+        .secret
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    (has_env || has_file) && !has_secret && has_env != has_file
 }
 
 #[cfg(test)]

@@ -161,6 +161,59 @@ fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
 }
 
 #[test]
+fn controller_secret_env_resolution_errors_when_required_name_has_no_ref() {
+    let err = resolve_controller_secret_env_for_command_with_fallbacks(
+        &HashMap::new(),
+        &["MISSING_CONTROLLER_SECRET".to_string()],
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect_err("missing controller secret ref should fail closed");
+
+    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+    assert_eq!(err.details["field"], "secret_env");
+    assert!(err.message.contains("MISSING_CONTROLLER_SECRET"));
+    assert!(err
+        .message
+        .contains("missing runner secret env ref for MISSING_CONTROLLER_SECRET"));
+}
+
+#[test]
+fn controller_secret_env_resolution_uses_fallback_sources() {
+    crate::test_support::with_isolated_home(|home| {
+        let provider_dir = home.path().join(".provider");
+        std::fs::create_dir_all(&provider_dir).expect("provider dir");
+        std::fs::write(
+            provider_dir.join("auth.json"),
+            serde_json::json!({
+                "tokens": {
+                    "access_token": "controller-access-secret"
+                }
+            })
+            .to_string(),
+        )
+        .expect("auth json");
+        let sources = HashMap::from([(
+            "PROVIDER_ACCESS_TOKEN".to_string(),
+            json_file_source("~/.provider/auth.json", "tokens.access_token"),
+        )]);
+
+        let resolved = resolve_controller_secret_env_for_command_with_fallbacks(
+            &HashMap::new(),
+            &["PROVIDER_ACCESS_TOKEN".to_string()],
+            &HashMap::new(),
+            &sources,
+        )
+        .expect("controller fallback source resolves");
+
+        assert_eq!(
+            resolved.get("PROVIDER_ACCESS_TOKEN"),
+            Some(&"controller-access-secret".to_string())
+        );
+    });
+}
+
+#[test]
 fn runner_secret_env_resolution_accepts_secret_env_plan_names() {
     std::env::set_var("HOMEBOY_PLAN_SECRET_ENV_TEST", "plan-secret-value");
     let plan = crate::core::secret_env_plan::SecretEnvPlan::from_secret_env_names([
