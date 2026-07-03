@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -7,6 +8,7 @@ use crate::command_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
 use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
+use crate::core::source_snapshot::SourceSnapshot;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
@@ -76,6 +78,10 @@ pub struct RunnerExecutionEnvelope {
     pub secret_env: Option<SecretEnvPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_materialization: Option<EnvMaterializationPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<RunnerExecutionDispatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunnerExecutionLifecycle>,
     #[serde(default)]
     pub lifecycle_policy: RunnerExecutionLifecyclePolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -90,6 +96,37 @@ pub struct RunnerExecutionEnvelope {
     pub result_refs: RunnerExecutionResultRefs,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionDispatch {
+    pub runner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub operation: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerExecutionLifecycle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_child_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cell_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -602,6 +639,8 @@ impl RunnerExecutionEnvelope {
             agent_task: None,
             secret_env: None,
             env_materialization: None,
+            dispatch: None,
+            lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations: Vec::new(),
             loop_policy: RunnerExecutionLoopPolicy::default(),
@@ -619,6 +658,16 @@ impl RunnerExecutionEnvelope {
 
     pub fn with_secret_env(mut self, secret_env: SecretEnvPlan) -> Self {
         self.secret_env = Some(secret_env);
+        self
+    }
+
+    pub fn with_dispatch(mut self, dispatch: RunnerExecutionDispatch) -> Self {
+        self.dispatch = Some(dispatch);
+        self
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: Option<RunnerExecutionLifecycle>) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 
@@ -674,6 +723,8 @@ impl RunnerExecutionEnvelope {
             agent_task: None,
             secret_env: None,
             env_materialization: None,
+            dispatch: None,
+            lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations: Vec::new(),
             loop_policy: RunnerExecutionLoopPolicy::default(),
@@ -708,6 +759,8 @@ impl RunnerExecutionEnvelope {
             agent_task: Some(request),
             secret_env: Some(secret_env),
             env_materialization: None,
+            dispatch: None,
+            lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations,
             loop_policy: RunnerExecutionLoopPolicy::default(),

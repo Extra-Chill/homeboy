@@ -24,6 +24,7 @@ mod tests {
 
     use super::persistence::recovered_terminal_from_result;
     use super::*;
+    use crate::core::secret_env_plan::SecretEnvPlan;
     use crate::core::source_snapshot::SourceSnapshot;
     use uuid::Uuid;
 
@@ -1497,6 +1498,54 @@ mod tests {
         assert_eq!(claim.job.id, job.id);
         assert_eq!(claim.request.command, vec!["homeboy", "test"]);
         assert_eq!(claim.request.project_id.as_deref(), Some("extrachill"));
+    }
+
+    #[test]
+    fn remote_runner_request_compiles_canonical_execution_envelope() {
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.command = vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()];
+        request
+            .env
+            .insert("PUBLIC_VALUE".to_string(), "visible".to_string());
+        request
+            .env
+            .insert("TOKEN_A".to_string(), "secret".to_string());
+        request.secret_env_names = vec!["TOKEN_A".to_string()];
+        request.secret_env_plan = SecretEnvPlan::from_secret_env_names(["TOKEN_B".to_string()]);
+        request.require_paths = vec!["/srv/extrachill/cache".to_string()];
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some("run-123".to_string()),
+            active_child_count: Some(2),
+            active_cell_count: Some(3),
+        });
+
+        let envelope = request.execution_envelope();
+        let dispatch = envelope.dispatch.expect("dispatch payload");
+
+        assert_eq!(envelope.source.kind, "remote_runner_job_request");
+        assert_eq!(dispatch.runner_id, "homeboy-lab");
+        assert_eq!(dispatch.project_id.as_deref(), Some("extrachill"));
+        assert_eq!(dispatch.command, vec!["sh", "-c", "printf ok"]);
+        assert_eq!(dispatch.cwd.as_deref(), Some("/srv/extrachill"));
+        assert_eq!(dispatch.env["PUBLIC_VALUE"], "visible");
+        assert_eq!(dispatch.require_paths, vec!["/srv/extrachill/cache"]);
+        assert!(dispatch.source_snapshot.is_some());
+        assert_eq!(
+            envelope
+                .secret_env
+                .expect("secret env plan")
+                .secret_env_names(),
+            vec!["TOKEN_A".to_string(), "TOKEN_B".to_string()]
+        );
+        let lifecycle = envelope.lifecycle.expect("lifecycle");
+        assert_eq!(lifecycle.source.as_deref(), Some("reverse-broker"));
+        assert_eq!(lifecycle.kind.as_deref(), Some("runner.exec"));
+        assert_eq!(lifecycle.durable_run_id.as_deref(), Some("run-123"));
+        assert_eq!(lifecycle.active_child_count, Some(2));
+        assert_eq!(lifecycle.active_cell_count, Some(3));
+        assert_eq!(envelope.result_refs.run_id.as_deref(), Some("run-123"));
     }
 
     fn remote_runner_request(runner_id: &str, project_id: Option<&str>) -> RemoteRunnerJobRequest {

@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::json;
 
-use crate::core::api_jobs::{RemoteRunnerJobRequest, RemoteRunnerJobResult};
+use crate::core::api_jobs::RemoteRunnerJobResult;
 use crate::core::error::{Error, Result};
+use crate::core::runner_execution_envelope::RunnerExecutionEnvelope;
 
 use super::super::execution::{exec_worker_local_until_cancelled_with_progress, RunnerExecOptions};
 use super::broker::{
@@ -264,6 +265,7 @@ fn run_once_output(
     // of mid-run (#5093). The local worker execution path runs this preflight
     // before handing the claimed job directly to the local runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
+    let execution_envelope = claim.request.execution_envelope();
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
     let finish = |result: RemoteRunnerJobResult| {
@@ -278,7 +280,7 @@ fn run_once_output(
     };
     let mut cancel_seen = false;
     let mut last_cancel_poll = Instant::now();
-    let claimed_run_id = claimed_job_run_id(&claim.request);
+    let claimed_run_id = claimed_job_run_id(&execution_envelope);
     let progress_client = client.clone();
     let progress_options = options.clone();
     let progress_job = claim.job.clone();
@@ -294,27 +296,11 @@ fn run_once_output(
     });
     let exec_result = exec_worker_local_until_cancelled_with_progress(
         &options.runner_id,
-        RunnerExecOptions {
-            cwd: claim.request.cwd.clone(),
-            project_id: claim.request.project_id.clone(),
-            allow_diagnostic_ssh: false,
-            command: claim.request.command.clone(),
-            env: claim.request.env.clone(),
-            secret_env_names: claim.request.secret_env_names.clone(),
-            secret_env_plan: Some(claim.request.secret_env_plan.clone()),
-            env_materialization: claim.request.env_materialization.clone(),
-            capture_patch: claim.request.capture_patch,
-            raw_exec: false,
-            source_snapshot: claim.request.source_snapshot.clone(),
+        runner_exec_options_from_envelope(
+            execution_envelope.clone(),
             capability_preflight,
-            required_extensions: claim.request.required_extensions(),
-            require_paths: claim.request.require_paths.clone(),
-            runner_workload: claim.request.runner_workload.clone(),
-            run_id: claimed_run_id,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+            claimed_run_id,
+        )?,
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {
                 return cancel_seen;
@@ -400,16 +386,54 @@ fn run_once_output(
     ))
 }
 
-fn claimed_job_run_id(request: &RemoteRunnerJobRequest) -> Option<String> {
-    request
+fn runner_exec_options_from_envelope(
+    envelope: RunnerExecutionEnvelope,
+    capability_preflight: Option<crate::core::runner::RunnerCapabilityPreflight>,
+    run_id: Option<String>,
+) -> Result<RunnerExecOptions> {
+    let dispatch = envelope.dispatch.ok_or_else(|| {
+        Error::internal_unexpected("runner execution envelope is missing dispatch payload")
+    })?;
+    let secret_env_plan = envelope.secret_env.unwrap_or_default();
+    let secret_env_names = secret_env_plan.secret_env_names();
+    let required_extensions = envelope
+        .runner_workload
+        .as_ref()
+        .map(|workload| workload.required_extensions.clone())
+        .unwrap_or_default();
+
+    Ok(RunnerExecOptions {
+        cwd: dispatch.cwd,
+        project_id: dispatch.project_id,
+        allow_diagnostic_ssh: false,
+        command: dispatch.command,
+        env: dispatch.env,
+        secret_env_names,
+        secret_env_plan: Some(secret_env_plan),
+        env_materialization: envelope.env_materialization,
+        capture_patch: envelope.mutation_policy.capture_patch,
+        raw_exec: false,
+        source_snapshot: dispatch.source_snapshot,
+        capability_preflight,
+        required_extensions,
+        require_paths: dispatch.require_paths,
+        runner_workload: envelope.runner_workload,
+        run_id,
+        detach_after_handoff: false,
+        mirror_evidence: true,
+        print_handoff: true,
+    })
+}
+
+fn claimed_job_run_id(envelope: &RunnerExecutionEnvelope) -> Option<String> {
+    envelope
         .lifecycle
         .as_ref()
         .and_then(|lifecycle| non_empty_run_id(lifecycle.durable_run_id.as_deref()))
         .or_else(|| {
-            request
+            envelope
                 .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("run_id"))
+                .get("run_id")
                 .and_then(|run_id| non_empty_run_id(run_id.as_str()))
         })
 }
