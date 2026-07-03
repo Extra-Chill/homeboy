@@ -796,11 +796,16 @@ fn runner_exec_homeboy_binaries(
     session: Option<&RunnerSession>,
 ) -> RunnerExecHomeboyBinaries {
     let controller_identity = crate::core::build_identity::current();
-    let configured_executable = runner
-        .settings
-        .homeboy_path
-        .clone()
-        .unwrap_or_else(|| "homeboy".to_string());
+    let configured_executable = match runner.kind {
+        RunnerKind::Local => Some(
+            runner
+                .settings
+                .homeboy_path
+                .clone()
+                .unwrap_or_else(|| "homeboy".to_string()),
+        ),
+        RunnerKind::Ssh => runner.settings.homeboy_path.clone(),
+    };
     RunnerExecHomeboyBinaries {
         controller_cli: RunnerExecHomeboyBinary {
             owner: "operator_command",
@@ -818,7 +823,7 @@ fn runner_exec_homeboy_binaries(
         },
         job_command_binary: RunnerExecHomeboyBinary {
             owner: "runner_config.settings.homeboy_path",
-            path: Some(configured_executable),
+            path: configured_executable,
             version: None,
             build_identity: None,
         },

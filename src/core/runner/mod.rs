@@ -245,6 +245,37 @@ impl From<ServerRunner> for RunnerSpec {
     }
 }
 
+pub(crate) fn remote_runner_homeboy_path<'a>(runner: &'a Runner, context: &str) -> Result<&'a str> {
+    match runner.kind {
+        RunnerKind::Local => Ok(runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")),
+        RunnerKind::Ssh => runner
+            .settings
+            .homeboy_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| missing_remote_homeboy_path_error(runner, context)),
+    }
+}
+
+fn missing_remote_homeboy_path_error(runner: &Runner, context: &str) -> Error {
+    Error::validation_invalid_argument(
+        "homeboy_path",
+        format!(
+            "{context} requires runner `{}` to configure runner.homeboy_path; refusing to use bare `homeboy` on a remote runner because PATH may select a stale binary",
+            runner.id
+        ),
+        Some(runner.id.clone()),
+        Some(vec![
+            format!(
+                "Configure an explicit remote Homeboy binary path for runner `{}` with `homeboy runner merge {}` or `homeboy runner refresh-homeboy {}`.",
+                runner.id, runner.id, runner.id
+            ),
+            "Use an absolute path to the runner-side Homeboy binary, then reconnect the runner daemon.".to_string(),
+        ]),
+    )
+}
+
 impl ConfigEntity for Runner {
     const ENTITY_TYPE: &'static str = "runner";
     const DIR_NAME: &'static str = "runners";
@@ -1008,6 +1039,50 @@ mod tests {
             Some("/usr/local/bin:/runner/bin")
         );
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
+    }
+
+    #[test]
+    fn remote_runner_homeboy_path_allows_local_bare_homeboy() {
+        let runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: RunnerPolicy::default(),
+        };
+
+        assert_eq!(
+            remote_runner_homeboy_path(&runner, "test").expect("local fallback"),
+            "homeboy"
+        );
+    }
+
+    #[test]
+    fn remote_runner_homeboy_path_requires_ssh_configuration() {
+        let runner = Runner {
+            id: "lab".to_string(),
+            kind: RunnerKind::Ssh,
+            server_id: Some("lab".to_string()),
+            workspace_root: Some("/srv/homeboy".to_string()),
+            settings: RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: RunnerPolicy::default(),
+        };
+
+        let err = remote_runner_homeboy_path(&runner, "Lab offload preflight")
+            .expect_err("ssh runner without homeboy_path rejects");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert_eq!(err.details["id"], Value::from("lab"));
+        assert_eq!(err.details["field"], Value::from("homeboy_path"));
+        assert!(err.message.contains("runner.homeboy_path"));
+        assert!(err.message.contains("bare `homeboy`"));
     }
 
     #[test]

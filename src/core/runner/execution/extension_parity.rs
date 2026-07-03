@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::super::remote_runner_homeboy_path;
 use super::{Runner, RunnerKind};
 
 pub(super) fn required_extensions_for_command(
@@ -99,7 +100,7 @@ fn validate_runner_extension(
     extension_id: &str,
     requested_setting_keys: &[String],
 ) -> Result<()> {
-    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy_path = remote_runner_homeboy_path(runner, "runner extension parity preflight")?;
     let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
 
     if output.success {

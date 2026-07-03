@@ -230,7 +230,7 @@ pub(crate) fn run_lab_offload_inner(
             plan,
             messages,
             &runner_workspace_root,
-            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
+            remote_runner_homeboy_path(&runner, "Lab offload preflight")?,
             &runner_status,
             overhead,
         );
@@ -304,7 +304,7 @@ pub(crate) fn run_lab_offload_inner(
         messages.push(warning);
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
-    let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
     let require_exact_runner_version = require_exact_runner_version(&runner.settings);
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
     plan = with_step(

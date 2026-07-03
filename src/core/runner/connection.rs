@@ -22,7 +22,7 @@ use super::session::{
     RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{broker_auth, broker_http};
-use super::{load, Runner, RunnerKind};
+use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 
@@ -44,7 +44,7 @@ struct CliEnvelope {
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
-    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
 
     let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
         return Ok(failed_connect(
@@ -261,7 +261,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let session = read_session(runner_id)?;
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
-    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
+    let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
@@ -477,17 +477,24 @@ fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
     connected: bool,
-) -> Option<RunnerStaleDaemonWarning> {
+) -> Result<Option<RunnerStaleDaemonWarning>> {
     if !connected || runner.kind != RunnerKind::Ssh {
-        return None;
+        return Ok(None);
     }
-    let session = session?;
+    let Some(session) = session else {
+        return Ok(None);
+    };
     if session.mode != RunnerTunnelMode::DirectSsh {
-        return None;
+        return Ok(None);
     }
-    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
-    let (_server_id, _server, client) = resolve_ssh_runner(runner).ok()??;
-    let current_identity = remote_homeboy_identity(&client, homeboy).ok()?;
+    let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+    let current_identity = match remote_homeboy_identity(&client, homeboy) {
+        Ok(identity) => identity,
+        Err(_) => return Ok(None),
+    };
     let current_version = current_identity.version.clone();
     let observed_session_version = session
         .local_url
@@ -517,9 +524,9 @@ fn stale_daemon_warning(
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
     {
-        return None;
+        return Ok(None);
     }
-    Some(
+    Ok(Some(
         RunnerStaleDaemonWarning::new(
             &runner.id,
             observed_session_version,
@@ -528,7 +535,7 @@ fn stale_daemon_warning(
             Some(current_identity.display),
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
-    )
+    ))
 }
 
 fn changed_runtime_paths(
@@ -622,7 +629,8 @@ fn disconnect_remote_daemon(
     else {
         return Ok(());
     };
-    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let homeboy =
+        remote_runner_homeboy_path(runner, "runner disconnect").map_err(|err| err.message)?;
     let output = client.execute(&remote_daemon_disconnect_command(
         homeboy,
         session.remote_daemon_pid,
