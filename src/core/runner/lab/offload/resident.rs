@@ -86,18 +86,7 @@ pub(crate) fn run_runner_resident_lab_offload(
             .build(),
     );
 
-    // Refuse to dispatch caller-derived argv to the runner if any argument still
-    // embeds the controller-local source path instead of the runner-resident
-    // workspace. This mirrors the path-translation preflight used by the
-    // patch-provider offload path before its remote dispatch (#5071).
     let source_path = lab_offload_source_path(request.normalized_args)?;
-    preflight_remote_argv_path_translation(
-        "Lab offload",
-        runner_id,
-        &command,
-        &source_path,
-        runner_workspace_root,
-    )?;
 
     if !request.read_only_polling {
         eprintln!(
@@ -158,6 +147,16 @@ pub(crate) fn run_runner_resident_lab_offload(
     secret_env_names.sort();
     secret_env_names.dedup();
     preflight_lab_secret_env_handoff(runner_id, None, &env, &secret_env_handoff)?;
+    let path_remaps =
+        path_remaps_from_workspace_mapping(&[], Some(&source_path), Some(runner_workspace_root));
+    preflight_lab_offload_remote_dispatch_paths(
+        runner_id,
+        &command,
+        &env,
+        &source_path,
+        runner_workspace_root,
+        &path_remaps,
+    )?;
 
     let (mirror_evidence, print_handoff) =
         runner_resident_exec_noise_policy(request.read_only_polling);
@@ -247,7 +246,7 @@ fn runner_resident_exec_noise_policy(read_only_polling: bool) -> (bool, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::runner_resident_exec_noise_policy;
+    use super::*;
 
     #[test]
     fn read_only_polling_skips_runner_exec_mirror_and_handoff_output() {
@@ -257,6 +256,45 @@ mod tests {
     #[test]
     fn runner_resident_execution_preserves_runner_exec_evidence() {
         assert_eq!(runner_resident_exec_noise_policy(false), (true, true));
+    }
+
+    #[test]
+    fn runner_resident_preflight_rejects_controller_local_path_env() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("homeboy");
+        let fixture_root = controller.path().join("fixtures");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root");
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+        let env = std::collections::HashMap::from([(
+            "FIXTURE_ROOT".to_string(),
+            fixture_root.display().to_string(),
+        )]);
+        let path_remaps = path_remaps_from_workspace_mapping(
+            &[],
+            Some(&source),
+            Some("/srv/homeboy/_lab_workspaces/homeboy"),
+        );
+
+        let err = preflight_lab_offload_remote_dispatch_paths(
+            "lab-resident",
+            &command,
+            &env,
+            &source,
+            "/srv/homeboy/_lab_workspaces/homeboy",
+            &path_remaps,
+        )
+        .expect_err("resident env with controller-local path must fail pre-dispatch");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("path-bearing remote surface"));
+        assert!(err.message.contains("lab-resident"));
+        assert!(err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| id.contains("env `FIXTURE_ROOT`")
+                && id.contains(&fixture_root.display().to_string())));
     }
 }
 
