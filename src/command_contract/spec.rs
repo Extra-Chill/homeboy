@@ -160,13 +160,6 @@ const fn command_spec_with_output_notes(
     }
 }
 
-const fn command_spec_without_docs(spec: CommandSpec) -> CommandSpec {
-    CommandSpec {
-        docs_slug: None,
-        ..spec
-    }
-}
-
 const fn lab_command_spec_with_output_notes(
     name: &'static str,
     json_family: CommandJsonFamily,
@@ -529,12 +522,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
     ),
-    command_spec_without_docs(
-        command_spec_with_output_notes(
-            "artifact-postprocess",
-            CommandJsonFamily::Workspace,
-            "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
-        ),
+    command_spec_with_output_notes(
+        "artifact-postprocess",
+        CommandJsonFamily::Workspace,
+        "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec_with_representative_argv(

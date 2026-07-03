@@ -11,6 +11,7 @@ fn command_surface_tracks_representative_live_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
+    assert!(surface.contains_path(&["artifact-postprocess"]));
     assert!(surface.contains_path(&["manifest"]));
     assert!(surface.contains_path(&["report"]));
     assert!(surface.contains_path(&["git", "status"]));
