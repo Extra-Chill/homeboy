@@ -1261,6 +1261,13 @@
       "description": "Optional sandbox working directory for the wordpress.phpunit process. Leave empty for the mounted component directory."
     },
     {
+      "id": "wp_codebox_phpunit_preload_files",
+      "label": "WP Codebox PHPUnit preload files",
+      "type": "array",
+      "default": [],
+      "description": "Absolute WP Codebox sandbox PHP files to require during managed wordpress.phpunit bootstrap. Use for runtime files that are mounted into the sandbox but are not component-root relative."
+    },
+    {
       "id": "wp_codebox_phpunit_mounts",
       "label": "WP Codebox PHPUnit mounts",
       "type": "array",

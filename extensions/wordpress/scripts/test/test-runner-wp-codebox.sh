@@ -770,6 +770,7 @@ WP_CODEBOX_PHPUNIT_MOUNTS_JSON="[]"
 WP_CODEBOX_PHPUNIT_TEST_ROOT=""
 WP_CODEBOX_PHPUNIT_CONFIG=""
 WP_CODEBOX_PHPUNIT_CWD=""
+WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON="[]"
 WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="null"
 WP_CODEBOX_WORDPRESS_VERSION=""
 WP_CODEBOX_MULTISITE=""
@@ -791,6 +792,9 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_phpunit_cwd // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHPUNIT_CWD="$extracted"
+
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_codebox_phpunit_preload_files // []' 2>/dev/null || echo "[]")
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
@@ -1149,9 +1153,12 @@ validate_wp_codebox_phpunit_recipe_profile() {
         --arg requestedCwd "$WP_CODEBOX_PHPUNIT_CWD" \
         --arg requestedTestRoot "$WP_CODEBOX_PHPUNIT_TEST_ROOT" \
         --arg requestedConfig "$WP_CODEBOX_PHPUNIT_CONFIG" \
+        --argjson requestedPreloadFiles "$WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON" \
         '
         def arg_present($args; $name; $value):
             ($value == "") or (($args // []) | index(($name + "=" + $value)) != null);
+        def json_arg_present($args; $name; $value):
+            ($value | length) == 0 or (($args // []) | index(($name + "=" + ($value | tojson))) != null);
         def mount_mode($mount): ($mount.mode // "readonly");
 
         . as $recipe
@@ -1166,7 +1173,8 @@ validate_wp_codebox_phpunit_recipe_profile() {
                 | "wp_codebox_phpunit_mounts entry missing from generated recipe inputs: " + (($mount.source // "") + " -> " + ($mount.target // "") + " (" + mount_mode($mount) + ")")),
             (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "cwd"; $requestedCwd) then empty else "wp_codebox_phpunit_cwd missing from generated wordpress.phpunit args: " + $requestedCwd end),
             (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "test-root"; $requestedTestRoot) then empty else "wp_codebox_phpunit_test_root missing from generated wordpress.phpunit args: " + $requestedTestRoot end),
-            (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "phpunit-xml"; $requestedConfig) then empty else "wp_codebox_phpunit_config missing from generated wordpress.phpunit args: " + $requestedConfig end)
+            (if $phpunitStep == null then empty elif arg_present($phpunitStep.args; "phpunit-xml"; $requestedConfig) then empty else "wp_codebox_phpunit_config missing from generated wordpress.phpunit args: " + $requestedConfig end),
+            (if $phpunitStep == null then empty elif json_arg_present($phpunitStep.args; "preload-files-json"; $requestedPreloadFiles) then empty else "wp_codebox_phpunit_preload_files missing from generated wordpress.phpunit args" end)
         ] | map(select(. != null and . != "")) | .[]
         ' "$RECIPE_FILE" 2>&1) || {
         printf '%s\n' "$validation_output"
@@ -1192,6 +1200,7 @@ jq -n \
     --argjson env "$PHPUNIT_ENV_JSON" \
     --argjson defines "$WP_CONFIG_DEFINES_JSON" \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
+    --argjson preloadFiles "$WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON" \
     --arg bootstrapMode "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" \
     --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
     --arg phpunitTestRoot "$WP_CODEBOX_PHPUNIT_TEST_ROOT" \
@@ -1210,6 +1219,7 @@ jq -n \
         env: $env,
         wpConfigDefines: $defines,
         bootstrapFiles: $bootstrapFiles,
+        preloadFiles: $preloadFiles,
         bootstrapMode: $bootstrapMode,
         projectBootstrap: $projectBootstrap,
         autoloadFile: "/wp-codebox-vendor/autoload.php",
