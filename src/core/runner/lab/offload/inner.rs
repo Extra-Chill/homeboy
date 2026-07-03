@@ -936,21 +936,23 @@ pub(crate) fn run_lab_offload_inner(
     // Parsing/applying the remote command output (patch extraction) is post-
     // workload overhead, not workload time.
     let output_parse_started = std::time::Instant::now();
+    let mut applied_mutation_files = Vec::new();
     if request.capture_patch && exit_code == 0 {
         let apply_output = apply_lab_offload_patch(&exec_output)?;
-        if apply_output.is_none() {
+        let Some(apply_output) = apply_output else {
             return Err(missing_mutation_patch_error(
                 request.normalized_args,
                 request.mutation_flag,
                 &exec_output,
             ));
-        }
-        plan = with_lab_apply_patch_step(plan, apply_output);
+        };
+        applied_mutation_files = apply_output.result.modified_files.clone();
+        plan = with_lab_apply_patch_step(plan, Some(apply_output));
     }
     overhead.record(LabOffloadPhase::OutputParse, output_parse_started.elapsed());
     // Importing the structured-output artifact back from the runner is overhead.
     let artifact_import_started = std::time::Instant::now();
-    let output_file_content = match remote_output_file.as_deref() {
+    let mut output_file_content = match remote_output_file.as_deref() {
         Some(path) => Some(download_lab_output_file(runner_id, path)?),
         None => None,
     };
@@ -970,9 +972,17 @@ pub(crate) fn run_lab_offload_inner(
         &exec_output,
         lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
     )?;
+    let mut stdout = exec_output.stdout.clone();
+    if !applied_mutation_files.is_empty() {
+        stdout = reconcile_lab_mutation_output(&stdout, &applied_mutation_files);
+        if let Some(content) = output_file_content.as_mut() {
+            *content = reconcile_lab_mutation_output(content, &applied_mutation_files);
+        }
+    }
+
     mirror_agent_task_run_plan_lifecycle(
         request.normalized_args,
-        &exec_output.stdout,
+        &stdout,
         output_file_content.as_deref(),
         exec_output.job_events.as_deref(),
     )?;
@@ -1063,11 +1073,104 @@ pub(crate) fn run_lab_offload_inner(
     materialized_workspace.set_success(exit_code == 0);
     Ok(LabOffloadOutcome::Offloaded {
         plan,
-        stdout: exec_output.stdout,
+        stdout,
         stderr,
         exit_code,
         output_file_content,
     })
+}
+
+fn reconcile_lab_mutation_output(output: &str, changed_files: &[String]) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return output.to_string();
+    };
+
+    if !rewrite_refactor_sources_result(&mut value, changed_files) {
+        return output.to_string();
+    }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| output.to_string())
+}
+
+fn rewrite_refactor_sources_result(
+    value: &mut serde_json::Value,
+    changed_files: &[String],
+) -> bool {
+    let mut rewritten = false;
+
+    if value
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| command == "refactor.sources")
+    {
+        rewrite_refactor_sources_object(value, changed_files);
+        rewritten = true;
+    }
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for child in map.values_mut() {
+                rewritten |= rewrite_refactor_sources_result(child, changed_files);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                rewritten |= rewrite_refactor_sources_result(child, changed_files);
+            }
+        }
+        _ => {}
+    }
+
+    rewritten
+}
+
+fn rewrite_refactor_sources_object(value: &mut serde_json::Value, changed_files: &[String]) {
+    let files_value = serde_json::to_value(changed_files).unwrap_or_else(|_| serde_json::json!([]));
+    let file_count = serde_json::json!(changed_files.len());
+
+    value["applied"] = serde_json::json!(true);
+    value["dry_run"] = serde_json::json!(false);
+    value["files_modified"] = file_count.clone();
+    value["changed_files"] = files_value.clone();
+
+    if let Some(totals) = value.get_mut("source_totals") {
+        totals["stages_with_edits"] = serde_json::json!(1);
+        totals["total_files_selected"] = file_count.clone();
+        if totals
+            .get("total_edits")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            == 0
+        {
+            totals["total_edits"] = file_count.clone();
+        }
+    }
+
+    if let Some(stages) = value
+        .get_mut("stages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for stage in stages {
+            if stage
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|stage| stage == "lint")
+            {
+                stage["applied"] = serde_json::json!(true);
+                stage["files_modified"] = file_count.clone();
+                stage["changed_files"] = files_value.clone();
+            }
+        }
+    }
+
+    if let Some(warnings) = value
+        .get_mut("warnings")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        warnings.retain(|warning| {
+            warning.as_str() != Some("No automated fixes accumulated across audit/lint/test")
+        });
+    }
 }
 
 pub(crate) fn ensure_lab_offload_streams_not_truncated(
@@ -1152,6 +1255,76 @@ fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
         value,
         "fuzz_results" | "fuzz_result_envelope" | "result_envelope"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconciles_refactor_sources_output_after_lab_patch_apply() {
+        let output = serde_json::json!({
+            "success": true,
+            "data": {
+                "command": "refactor.sources",
+                "dry_run": false,
+                "applied": false,
+                "files_modified": 0,
+                "changed_files": [],
+                "source_totals": {
+                    "stages_with_edits": 0,
+                    "total_edits": 0,
+                    "total_files_selected": 0
+                },
+                "stages": [
+                    {
+                        "stage": "lint",
+                        "applied": false,
+                        "files_modified": 0,
+                        "changed_files": []
+                    }
+                ],
+                "warnings": [
+                    "Deterministic merge order: lint",
+                    "No automated fixes accumulated across audit/lint/test"
+                ]
+            }
+        })
+        .to_string();
+
+        let rewritten = reconcile_lab_mutation_output(
+            &output,
+            &["inc/Demo.php".to_string(), "tests/demo.php".to_string()],
+        );
+        let value: serde_json::Value = serde_json::from_str(&rewritten).expect("json output");
+        let data = &value["data"];
+
+        assert_eq!(data["applied"], serde_json::json!(true));
+        assert_eq!(data["files_modified"], serde_json::json!(2));
+        assert_eq!(
+            data["changed_files"],
+            serde_json::json!(["inc/Demo.php", "tests/demo.php"])
+        );
+        assert_eq!(data["source_totals"]["stages_with_edits"], 1);
+        assert_eq!(data["stages"][0]["applied"], serde_json::json!(true));
+        assert_eq!(data["stages"][0]["files_modified"], serde_json::json!(2));
+        assert!(!data["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning.as_str()
+                == Some("No automated fixes accumulated across audit/lint/test")));
+    }
+
+    #[test]
+    fn leaves_non_refactor_json_output_unchanged() {
+        let output = "{\"success\":true,\"data\":{\"command\":\"lint\"}}";
+
+        assert_eq!(
+            reconcile_lab_mutation_output(output, &["src/lib.rs".to_string()]),
+            output
+        );
+    }
 }
 
 pub(crate) fn lab_offload_structured_result_available(
