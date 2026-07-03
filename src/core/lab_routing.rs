@@ -161,6 +161,8 @@ pub struct LabRouteOutput {
 pub enum LabRouteOutcome {
     /// The command should continue executing locally on the controller.
     RunLocal,
+    /// The command was handed to a runner and is still in flight.
+    InFlight(LabRouteOutput),
     /// The command was offloaded to a runner; render the captured output.
     Offloaded(LabRouteOutput),
 }
@@ -177,7 +179,15 @@ pub fn dispatch_lab_offload(
     runner_id: Option<&str>,
     observer: Box<dyn LabDispatchObserver>,
 ) -> Result<LabRouteOutcome> {
-    match route_lab_offload(request) {
+    lab_offload_outcome_to_route_outcome(route_lab_offload(request), runner_id, observer)
+}
+
+fn lab_offload_outcome_to_route_outcome(
+    outcome: Result<runners::LabOffloadOutcome>,
+    runner_id: Option<&str>,
+    observer: Box<dyn LabDispatchObserver>,
+) -> Result<LabRouteOutcome> {
+    match outcome {
         Err(err) => {
             let _ = observer.finish(
                 RunStatus::Error,
@@ -243,7 +253,84 @@ pub fn dispatch_lab_offload(
                 output_file_content,
             }))
         }
+        Ok(runners::LabOffloadOutcome::InFlight {
+            stdout,
+            stderr,
+            exit_code,
+            output_file_content,
+            ..
+        }) => {
+            let retrieval = observer.run_id().map(PersistedRunRetrieval::for_run);
+            let stdout = stdout_with_in_flight_status(&stdout, retrieval.as_ref());
+            let output_file_content = output_file_content
+                .as_deref()
+                .map(|content| stdout_with_in_flight_status(content, retrieval.as_ref()))
+                .or_else(|| Some(stdout.clone()));
+            Ok(LabRouteOutcome::InFlight(LabRouteOutput {
+                stdout,
+                stderr,
+                exit_code,
+                output_file_content,
+            }))
+        }
     }
+}
+
+fn stdout_with_in_flight_status(stdout: &str, retrieval: Option<&PersistedRunRetrieval>) -> String {
+    let mut value = serde_json::from_str::<serde_json::Value>(stdout).unwrap_or_else(|_| {
+        json!({
+            "status": "running",
+            "output": stdout,
+        })
+    });
+    let run_id = retrieval
+        .map(|retrieval| retrieval.run_id.clone())
+        .or_else(|| metadata_path_string(&value, &["identity", "run_id"]))
+        .or_else(|| metadata_path_string(&value, &["persisted_run_id"]))
+        .or_else(|| metadata_path_string(&value, &["durable_run_id"]));
+    let runner_id = metadata_path_string(&value, &["identity", "runner_id"])
+        .or_else(|| metadata_path_string(&value, &["runner_id"]));
+    let runner_job_id = metadata_path_string(&value, &["identity", "runner_job_id"])
+        .or_else(|| metadata_path_string(&value, &["job_id"]));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String("running".to_string()),
+        );
+        let mut in_flight = json!({
+            "status": "running",
+            "run_id": run_id,
+            "runner_id": runner_id,
+            "runner_job_id": runner_job_id,
+        });
+        if let Some(in_flight_object) = in_flight.as_object_mut() {
+            if let Some(retrieval) = retrieval {
+                in_flight_object.insert("homeboy_persisted_run".to_string(), retrieval.to_json());
+                in_flight_object.insert(
+                    "watch_command".to_string(),
+                    serde_json::Value::String(format!("homeboy runs watch {}", retrieval.run_id)),
+                );
+            }
+            if let (Some(runner_id), Some(runner_job_id)) = (runner_id, runner_job_id) {
+                in_flight_object.insert(
+                    "runner_job_watch_command".to_string(),
+                    serde_json::Value::String(format!(
+                        "homeboy runner job logs {runner_id} {runner_job_id} --follow"
+                    )),
+                );
+            }
+        }
+        object.insert("homeboy_in_flight".to_string(), in_flight);
+        if let Some(retrieval) = retrieval {
+            object.insert("homeboy_persisted_run".to_string(), retrieval.to_json());
+        }
+    }
+    serde_json::to_string_pretty(&value)
+        .map(|mut rendered| {
+            rendered.push('\n');
+            rendered
+        })
+        .unwrap_or_else(|_| stdout.to_string())
 }
 
 fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
@@ -522,6 +609,7 @@ mod tests {
         CommandPortability, CommandSourceMaterialization, CommandSourcePolicy,
         CommandWorkspacePolicy,
     };
+    use crate::core::plan::{HomeboyPlan, PlanKind};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     struct EnvGuard {
@@ -756,6 +844,102 @@ mod tests {
             json["homeboy_persisted_run"]["id_scope"],
             "persisted_homeboy_run"
         );
+    }
+
+    #[test]
+    fn detached_handoff_maps_to_in_flight_output_and_leaves_run_running() {
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observer = Box::new(RecordingObserver {
+            run_id: Some("dispatch-run-7448".to_string()),
+            finished: finished.clone(),
+        });
+        let stdout = r#"{
+            "schema":"homeboy/runner-exec-handoff/v1",
+            "status":"running",
+            "identity":{
+                "runner_id":"homeboy-lab",
+                "runner_job_id":"job-7448",
+                "run_id":"agent-task-7448"
+            },
+            "job_id":"job-7448",
+            "follow_commands":{
+                "job_logs":"homeboy runner job logs homeboy-lab job-7448 --follow"
+            }
+        }"#;
+
+        let outcome = lab_offload_outcome_to_route_outcome(
+            Ok(runners::LabOffloadOutcome::InFlight {
+                plan: test_plan(),
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                output_file_content: Some(stdout.to_string()),
+            }),
+            Some("homeboy-lab"),
+            observer,
+        )
+        .expect("route outcome");
+
+        let LabRouteOutcome::InFlight(output) = outcome else {
+            panic!("expected in-flight outcome");
+        };
+        assert_eq!(output.exit_code, 0);
+        let json: serde_json::Value = serde_json::from_str(&output.stdout).expect("json stdout");
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["homeboy_in_flight"]["status"], "running");
+        assert_eq!(
+            json["homeboy_in_flight"]["homeboy_persisted_run"]["persisted_run_id"],
+            "dispatch-run-7448"
+        );
+        assert_eq!(
+            json["homeboy_in_flight"]["watch_command"],
+            "homeboy runs watch dispatch-run-7448"
+        );
+        assert_eq!(
+            json["homeboy_in_flight"]["runner_job_watch_command"],
+            "homeboy runner job logs homeboy-lab job-7448 --follow"
+        );
+        assert!(finished.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn terminal_offload_maps_to_terminal_output_and_finishes_run() {
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observer = Box::new(RecordingObserver {
+            run_id: Some("dispatch-run-terminal".to_string()),
+            finished: finished.clone(),
+        });
+
+        let outcome = lab_offload_outcome_to_route_outcome(
+            Ok(runners::LabOffloadOutcome::Offloaded {
+                plan: test_plan(),
+                stdout: r#"{"success":true}"#.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                output_file_content: None,
+            }),
+            Some("homeboy-lab"),
+            observer,
+        )
+        .expect("route outcome");
+
+        let LabRouteOutcome::Offloaded(output) = outcome else {
+            panic!("expected terminal offload outcome");
+        };
+        assert_eq!(output.exit_code, 0);
+        let json: serde_json::Value = serde_json::from_str(&output.stdout).expect("json stdout");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "dispatch-run-terminal"
+        );
+        let recorded = finished.lock().unwrap().clone();
+        let (status, metadata) = recorded.expect("observer finished");
+        assert_eq!(status, RunStatus::Pass);
+        assert_eq!(metadata["lab_dispatch"]["status"], "offloaded_complete");
+    }
+
+    fn test_plan() -> HomeboyPlan {
+        HomeboyPlan::for_description(PlanKind::LabOffload, "test lab offload")
     }
 
     #[test]

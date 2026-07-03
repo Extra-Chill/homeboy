@@ -939,7 +939,7 @@ pub(crate) fn run_lab_offload_inner(
             stderr.push('\n');
         }
         stderr.push_str(&exec_output.stderr);
-        return Ok(LabOffloadOutcome::Offloaded {
+        return Ok(LabOffloadOutcome::InFlight {
             plan,
             stdout: exec_output.stdout.clone(),
             stderr,

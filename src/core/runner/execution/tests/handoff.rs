@@ -498,7 +498,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.schema,
             crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
         );
-        assert_eq!(envelope.status, "handoff_complete");
+        assert_eq!(envelope.status, "running");
         assert_eq!(envelope.execution_location, "runner:lab");
         assert_eq!(envelope.identity.runner_id, "lab");
         assert_eq!(envelope.identity.runner_job_id, job_id);
@@ -548,7 +548,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.run_location_index.follow_commands.job_logs,
             format!("homeboy runner job logs lab {job_id} --follow")
         );
-        assert_eq!(envelope.evidence.status, "handoff_complete");
+        assert_eq!(envelope.evidence.status, "running");
         assert_eq!(envelope.evidence.runner_id, "lab");
         assert_eq!(envelope.evidence.runner_job_id, job_id);
         assert_eq!(
@@ -586,7 +586,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.mirror_run_id.as_deref(),
             Some("agent-task-run-6454")
         );
-        assert_eq!(json["status"], "handoff_complete");
+        assert_eq!(json["status"], "running");
         assert_eq!(json["identity"]["runner_id"], "lab");
         assert_eq!(json["identity"]["runner_job_id"], job_id);
         assert_eq!(json["identity"]["persisted_run_id"], "agent-task-run-6454");
@@ -656,7 +656,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
         json["schema"],
         crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
     );
-    assert_eq!(json["status"], "handoff_complete");
+    assert_eq!(json["status"], "running");
     assert_eq!(json["execution_location"], "runner:lab");
     assert_eq!(json["identity"]["runner_id"], "lab");
     assert_eq!(json["identity"]["runner_job_id"], "job-123");
