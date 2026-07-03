@@ -395,6 +395,45 @@ mod tests {
     }
 
     #[test]
+    fn live_owned_child_run_remains_running_when_parent_reports_no_active_jobs() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "test",
+                    "wpcom",
+                    "homeboy-lab",
+                    serde_json::json!({
+                        "parent_runner_job_id": "56ee30b8-96b1-4206-a22c-a139544da147",
+                        "runner_id": "homeboy-lab",
+                    }),
+                ))
+                .expect("child run");
+
+            // Reproduces issue #7389's mismatch without a daemon fixture: the
+            // parent control plane has no active job, but the child run is still
+            // owned by a live process, so owner-PID reconciliation cannot act.
+            let parent_active_job_count = 0;
+            let reconciled = reconcile_orphaned_running_runs(&store, 1000, false, |pid| {
+                pid == std::process::id()
+            })
+            .expect("reconcile");
+            let unchanged = store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists");
+
+            assert_eq!(parent_active_job_count, 0);
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, "running");
+            assert!(unchanged.finished_at.is_none());
+            assert_eq!(run_owner_pid(&unchanged), Some(std::process::id()));
+            assert!(running_status_note(&unchanged).is_none());
+        });
+    }
+
+    #[test]
     fn running_summary_flags_unverifiable_and_dead_owner_records() {
         let base = RunRecord {
             id: "run-1".to_string(),
