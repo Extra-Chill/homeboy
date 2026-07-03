@@ -769,7 +769,7 @@ fn detect_unused_params(functions: &[FunctionInfo], grammar: &Grammar) -> Vec<Un
         }
 
         // Parse parameter names with their (optional) type hints
-        let params = parse_params(&f.params);
+        let params = parse_params(&f.params, &grammar.fingerprint.variable_prefixes);
 
         // Extract body-only text (after first opening brace)
         let body_after_brace = if let Some(pos) = f.body.find('{') {
@@ -816,16 +816,15 @@ fn detect_unused_params(functions: &[FunctionInfo], grammar: &Grammar) -> Vec<Un
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Param {
     name: String,
-    /// Type hint as it appeared in source, if any. For PHP, leading backslashes
-    /// and nullable markers are preserved.
-    /// For Rust, this is the type after the colon (e.g. `&str`).
+    /// Type hint as it appeared in source, if any.
     type_hint: Option<String>,
 }
 
 /// Parse parameters from a params string into (name, type_hint) pairs.
 ///
-/// Supports both Rust (`name: Type`) and PHP (`Type $name`) signatures.
-fn parse_params(params: &str) -> Vec<Param> {
+/// Supports Rust-style (`name: Type`) signatures plus grammar-declared variable
+/// prefixes for languages whose parameter names carry a sigil.
+fn parse_params(params: &str, variable_prefixes: &[String]) -> Vec<Param> {
     let mut out = Vec::new();
     for chunk in split_top_level_commas(params) {
         let chunk = chunk.trim();
@@ -853,22 +852,37 @@ fn parse_params(params: &str) -> Vec<Param> {
                 name: name.to_string(),
                 type_hint,
             });
-        } else if chunk.contains('$') {
-            // PHP-style: "TypeHint $name" or "$name" or "array $input" or "?\WP_Post $post"
-            static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-                regex::Regex::new(r"^([?]?[\\\w|&]+)?\s*\$(\w+)").unwrap()
-            });
-            if let Some(caps) = RE.captures(chunk) {
-                let type_hint = caps
-                    .get(1)
-                    .map(|m| m.as_str().trim().to_string())
-                    .filter(|s| !s.is_empty());
-                let name = caps[2].to_string();
-                out.push(Param { name, type_hint });
+        } else if let Some(prefix) = variable_prefixes
+            .iter()
+            .filter(|prefix| !prefix.is_empty())
+            .find(|prefix| chunk.contains(prefix.as_str()))
+        {
+            if let Some((before_name, name)) = parse_prefixed_param(chunk, prefix) {
+                out.push(Param {
+                    name,
+                    type_hint: before_name,
+                });
             }
         }
     }
     out
+}
+
+fn parse_prefixed_param(chunk: &str, prefix: &str) -> Option<(Option<String>, String)> {
+    let prefix_pos = chunk.find(prefix)?;
+    let before_name = chunk[..prefix_pos].trim();
+    let after_prefix = &chunk[prefix_pos + prefix.len()..];
+    let name = after_prefix
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    if name.is_empty() {
+        return None;
+    }
+    Some((
+        (!before_name.is_empty()).then(|| before_name.to_string()),
+        name,
+    ))
 }
 
 /// Split a parameter list on commas that are not inside nested types.
@@ -922,7 +936,10 @@ fn top_level_param_colon(param: &str) -> Option<usize> {
 /// that only care about names.
 #[cfg(test)]
 fn parse_param_names(params: &str) -> Vec<String> {
-    parse_params(params).into_iter().map(|p| p.name).collect()
+    parse_params(params, &[])
+        .into_iter()
+        .map(|p| p.name)
+        .collect()
 }
 
 /// Whether a method name corresponds to a framework/contract callback where
@@ -1295,7 +1312,12 @@ fn extract_call_sites(content: &str, grammar: &Grammar) -> Vec<CallSite> {
     let compiled: Vec<(Option<regex::Regex>, bool)> = cfg
         .patterns
         .iter()
-        .map(|pattern| (grammar::cached_regex(&pattern.regex), pattern.apply_skip_calls))
+        .map(|pattern| {
+            (
+                grammar::cached_regex(&pattern.regex),
+                pattern.apply_skip_calls,
+            )
+        })
         .collect();
 
     let mut sites = Vec::new();

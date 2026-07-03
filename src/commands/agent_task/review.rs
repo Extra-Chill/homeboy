@@ -374,10 +374,8 @@ fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Val
 /// extension-provider selector apart from the nested AI runtime provider config
 /// without reading runtime internals (#6122).
 ///
-/// The confusion this prevents: `--dispatch-selector codex` fails because
-/// `codex` is an AI runtime, not a Homeboy executor provider id. The correct
-/// selector is an executor provider id (e.g. `wordpress.sandbox-agent-task-executor`),
-/// while `codex` belongs in `--dispatch-provider-config` as the nested provider.
+/// The confusion this prevents: `--dispatch-selector codex` fails when `codex`
+/// is a nested runtime/provider config value, not a Homeboy executor provider id.
 fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
     let selectable_ids: Vec<String> = providers
         .iter()
@@ -386,21 +384,13 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
 
     // Surface a worked example using a real registered executor provider id
     // when one is available, so the operator can copy a known-good selector
-    // instead of guessing. Prefer a sandbox-style provider (the case the
-    // issue called out) but fall back to the first provider, then to a
-    // documented literal when no providers are registered here.
+    // instead of guessing.
     let example_selector = providers
         .iter()
-        .find(|provider| {
-            provider.id.contains("sandbox")
-                || provider
-                    .extension_id
-                    .as_deref()
-                    .is_some_and(|id| id.contains("sandbox"))
-        })
+        .find(|provider| provider.default_backend)
         .or_else(|| providers.first())
         .map(|provider| provider.id.clone())
-        .unwrap_or_else(|| "wordpress.sandbox-agent-task-executor".to_string());
+        .unwrap_or_else(|| "sample.executor-provider".to_string());
 
     serde_json::json!({
         "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which AI runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass the AI runtime (codex, opencode, claude-code, ...) inside --dispatch-provider-config — never the other way around.",
@@ -421,7 +411,7 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
         ],
         "common_mistake": "Passing an AI runtime name (codex, opencode, claude-code) to --dispatch-selector. That selects the executor, not the model, so it fails with 'no extension agent-task provider ... matched selector'. Put the AI runtime in --dispatch-provider-config instead.",
         "example": {
-            "description": "Run a task with a Sandbox-style executor (selector) driving the Codex AI runtime (nested provider config).",
+            "description": "Run a task with a selected executor provider driving a nested AI runtime/provider config.",
             "command": format!(
                 "homeboy agent-task cook --dispatch-selector {example_selector} --dispatch-provider-config '{{\"provider\":\"codex\"}}' --prompt @task.md"
             ),
@@ -757,9 +747,9 @@ mod tests {
     #[test]
     fn dispatch_config_layers_distinguish_selector_from_provider_config() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "wordpress.sandbox-agent-task-executor",
-            "backend": "wordpress",
-            "extension_id": "wordpress.sandbox",
+            "id": "sample.executor-provider",
+            "backend": "sample",
+            "extension_id": "sample.extension",
             "runtime_id": "sandbox-runtime",
             "provider_defaults": {
                 "codex": { "secret_env": ["CODEX_TOKEN"] }
@@ -784,7 +774,7 @@ mod tests {
         // The selector layer surfaces the real registered provider id, not a model.
         assert_eq!(
             layers["layers"][0]["registered_provider_ids"],
-            serde_json::json!(["wordpress.sandbox-agent-task-executor"])
+            serde_json::json!(["sample.executor-provider"])
         );
 
         // The worked example uses the discovered sandbox selector and puts the
@@ -792,7 +782,7 @@ mod tests {
         let command = layers["example"]["command"]
             .as_str()
             .expect("example command");
-        assert!(command.contains("--dispatch-selector wordpress.sandbox-agent-task-executor"));
+        assert!(command.contains("--dispatch-selector sample.executor-provider"));
         assert!(command.contains("--dispatch-provider-config"));
         assert!(command.contains("codex"));
 
@@ -808,8 +798,8 @@ mod tests {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "opencode.agent-task-executor",
             "backend": "opencode",
-            "extension_id": "wp-codebox",
-            "runtime_package_source": "wp-codebox",
+            "extension_id": "sample-runtime",
+            "runtime_package_source": "sample-runtime",
             "runtime_id": "opencode-local-runtime",
             "provider_defaults": {
                 "openai": {},
@@ -826,7 +816,7 @@ mod tests {
         );
         assert_eq!(catalog[0]["executor_backend"], "opencode");
         assert_eq!(catalog[0]["runtime_id"], "opencode-local-runtime");
-        assert_eq!(catalog[0]["runtime_package_source"], "wp-codebox");
+        assert_eq!(catalog[0]["runtime_package_source"], "sample-runtime");
         assert_eq!(
             catalog[0]["ai_provider_ids"],
             serde_json::json!(["anthropic", "openai"])
@@ -840,7 +830,7 @@ mod tests {
         let command = layers["example"]["command"]
             .as_str()
             .expect("example command");
-        assert!(command.contains("--dispatch-selector wordpress.sandbox-agent-task-executor"));
+        assert!(command.contains("--dispatch-selector sample.executor-provider"));
         assert_eq!(
             layers["layers"][0]["registered_provider_ids"],
             serde_json::json!([])

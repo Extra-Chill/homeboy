@@ -131,7 +131,7 @@ pub struct AgentTaskFanoutInputArgs {
     pub backend: Option<String>,
 
     /// Default extension-provider selector for cooks without one: a Homeboy
-    /// executor provider id (e.g. `wordpress.sandbox-agent-task-executor`), NOT
+    /// executor provider id (e.g. `sample.executor-provider`), NOT
     /// an AI runtime name (codex, opencode, claude-code). Set the AI runtime via
     /// --provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
@@ -560,7 +560,7 @@ pub struct AgentTaskLoopDefineArgs {
     pub dispatch_backend: Option<String>,
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
-    /// `wordpress.sandbox-agent-task-executor`) that runs loop-spawned dispatch
+    /// `sample.executor-provider`) that runs loop-spawned dispatch
     /// actions when the action omits one. This is NOT a model or AI runtime name
     /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
     /// Run `homeboy agent-task providers` for valid ids.
@@ -603,7 +603,7 @@ pub struct AgentTaskLoopResumeArgs {
     pub dispatch_backend: Option<String>,
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
-    /// `wordpress.sandbox-agent-task-executor`) that runs loop-spawned dispatch
+    /// `sample.executor-provider`) that runs loop-spawned dispatch
     /// actions when the action omits one. This is NOT a model or AI runtime name
     /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
     /// Run `homeboy agent-task providers` for valid ids.

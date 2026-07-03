@@ -243,16 +243,6 @@ fn cluster_key(failure: &TestFailure) -> String {
         }
     }
 
-    // Pattern: WP_Error with specific error code
-    if msg.contains("WP_Error") || msg.contains("wp_error") {
-        if let Some(code) = extract_between(msg, "code: ", ")") {
-            return format!("wp_error::{}", code);
-        }
-        if let Some(code) = extract_between(msg, "'", "'") {
-            return format!("wp_error::{}", code);
-        }
-    }
-
     // Pattern: "Argument #N ... must be of type X, Y given"
     if msg.contains("must be of type") {
         let key = normalize_for_key(msg);
@@ -312,12 +302,8 @@ fn categorize(error_type: &str, message: &str) -> FailureCategory {
         return FailureCategory::ReturnTypeChange;
     }
 
-    // Error code changes (WP_Error, HTTP status, etc.)
-    if message.contains("error code")
-        || message.contains("WP_Error")
-        || message.contains("rest_forbidden")
-        || message.contains("ability_invalid")
-    {
+    // Error code changes.
+    if message.contains("error code") {
         return FailureCategory::ErrorCodeChange;
     }
 
@@ -385,7 +371,10 @@ fn suggest_fix(category: &FailureCategory, message: &str) -> Option<String> {
         }
         FailureCategory::FatalError => {
             if message.contains("Cannot redeclare") {
-                Some("Function is being included twice — check bootstrap and autoloading".to_string())
+                Some(
+                    "Function is being included twice — check bootstrap and autoloading"
+                        .to_string(),
+                )
             } else {
                 Some("Fatal error in test bootstrap — fix before other tests can run".to_string())
             }
@@ -393,12 +382,12 @@ fn suggest_fix(category: &FailureCategory, message: &str) -> Option<String> {
         FailureCategory::ErrorCodeChange => {
             Some("Error codes changed — update assertion strings to match new API".to_string())
         }
-        FailureCategory::ReturnTypeChange => {
-            Some("Return type changed — update assertions (e.g., assertIsArray → assertInstanceOf(WP_Error::class))".to_string())
-        }
-        FailureCategory::MockError => {
-            Some("Mock configuration broken — the mocked class/method signature changed".to_string())
-        }
+        FailureCategory::ReturnTypeChange => Some(
+            "Return type changed — update assertions to match the new return contract".to_string(),
+        ),
+        FailureCategory::MockError => Some(
+            "Mock configuration broken — the mocked class/method signature changed".to_string(),
+        ),
         FailureCategory::SignatureChange => {
             Some("Method signature changed — update call sites with new parameter list".to_string())
         }

@@ -33,6 +33,7 @@ pub(super) fn request(
         runner_readiness: Vec::new(),
         runner_sources: Vec::new(),
         dependency_failure_patterns: Vec::new(),
+        config_preflights: Vec::new(),
         lab_runtime_components: Vec::new(),
         timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
         role_aliases: AgentTaskProviderRoleAliases::default(),

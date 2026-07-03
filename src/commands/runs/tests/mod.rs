@@ -1077,7 +1077,7 @@ fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
         );
         assert!(replay.viewer_links[0]
             .url
-            .starts_with("https://playground.wordpress.net/?blueprint-url="));
+            .starts_with("https://example.com/blueprint-viewer/?blueprint-url="));
         assert!(replay.viewer_links[0]
             .url
             .contains("http%3A%2F%2F127.0.0.1%3A"));

@@ -25,7 +25,7 @@ pub fn parse_key_val(s: &str) -> Result<(String, String), String> {
 /// Examples:
 ///
 ///   --setting-json bench_env={"BENCH_CORPUS_SIZE":"1000"}
-///   --setting-json wp_config_defines={"MARKDOWN_DB_MODE":"primary","WP_DEBUG":true}
+///   --setting-json runtime_defines={"MARKDOWN_DB_MODE":"primary","DEBUG":true}
 ///   --setting-json my_array=[1,2,3]
 ///   --setting-json my_flag=true
 ///   --setting-json my_string="literal"

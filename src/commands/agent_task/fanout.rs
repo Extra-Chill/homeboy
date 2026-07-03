@@ -524,10 +524,8 @@ impl BatchCookSpec {
             .commit_message
             .clone()
             .unwrap_or_else(|| default_cook_commit_message(self));
-        let source_worktree_path = agent_task_service::source_worktree_path(
-            self.cwd.clone(),
-            self.workspace.clone(),
-        );
+        let source_worktree_path =
+            agent_task_service::source_worktree_path(self.cwd.clone(), self.workspace.clone());
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {
@@ -1022,7 +1020,7 @@ mod tests {
             fanout_id: Some("issue-wave".to_string()),
             prompt_template: None,
             backend: Some("sandbox".to_string()),
-            selector: Some("wordpress.sandbox-agent-task-executor".to_string()),
+            selector: Some("sample.executor-provider".to_string()),
             model: Some("gpt-5.5".to_string()),
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),

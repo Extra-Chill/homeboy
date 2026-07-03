@@ -559,7 +559,7 @@ use std::path::{Path, PathBuf};
 /// - `--setting-json key=<json>` (typed): for object/array/typed-scalar
 ///   settings that `--setting`'s string-only coercion can't represent.
 ///   Required for any setting whose dispatcher consumer expects a JSON
-///   object (the wordpress extension's `wp_config_defines` and `bench_env`
+///   object (for example an extension's `runtime_defines` and `bench_env`
 ///   are the motivating cases). String coercion of an object value
 ///   produces `"{\"key\":\"value\"}"` — a string containing JSON, not a
 ///   JSON object — which downstream `jq -c '.field'` extractions then
@@ -602,7 +602,7 @@ pub struct SettingArgs {
     /// Examples:
     ///
     ///   --setting-json bench_env='{"BENCH_CORPUS_SIZE":"1000"}'
-    ///   --setting-json wp_config_defines='{"MARKDOWN_DB_MODE":"primary"}'
+    ///   --setting-json runtime_defines='{"MARKDOWN_DB_MODE":"primary"}'
     ///   --setting-json my_flag=true
     #[arg(long = "setting-json", value_parser = crate::commands::parse_key_json)]
     pub setting_json: Vec<(String, serde_json::Value)>,

@@ -186,7 +186,7 @@ pub fn apply_plan(plan: &DecomposePlan, root: &Path, write: bool) -> Result<Vec<
 /// - `pub use submodule::*;` re-exports so callers don't break
 ///
 /// Delegates to the language extension's `generate_module_index` command for
-/// language-specific syntax (Rust `pub use`, PHP `require_once`, etc.).
+/// language-specific module syntax.
 fn generate_source_module_index(plan: &DecomposePlan, root: &Path) {
     let source_path = root.join(&plan.file);
 

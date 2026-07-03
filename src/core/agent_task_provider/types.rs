@@ -75,6 +75,8 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_preflights: Vec<AgentTaskProviderConfigPreflight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lab_runtime_components: Vec<String>,
     #[serde(
         default,
@@ -105,6 +107,53 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderConfigPreflight {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub required_values: AgentTaskProviderConfigValueCollector,
+    pub supported_values: AgentTaskProviderConfigValueCollector,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_key_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_probe: Option<AgentTaskProviderConfigBinaryProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderConfigValueCollector {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_key_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_value_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderConfigBinaryProbe {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub json_commands: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fingerprint_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fingerprint_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

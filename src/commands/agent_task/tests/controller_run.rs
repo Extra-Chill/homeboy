@@ -243,9 +243,7 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
                     dispatch_backend: Some("fixture".to_string()),
                     dispatch_selector: None,
                     dispatch_model: Some("gpt-test".to_string()),
-                    dispatch_provider_config: Some(
-                        r#"{"runtime_wordpress_version":"6.9"}"#.to_string(),
-                    ),
+                    dispatch_provider_config: Some(r#"{"runtime_version":"6.9"}"#.to_string()),
                 },
             },
             CapturingExecutor {
@@ -267,7 +265,7 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
         assert_eq!(observed.executor.backend, "fixture");
         assert_eq!(observed.executor.selector, None);
         assert_eq!(observed.executor.model.as_deref(), Some("gpt-test"));
-        assert_eq!(observed.executor.config["runtime_wordpress_version"], "6.9");
+        assert_eq!(observed.executor.config["runtime_version"], "6.9");
         assert_eq!(
             value["from_spec"]["actions"][0]["action"]["request"]["dispatch"]["backend"],
             "fixture"

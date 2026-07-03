@@ -1478,7 +1478,7 @@ mod tests {
             backend: Some("ignored-backend".to_string()),
             selector: None,
             model: Some("gpt-5.5".to_string()),
-            provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
+            provider_config: Some(r#"{"runtime_version":"7.0"}"#.to_string()),
         }
         .to_overrides();
         let command = agent_task_controller_service::controller_request_dispatch_command(
@@ -1497,7 +1497,7 @@ mod tests {
         assert_eq!(command.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             command.core.provider_config.as_deref(),
-            Some(r#"{"runtime_wordpress_version":"7.0"}"#)
+            Some(r#"{"runtime_version":"7.0"}"#)
         );
     }
 
@@ -1507,7 +1507,7 @@ mod tests {
             backend: None,
             selector: None,
             model: None,
-            provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
+            provider_config: Some(r#"{"runtime_version":"7.0"}"#.to_string()),
         }
         .to_overrides();
         let command = agent_task_controller_service::controller_request_dispatch_command(
@@ -1515,7 +1515,7 @@ mod tests {
                 "dispatch": {
                     "prompt": "Cook",
                     "tasks": ["Do the work"],
-                    "provider_config": "{\"runtime_wordpress_version\":\"nightly\"}"
+                    "provider_config": "{\"runtime_version\":\"nightly\"}"
                 }
             }),
             &overrides,
@@ -1524,7 +1524,7 @@ mod tests {
 
         assert_eq!(
             command.core.provider_config.as_deref(),
-            Some(r#"{"runtime_wordpress_version":"nightly"}"#)
+            Some(r#"{"runtime_version":"nightly"}"#)
         );
     }
 

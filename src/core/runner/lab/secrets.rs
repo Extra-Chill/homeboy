@@ -2339,6 +2339,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             runner_readiness: Vec::new(),
             runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
+            config_preflights: Vec::new(),
             lab_runtime_components: Vec::new(),
             timeout_artifact_discovery: Default::default(),
             role_aliases: Default::default(),
