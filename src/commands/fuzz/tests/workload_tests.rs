@@ -477,6 +477,7 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         rig: None,
         extension_override: ExtensionOverrideArgs { extensions: vec![] },
         setting_args: SettingArgs {
+            settings_json_file: vec![],
             setting: vec![],
             setting_json: vec![],
         },
@@ -654,6 +655,7 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         rig: Some("package-fuzz".to_string()),
         extension_override: ExtensionOverrideArgs { extensions: vec![] },
         setting_args: SettingArgs {
+            settings_json_file: vec![],
             setting: vec![],
             setting_json: vec![],
         },
@@ -781,6 +783,7 @@ fn fuzz_runner_env_stages_generic_workload_file_refs() {
         rig: Some("package-fuzz".to_string()),
         extension_override: ExtensionOverrideArgs { extensions: vec![] },
         setting_args: SettingArgs {
+            settings_json_file: vec![],
             setting: vec![],
             setting_json: vec![],
         },
@@ -919,6 +922,7 @@ fn fuzz_runner_env_stages_nested_generic_workload_json_file_refs() {
         rig: Some("package-fuzz".to_string()),
         extension_override: ExtensionOverrideArgs { extensions: vec![] },
         setting_args: SettingArgs {
+            settings_json_file: vec![],
             setting: vec![],
             setting_json: vec![],
         },

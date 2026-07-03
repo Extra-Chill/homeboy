@@ -15,8 +15,9 @@ pub(crate) fn resolve_source_context(
         component_id: comp.component.clone(),
         path_override: comp.path.clone(),
         capability,
-        settings_overrides: settings.setting.clone(),
-        settings_json_overrides: settings.setting_json.clone(),
+        settings_profile_json_overrides: settings.settings_profile_json_overrides()?,
+        settings_overrides: settings.settings_overrides()?,
+        settings_json_overrides: settings.settings_json_overrides()?,
         extension_overrides: extension_override.extensions.clone(),
     })
 }

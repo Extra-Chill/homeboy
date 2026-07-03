@@ -303,6 +303,7 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         rig: Some("package-fuzz".to_string()),
         extension_override: ExtensionOverrideArgs { extensions: vec![] },
         setting_args: SettingArgs {
+            settings_json_file: vec![],
             setting: vec![],
             setting_json: vec![],
         },
