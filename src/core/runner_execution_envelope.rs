@@ -194,10 +194,10 @@ pub struct PathMaterializationProjection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PathMaterializationPlan {
     #[serde(default = "path_materialization_plan_schema")]
     pub schema: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<PathMaterializationEntry>,
 }
 
@@ -311,6 +311,7 @@ impl PathMaterializationPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PathMaterializationEntry {
     pub role: String,
     pub owner: String,
