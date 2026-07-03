@@ -713,6 +713,7 @@ pub(super) fn plan_inventory_selection(
                 safety_class,
                 args.strategy,
                 destructive_allowed,
+                args.run.isolation.requests_isolation(),
                 &filters,
                 &workload_operations,
             );
@@ -1016,6 +1017,9 @@ fn skip_reason_detail(
     args: &FuzzPlanArgs,
     isolation_proof: Option<&IsolationProof>,
 ) -> &'static str {
+    if reason == "unsafe" {
+        return "mutation-capable fuzz operations require --isolation isolated";
+    }
     if reason != "destructive" {
         return "operation is outside the selected strategy, filters, or supported operation families";
     }
@@ -1057,6 +1061,7 @@ fn operation_skip_reason(
     safety_class: FuzzSafetyClass,
     strategy: FuzzPlanStrategy,
     destructive_allowed: bool,
+    isolation_requested: bool,
     filters: &BTreeSet<String>,
     workload_operations: &BTreeSet<String>,
 ) -> Option<&'static str> {
@@ -1081,7 +1086,28 @@ fn operation_skip_reason(
     if !strategy_matches_operation(strategy, family.expect("family checked above")) {
         return Some("unsupported");
     }
+    if requires_isolated_mutation(family, safety_class) && !isolation_requested {
+        return Some("unsafe");
+    }
     None
+}
+
+fn requires_isolated_mutation(
+    family: Option<FuzzOperationFamily>,
+    safety_class: FuzzSafetyClass,
+) -> bool {
+    matches!(
+        family,
+        Some(
+            FuzzOperationFamily::Create
+                | FuzzOperationFamily::Update
+                | FuzzOperationFamily::Delete
+                | FuzzOperationFamily::Submit
+        )
+    ) || matches!(
+        safety_class,
+        FuzzSafetyClass::Idempotent | FuzzSafetyClass::IsolatedMutation
+    )
 }
 
 fn strategy_matches_operation(strategy: FuzzPlanStrategy, family: FuzzOperationFamily) -> bool {

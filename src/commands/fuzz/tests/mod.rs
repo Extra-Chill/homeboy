@@ -222,6 +222,36 @@ fn destructive_inventory() -> FuzzTargetInventory {
     .expect("inventory parses")
 }
 
+fn mutation_family_inventory() -> FuzzTargetInventory {
+    FuzzTargetInventory::from_value(serde_json::json!({
+        "schema": "homeboy/fuzz-target-inventory/v1",
+        "version": 1,
+        "id": "component-a-inventory",
+        "targets": [
+            {
+                "schema": "homeboy/fuzz-target/v1",
+                "id": "api.users",
+                "kind": "api",
+                "operations": [
+                    { "id": "api.users.read", "kind": "GET", "family": "read" },
+                    { "id": "api.users.create", "kind": "POST", "family": "create" },
+                    { "id": "api.users.update", "kind": "PATCH", "family": "update" },
+                    { "id": "api.users.delete", "kind": "DELETE", "family": "delete" },
+                    { "id": "api.users.submit", "kind": "submit", "family": "submit" }
+                ]
+            }
+        ],
+        "workloads": [
+            {
+                "schema": "homeboy/fuzz-workload/v1",
+                "id": "api-fuzz",
+                "safety_class": "read_only"
+            }
+        ]
+    }))
+    .expect("inventory parses")
+}
+
 fn write_inventory(path: &Path, inventory: &FuzzTargetInventory) {
     fs::write(
         path,
