@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.13] - 2026-07-03
+
+### Fixed
+- surface cleanup provider progress
+- add status timing diagnostics
+- reject packaged source for self cleanup
+
 ## [0.280.12] - 2026-07-03
 
 ### Changed

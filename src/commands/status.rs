@@ -12,6 +12,7 @@ use super::CmdResult;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 mod dashboard_table;
 use dashboard_table::log_dashboard_table;
@@ -52,6 +53,10 @@ pub struct StatusArgs {
     /// Show only outdated components (local != remote)
     #[arg(long)]
     pub outdated: bool,
+
+    /// Emit status phase progress to stderr and include phase timings in JSON
+    #[arg(long)]
+    pub timings: bool,
 
     /// Show only components carrying merged-but-unreleased work (commits on
     /// origin/<default-branch> that are past the latest release tag).
@@ -100,6 +105,12 @@ pub struct UnreleasedMerge {
     /// Count of commits on `origin/<default-branch>` past `latest_tag`
     /// (merge commits excluded, matching release-state counting).
     pub commits_since_tag: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusTiming {
+    pub phase: &'static str,
+    pub elapsed_ms: u128,
 }
 
 /// Clarifying note emitted alongside the git-state-only `ready_to_deploy` list.
@@ -158,6 +169,8 @@ pub struct StatusOutput {
     /// Clarifying note, emitted only when `unreleased_merges` is non-empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unreleased_merges_note: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timings: Vec<StatusTiming>,
     pub clean: usize,
 }
 
@@ -225,6 +238,45 @@ pub struct ProjectDashboardOutput {
     pub total: usize,
     pub components: Vec<ProjectStatusRow>,
     pub summary: ProjectDashboardSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timings: Vec<StatusTiming>,
+}
+
+struct StatusTimer {
+    enabled: bool,
+    phase_started: Instant,
+    timings: Vec<StatusTiming>,
+}
+
+impl StatusTimer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            phase_started: Instant::now(),
+            timings: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, phase: &'static str) {
+        if self.enabled {
+            eprintln!("[status] {phase}...");
+        }
+        self.phase_started = Instant::now();
+    }
+
+    fn finish(&mut self, phase: &'static str) {
+        if !self.enabled {
+            return;
+        }
+
+        let elapsed_ms = self.phase_started.elapsed().as_millis();
+        eprintln!("[status] {phase} completed in {elapsed_ms}ms");
+        self.timings.push(StatusTiming { phase, elapsed_ms });
+    }
+
+    fn into_timings(self) -> Vec<StatusTiming> {
+        self.timings
+    }
 }
 
 /// Summary counts for the project dashboard.
@@ -291,7 +343,11 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
         return Ok((StatusResult::Full(report), 0));
     }
 
+    let mut timer = StatusTimer::new(args.timings);
+
+    timer.begin("resolve_context");
     let (context_output, _) = context::run(None)?;
+    timer.finish("resolve_context");
 
     let relevant_ids: std::collections::HashSet<String> = context_output
         .matched_components
@@ -317,7 +373,9 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
         ));
     }
 
+    timer.begin("load_component_inventory");
     let all_components = component::inventory().unwrap_or_default();
+    timer.finish("load_component_inventory");
 
     let show_all = args.all || relevant_ids.is_empty();
 
@@ -330,12 +388,14 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
             .collect()
     };
 
-    summarize_components(components, &args)
+    summarize_components(components, &args, timer)
 }
 
 fn unregistered_cwd_status_output() -> Option<UnregisteredContextStatusOutput> {
     let cwd = std::env::current_dir().ok()?;
-    let git_root = git::get_git_root(&cwd.to_string_lossy()).ok().map(PathBuf::from);
+    let git_root = git::get_git_root(&cwd.to_string_lossy())
+        .ok()
+        .map(PathBuf::from);
     let candidates = [Some(cwd.as_path()), git_root.as_deref()];
 
     if candidates
@@ -450,6 +510,7 @@ fn path_is_at_or_inside(parent: &Path, path: &Path) -> bool {
 fn summarize_components(
     components: Vec<component::Component>,
     args: &StatusArgs,
+    mut timer: StatusTimer,
 ) -> CmdResult<StatusResult> {
     let total = components.len();
 
@@ -469,6 +530,7 @@ fn summarize_components(
     let include_unreleased_merges = !has_filter || args.unreleased;
 
     if include_upstream_drift || include_unreleased_merges {
+        timer.begin("inspect_upstream_and_unreleased");
         for comp in &components {
             if include_upstream_drift {
                 if let Some(drift) = git_cache.fetch_upstream_drift_for(&comp.local_path, &comp.id)
@@ -491,8 +553,10 @@ fn summarize_components(
                 }
             }
         }
+        timer.finish("inspect_upstream_and_unreleased");
     }
 
+    timer.begin("inspect_release_state");
     for comp in &components {
         let status = git_cache
             .release_state_for(comp)
@@ -507,6 +571,7 @@ fn summarize_components(
             ReleaseStateStatus::Unknown => clean += 1,
         }
     }
+    timer.finish("inspect_release_state");
 
     // Apply filters if any are set
     if has_filter {
@@ -554,6 +619,7 @@ fn summarize_components(
             upstream_drift,
             unreleased_merges,
             unreleased_merges_note,
+            timings: timer.into_timings(),
             clean,
         }),
         0,
@@ -563,7 +629,10 @@ fn summarize_components(
 /// Path override mode: inspect one checkout without requiring registry membership.
 fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
     let path = args.path.as_deref();
+    let mut timer = StatusTimer::new(args.timings);
+    timer.begin("resolve_path_component");
     let component = component::resolve_effective(args.project.as_deref(), path, None)?;
+    timer.finish("resolve_path_component");
 
     if args.full {
         let mut report = context::build_report_for_component(args.all, "status", component, path)?;
@@ -571,7 +640,7 @@ fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
         return Ok((StatusResult::Full(report), 0));
     }
 
-    summarize_components(vec![component], args)
+    summarize_components(vec![component], args, timer)
 }
 
 /// Project dashboard: show version drift across all components in a project.
@@ -579,7 +648,11 @@ fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
 /// Combines local version, remote (deployed) version, release state, upstream
 /// drift, and unreleased commit count into a single view per component.
 fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<StatusResult> {
+    let mut timer = StatusTimer::new(args.timings);
+
+    timer.begin("resolve_project_components");
     let components = scope::resolve_scope_component_records(&Scope::Project(project_id.into()))?;
+    timer.finish("resolve_project_components");
 
     if components.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -593,17 +666,22 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     }
 
     // Gather local versions
+    timer.begin("read_local_versions");
     let local_versions: std::collections::HashMap<String, String> = components
         .iter()
         .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
         .collect();
+    timer.finish("read_local_versions");
 
     // Gather remote versions via deploy check mode (handles SSH internally)
+    timer.begin("fetch_remote_versions");
     let remote_versions = fetch_project_remote_versions(project_id);
+    timer.finish("fetch_remote_versions");
 
     let mut git_cache = StatusGitCache::default();
 
     // Fetch upstream drift for all components
+    timer.begin("inspect_upstream_drift");
     let upstream_drift_map: std::collections::HashMap<String, UpstreamDrift> = components
         .iter()
         .filter_map(|c| {
@@ -612,6 +690,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
                 .map(|d| (c.id.clone(), d))
         })
         .collect();
+    timer.finish("inspect_upstream_drift");
 
     // Build per-component rows
     let mut rows: Vec<ProjectStatusRow> = Vec::new();
@@ -628,6 +707,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         unknown: 0,
     };
 
+    timer.begin("build_dashboard_rows");
     for comp in &components {
         // Bundled/retired components are no longer standalone deploy targets.
         // Surface their lifecycle status for visibility, but do not run the
@@ -723,6 +803,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             status: dashboard_status,
         });
     }
+    timer.finish("build_dashboard_rows");
 
     // Apply filters
     if args.outdated {
@@ -759,6 +840,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             total,
             components: rows,
             summary,
+            timings: timer.into_timings(),
         }),
         0,
     ))
@@ -1063,6 +1145,7 @@ mod tests {
             all: false,
             outdated: false,
             unreleased: false,
+            timings: false,
         }
     }
 
@@ -1078,6 +1161,7 @@ mod tests {
             all: false,
             outdated: false,
             unreleased: false,
+            timings: false,
         }
     }
 
@@ -1106,8 +1190,45 @@ mod tests {
             upstream_drift: Vec::new(),
             unreleased_merges: Vec::new(),
             unreleased_merges_note: None,
+            timings: Vec::new(),
             clean: 0,
         }
+    }
+
+    #[test]
+    fn parser_accepts_status_timings() {
+        let cli = Cli::try_parse_from(["homeboy", "status", "--timings"])
+            .expect("status --timings parses");
+
+        match cli.command {
+            Commands::Status(args) => assert!(args.timings),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn status_timings_are_omitted_unless_present() {
+        let output = empty_status_output();
+        let json = serde_json::to_value(&output).expect("serialize status output");
+        assert!(json.get("timings").is_none());
+
+        let output = StatusOutput {
+            timings: vec![StatusTiming {
+                phase: "inspect_release_state",
+                elapsed_ms: 12,
+            }],
+            ..empty_status_output()
+        };
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        assert_eq!(
+            json.get("timings")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(json["timings"][0]["phase"], "inspect_release_state");
+        assert_eq!(json["timings"][0]["elapsed_ms"], 12);
     }
 
     #[test]

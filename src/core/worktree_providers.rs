@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -47,7 +50,23 @@ pub struct WorktreeProviderCleanupResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parsed_payload: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_progress: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub run_refs: Vec<WorktreeProviderRunRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_up_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeProviderRunRef {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_command: Option<String>,
 }
 
 pub fn cleanup_worktree_providers(
@@ -181,41 +200,149 @@ fn run_command_provider_cleanup(
         );
     }
 
-    match Command::new(&command[0]).args(&command[1..]).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let status = output.status.code();
+    match Command::new(&command[0])
+        .args(&command[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let stdout_lines = Arc::new(Mutex::new(Vec::new()));
+            let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+
+            let stdout_handle = stdout.map(|stream| {
+                collect_provider_stream(
+                    provider_id.to_string(),
+                    "stdout",
+                    stream,
+                    Arc::clone(&stdout_lines),
+                )
+            });
+            let stderr_handle = stderr.map(|stream| {
+                collect_provider_stream(
+                    provider_id.to_string(),
+                    "stderr",
+                    stream,
+                    Arc::clone(&stderr_lines),
+                )
+            });
+
+            let wait_result = child.wait();
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            if let Some(handle) = stderr_handle {
+                let _ = handle.join();
+            }
+
+            let stdout = joined_lines(&stdout_lines);
+            let stderr = joined_lines(&stderr_lines);
             let parsed_payload = parse_json_stdout(&stdout);
+            let phase = provider_phase(&parsed_payload, &mode);
+            let last_progress = provider_last_progress(&parsed_payload)
+                .or_else(|| last_non_empty_line(&stdout))
+                .or_else(|| last_non_empty_line(&stderr));
+            let run_refs = provider_run_refs(&parsed_payload);
+            let follow_up_command = provider_follow_up_command(&run_refs);
+
+            let output_status = match wait_result {
+                Ok(status) => status,
+                Err(err) => {
+                    return WorktreeProviderCleanupResult {
+                        provider_id: provider_id.to_string(),
+                        success: false,
+                        mode,
+                        command_run: Some(command.clone()),
+                        status: None,
+                        stdout,
+                        stderr,
+                        parsed_payload,
+                        phase,
+                        last_progress,
+                        run_refs,
+                        follow_up_command,
+                        error: Some(format!("failed to wait for provider command: {err}")),
+                    };
+                }
+            };
+            let status = output_status.code();
             WorktreeProviderCleanupResult {
                 provider_id: provider_id.to_string(),
-                success: output.status.success(),
+                success: output_status.success(),
                 mode,
                 command_run: Some(command.clone()),
                 status,
                 stdout,
                 stderr,
                 parsed_payload,
-                error: output
-                    .status
+                phase,
+                last_progress,
+                run_refs,
+                follow_up_command,
+                error: output_status
                     .success()
                     .then_some(())
                     .is_none()
                     .then(|| "provider command failed".to_string()),
             }
         }
-        Err(err) => WorktreeProviderCleanupResult {
-            provider_id: provider_id.to_string(),
-            success: false,
-            mode,
-            command_run: Some(command.clone()),
-            status: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            parsed_payload: None,
-            error: Some(format!("failed to execute provider command: {err}")),
-        },
+        Err(err) => {
+            let phase = Some(mode_phase(&mode).to_string());
+            WorktreeProviderCleanupResult {
+                provider_id: provider_id.to_string(),
+                success: false,
+                mode,
+                command_run: Some(command.clone()),
+                status: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                parsed_payload: None,
+                phase,
+                last_progress: None,
+                run_refs: Vec::new(),
+                follow_up_command: None,
+                error: Some(format!("failed to execute provider command: {err}")),
+            }
+        }
     }
+}
+
+fn collect_provider_stream<R>(
+    provider_id: String,
+    stream_name: &'static str,
+    stream: R,
+    lines: Arc<Mutex<Vec<String>>>,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let reader = BufReader::new(stream);
+        for line in reader.lines().map_while(std::result::Result::ok) {
+            eprintln!("[cleanup.worktrees provider={provider_id} stream={stream_name}] {line}");
+            if let Ok(mut guard) = lines.lock() {
+                guard.push(line);
+            }
+        }
+    })
+}
+
+fn joined_lines(lines: &Arc<Mutex<Vec<String>>>) -> String {
+    lines
+        .lock()
+        .map(|guard| guard.join("\n"))
+        .unwrap_or_default()
+}
+
+fn last_non_empty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
 }
 
 fn provider_failure(
@@ -223,6 +350,7 @@ fn provider_failure(
     mode: WorktreeProviderCleanupMode,
     error: &str,
 ) -> WorktreeProviderCleanupResult {
+    let phase = Some(mode_phase(&mode).to_string());
     WorktreeProviderCleanupResult {
         provider_id: provider_id.to_string(),
         success: false,
@@ -232,6 +360,10 @@ fn provider_failure(
         stdout: String::new(),
         stderr: String::new(),
         parsed_payload: None,
+        phase,
+        last_progress: None,
+        run_refs: Vec::new(),
+        follow_up_command: None,
         error: Some(error.to_string()),
     }
 }
@@ -241,7 +373,151 @@ fn parse_json_stdout(stdout: &str) -> Option<Value> {
     if trimmed.is_empty() {
         return None;
     }
-    serde_json::from_str(trimmed).ok()
+    serde_json::from_str(trimmed).ok().or_else(|| {
+        trimmed
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find_map(|line| serde_json::from_str(line).ok())
+    })
+}
+
+fn provider_phase(payload: &Option<Value>, mode: &WorktreeProviderCleanupMode) -> Option<String> {
+    payload
+        .as_ref()
+        .and_then(|payload| first_string_for_keys(payload, &["phase", "state", "status"]))
+        .or_else(|| Some(mode_phase(mode).to_string()))
+}
+
+fn provider_last_progress(payload: &Option<Value>) -> Option<String> {
+    payload.as_ref().and_then(|payload| {
+        first_string_for_keys(
+            payload,
+            &[
+                "last_progress",
+                "progress",
+                "message",
+                "summary",
+                "last_observed_progress",
+            ],
+        )
+    })
+}
+
+fn provider_run_refs(payload: &Option<Value>) -> Vec<WorktreeProviderRunRef> {
+    let Some(payload) = payload else {
+        return Vec::new();
+    };
+    let mut run_ids = Vec::new();
+    let mut status_commands = Vec::new();
+    collect_strings_for_keys(
+        payload,
+        &["run_id", "runId", "durable_run_id"],
+        &mut run_ids,
+    );
+    collect_strings_for_keys(
+        payload,
+        &["status_command", "statusCommand", "status_cmd"],
+        &mut status_commands,
+    );
+    collect_status_commands_from_arrays(payload, &mut status_commands);
+
+    let len = run_ids.len().max(status_commands.len());
+    (0..len)
+        .map(|index| WorktreeProviderRunRef {
+            run_id: run_ids.get(index).cloned(),
+            status_command: status_commands.get(index).cloned(),
+        })
+        .collect()
+}
+
+fn provider_follow_up_command(refs: &[WorktreeProviderRunRef]) -> Option<String> {
+    refs.iter().find_map(|row| row.status_command.clone())
+}
+
+fn mode_phase(mode: &WorktreeProviderCleanupMode) -> &'static str {
+    match mode {
+        WorktreeProviderCleanupMode::Preview => "preview",
+        WorktreeProviderCleanupMode::Apply => "apply",
+    }
+}
+
+fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(Value::as_str) {
+                    return Some(value.to_string());
+                }
+            }
+            map.values()
+                .find_map(|value| first_string_for_keys(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| first_string_for_keys(value, keys)),
+        _ => None,
+    }
+}
+
+fn collect_strings_for_keys(value: &Value, keys: &[&str], out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(Value::as_str) {
+                    if !out.contains(&value.to_string()) {
+                        out.push(value.to_string());
+                    }
+                }
+            }
+            for value in map.values() {
+                collect_strings_for_keys(value, keys, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_strings_for_keys(value, keys, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_status_commands_from_arrays(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "status_commands",
+                "statusCommands",
+                "next_commands",
+                "nextCommands",
+            ] {
+                if let Some(values) = map.get(key).and_then(Value::as_array) {
+                    for value in values {
+                        if let Some(command) = value.as_str().or_else(|| {
+                            value
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .or_else(|| value.get("status_command").and_then(Value::as_str))
+                        }) {
+                            if !out.contains(&command.to_string()) {
+                                out.push(command.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            for value in map.values() {
+                collect_status_commands_from_arrays(value, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_status_commands_from_arrays(value, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +649,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_apply_captures_phase_progress_and_durable_refs() {
+        let script = fake_provider_script_with_refs();
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: vec!["fixture".to_string()],
+                all_providers: false,
+                apply: true,
+            },
+            config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    cleanup_apply: Some(vec![script]),
+                    ..Default::default()
+                },
+            }),
+        )
+        .expect("cleanup succeeds");
+
+        let provider = &output.providers[0];
+        assert_eq!(provider.phase.as_deref(), Some("running"));
+        assert_eq!(provider.last_progress.as_deref(), Some("removed 10/20"));
+        assert_eq!(provider.run_refs.len(), 1);
+        assert_eq!(
+            provider.run_refs[0].run_id.as_deref(),
+            Some("cleanup-run-1")
+        );
+        assert_eq!(
+            provider.run_refs[0].status_command.as_deref(),
+            Some("provider status cleanup-run-1")
+        );
+        assert_eq!(
+            provider.follow_up_command.as_deref(),
+            Some("provider status cleanup-run-1")
+        );
+    }
+
     fn config_with_provider(provider: WorktreeProviderConfig) -> HomeboyConfig {
         let mut providers = HashMap::new();
         providers.insert("fixture".to_string(), provider);
@@ -387,6 +702,22 @@ mod tests {
         let script = dir.join("provider");
         fs::write(&script, "#!/bin/sh\nprintf '{\"mode\":\"%s\"}\n' \"$1\"\n")
             .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    fn fake_provider_script_with_refs() -> String {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "printf 'starting cleanup\\n' >&2\n",
+                "printf '{\"phase\":\"running\",\"last_progress\":\"removed 10/20\",\"run_id\":\"cleanup-run-1\",\"status_command\":\"provider status cleanup-run-1\"}\\n'\n"
+            ),
+        )
+        .expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
     }
