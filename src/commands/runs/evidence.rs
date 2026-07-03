@@ -204,6 +204,36 @@ mod tests {
             assert_eq!(output.command, "runs.evidence");
             assert_eq!(output.run_id, run.id);
             assert_eq!(output.run.kind, "bench");
+            assert_eq!(
+                output.homeboy_provenance.schema,
+                "homeboy/homeboy-provenance/v1"
+            );
+            assert_eq!(output.homeboy_provenance.identities.len(), 2);
+            assert_eq!(
+                output.homeboy_provenance.identities[0].role,
+                "observation_run_binary"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[0].version.as_deref(),
+                Some("test-version")
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[1].role,
+                "runner_job_handoff"
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[1].runner_id.as_deref(),
+                Some("lab-default")
+            );
+            assert_eq!(
+                output.homeboy_provenance.identities[1]
+                    .runner_job_id
+                    .as_deref(),
+                Some("job-1")
+            );
+            assert!(output.homeboy_provenance.warnings[0].contains(
+                "controller_cli, active_daemon, configured_job_binary, and observation_run_binary"
+            ));
             assert_eq!(output.tracker_refs.len(), 2);
             assert_eq!(output.tracker_refs[0].kind, "linear");
             assert_eq!(output.tracker_refs[0].id, "HB-42");
