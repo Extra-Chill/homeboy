@@ -143,6 +143,32 @@ pub(crate) fn lab_at_file_materialization_error(
     )
 }
 
+pub(crate) fn preflight_lab_offload_remote_dispatch_paths(
+    runner_id: &str,
+    command: &[String],
+    env: &std::collections::HashMap<String, String>,
+    source_path: &Path,
+    remote_cwd: &str,
+    path_remaps: &[LabPathRemap],
+) -> Result<()> {
+    preflight_remote_argv_path_translation(
+        "Lab offload",
+        runner_id,
+        command,
+        source_path,
+        remote_cwd,
+    )?;
+    preflight_remote_path_bearing_surfaces(
+        "Lab offload",
+        runner_id,
+        command,
+        env,
+        source_path,
+        remote_cwd,
+        path_remaps,
+    )
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -728,20 +754,12 @@ pub(crate) fn run_lab_offload_inner(
     // that no controller-local source-checkout path survived un-translated
     // before we dispatch the command to the remote runner, so a missed remap
     // fails loudly here instead of corrupting the remote run.
-    preflight_remote_argv_path_translation(
-        "Lab offload",
-        runner_id,
-        &command,
-        &source_path,
-        &remote_cwd,
-    )?;
     let path_remaps = path_remaps_from_workspace_mapping(
         &workspace_mapping,
         Some(&source_path),
         Some(&remote_cwd),
     );
-    preflight_remote_path_bearing_surfaces(
-        "Lab offload",
+    preflight_lab_offload_remote_dispatch_paths(
         runner_id,
         &command,
         &env,
