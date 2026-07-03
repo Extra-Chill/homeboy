@@ -9,7 +9,8 @@ use crate::command_contract::{
     LabWorkspaceModePolicy,
 };
 use crate::core::command_execution_plan::{
-    CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
+    CommandPortability, CommandSourceMaterialization, CommandSourcePolicy, CommandWorkspacePolicy,
+    LabRoutePlan,
 };
 use crate::core::observation::records::RunEvidenceCommands;
 use crate::core::observation::RunStatus;
@@ -353,6 +354,10 @@ pub fn lab_offload_command_from_contract(
     lab_offload_command_from_route_contract(contract.into_route_contract(required_extensions))
 }
 
+pub fn lab_route_plan_from_contract(contract: LabCommandContract) -> LabRoutePlan {
+    lab_route_plan_from_route_contract(contract.into_route_contract(Vec::new()))
+}
+
 pub fn lab_offload_command_from_route_contract(
     route_contract: LabCommandRouteContract,
 ) -> runners::LabOffloadCommand {
@@ -398,9 +403,7 @@ pub fn lab_offload_command_from_route_contract(
     }
 }
 
-pub(crate) fn lab_route_plan_from_route_contract(
-    route_contract: LabCommandRouteContract,
-) -> LabRoutePlan {
+pub fn lab_route_plan_from_route_contract(route_contract: LabCommandRouteContract) -> LabRoutePlan {
     let contract = route_contract.command;
     let mut plan = match contract.portability {
         LabCommandPortability::Portable => LabRoutePlan::portable(contract.hot_label),
@@ -412,6 +415,10 @@ pub(crate) fn lab_route_plan_from_route_contract(
     plan.source_policy = match contract.source_path_mode {
         LabSourcePathMode::CwdOrPathFlag => CommandSourcePolicy::ControllerCwdOrExplicitPath,
         LabSourcePathMode::RunnerResident => CommandSourcePolicy::RunnerResident,
+    };
+    plan.source_materialization = match contract.source_path_mode {
+        LabSourcePathMode::CwdOrPathFlag => CommandSourceMaterialization::ControllerCwdAsPathArg,
+        LabSourcePathMode::RunnerResident => CommandSourceMaterialization::None,
     };
     plan.workspace_policy = match contract.workspace_mode_policy {
         LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
@@ -512,7 +519,8 @@ mod tests {
         LAB_CAPABILITY_PLAYWRIGHT, LAB_TRACE_EXTRA_CAPABILITIES,
     };
     use crate::core::command_execution_plan::{
-        CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
+        CommandPortability, CommandSourceMaterialization, CommandSourcePolicy,
+        CommandWorkspacePolicy,
     };
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -607,6 +615,10 @@ mod tests {
             CommandSourcePolicy::ControllerCwdOrExplicitPath
         );
         assert_eq!(
+            plan.source_materialization,
+            CommandSourceMaterialization::ControllerCwdAsPathArg
+        );
+        assert_eq!(
             plan.workspace_policy,
             CommandWorkspacePolicy::GitCheckoutRequired
         );
@@ -631,6 +643,10 @@ mod tests {
 
         assert_eq!(plan.local_only_reason(), Some("needs controller services"));
         assert_eq!(plan.source_policy, CommandSourcePolicy::RunnerResident);
+        assert_eq!(
+            plan.source_materialization,
+            CommandSourceMaterialization::None
+        );
         assert_eq!(
             plan.workspace_policy,
             CommandWorkspacePolicy::RunnerResident

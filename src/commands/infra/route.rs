@@ -1,4 +1,5 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
@@ -883,6 +884,12 @@ fn rewrite_ad_hoc_lab_workspace_to_path(
     command: &Commands,
     normalized_args: &[String],
 ) -> Option<Vec<String>> {
+    let contract = command.lab_contract()?;
+    let plan = lab_routing::lab_route_plan_from_contract(contract);
+    if plan.source_materialization != CommandSourceMaterialization::ControllerCwdAsPathArg {
+        return None;
+    }
+
     let needs_path = match command {
         Commands::Audit(args) => args.comp.component.is_none() && args.comp.path.is_none(),
         Commands::Lint(args) => args.comp.component.is_none() && args.comp.path.is_none(),
