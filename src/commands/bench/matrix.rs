@@ -9,8 +9,8 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::bench as extension_bench;
 use homeboy::core::extension::bench::report::collect_artifacts;
 use homeboy::core::extension::bench::{
-    BenchCommandOutput, BenchGate, BenchResults, BenchRunExecution, BenchRunWorkflowArgs,
-    BenchRunWorkflowResult,
+    BenchCommandOutput, BenchGate, BenchGateOp, BenchResults, BenchRunExecution,
+    BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::rig::lease::ActiveRigRunLease;
@@ -334,13 +334,17 @@ struct DeclaredBenchGates {
 }
 
 fn apply_declared_bench_gates(workflow: &mut BenchRunWorkflowResult, gates: DeclaredBenchGates) {
-    if gates.scenario_gates.is_empty() && gates.result_gates.is_empty() {
-        return;
-    }
-
     let Some(results) = workflow.results.as_mut() else {
         return;
     };
+
+    let synthesized_not_run_gates = append_default_not_run_fixture_gates(results);
+    if gates.scenario_gates.is_empty()
+        && gates.result_gates.is_empty()
+        && !synthesized_not_run_gates
+    {
+        return;
+    }
 
     for scenario in &mut results.scenarios {
         if let Some(gates) = gates.scenario_gates.get(&scenario.id) {
@@ -362,6 +366,49 @@ fn apply_declared_bench_gates(workflow: &mut BenchRunWorkflowResult, gates: Decl
     if workflow.exit_code == 0 {
         workflow.exit_code = 1;
     }
+}
+
+fn append_default_not_run_fixture_gates(results: &mut BenchResults) -> bool {
+    let result_dry_run = explicit_planning_or_dry_run_metadata(&results.metadata);
+    let mut appended = false;
+    for scenario in &mut results.scenarios {
+        if result_dry_run || explicit_planning_or_dry_run_metadata(&scenario.metadata) {
+            continue;
+        }
+        let fixture_count = scenario.metrics.get("fixture_count").unwrap_or(0.0);
+        if fixture_count <= 0.0 || scenario.metrics.get("not_run_fixture_count").is_none() {
+            continue;
+        }
+        if scenario
+            .gates
+            .iter()
+            .any(|gate| gate.metric == "not_run_fixture_count")
+        {
+            continue;
+        }
+        scenario.gates.push(BenchGate {
+            metric: "not_run_fixture_count".to_string(),
+            op: BenchGateOp::Lte,
+            value: 0.0,
+        });
+        appended = true;
+    }
+    appended
+}
+
+fn explicit_planning_or_dry_run_metadata(
+    metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    ["execution_status", "mode", "intent"].iter().any(|key| {
+        metadata
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_planning_or_dry_run_value)
+    })
+}
+
+fn is_planning_or_dry_run_value(value: &str) -> bool {
+    matches!(value, "dry_run" | "dry-run" | "planning")
 }
 
 fn suffix_component_results(mut results: BenchResults, component_id: &str) -> BenchResults {
@@ -1233,6 +1280,95 @@ mod tests {
             homeboy::core::gate::HomeboyGateStatus::Failed
         );
         assert!(workflow.gate_failures[0].contains("failed_fixture_count lte 0"));
+    }
+
+    #[test]
+    fn default_result_gate_fails_discovered_but_not_run_fixtures() {
+        let results = homeboy::core::extension::bench::parse_bench_results_str(
+            r#"{
+                "component_id": "static-site-importer",
+                "iterations": 1,
+                "scenarios": [
+                    {
+                        "id": "static-site-fixture-matrix",
+                        "iterations": 1,
+                        "metrics": {
+                            "fixture_count": 13,
+                            "not_run_fixture_count": 13,
+                            "failed_fixture_count": 0
+                        },
+                        "metadata": { "execution_status": "not_requested" }
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse bench results");
+        let mut workflow = BenchRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "static-site-importer".to_string(),
+            exit_code: 0,
+            iterations: 1,
+            results: Some(results),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        };
+
+        apply_declared_bench_gates(&mut workflow, DeclaredBenchGates::default());
+
+        assert_eq!(workflow.status, "failed");
+        assert_eq!(workflow.exit_code, 1);
+        assert_eq!(workflow.gate_results.len(), 1);
+        assert!(workflow.gate_results[0]
+            .id
+            .contains("not_run_fixture_count"));
+        assert!(workflow.gate_failures[0].contains("not_run_fixture_count lte 0"));
+    }
+
+    #[test]
+    fn default_not_run_fixture_gate_skips_explicit_planning_workload() {
+        let results = homeboy::core::extension::bench::parse_bench_results_str(
+            r#"{
+                "component_id": "static-site-importer",
+                "iterations": 1,
+                "scenarios": [
+                    {
+                        "id": "static-site-fixture-matrix",
+                        "iterations": 1,
+                        "metrics": {
+                            "fixture_count": 13,
+                            "not_run_fixture_count": 13,
+                            "failed_fixture_count": 0
+                        },
+                        "metadata": { "execution_status": "planning" }
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse bench results");
+        let mut workflow = BenchRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "static-site-importer".to_string(),
+            exit_code: 0,
+            iterations: 1,
+            results: Some(results),
+            gate_results: Vec::new(),
+            gate_failures: Vec::new(),
+            baseline_comparison: None,
+            hints: None,
+            failure: None,
+            diagnostics: Vec::new(),
+        };
+
+        apply_declared_bench_gates(&mut workflow, DeclaredBenchGates::default());
+
+        assert_eq!(workflow.status, "passed");
+        assert_eq!(workflow.exit_code, 0);
+        assert!(workflow.gate_results.is_empty());
+        assert!(workflow.gate_failures.is_empty());
     }
 
     #[test]
