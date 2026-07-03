@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.15] - 2026-07-03
+
+### Fixed
+- Fix WP Codebox configured PHPUnit file routing
+
 ## [3.23.14] - 2026-07-03
 
 ### Changed

@@ -76,8 +76,12 @@ name: Runtime Agent Full Run (reusable)
         description: JSON homeboy/secret-env-plan/v1 declaration merged into the generated runner config. Values are never serialized.
         type: string
         default: '{}'
+      secret_env_bindings:
+        description: JSON object mapping declared target secret env names to explicit source env names already present in the job environment. Values are env names only, never secret values.
+        type: string
+        default: '{}'
       materialize_secret_env_from_github_secrets:
-        description: Opt-in bridge that resolves only declared secret_env_map sources from the GitHub secrets context before the runner starts. Prefer explicit, minimal caller secrets when enabling.
+        description: Opt-in bridge that materializes declared secret_env_bindings before the runner starts. Unsafe bulk GitHub secrets JSON is not exposed by this reusable workflow.
         type: boolean
         default: false
       model:
@@ -254,6 +258,10 @@ name: Runtime Agent Full Run (reusable)
         default: '{}'
       runtime_config:
         description: JSON object merged into the generated runner config for caller-owned runtime fields.
+        type: string
+        default: '{}'
+      path_materialization_plan:
+        description: JSON homeboy/path-materialization-plan/v1 declaration for runner/workload paths and runtime mounts.
         type: string
         default: '{}'
       workload_run_before:
@@ -512,6 +520,7 @@ jobs:
           RUNTIME_OVERLAYS: ${{ inputs.runtime_overlays }}
           RUNTIME_ENV: ${{ inputs.runtime_env }}
           RUNTIME_CONFIG: ${{ inputs.runtime_config }}
+          PATH_MATERIALIZATION_PLAN: ${{ inputs.path_materialization_plan }}
           WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
           WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
@@ -532,7 +541,7 @@ jobs:
         if: ${{ inputs.run_agent && inputs.materialize_secret_env_from_github_secrets }}
         env:
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
-          HOMEBOY_GITHUB_SECRETS_JSON: ${{ toJson(secrets) }}
+          HOMEBOY_SECRET_ENV_BINDINGS: ${{ inputs.secret_env_bindings }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs materialize-secret-env
 
       - name: Run runtime agent

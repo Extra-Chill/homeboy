@@ -36,7 +36,7 @@
     "homeboy-run-headless-production-loop": "./scripts/run-headless-loop.cjs"
   },
   "scripts": {
-    "test": "set -e; for test in tests/*.test.js; do node \"$test\"; done",
+    "test": "set -e; export HOMEBOY_RUNTIME_CONTRACT_CONSTANTS_FIXTURE=tests/fixtures/homeboy-runtime-contract-constants.generated.json; for test in tests/*.test.js; do node \"$test\"; done",
     "probe:homeboy-contract": "node scripts/probe-homeboy-contract-surface.cjs",
     "test:homeboy-contract-export": "node scripts/check-homeboy-contract-export-fixtures.cjs",
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",

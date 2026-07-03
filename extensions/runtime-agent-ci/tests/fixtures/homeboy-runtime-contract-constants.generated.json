@@ -1,0 +1,31 @@
+{
+  "success": true,
+  "data": {
+    "constants": {
+      "artifact_manifest": {
+        "file_name": "homeboy-artifact-manifest.json",
+        "schema_id": "homeboy/artifact-manifest/v1"
+      },
+      "artifact_paths": {
+        "schema_id": "homeboy/runtime-agent-artifact-paths/v1"
+      },
+      "run_location_index": {
+        "schema_id": "homeboy/run-location-index/v1"
+      },
+      "run_outcome_envelope": {
+        "schema_id": "homeboy/run-outcome-envelope/v1"
+      },
+      "runner_artifact_manifest_ref": {
+        "schema_id": "homeboy/runner-artifact-manifest-ref/v1"
+      },
+      "runner_execution_record": {
+        "schema_id": "homeboy/runner-execution-record/v1"
+      },
+      "secret_env_plan": {
+        "schema_id": "homeboy/secret-env-plan/v1"
+      }
+    },
+    "contract_id": "all",
+    "schema": "homeboy/contract-constants/v1"
+  }
+}

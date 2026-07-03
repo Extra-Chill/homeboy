@@ -1,62 +1,28 @@
 'use strict';
 
-const CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
-  artifact_manifest: Object.freeze({
-    file_name: 'homeboy-artifact-manifest.json',
-    schema_id: 'homeboy/artifact-manifest/v1',
-  }),
-  secret_env_plan: Object.freeze({
-    schema_id: 'homeboy/secret-env-plan/v1',
-  }),
-  run_location_index: Object.freeze({
-    schema_id: 'homeboy/run-location-index/v1',
-  }),
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+
+const REQUIRED_RUNTIME_CONTRACT_FIELDS = Object.freeze({
+  artifact_manifest: Object.freeze(['file_name', 'schema_id']),
+  secret_env_plan: Object.freeze(['schema_id']),
+  run_location_index: Object.freeze(['schema_id']),
+  artifact_paths: Object.freeze(['schema_id']),
+  runner_artifact_manifest_ref: Object.freeze(['schema_id']),
+  runner_execution_record: Object.freeze(['schema_id']),
+  run_outcome_envelope: Object.freeze(['schema_id']),
 });
 
-const LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS = validatedLocalSchemaFallback(
-  'run_outcome_envelope',
-  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope,
-  Object.freeze({ schema_id: 'homeboy/run-outcome-envelope/v1' })
-);
-const LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS = validatedLocalSchemaFallback(
-  'runner_execution_record',
-  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record,
-  Object.freeze({ schema_id: 'homeboy/runner-execution-record/v1' })
-);
-
-// Extension-local artifact schemas. These remain here until Homeboy core exports
-// contract constants for the runtime artifact path/ref boundary.
-const EXTENSION_RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
-  artifact_paths: Object.freeze({
-    schema_id: 'homeboy/runtime-agent-artifact-paths/v1',
-  }),
-  runner_artifact_manifest_ref: Object.freeze({
-    schema_id: 'homeboy/runner-artifact-manifest-ref/v1',
-  }),
-});
-
-const CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS = Object.freeze(Object.keys({
-  ...(CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope ? {} : { run_outcome_envelope: LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS }),
-  ...(CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record ? {} : { runner_execution_record: LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS }),
-  ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
-}));
-
-const RUNTIME_CONTRACT_CONSTANTS = Object.freeze({
-  ...CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
-  run_outcome_envelope: CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope || LOCAL_RUN_OUTCOME_ENVELOPE_CONTRACT_CONSTANTS,
-  runner_execution_record: CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.runner_execution_record || LOCAL_RUNNER_EXECUTION_RECORD_CONTRACT_CONSTANTS,
-  ...EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
-});
-
-const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
+const RUNTIME_CONTRACT_CONSTANTS = loadHomeboyRuntimeContractConstants();
+const ARTIFACT_MANIFEST_CONTRACT_CONSTANTS = RUNTIME_CONTRACT_CONSTANTS.artifact_manifest;
 const ARTIFACT_MANIFEST_SCHEMA = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.schema_id;
 const ARTIFACT_MANIFEST_FILE = ARTIFACT_MANIFEST_CONTRACT_CONSTANTS.file_name;
-const SECRET_ENV_PLAN_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
-const RUN_LOCATION_INDEX_SCHEMA = CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
+const SECRET_ENV_PLAN_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.secret_env_plan.schema_id;
+const RUN_LOCATION_INDEX_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_location_index.schema_id;
 const RUN_OUTCOME_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id;
 const RUNNER_EXECUTION_RECORD_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.runner_execution_record.schema_id;
-const ARTIFACT_PATHS_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
-const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = EXTENSION_RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
+const ARTIFACT_PATHS_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.artifact_paths.schema_id;
+const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA = RUNTIME_CONTRACT_CONSTANTS.runner_artifact_manifest_ref.schema_id;
 const {
   buildSecretEnvFallbacks,
   buildSecretEnvPlan,
@@ -73,14 +39,41 @@ const CANONICAL_RUN_ARTIFACT_FILES = Object.freeze({
   loop_policy: 'loop-policy.json',
 });
 
-function validatedLocalSchemaFallback(contractName, coreConstants, fallback) {
-  if (coreConstants && typeof coreConstants.schema_id === 'string' && coreConstants.schema_id.length > 0) {
-    return coreConstants;
+function loadHomeboyRuntimeContractConstants(options = {}) {
+  const output = loadHomeboyContractConstantsOutput(options);
+  const constants = runtimeContractConstantsFromHomeboyOutput(output);
+  validateRequiredRuntimeContractConstants(constants);
+  return deepFreeze(constants);
+}
+
+function loadHomeboyContractConstantsOutput(options = {}) {
+  const fixturePath = options.fixturePath || process.env.HOMEBOY_RUNTIME_CONTRACT_CONSTANTS_FIXTURE || '';
+  if (fixturePath) {
+    return JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
   }
-  if (!fallback || typeof fallback.schema_id !== 'string' || fallback.schema_id.length === 0) {
-    throw new Error(`${contractName}.schema_id fallback must be a non-empty string`);
+
+  const command = options.homeboyCommand || process.env.HOMEBOY_COMMAND || 'homeboy';
+  const spawn = options.spawnSync || spawnSync;
+  const env = { ...process.env, ...(options.env || {}) };
+  const result = spawn(command, ['contract', 'constants', 'all'], { encoding: 'utf8', env });
+  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
+  const stderr = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+
+  if (result.error) {
+    throw new Error(`Homeboy runtime contract constants unavailable: ${result.error.message}`);
   }
-  return fallback;
+  if (result.status !== 0) {
+    throw new Error(`Homeboy runtime contract constants unavailable: ${command} contract constants all exited ${result.status}: ${stderr || stdout}`);
+  }
+  if (!stdout) {
+    throw new Error(`Homeboy runtime contract constants unavailable: ${command} contract constants all emitted no JSON`);
+  }
+
+  try {
+    return JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`Homeboy runtime contract constants unavailable: ${command} contract constants all emitted invalid JSON: ${error.message}`);
+  }
 }
 
 function runtimeContractConstantsFromHomeboyOutput(output) {
@@ -99,6 +92,36 @@ function runtimeContractConstantsFromHomeboyOutput(output) {
   copyContractConstants(normalized, 'path_materialization_plan', constants.path_materialization_plan || constants.pathMaterializationPlan, ['schema_id']);
   copyContractConstants(normalized, 'run_outcome_envelope', constants.run_outcome_envelope || constants.runOutcomeEnvelope, ['schema_id']);
   return normalized;
+}
+
+function validateRequiredRuntimeContractConstants(constants) {
+  const errors = [];
+  for (const [contractName, fields] of Object.entries(REQUIRED_RUNTIME_CONTRACT_FIELDS)) {
+    const contract = constants[contractName];
+    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
+      errors.push(`${contractName} is missing from Homeboy contract constants`);
+      continue;
+    }
+    for (const field of fields) {
+      if (typeof contract[field] !== 'string' || contract[field].length === 0) {
+        errors.push(`${contractName}.${field} is missing from Homeboy contract constants`);
+      }
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(`Homeboy runtime contract constants are incomplete: ${errors.join('; ')}`);
+  }
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  for (const child of Object.values(value)) {
+    deepFreeze(child);
+  }
+  return value;
 }
 
 function contractConstantsPayload(output) {
@@ -131,9 +154,7 @@ module.exports = {
   ARTIFACT_MANIFEST_SCHEMA,
   ARTIFACT_PATHS_SCHEMA,
   CANONICAL_RUN_ARTIFACT_FILES,
-  CORE_RUNTIME_CONTRACT_EXPORT_BLOCKERS,
-  CORE_PUBLISHED_RUNTIME_CONTRACT_CONSTANTS,
-  EXTENSION_RUNTIME_CONTRACT_CONSTANTS,
+  REQUIRED_RUNTIME_CONTRACT_FIELDS,
   RUN_LOCATION_INDEX_SCHEMA,
   RUN_OUTCOME_ENVELOPE_SCHEMA,
   RUNNER_EXECUTION_RECORD_SCHEMA,
@@ -142,5 +163,7 @@ module.exports = {
   SECRET_ENV_PLAN_SCHEMA,
   buildSecretEnvFallbacks,
   buildSecretEnvPlan,
+  loadHomeboyRuntimeContractConstants,
   runtimeContractConstantsFromHomeboyOutput,
+  validateRequiredRuntimeContractConstants,
 };
