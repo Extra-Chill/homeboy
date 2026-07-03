@@ -74,6 +74,7 @@ fn exec_runner_rig_sources_command(
             env: HashMap::new(),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
+            env_materialization: None,
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,

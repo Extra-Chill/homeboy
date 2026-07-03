@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use crate::command_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
+use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
@@ -73,6 +74,8 @@ pub struct RunnerExecutionEnvelope {
     pub agent_task: Option<AgentTaskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_env: Option<SecretEnvPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_materialization: Option<EnvMaterializationPlan>,
     #[serde(default)]
     pub lifecycle_policy: RunnerExecutionLifecyclePolicy,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -598,6 +601,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: None,
             agent_task: None,
             secret_env: None,
+            env_materialization: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations: Vec::new(),
             loop_policy: RunnerExecutionLoopPolicy::default(),
@@ -669,6 +673,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: Some(workload),
             agent_task: None,
             secret_env: None,
+            env_materialization: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations: Vec::new(),
             loop_policy: RunnerExecutionLoopPolicy::default(),
@@ -702,6 +707,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: None,
             agent_task: Some(request),
             secret_env: Some(secret_env),
+            env_materialization: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
             artifact_declarations,
             loop_policy: RunnerExecutionLoopPolicy::default(),

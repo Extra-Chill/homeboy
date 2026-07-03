@@ -168,6 +168,7 @@ pub fn refresh_homeboy_binary(
             env: Default::default(),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
+            env_materialization: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

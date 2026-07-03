@@ -1187,6 +1187,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
             env: Default::default(),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
+            env_materialization: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

@@ -97,6 +97,7 @@ pub(super) fn exec(
             env,
             secret_env_names,
             secret_env_plan: Some(secret_env_plan),
+            env_materialization: None,
             capture_patch,
             raw_exec: true,
             source_snapshot,
