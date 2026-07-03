@@ -55,14 +55,13 @@
 - [upgrade](upgrade.md)
 - [version](version.md)
 - [worktree](worktree.md) — component-backed task worktree lifecycle
-- [wp](wp.md) — extension-provided WP-CLI routing when installed
 
 This list covers the top-level core CLI commands currently surfaced by `homeboy
 --help` in this checkout. Hidden internal commands are omitted from this index.
 
 Note: some extensions also expose additional top-level CLI commands at runtime
-when installed. Extension command docs, including `cargo` and `wp`, describe
-possible runtime-provided commands rather than guaranteed core subcommands.
+when installed. Extension command docs describe possible runtime-provided
+commands rather than guaranteed core subcommands.
 
 Agents and automation that need command safety metadata should read the recursive manifest with `homeboy manifest`.
 

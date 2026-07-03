@@ -341,7 +341,7 @@ mod tests {
             None,
         );
         component.extensions = Some(HashMap::from([(
-            "wordpress".to_string(),
+            "package-host".to_string(),
             ScopedExtensionConfig::default(),
         )]));
         component
@@ -352,8 +352,8 @@ mod tests {
             id: "site".to_string(),
             base_path: Some("/srv/site".to_string()),
             path_roots: HashMap::from([(
-                "wp_content".to_string(),
-                "/htdocs/wp-content".to_string(),
+                "package_root".to_string(),
+                "/opt/packages".to_string(),
             )]),
             ..Project::default()
         }
@@ -365,8 +365,8 @@ mod tests {
 
     fn install_extension_with_detect_command(detect_command: Option<&str>) {
         crate::core::extension::save_manifest(&ExtensionManifest {
-            id: "wordpress".to_string(),
-            name: "WordPress".to_string(),
+            id: "package-host".to_string(),
+            name: "Package Host".to_string(),
             version: "1.0.0".to_string(),
             deploy: Some(DeployCapability {
                 verifications: Vec::new(),
@@ -376,8 +376,8 @@ mod tests {
                 archive_install: Vec::new(),
                 remote_path_inference: Vec::new(),
                 path_roots: vec![RemotePathRootRule {
-                    path_prefix: "wp-content".to_string(),
-                    root: "wp_content".to_string(),
+                    path_prefix: "packages".to_string(),
+                    root: "package_root".to_string(),
                     strip_prefix: true,
                     detect_command: detect_command.map(str::to_string),
                 }],
@@ -385,7 +385,7 @@ mod tests {
                 since_tag: None,
             }),
             ..serde_json::from_value(serde_json::json!({
-                "name": "WordPress",
+                "name": "Package Host",
                 "version": "1.0.0"
             }))
             .expect("manifest")
@@ -428,39 +428,39 @@ mod tests {
 
             let resolved = resolve_effective_remote_path(
                 &project_with_root(),
-                &component("wp-content/plugins/foo"),
+                &component("packages/foo"),
                 "/srv/site",
             )
             .expect("resolve path");
 
-            assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
+            assert_eq!(resolved, "/opt/packages/foo");
         });
     }
 
     #[test]
-    fn resolves_relative_content_root_against_base_path() {
+    fn resolves_relative_managed_root_against_base_path() {
         with_isolated_home(|_| {
             install_extension();
             let project = Project {
                 id: "site".to_string(),
                 base_path: Some("/srv/site".to_string()),
-                path_roots: HashMap::from([("wp_content".to_string(), "wp-content".to_string())]),
+                path_roots: HashMap::from([("package_root".to_string(), "packages".to_string())]),
                 ..Project::default()
             };
 
             let resolved = resolve_effective_remote_path(
                 &project,
-                &component("wp-content/plugins/foo"),
+                &component("packages/foo"),
                 "/srv/site",
             )
             .expect("resolve path");
 
-            assert_eq!(resolved, "/srv/site/wp-content/plugins/foo");
+            assert_eq!(resolved, "/srv/site/packages/foo");
         });
     }
 
     #[test]
-    fn parent_relative_content_paths_without_root_are_rejected() {
+    fn parent_relative_managed_paths_without_root_are_rejected() {
         with_isolated_home(|_| {
             install_extension();
 
@@ -470,17 +470,17 @@ mod tests {
                     base_path: Some("/srv/site".to_string()),
                     ..Project::default()
                 },
-                &component("../wp-content/plugins/foo"),
+                &component("../packages/foo"),
                 "/srv/site",
             )
-            .expect_err("parent-relative content path without a root should be rejected");
+            .expect_err("parent-relative managed path without a root should be rejected");
 
             let message = err.to_string();
             assert!(
                 message.contains("resolves outside the writable managed root"),
                 "expected clear root-escape diagnostic, got: {message}"
             );
-            assert!(message.contains("wp_content"));
+            assert!(message.contains("package_root"));
 
             // Remediation lives in details.tried (same shape as the other
             // path-root errors in this module).
@@ -491,64 +491,63 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                tried_text.contains("runtime-managed-root>/plugins/foo"),
+                tried_text.contains("runtime-managed-root>/foo"),
                 "diagnostic should suggest an explicit absolute path shape, got: {tried_text}"
             );
             assert!(
-                tried_text.contains("path_roots.wp_content"),
+                tried_text.contains("path_roots.package_root"),
                 "diagnostic should mention configuring the path_root, got: {tried_text}"
             );
         });
     }
 
     #[test]
-    fn wp_cloud_parent_relative_path_without_root_is_rejected_3488() {
-        // Regression for issue #3488: WP Cloud base_path `/htdocs/__wp__` with a
-        // `../wp-content/...` remote_path and no detected wp_content root must be
-        // rejected at preflight instead of producing `/htdocs/__wp__/../wp-content/...`
-        // (which `mkdir -p` expands into a read-only filesystem).
+    fn parent_relative_path_without_root_is_rejected_before_expansion_3488() {
+        // Regression for issue #3488: a base_path inside a managed runtime with a
+        // `../packages/...` remote_path and no detected package root must be
+        // rejected at preflight instead of producing an escaping expanded path.
         with_isolated_home(|_| {
             install_extension();
 
             let err = resolve_effective_remote_path(
                 &Project {
-                    id: "wp-docs-runtime".to_string(),
-                    base_path: Some("/htdocs/__wp__".to_string()),
+                    id: "docs-runtime".to_string(),
+                    base_path: Some("/srv/runtime/app".to_string()),
                     ..Project::default()
                 },
-                &component("../wp-content/plugins/frontend-agent-chat"),
-                "/htdocs/__wp__",
+                &component("../packages/frontend-agent-chat"),
+                "/srv/runtime/app",
             )
-            .expect_err("WP Cloud parent-relative escape must be rejected (#3488)");
+            .expect_err("parent-relative escape must be rejected (#3488)");
 
             let message = err.to_string();
             assert!(message.contains("resolves outside the writable managed root"));
             assert!(message.contains("frontend-agent-chat"));
             assert!(
-                !message.contains("/htdocs/__wp__/../wp-content"),
+                !message.contains("/srv/runtime/app/../packages"),
                 "must not surface the escaping expanded path, got: {message}"
             );
         });
     }
 
     #[test]
-    fn parent_relative_content_paths_use_configured_root_when_available() {
+    fn parent_relative_managed_paths_use_configured_root_when_available() {
         with_isolated_home(|_| {
             install_extension();
 
             let resolved = resolve_effective_remote_path(
                 &project_with_root(),
-                &component("../wp-content/plugins/foo"),
-                "/htdocs/__wp__",
+                &component("../packages/foo"),
+                "/srv/runtime/app",
             )
-            .expect("parent-relative content path should resolve through root");
+            .expect("parent-relative managed path should resolve through root");
 
-            assert_eq!(resolved, "/htdocs/wp-content/plugins/foo");
+            assert_eq!(resolved, "/opt/packages/foo");
         });
     }
 
     #[test]
-    fn parent_relative_non_content_paths_are_rejected() {
+    fn parent_relative_non_managed_paths_are_rejected() {
         with_isolated_home(|_| {
             install_extension();
 
@@ -570,7 +569,7 @@ mod tests {
 
             let err = resolve_effective_remote_path(
                 &project_with_root(),
-                &component("../wp-content/../secrets/foo"),
+                &component("../packages/../secrets/foo"),
                 "/srv/site",
             )
             .expect_err("internal parent traversal should fail");
@@ -582,7 +581,7 @@ mod tests {
     #[test]
     fn test_project_with_detected_path_roots() {
         with_isolated_home(|_| {
-            install_extension_with_detect_command(Some("printf /detected/wp-content"));
+            install_extension_with_detect_command(Some("printf /detected/packages"));
             let project = Project {
                 id: "site".to_string(),
                 ..Project::default()
@@ -590,31 +589,31 @@ mod tests {
 
             let detected = project_with_detected_path_roots(
                 &project,
-                &[component("wp-content/plugins/foo")],
+                &[component("packages/foo")],
                 "/tmp",
                 &local_client(),
             );
 
             assert_eq!(
-                detected.path_roots.get("wp_content").map(String::as_str),
-                Some("/detected/wp-content")
+                detected.path_roots.get("package_root").map(String::as_str),
+                Some("/detected/packages")
             );
         });
     }
 
     #[test]
-    fn applies_content_root_to_theme_paths() {
+    fn applies_managed_root_to_nested_paths() {
         with_isolated_home(|_| {
             install_extension();
 
             let resolved = resolve_effective_remote_path(
                 &project_with_root(),
-                &component("wp-content/themes/theme"),
+                &component("packages/themes/theme"),
                 "/srv/site",
             )
             .expect("resolve path");
 
-            assert_eq!(resolved, "/htdocs/wp-content/themes/theme");
+            assert_eq!(resolved, "/opt/packages/themes/theme");
         });
     }
 
@@ -645,14 +644,14 @@ mod tests {
                     base_path: Some("/srv/site".to_string()),
                     ..Project::default()
                 },
-                &component("wp-content/plugins/foo"),
+                &component("packages/foo"),
                 "/srv/site",
             )
             .expect_err("missing managed root should fail");
 
             let message = err.to_string();
             assert!(message.contains("matches managed path root"));
-            assert!(message.contains("wp_content"));
+            assert!(message.contains("package_root"));
         });
     }
 }

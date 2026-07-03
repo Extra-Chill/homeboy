@@ -287,24 +287,23 @@ fn command_surface_doctor_report_agrees_for_matching_sets() {
         "cargo".to_string(),
         "fuzz".to_string(),
         "manifest".to_string(),
-        "wp".to_string(),
     ]);
     let help = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
-    let extension_docs = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
+    let extension_docs = BTreeSet::from(["cargo".to_string()]);
 
     let report = command_surface_doctor_report(source, docs, help, extension_docs);
 
     assert!(report.agrees);
     assert!(report.drift_notes.is_empty());
-    assert_eq!(report.runtime_extension_docs, vec!["cargo", "wp"]);
+    assert_eq!(report.runtime_extension_docs, vec!["cargo"]);
 }
 
 #[test]
 fn command_surface_doctor_report_detects_docs_and_help_mismatches() {
     let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
-    let docs = BTreeSet::from(["lab".to_string(), "manifest".to_string(), "wp".to_string()]);
+    let docs = BTreeSet::from(["lab".to_string(), "manifest".to_string(), "tool".to_string()]);
     let help = BTreeSet::from(["fuzz".to_string(), "lab".to_string()]);
-    let extension_docs = BTreeSet::from(["wp".to_string()]);
+    let extension_docs = BTreeSet::from(["tool".to_string()]);
 
     let report = command_surface_doctor_report(source, docs, help, extension_docs);
 

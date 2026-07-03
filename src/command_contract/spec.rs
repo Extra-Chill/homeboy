@@ -693,10 +693,6 @@ pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
         slug: "rig-spec",
         kind: CommandDocKind::Support,
     },
-    CommandDocSpec {
-        slug: "wp",
-        kind: CommandDocKind::RuntimeExtensionCommand,
-    },
 ];
 
 pub fn registered_command(name: &str) -> Option<&'static CommandSpec> {
