@@ -47,6 +47,7 @@ mod offload_metadata;
 mod origin_refs;
 mod resource_metrics;
 mod rig_materialization;
+mod runtime_materialization_status;
 mod runtime_overlay_freshness;
 mod session;
 mod source_materialization;
@@ -125,6 +126,7 @@ pub use offload_metadata::{
 };
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{RunnerResourceGuardViolation, RunnerResourceMetrics};
+pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerArtifactRef, RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
