@@ -410,6 +410,7 @@ fn runner_exec_options_from_envelope(
         env: dispatch.env,
         secret_env_names,
         secret_env_plan: Some(secret_env_plan),
+        env_materialization: envelope.env_materialization,
         capture_patch: envelope.mutation_policy.capture_patch,
         raw_exec: false,
         source_snapshot: dispatch.source_snapshot,

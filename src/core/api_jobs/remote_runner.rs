@@ -9,6 +9,7 @@ use super::store::{JobStore, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
+use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
 use crate::core::runner_execution_envelope::{
@@ -69,6 +70,8 @@ pub struct RemoteRunnerJobRequest {
     pub secret_env_names: Vec<String>,
     #[serde(default)]
     pub secret_env_plan: SecretEnvPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_materialization: Option<EnvMaterializationPlan>,
     #[serde(default)]
     pub capture_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

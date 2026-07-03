@@ -99,6 +99,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::core::secret_env_plan::SecretEnvPlan",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::env_materialization_plan::ENV_MATERIALIZATION_PLAN_SCHEMA,
+        name: "env-materialization-plan",
+        title: "Environment materialization plan",
+        owner: "homeboy-core",
+        summary: "Describes public env literals, secret refs, source env refs, inherited allowlists, and handoff metadata without serialized secret values.",
+        rust_type: "homeboy::core::env_materialization_plan::EnvMaterializationPlan",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::secret_env_plan::SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA,
         name: "secret-env-materialized-handoff",
         title: "Secret environment materialized handoff",
@@ -257,6 +265,7 @@ mod tests {
             "artifact-manifest",
             "artifact-postprocess",
             "secret-env-plan",
+            "env-materialization-plan",
             "fuzz-workload",
             "resource-cleanup-intent",
             "resource-lifecycle-index",

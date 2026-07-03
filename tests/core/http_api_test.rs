@@ -309,6 +309,7 @@ fn runs_list_includes_active_runner_jobs() {
                 env: Default::default(),
                 secret_env_names: Vec::new(),
                 secret_env_plan: Default::default(),
+                env_materialization: None,
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),

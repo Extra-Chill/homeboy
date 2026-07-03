@@ -7,6 +7,16 @@ fn write_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
+fn make_executable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut mode = fs::metadata(path).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(path, mode).unwrap();
+    }
+}
+
 fn fixture_component(path: &std::path::Path) -> (&'static str, String) {
     ("fixture", path.display().to_string())
 }
@@ -181,6 +191,124 @@ fn composer_install_command_args_are_runtime_prep_safe() {
     assert_eq!(
         deps::composer_install_command_args(),
         vec!["install", "--no-interaction", "--no-progress"]
+    );
+}
+
+#[test]
+fn status_prefers_neutral_adapter_manifest_over_builtin_manifests() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let root_path = root.display().to_string();
+
+    write_file(
+        &root.join("homeboy-deps.json"),
+        r#"{
+            "provider": "fixture-adapter",
+            "dependency_identities": ["fixture/root"],
+            "packages": [
+                {
+                    "name": "fixture/package",
+                    "manifest_section": "adapter-dependencies",
+                    "constraint": "^1.0",
+                    "locked_version": "1.2.3",
+                    "locked_reference": "adapter-ref"
+                }
+            ],
+            "commands": {
+                "install": { "argv": ["fixture-adapter", "install"] }
+            }
+        }"#,
+    );
+    write_file(
+        &root.join("composer.json"),
+        r#"{ "require": { "fixture/composer": "^9.0" } }"#,
+    );
+    write_file(
+        &root.join("package.json"),
+        r#"{ "dependencies": { "fixture-npm": "^9.0.0" } }"#,
+    );
+
+    let status = deps::status(Some("fixture"), Some(&root_path), None).unwrap();
+
+    assert_eq!(status.package_manager, "fixture-adapter");
+    assert_eq!(status.packages.len(), 1);
+    assert_eq!(status.packages[0].name, "fixture/package");
+    assert_eq!(status.packages[0].constraint.as_deref(), Some("^1.0"));
+}
+
+#[test]
+fn neutral_adapter_manifest_discovers_install_command_and_runs_update_install() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let root_path = root.display().to_string();
+    let adapter = root.join("fixture-adapter.sh");
+    write_file(
+        &adapter,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> adapter-args.txt
+"#,
+    );
+    make_executable(&adapter);
+    write_file(
+        &root.join("homeboy-deps.json"),
+        &format!(
+            r#"{{
+                "provider": "fixture-adapter",
+                "packages": [{{
+                    "name": "fixture/package",
+                    "manifest_section": "adapter-dependencies",
+                    "constraint": "^1.0",
+                    "locked_version": "1.2.3"
+                }}],
+                "commands": {{
+                    "install": {{ "argv": ["{}", "install"] }},
+                    "update": {{ "argv": ["{}", "update", "{{package}}", "{{constraint}}"] }}
+                }}
+            }}"#,
+            adapter.display(),
+            adapter.display()
+        ),
+    );
+
+    let plan = deps::dependency_install_plan(root).unwrap();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].provider_id, "fixture-adapter");
+    assert_eq!(
+        plan[0].command,
+        vec![adapter.display().to_string(), "install".to_string()]
+    );
+
+    let install = deps::install(Some("fixture"), Some(&root_path)).unwrap();
+    assert_eq!(install.package_manager, "fixture-adapter");
+    assert_eq!(install.installs.len(), 1);
+    assert_eq!(install.installs[0].command, plan[0].command);
+
+    let update = deps::update(
+        Some("fixture"),
+        Some(&root_path),
+        "fixture/package",
+        Some("^2.0"),
+        DependencyUpdateOptions {
+            install: false,
+            rebuild: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(update.package_manager, "fixture-adapter");
+    assert_eq!(update.package, "fixture/package");
+    assert_eq!(update.requested_constraint.as_deref(), Some("^2.0"));
+    assert_eq!(
+        update.command,
+        vec![
+            adapter.display().to_string(),
+            "update".to_string(),
+            "fixture/package".to_string(),
+            "^2.0".to_string(),
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("adapter-args.txt")).unwrap(),
+        "install\nupdate\nfixture/package\n^2.0\n"
     );
 }
 

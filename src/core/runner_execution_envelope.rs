@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use crate::command_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
+use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -75,6 +76,8 @@ pub struct RunnerExecutionEnvelope {
     pub agent_task: Option<AgentTaskRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_env: Option<SecretEnvPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_materialization: Option<EnvMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<RunnerExecutionDispatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -635,6 +638,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: None,
             agent_task: None,
             secret_env: None,
+            env_materialization: None,
             dispatch: None,
             lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
@@ -718,6 +722,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: Some(workload),
             agent_task: None,
             secret_env: None,
+            env_materialization: None,
             dispatch: None,
             lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),
@@ -753,6 +758,7 @@ impl RunnerExecutionEnvelope {
             runner_workload: None,
             agent_task: Some(request),
             secret_env: Some(secret_env),
+            env_materialization: None,
             dispatch: None,
             lifecycle: None,
             lifecycle_policy: RunnerExecutionLifecyclePolicy::default(),

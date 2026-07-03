@@ -481,6 +481,7 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             env: HashMap::new(),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
+            env_materialization: None,
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,

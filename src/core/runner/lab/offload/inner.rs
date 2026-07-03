@@ -800,6 +800,7 @@ pub(crate) fn run_lab_offload_inner(
             env,
             secret_env_names,
             secret_env_plan: Some(secret_env_handoff.secret_env_plan.clone()),
+            env_materialization: None,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),

@@ -1558,6 +1558,7 @@ mod tests {
             env: HashMap::new(),
             secret_env_names: Vec::new(),
             secret_env_plan: Default::default(),
+            env_materialization: None,
             capture_patch: true,
             source_snapshot: Some(SourceSnapshot::existing_remote(
                 runner_id,
