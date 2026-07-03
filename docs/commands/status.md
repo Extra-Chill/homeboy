@@ -75,6 +75,7 @@ and look at `outdated`. Together, `unreleased_merges` (tag-vs-merged),
 - `--unreleased` — show only components carrying merged-but-unreleased work (commits on `origin/<default-branch>` past the latest release tag)
 - `--all` — show all components regardless of current directory context
 - `--outdated` — (project mode) show only components whose installed-on-target version is behind the latest release
+- `--timings` — emit phase progress to stderr and include phase timings in JSON, useful when diagnosing slow status runs
 
 ## Related
 
