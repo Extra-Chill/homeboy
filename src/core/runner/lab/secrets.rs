@@ -6,7 +6,7 @@
 //! it resolves controller-owned secret values once, records runner-deferred
 //! requirements by name, and exposes only redacted diagnostics for metadata.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::command_contract::LabSecretEnvSource;
 use crate::core::agent_tasks::provider::{
@@ -19,7 +19,9 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::core::secret_env_plan::{SecretEnvHandoffEntry, SecretEnvPlan};
+use crate::core::secret_env_plan::{
+    SecretEnvHandoffEntry, SecretEnvPlan, SecretEnvPlanMaterializeRequest,
+};
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -45,6 +47,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     args: &[String],
     mut env_delta: HashMap<String, String>,
 ) -> Result<LabSecretEnvHandoffPlan> {
+    let declared_public_env_delta = env_delta.clone();
     let agent_task_secret_env = if secret_env_sources.contains(&LabSecretEnvSource::AgentTask) {
         hydrate_agent_task_secret_env(args, &mut env_delta)?
     } else {
@@ -72,7 +75,21 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     }
     secret_env_names.sort();
     secret_env_names.dedup();
-    let secret_env_plan = SecretEnvPlan::from_secret_env_names(secret_env_names.clone());
+    let public_env = declared_public_env_delta
+        .into_iter()
+        .filter(|(name, _)| !secret_env_names.contains(name))
+        .collect::<BTreeMap<_, _>>();
+    let secret_env_plan = materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
+    let resolved_secret_env_names = secret_env_plan.secret_env_names();
+    let secret_values = env_delta
+        .iter()
+        .filter(|(name, _)| resolved_secret_env_names.contains(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    env_delta = secret_env_plan
+        .materialize(secret_values)
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
     let mut runner_deferred_secret_env = Vec::new();
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&agent_task_secret_env));
@@ -90,7 +107,7 @@ pub(super) fn build_lab_secret_env_handoff_plan(
     let diagnostics = serde_json::json!({
         "schema": LAB_SECRET_ENV_HANDOFF_SCHEMA,
         "entries": entries,
-        "secret_env_plan": secret_env_plan.redacted(),
+        "secret_env_plan": redacted_lab_secret_env_plan(&secret_env_plan),
         "final_env_delta": redacted_env_delta_metadata(&env_delta),
         "secret_env_names": secret_env_names.clone(),
         "runner_deferred_secret_env": runner_deferred_secret_env
@@ -129,6 +146,39 @@ fn empty_tunnel_secret_env_metadata() -> serde_json::Value {
         "schema": "homeboy/lab-tunnel-secret-env/v1",
         "runner_deferred_secret_env": [],
     })
+}
+
+fn materialized_lab_secret_env_plan(
+    public_env: BTreeMap<String, String>,
+    secret_env_names: Vec<String>,
+) -> Result<SecretEnvPlan> {
+    SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
+        public_env,
+        secret_env_names,
+        diagnostic_source: Some("lab-secret-env-handoff".to_string()),
+        ..SecretEnvPlanMaterializeRequest::default()
+    })
+    .map(|materialization| materialization.plan)
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "secret-env-plan",
+            error.message,
+            None,
+            Some(vec![
+                "Declare Lab public env and secret env through the secret-env plan contract before dispatch."
+                    .to_string(),
+            ]),
+        )
+    })
+}
+
+fn redacted_lab_secret_env_plan(plan: &SecretEnvPlan) -> SecretEnvPlan {
+    let mut redacted = plan.redacted();
+    let replacement = redacted.redaction.replacement.clone();
+    for value in redacted.public_env.values_mut() {
+        *value = replacement.clone();
+    }
+    redacted
 }
 
 fn redacted_env_delta_metadata(env_delta: &HashMap<String, String>) -> Vec<serde_json::Value> {
@@ -1104,7 +1154,21 @@ mod tests {
             plan.secret_env_names,
             vec!["HOMEBOY_TRACE_HANDOFF_SECRET_TEST".to_string()]
         );
+        assert_eq!(
+            plan.secret_env_plan
+                .public_env
+                .get("HOMEBOY_PUBLIC_CONTEXT"),
+            Some(&"still-redacted-in-diagnostics".to_string())
+        );
         assert!(plan.runner_deferred_secret_env.is_empty());
+        let materialized = plan.secret_env_plan.materialize([(
+            "HOMEBOY_TRACE_HANDOFF_SECRET_TEST".to_string(),
+            "trace-secret-value".to_string(),
+        )]);
+        assert_eq!(
+            plan.env_delta,
+            materialized.into_iter().collect::<HashMap<_, _>>()
+        );
         let rendered = plan.diagnostics.to_string();
         assert!(rendered.contains("homeboy/lab-secret-env-handoff/v1"));
         assert!(rendered.contains("HOMEBOY_TRACE_HANDOFF_SECRET_TEST"));
@@ -1506,6 +1570,16 @@ mod tests {
                 .get("HOMEBOY_CONTROLLER_PROVIDER_TOKEN")
                 .map(String::as_str),
             Some("controller-secret-value")
+        );
+        assert_eq!(
+            plan.env_delta,
+            plan.secret_env_plan
+                .materialize([(
+                    "HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string(),
+                    "controller-secret-value".to_string(),
+                )])
+                .into_iter()
+                .collect::<HashMap<_, _>>()
         );
         assert!(plan
             .diagnostics

@@ -355,11 +355,11 @@ pub(super) fn prepare_runner_exec_secret_env_plan(
                 Some(format!("read runner exec secret env plan {path}")),
             )
         })?;
-        merge_runner_exec_secret_env_plan(&mut plan, parse_runner_exec_secret_env_plan(&raw)?)?;
+        plan.merge_from(parse_runner_exec_secret_env_plan(&raw)?);
     }
 
     if let Some(raw) = secret_env_plan {
-        merge_runner_exec_secret_env_plan(&mut plan, parse_runner_exec_secret_env_plan(&raw)?)?;
+        plan.merge_from(parse_runner_exec_secret_env_plan(&raw)?);
     }
 
     Ok(plan)
@@ -374,14 +374,6 @@ fn parse_runner_exec_secret_env_plan(raw: &str) -> homeboy::core::Result<SecretE
             None,
         )
     })
-}
-
-fn merge_runner_exec_secret_env_plan(
-    target: &mut SecretEnvPlan,
-    plan: SecretEnvPlan,
-) -> homeboy::core::Result<()> {
-    target.merge_from(plan);
-    Ok(())
 }
 
 pub(super) fn validate_runner_exec_public_env(
