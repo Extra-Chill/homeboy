@@ -454,6 +454,40 @@ fn test_handle() {
 }
 
 #[test]
+fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
+        run.id = "legacy-ownerless-run".to_string();
+        run.metadata_json = serde_json::json!({ "source": "legacy-runner" });
+        store.import_run(&run).expect("import ownerless run");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/runs?status=running".to_string(),
+            body: None,
+        })
+        .expect("runs list");
+
+        assert!(response.body["runs"].as_array().expect("runs").is_empty());
+        let stored = store
+            .get_run("legacy-ownerless-run")
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(stored.status, "stale");
+        assert_eq!(
+            stored.metadata_json["homeboy_reconciled"]["reason"],
+            "owner_metadata_missing"
+        );
+        assert_eq!(
+            stored.metadata_json["homeboy_reconciled"]["source"],
+            "http_api_read_reconcile"
+        );
+    });
+}
+
+#[test]
 fn artifact_content_serves_encoded_artifact_store_locator() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();

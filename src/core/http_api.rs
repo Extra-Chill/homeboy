@@ -12,9 +12,12 @@ use uuid::Uuid;
 use crate::core::api_jobs::{self, ActiveRunnerJobSummary, JobStore};
 use crate::core::error::{Error, Result};
 use crate::core::observation::{
-    running_status_note, FindingListFilter, ObservationStore, RunListFilter, RunRecord,
+    run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
+    RunRecord, RunStatus,
 };
 use crate::core::{component, git, paths, rig, runner, stack};
+
+const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -507,6 +510,7 @@ fn list_runs(
     job_store: &JobStore,
 ) -> Result<Vec<RunSummary>> {
     let store = ObservationStore::open_initialized()?;
+    reconcile_stale_running_runs_for_read(&store)?;
     let filter = RunListFilter {
         kind: kind_override
             .map(str::to_string)
@@ -574,12 +578,70 @@ fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
 
 fn show_run(run_id: &str) -> Result<RunDetail> {
     let store = ObservationStore::open_initialized()?;
+    reconcile_stale_running_runs_for_read(&store)?;
     let run = require_run(&store, run_id)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
         homeboy_version: run.homeboy_version,
         metadata: run.metadata_json,
         artifacts: store.list_artifacts(run_id)?,
+    })
+}
+
+fn reconcile_stale_running_runs_for_read(store: &ObservationStore) -> Result<()> {
+    for run in store.list_runs(RunListFilter {
+        status: Some(RunStatus::Running.as_str().to_string()),
+        limit: Some(1000),
+        ..RunListFilter::default()
+    })? {
+        let Some(reason) = api_stale_running_reason(&run) else {
+            continue;
+        };
+        let metadata = api_reconcile_metadata(&run, reason);
+        store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?;
+    }
+
+    Ok(())
+}
+
+fn api_stale_running_reason(run: &RunRecord) -> Option<&'static str> {
+    if let Some(owner_pid) = run_owner_pid(run) {
+        return (!crate::core::process::pid_is_running(owner_pid))
+            .then_some("owner_process_not_running");
+    }
+
+    api_ownerless_running_is_stale(run).then_some("owner_metadata_missing")
+}
+
+fn api_ownerless_running_is_stale(run: &RunRecord) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&run.started_at)
+        .map(|started_at| {
+            chrono::Utc::now()
+                .signed_duration_since(started_at.with_timezone(&chrono::Utc))
+                .num_minutes()
+                >= OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
+        })
+        .unwrap_or(false)
+}
+
+fn api_reconcile_metadata(run: &RunRecord, reason: &str) -> Value {
+    let mut metadata = run.metadata_json.clone();
+    let marker = json!({
+        "status": RunStatus::Stale.as_str(),
+        "reason": reason,
+        "owner_pid": run_owner_pid(run).map(|pid| Value::from(pid as u64)).unwrap_or(Value::Null),
+        "reconciled_at": chrono::Utc::now().to_rfc3339(),
+        "source": "http_api_read_reconcile",
+    });
+
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("homeboy_reconciled".to_string(), marker);
+        return metadata;
+    }
+
+    json!({
+        "homeboy_reconciled": marker,
+        "homeboy_original_metadata": metadata,
     })
 }
 

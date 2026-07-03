@@ -24,7 +24,12 @@ pub fn list_runner_runs(
     if let Some(component_id) = args.component_id {
         query.push(("component", component_id));
     }
-    if let Some(status) = args.status {
+    let status = if args.running {
+        Some("running".to_string())
+    } else {
+        args.status
+    };
+    if let Some(status) = status {
         query.push(("status", status));
     }
     if let Some(rig) = args.rig {
