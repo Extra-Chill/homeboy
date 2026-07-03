@@ -28,28 +28,28 @@ fn write_extension_fixture(home: &Path, id: &str, deploy_json: &str) {
 #[test]
 fn validate_version_target_conflict_different_pattern_errors() {
     let existing = vec![VersionTarget {
-        file: "plugin.php".to_string(),
-        pattern: Some("Version: (.*)".to_string()),
+        file: "component.meta".to_string(),
+        pattern: Some("version=(.*)".to_string()),
         artifact_path: None,
     }];
 
     let result = validate_version_target_conflict(
         &existing,
-        "plugin.php",
-        "define('VER', '(.*)')",
+        "component.meta",
+        "build=(.*)",
         "test-comp",
     );
     // Multiple targets per file with different patterns are now allowed
-    // (e.g. plugin header Version: + PHP define() constant in same file)
+    // (e.g. release version + build metadata in the same file).
     assert!(result.is_ok());
 }
 
 #[test]
 fn component_lifecycle_defaults_to_active_and_is_omitted_when_serialized() {
     let component = Component::new(
-        "sample-plugin".to_string(),
-        "/tmp/sample-plugin".to_string(),
-        "wp-content/plugins/sample-plugin".to_string(),
+        "sample-component".to_string(),
+        "/tmp/sample-component".to_string(),
+        "remote/components/sample-component".to_string(),
         None,
     );
 
@@ -95,7 +95,7 @@ fn component_lifecycle_bundled_roundtrips_and_suppresses() {
 #[test]
 fn component_lifecycle_retired_is_not_active() {
     let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "old-plugin",
+        "id": "old-component",
         "lifecycle": "retired"
     }))
     .unwrap();
@@ -123,9 +123,9 @@ fn component_lifecycle_unknown_value_is_rejected() {
 #[test]
 fn component_priority_labels_serialization_roundtrip() {
     let mut component = Component::new(
-        "sample-plugin".to_string(),
-        "/tmp/sample-plugin".to_string(),
-        "wp-content/plugins/sample-plugin".to_string(),
+        "sample-component".to_string(),
+        "/tmp/sample-component".to_string(),
+        "remote/components/sample-component".to_string(),
         None,
     );
     component.priority_labels = Some(vec!["urgent".to_string()]);
@@ -162,41 +162,41 @@ fn component_env_serialization_roundtrip() {
 #[test]
 fn component_deploy_config_reads_legacy_flat_fields() {
     let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "sample-plugin",
-        "local_path": "/repo/sample-plugin",
-        "remote_path": "wp-content/plugins/sample-plugin",
-        "build_artifact": "dist/sample-plugin.zip",
-        "extract_command": "unzip -o dist/sample-plugin.zip",
+        "id": "sample-component",
+        "local_path": "/repo/sample-component",
+        "remote_path": "remote/components/sample-component",
+        "build_artifact": "dist/sample-component.zip",
+        "extract_command": "unzip -o dist/sample-component.zip",
         "remote_owner": "www-data",
         "deploy_strategy": "git",
         "git_deploy": {
             "remote": "upstream",
             "branch": "stable",
-            "post_pull": ["wp cache flush"],
+            "post_pull": ["tool cache flush"],
             "tag_pattern": "v{{version}}"
         },
-        "remote_url": "https://github.com/example/sample-plugin.git",
-        "cli_path": "lando wp",
+        "remote_url": "https://github.com/example/sample-component.git",
+        "cli_path": "local tool",
         "artifact_inputs": [{
             "component": "builder",
             "artifact": "zip",
-            "target": "dist/sample-plugin.zip",
+            "target": "dist/sample-component.zip",
             "sha256": "abc123"
         }],
         "cleanup_artifacts": [{
             "label": "package",
-            "path": "dist/sample-plugin.zip"
+            "path": "dist/sample-component.zip"
         }]
     }))
     .unwrap();
 
     let deploy = component.deploy_config();
-    assert_eq!(deploy.local_path, "/repo/sample-plugin");
-    assert_eq!(deploy.remote_path, "wp-content/plugins/sample-plugin");
-    assert_eq!(deploy.build_artifact, Some("dist/sample-plugin.zip"));
+    assert_eq!(deploy.local_path, "/repo/sample-component");
+    assert_eq!(deploy.remote_path, "remote/components/sample-component");
+    assert_eq!(deploy.build_artifact, Some("dist/sample-component.zip"));
     assert_eq!(
         deploy.extract_command,
-        Some("unzip -o dist/sample-plugin.zip")
+        Some("unzip -o dist/sample-component.zip")
     );
     assert_eq!(deploy.remote_owner, Some("www-data"));
     assert_eq!(deploy.deploy_strategy, Some("git"));
@@ -204,9 +204,9 @@ fn component_deploy_config_reads_legacy_flat_fields() {
     assert_eq!(component.deploy_strategy(), Some("git"));
     assert_eq!(
         component.remote_url(),
-        Some("https://github.com/example/sample-plugin.git")
+        Some("https://github.com/example/sample-component.git")
     );
-    assert_eq!(deploy.cli_path, Some("lando wp"));
+    assert_eq!(deploy.cli_path, Some("local tool"));
     assert_eq!(deploy.artifact_inputs.len(), 1);
     assert_eq!(deploy.artifact_inputs[0].component, "builder");
     assert_eq!(deploy.cleanup_artifacts.len(), 1);
@@ -215,37 +215,37 @@ fn component_deploy_config_reads_legacy_flat_fields() {
     let git_deploy = component.git_deploy_config().expect("git deploy config");
     assert_eq!(git_deploy.remote, "upstream");
     assert_eq!(git_deploy.branch, "stable");
-    assert_eq!(git_deploy.post_pull, vec!["wp cache flush".to_string()]);
+    assert_eq!(git_deploy.post_pull, vec!["tool cache flush".to_string()]);
     assert_eq!(git_deploy.tag_pattern.as_deref(), Some("v{{version}}"));
 }
 
 #[test]
 fn component_deploy_config_serializes_as_legacy_flat_fields() {
     let mut component = Component::new(
-        "sample-plugin".to_string(),
-        "/repo/sample-plugin".to_string(),
-        "wp-content/plugins/sample-plugin".to_string(),
-        Some("dist/sample-plugin.zip".to_string()),
+        "sample-component".to_string(),
+        "/repo/sample-component".to_string(),
+        "remote/components/sample-component".to_string(),
+        Some("dist/sample-component.zip".to_string()),
     );
     component.deploy_strategy = Some("git".to_string());
     component.git_deploy = Some(GitDeployConfig {
         remote: "upstream".to_string(),
         branch: "stable".to_string(),
-        post_pull: vec!["wp cache flush".to_string()],
+        post_pull: vec!["tool cache flush".to_string()],
         tag_pattern: Some("v{{version}}".to_string()),
     });
-    component.remote_url = Some("https://github.com/example/sample-plugin.git".to_string());
+    component.remote_url = Some("https://github.com/example/sample-component.git".to_string());
 
     let json = serde_json::to_value(&component).unwrap();
     assert!(json.get("deploy").is_none());
     assert_eq!(json["deploy_strategy"], serde_json::json!("git"));
     assert_eq!(
         json["build_artifact"],
-        serde_json::json!("dist/sample-plugin.zip")
+        serde_json::json!("dist/sample-component.zip")
     );
     assert_eq!(
         json["remote_url"],
-        serde_json::json!("https://github.com/example/sample-plugin.git")
+        serde_json::json!("https://github.com/example/sample-component.git")
     );
     assert_eq!(json["git_deploy"]["remote"], serde_json::json!("upstream"));
     assert_eq!(json["git_deploy"]["branch"], serde_json::json!("stable"));
@@ -254,7 +254,7 @@ fn component_deploy_config_serializes_as_legacy_flat_fields() {
     let deploy = reparsed.deploy_config();
     assert_eq!(deploy.deploy_strategy, Some("git"));
     assert!(deploy.is_git_deploy());
-    assert_eq!(deploy.build_artifact, Some("dist/sample-plugin.zip"));
+    assert_eq!(deploy.build_artifact, Some("dist/sample-component.zip"));
 }
 
 #[test]
@@ -271,21 +271,21 @@ fn component_ignores_changelog_targets_alias() {
 #[test]
 fn validate_version_target_conflict_same_pattern_ok() {
     let existing = vec![VersionTarget {
-        file: "plugin.php".to_string(),
-        pattern: Some("Version: (.*)".to_string()),
+        file: "component.meta".to_string(),
+        pattern: Some("version=(.*)".to_string()),
         artifact_path: None,
     }];
 
     let result =
-        validate_version_target_conflict(&existing, "plugin.php", "Version: (.*)", "test-comp");
+        validate_version_target_conflict(&existing, "component.meta", "version=(.*)", "test-comp");
     assert!(result.is_ok());
 }
 
 #[test]
 fn validate_version_target_conflict_different_file_ok() {
     let existing = vec![VersionTarget {
-        file: "plugin.php".to_string(),
-        pattern: Some("Version: (.*)".to_string()),
+        file: "component.meta".to_string(),
+        pattern: Some("version=(.*)".to_string()),
         artifact_path: None,
     }];
 
@@ -303,13 +303,13 @@ fn validate_version_target_conflict_empty_existing_ok() {
     let existing: Vec<VersionTarget> = vec![];
 
     let result =
-        validate_version_target_conflict(&existing, "plugin.php", "Version: (.*)", "test-comp");
+        validate_version_target_conflict(&existing, "component.meta", "version=(.*)", "test-comp");
     assert!(result.is_ok());
 }
 
 #[test]
 fn validate_version_pattern_rejects_template_syntax() {
-    let result = validate_version_pattern("Version: {version}");
+    let result = validate_version_pattern("version={version}");
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.details.to_string().contains("template syntax"));
@@ -317,7 +317,7 @@ fn validate_version_pattern_rejects_template_syntax() {
 
 #[test]
 fn validate_version_pattern_rejects_no_capture_group() {
-    let result = validate_version_pattern(r"Version: \d+\.\d+\.\d+");
+    let result = validate_version_pattern(r"version=\d+\.\d+\.\d+");
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.details.to_string().contains("no capture group"));
@@ -325,18 +325,18 @@ fn validate_version_pattern_rejects_no_capture_group() {
 
 #[test]
 fn validate_version_pattern_rejects_invalid_regex() {
-    let result = validate_version_pattern(r"Version: (\d+\.\d+");
+    let result = validate_version_pattern(r"version=(\d+\.\d+");
     assert!(result.is_err());
 }
 
 #[test]
 fn validate_version_pattern_accepts_valid_pattern() {
-    assert!(validate_version_pattern(r"Version:\s*(\d+\.\d+\.\d+)").is_ok());
+    assert!(validate_version_pattern(r"version:\s*(\d+\.\d+\.\d+)").is_ok());
 }
 
 #[test]
 fn parse_version_targets_rejects_template_syntax() {
-    let targets = vec!["style.css::Version: {version}".to_string()];
+    let targets = vec!["component.meta::version={version}".to_string()];
     let result = parse_version_targets(&targets);
     assert!(result.is_err());
 }
@@ -344,27 +344,27 @@ fn parse_version_targets_rejects_template_syntax() {
 #[test]
 fn normalize_version_pattern_converts_double_escaped() {
     // Pattern with double-escaped backslashes (as stored in config)
-    let double_escaped = r"Version:\\s*(\\d+\\.\\d+\\.\\d+)";
+    let double_escaped = r"version:\\s*(\\d+\\.\\d+\\.\\d+)";
     let normalized = normalize_version_pattern(double_escaped);
-    assert_eq!(normalized, r"Version:\s*(\d+\.\d+\.\d+)");
+    assert_eq!(normalized, r"version:\s*(\d+\.\d+\.\d+)");
 
     // Pattern already correct should stay the same
-    let correct = r"Version:\s*(\d+\.\d+\.\d+)";
+    let correct = r"version:\s*(\d+\.\d+\.\d+)";
     let normalized2 = normalize_version_pattern(correct);
-    assert_eq!(normalized2, r"Version:\s*(\d+\.\d+\.\d+)");
+    assert_eq!(normalized2, r"version:\s*(\d+\.\d+\.\d+)");
 }
 
 #[test]
 fn parse_version_targets_normalizes_double_escaped_patterns() {
     // Simulate pattern stored with double-escaped backslashes
-    let targets = vec!["plugin.php::Version:\\s*(\\d+\\.\\d+\\.\\d+)".to_string()];
+    let targets = vec!["component.meta::version:\\s*(\\d+\\.\\d+\\.\\d+)".to_string()];
     let result = parse_version_targets(&targets).unwrap();
 
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].file, "plugin.php");
+    assert_eq!(result[0].file, "component.meta");
     assert_eq!(
         result[0].pattern.as_ref().unwrap(),
-        r"Version:\s*(\d+\.\d+\.\d+)"
+        r"version:\s*(\d+\.\d+\.\d+)"
     );
 }
 
@@ -537,11 +537,11 @@ fn resolve_remote_path_fills_empty() {
 #[test]
 fn resolve_remote_path_preserves_explicit_value() {
     let mut component = Component {
-        id: "my-plugin".to_string(),
+        id: "my-component".to_string(),
         local_path: "/tmp".to_string(),
         remote_path: "custom/deploy/path".to_string(),
         extensions: Some(HashMap::from([(
-            "wordpress".to_string(),
+            "example".to_string(),
             ScopedExtensionConfig::default(),
         )])),
         ..Component::default()
@@ -633,7 +633,7 @@ fn discover_from_portable_with_baselines_and_extensions() {
         "auto_cleanup": false,
         "baselines": {
             "lint": {
-                "context_id": "sample-plugin",
+                "context_id": "sample-component",
                 "created_at": "2026-03-06T04:47:29Z",
                 "item_count": 0,
                 "known_fingerprints": [],
@@ -644,11 +644,11 @@ fn discover_from_portable_with_baselines_and_extensions() {
         },
         "changelog_target": "docs/CHANGELOG.md",
         "extensions": {
-            "wordpress": {}
+            "example": {}
         },
-        "id": "sample-plugin",
+        "id": "sample-component",
         "version_targets": [
-            {"file": "sample-plugin.php", "pattern": "(?m)^\\s*\\*?\\s*Version:\\s*([0-9.]+)"}
+            {"file": "sample-component.meta", "pattern": "(?m)^version=([0-9.]+)"}
         ]
     });
     std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
@@ -661,7 +661,7 @@ fn discover_from_portable_with_baselines_and_extensions() {
 
     let comp = result.unwrap();
     // id comes from portable JSON
-    assert_eq!(comp.id, "sample-plugin");
+    assert_eq!(comp.id, "sample-component");
     assert_eq!(comp.local_path, dir.to_string_lossy());
     // extensions must be present
     assert!(
@@ -669,8 +669,8 @@ fn discover_from_portable_with_baselines_and_extensions() {
         "extensions should be set from portable config"
     );
     assert!(
-        comp.extensions.as_ref().unwrap().contains_key("wordpress"),
-        "wordpress extension should be present"
+        comp.extensions.as_ref().unwrap().contains_key("example"),
+        "example extension should be present"
     );
     assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
     assert!(comp.version_targets.is_some());
@@ -758,12 +758,12 @@ fn scoped_extension_config_flat_settings_override_nested_settings() {
 }
 
 #[test]
-fn component_homeboy_json_routes_nested_wordpress_test_backend_setting() {
+fn component_homeboy_json_routes_nested_extension_test_backend_setting() {
     let component: Component = serde_json::from_value(serde_json::json!({
         "id": "roadie",
         "local_path": "/tmp/roadie",
         "extensions": {
-            "wordpress": {
+            "example": {
                 "settings": {
                     "test_backend": "host-smoke"
                 }
@@ -772,21 +772,21 @@ fn component_homeboy_json_routes_nested_wordpress_test_backend_setting() {
     }))
     .unwrap();
 
-    let wordpress_settings = component
+    let extension_settings = component
         .extensions
         .as_ref()
-        .and_then(|extensions| extensions.get("wordpress"))
-        .expect("wordpress extension config")
+        .and_then(|extensions| extensions.get("example"))
+        .expect("example extension config")
         .settings
         .clone();
 
     assert_eq!(
-        wordpress_settings
+        extension_settings
             .get("test_backend")
             .and_then(|value| value.as_str()),
         Some("host-smoke")
     );
-    assert!(wordpress_settings.get("settings").is_none());
+    assert!(extension_settings.get("settings").is_none());
 }
 
 #[test]

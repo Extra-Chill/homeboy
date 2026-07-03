@@ -44,7 +44,6 @@ static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new(
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &[
     "_COMPONENT_PATH",
-    "_PLUGIN_PATH",
     "_PROVIDER_PATH",
     "_RUNTIME_PATH",
 ];
