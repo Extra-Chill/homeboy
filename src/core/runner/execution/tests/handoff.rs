@@ -470,6 +470,27 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         assert_eq!(exit_code, 0);
         assert_eq!(output.job_id.as_deref(), Some(job_id.as_str()));
         assert_eq!(output.mirror_run_id.as_deref(), Some("agent-task-run-6454"));
+        assert_eq!(
+            output
+                .execution_record
+                .as_ref()
+                .map(|record| record.status.as_str()),
+            Some("running")
+        );
+        assert!(output
+            .execution_record
+            .as_ref()
+            .expect("execution record")
+            .artifact_refs
+            .iter()
+            .any(|artifact| artifact.id == "run_location_index"));
+        assert!(output
+            .runner_result
+            .as_ref()
+            .expect("runner result")
+            .artifact_refs
+            .iter()
+            .any(|artifact| artifact.artifact_id == "run_location_index"));
         let json: Value = serde_json::from_str(&output.stdout).expect("handoff JSON");
         let envelope: crate::command_contract::RunnerHandoffEnvelope =
             serde_json::from_value(json.clone()).expect("typed handoff envelope");
@@ -508,6 +529,25 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             envelope.artifact_manifest.path,
             "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
         );
+        assert_eq!(
+            envelope.run_location_index.schema,
+            crate::command_contract::RUN_LOCATION_INDEX_SCHEMA
+        );
+        assert_eq!(envelope.run_location_index.run_id, "agent-task-run-6454");
+        assert_eq!(envelope.run_location_index.runner_id, "lab");
+        assert_eq!(envelope.run_location_index.remote_job_id, job_id);
+        assert_eq!(
+            envelope.run_location_index.remote_cwd,
+            "/srv/homeboy/project"
+        );
+        assert_eq!(
+            envelope.run_location_index.artifact_manifest_ref.path,
+            "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+        );
+        assert_eq!(
+            envelope.run_location_index.follow_commands.job_logs,
+            format!("homeboy runner job logs lab {job_id} --follow")
+        );
         assert_eq!(envelope.evidence.status, "handoff_complete");
         assert_eq!(envelope.evidence.runner_id, "lab");
         assert_eq!(envelope.evidence.runner_job_id, job_id);
@@ -516,11 +556,16 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             Some("agent-task-run-6454")
         );
         assert_eq!(envelope.evidence.remote_cwd, "/srv/homeboy/project");
-        assert_eq!(envelope.evidence.artifact_refs.len(), 1);
+        assert_eq!(envelope.evidence.artifact_refs.len(), 2);
         assert_eq!(envelope.evidence.artifact_refs[0].id, "artifact_manifest");
         assert_eq!(
             envelope.evidence.artifact_refs[0].path.as_deref(),
             Some("/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json")
+        );
+        assert_eq!(envelope.evidence.artifact_refs[1].id, "run_location_index");
+        assert_eq!(
+            envelope.evidence.artifact_refs[1].path.as_deref(),
+            Some("/srv/homeboy/project-homeboy-artifacts/homeboy-run-location-index.json")
         );
         assert!(envelope
             .evidence
@@ -554,12 +599,26 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             json["artifact_manifest"]["path"],
             "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
         );
+        assert_eq!(json["run_location_index"]["run_id"], "agent-task-run-6454");
+        assert_eq!(json["run_location_index"]["remote_job_id"], job_id);
+        assert_eq!(
+            json["run_location_index"]["remote_cwd"],
+            "/srv/homeboy/project"
+        );
+        assert_eq!(
+            json["run_location_index"]["follow_commands"]["artifacts"],
+            "homeboy agent-task artifacts agent-task-run-6454"
+        );
         assert_eq!(json["evidence"]["runner_id"], "lab");
         assert_eq!(json["evidence"]["runner_job_id"], job_id);
         assert_eq!(json["evidence"]["run_id"], "agent-task-run-6454");
         assert_eq!(
             json["evidence"]["artifact_refs"][0]["path"],
             "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
+        );
+        assert_eq!(
+            json["evidence"]["artifact_refs"][1]["path"],
+            "/srv/homeboy/project-homeboy-artifacts/homeboy-run-location-index.json"
         );
         assert_eq!(
             json["evidence"]["next_commands"][0]["command"],
@@ -589,6 +648,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
         "job-123",
         "/srv/homeboy/project".to_string(),
         None,
+        "2026-06-30T15:58:00Z".to_string(),
     );
     let json = serde_json::to_value(&envelope).expect("serialize handoff envelope");
 
@@ -605,12 +665,29 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
         json["artifact_manifest"]["path"],
         "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
     );
+    assert_eq!(
+        json["run_location_index"]["run_id"],
+        "runner:lab:job:job-123"
+    );
+    assert_eq!(json["run_location_index"]["remote_job_id"], "job-123");
+    assert_eq!(
+        json["run_location_index"]["remote_cwd"],
+        "/srv/homeboy/project"
+    );
+    assert_eq!(
+        json["run_location_index"]["liveness_heartbeat_timestamp"],
+        "2026-06-30T15:58:00Z"
+    );
     assert_eq!(json["evidence"]["runner_id"], "lab");
     assert_eq!(json["evidence"]["runner_job_id"], "job-123");
     assert_eq!(json["evidence"]["remote_cwd"], "/srv/homeboy/project");
     assert_eq!(
         json["evidence"]["artifact_refs"][0]["id"],
         "artifact_manifest"
+    );
+    assert_eq!(
+        json["evidence"]["artifact_refs"][1]["id"],
+        "run_location_index"
     );
     assert_eq!(
         json["evidence"]["next_commands"][1]["command"],

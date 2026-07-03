@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
-use crate::command_contract::RunnerWorkload;
+use crate::command_contract::{run_location_index_path, RunnerWorkload};
 use crate::core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, ErrorCode, Result};
@@ -399,6 +399,7 @@ pub(super) fn detached_handoff_output(
         &job_id,
         cwd.clone(),
         mirror_run_id.clone(),
+        job_timestamp_ms_to_rfc3339(job.updated_at_ms),
     );
     let stdout = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "{}".to_string());
     let transport = match mode {
@@ -406,13 +407,48 @@ pub(super) fn detached_handoff_output(
         _ => "daemon",
     };
     let runner_job = RunnerJob::from_job(&runner.id, transport, &command, Some(cwd.clone()), &job);
-    let runner_result = runner_result(Some(&job), 0, &stdout, "", mirror_run_id.as_deref(), None);
+    let run_location_index_path = run_location_index_path(&cwd);
+    let mut runner_result =
+        runner_result(Some(&job), 0, &stdout, "", mirror_run_id.as_deref(), None);
+    runner_result
+        .artifact_refs
+        .push(crate::core::runner::RunnerArtifactRef {
+            artifact_id: "run_location_index".to_string(),
+            name: Some("run location index".to_string()),
+            path: Some(run_location_index_path.clone()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: None,
+            sha256: None,
+            transport: Some(transport.to_string()),
+        });
     let handoff = runner_handoff(
         runner,
         transport,
         Some(runner_job.clone()),
         Some(runner_result.clone()),
     );
+    let execution_record =
+        RunnerExecutionRecord::in_flight(job_id.clone(), runner.id.clone(), transport.to_string())
+            .with_job_id(job_id.clone())
+            .with_mirror_run_id(mirror_run_id.clone())
+            .with_path_materialization_plan(path_materialization_plan(
+                Some(&source_snapshot),
+                &require_paths,
+            ))
+            .with_orchestration_provenance(orchestration_target_provenance(
+                runner,
+                None,
+                Some(&source_snapshot),
+                &[],
+            ))
+            .with_artifact_refs([RunnerExecutionArtifactRef {
+                id: "run_location_index".to_string(),
+                name: Some("run location index".to_string()),
+                path: Some(run_location_index_path),
+                url: None,
+            }])
+            .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
 
     (
         RunnerExecOutput {
@@ -439,24 +475,19 @@ pub(super) fn detached_handoff_output(
             structured_summaries: Vec::new(),
             metrics: None,
             capture: None,
-            execution_record: Some(runner_execution_record_for_output(
-                runner,
-                transport,
-                0,
-                Some(job.id.to_string()),
-                mirror_run_id.clone(),
-                Some(&source_snapshot),
-                &require_paths,
-                &[],
-                &[],
-                Some(&runner_result),
-            )),
+            execution_record: Some(execution_record),
             runner_result: Some(runner_result),
             handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         0,
     )
+}
+
+fn job_timestamp_ms_to_rfc3339(timestamp_ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms as i64)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
 }
 
 /// Grace window during which a transient daemon polling failure (connection

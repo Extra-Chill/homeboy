@@ -460,6 +460,29 @@ impl RunnerExecutionRecord {
         }
     }
 
+    pub fn in_flight(
+        execution_id: impl Into<String>,
+        runner_id: impl Into<String>,
+        transport: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: RUNNER_EXECUTION_RECORD_SCHEMA.to_string(),
+            execution_id: execution_id.into(),
+            runner_id: runner_id.into(),
+            transport: transport.into(),
+            status: "running".to_string(),
+            job_id: None,
+            local_run_id: None,
+            remote_run_id: None,
+            agent_task_run_id: None,
+            mirror_run_id: None,
+            path_materialization_plan: None,
+            orchestration_provenance: None,
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+        }
+    }
+
     pub fn with_job_id(mut self, job_id: impl Into<String>) -> Self {
         self.job_id = Some(job_id.into());
         self

@@ -275,6 +275,7 @@ pub struct RunnerHandoffEnvelope {
     pub mirror_run_id: Option<String>,
     pub remote_cwd: String,
     pub artifact_manifest: RunnerHandoffArtifactManifestRef,
+    pub run_location_index: RunLocationIndex,
     pub evidence: RunnerHandoffEvidence,
     pub follow_commands: RunnerHandoffFollowCommands,
 }
@@ -343,8 +344,10 @@ pub struct RunLocationIndex {
     pub controller_location: String,
     pub runner_id: String,
     pub remote_job_id: String,
+    pub remote_cwd: String,
     pub artifact_manifest_ref: RunnerHandoffArtifactManifestRef,
     pub liveness_heartbeat_timestamp: String,
+    pub follow_commands: RunnerHandoffFollowCommands,
 }
 
 impl RunnerHandoffEnvelope {
@@ -353,6 +356,7 @@ impl RunnerHandoffEnvelope {
         job_id: &str,
         remote_cwd: String,
         mirror_run_id: Option<String>,
+        liveness_heartbeat_timestamp: String,
     ) -> Self {
         let job_logs_command = vec![
             "homeboy".to_string(),
@@ -413,24 +417,7 @@ impl RunnerHandoffEnvelope {
             ]);
         }
         let artifact_manifest = RunnerHandoffArtifactManifestRef::for_remote_cwd(&remote_cwd);
-        let evidence = RunnerHandoffEvidence {
-            schema: "homeboy/runner-handoff-evidence/v1".to_string(),
-            status: "handoff_complete".to_string(),
-            runner_id: runner_id.to_string(),
-            runner_job_id: job_id.to_string(),
-            run_id: mirror_run_id.clone(),
-            persisted_run_id: mirror_run_id.clone(),
-            mirror_run_id: mirror_run_id.clone(),
-            remote_cwd: remote_cwd.clone(),
-            artifact_manifest: artifact_manifest.clone(),
-            artifact_refs: vec![RunnerWorkloadArtifactRef {
-                id: "artifact_manifest".to_string(),
-                name: Some("runner artifact manifest".to_string()),
-                path: Some(artifact_manifest.path.clone()),
-                url: None,
-            }],
-            next_commands,
-        };
+        let run_location_index_path = run_location_index_path(&remote_cwd);
         let follow_commands = RunnerHandoffFollowCommands {
             job_logs: format!("homeboy runner job logs {runner_id} {job_id} --follow"),
             job_cancel: format!("homeboy runner job cancel {runner_id} {job_id}"),
@@ -443,6 +430,45 @@ impl RunnerHandoffEnvelope {
             artifacts: mirror_run_id
                 .as_ref()
                 .map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
+        };
+        let run_location_index = RunLocationIndex {
+            schema: RUN_LOCATION_INDEX_SCHEMA.to_string(),
+            run_id: mirror_run_id
+                .clone()
+                .unwrap_or_else(|| format!("runner:{runner_id}:job:{job_id}")),
+            controller_location: "controller:local".to_string(),
+            runner_id: runner_id.to_string(),
+            remote_job_id: job_id.to_string(),
+            remote_cwd: remote_cwd.clone(),
+            artifact_manifest_ref: artifact_manifest.clone(),
+            liveness_heartbeat_timestamp,
+            follow_commands: follow_commands.clone(),
+        };
+        let evidence = RunnerHandoffEvidence {
+            schema: "homeboy/runner-handoff-evidence/v1".to_string(),
+            status: "handoff_complete".to_string(),
+            runner_id: runner_id.to_string(),
+            runner_job_id: job_id.to_string(),
+            run_id: mirror_run_id.clone(),
+            persisted_run_id: mirror_run_id.clone(),
+            mirror_run_id: mirror_run_id.clone(),
+            remote_cwd: remote_cwd.clone(),
+            artifact_manifest: artifact_manifest.clone(),
+            artifact_refs: vec![
+                RunnerWorkloadArtifactRef {
+                    id: "artifact_manifest".to_string(),
+                    name: Some("runner artifact manifest".to_string()),
+                    path: Some(artifact_manifest.path.clone()),
+                    url: None,
+                },
+                RunnerWorkloadArtifactRef {
+                    id: "run_location_index".to_string(),
+                    name: Some("run location index".to_string()),
+                    path: Some(run_location_index_path),
+                    url: None,
+                },
+            ],
+            next_commands,
         };
         Self {
             schema: RUNNER_HANDOFF_ENVELOPE_SCHEMA.to_string(),
@@ -461,6 +487,7 @@ impl RunnerHandoffEnvelope {
             persisted_run_id: mirror_run_id.clone(),
             mirror_run_id,
             artifact_manifest,
+            run_location_index,
             remote_cwd,
             evidence,
             follow_commands,
@@ -525,6 +552,13 @@ impl RunnerHandoffArtifactManifestRef {
             ),
         }
     }
+}
+
+pub fn run_location_index_path(remote_cwd: &str) -> String {
+    format!(
+        "{}{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/homeboy-run-location-index.json",
+        remote_cwd.trim_end_matches('/')
+    )
 }
 
 mod local_execution_enums {

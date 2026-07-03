@@ -1252,6 +1252,7 @@ fn runner_handoff_example() -> Value {
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
             "path": runner_artifact_manifest_example_path()
         },
+        "run_location_index": run_location_index_example(),
         "evidence": {
             "schema": "homeboy/runner-handoff-evidence/v1",
             "status": "handoff_complete",
@@ -1270,6 +1271,10 @@ fn runner_handoff_example() -> Value {
                 "id": "artifact_manifest",
                 "name": "runner artifact manifest",
                 "path": runner_artifact_manifest_example_path()
+            }, {
+                "id": "run_location_index",
+                "name": "run location index",
+                "path": runner_run_location_index_example_path()
             }],
             "next_commands": [{
                 "label": "runner_job_logs",
@@ -1296,18 +1301,32 @@ fn run_location_index_example() -> Value {
         "controller_location": "controller:local",
         "runner_id": "runner-1",
         "remote_job_id": "job-1",
+        "remote_cwd": "/home/runner/workspace",
         "artifact_manifest_ref": {
             "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
             "path": runner_artifact_manifest_example_path()
         },
-        "liveness_heartbeat_timestamp": "2026-01-01T00:00:00Z"
+        "liveness_heartbeat_timestamp": "2026-01-01T00:00:00Z",
+        "follow_commands": {
+            "job_logs": "homeboy runner job logs runner-1 job-1 --follow",
+            "job_cancel": "homeboy runner job cancel runner-1 job-1",
+            "status": "homeboy agent-task status run-1",
+            "logs": "homeboy agent-task logs run-1",
+            "artifacts": "homeboy agent-task artifacts run-1"
+        }
     })
 }
 
 fn runner_artifact_manifest_example_path() -> String {
     format!(
         "/home/runner/workspace{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/{RUNNER_ARTIFACT_MANIFEST_FILE}"
+    )
+}
+
+fn runner_run_location_index_example_path() -> String {
+    format!(
+        "/home/runner/workspace{RUNNER_ARTIFACT_ROOT_DIR_SUFFIX}/homeboy-run-location-index.json"
     )
 }
 
