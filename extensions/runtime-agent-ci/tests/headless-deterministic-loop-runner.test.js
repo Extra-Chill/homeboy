@@ -12,6 +12,7 @@ const {
 const {
   ARTIFACT_MANIFEST_FILE,
   ARTIFACT_MANIFEST_SCHEMA,
+  RUNNER_EXECUTION_RECORD_SCHEMA,
   RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
 } = require('../lib/runtime-contracts.cjs');
 
@@ -210,7 +211,14 @@ try {
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'loop-result.json'), true);
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'events.json'), true);
   assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'run-outcome-envelope.json'), true);
+  assert.equal(manifest.artifacts.some((artifact) => artifact.path === 'runner-execution-record.json'), true);
   assert.equal(manifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
+  const runnerRecord = JSON.parse(fs.readFileSync(path.join(artifactDir, 'runner-execution-record.json'), 'utf8'));
+  assert.equal(runnerRecord.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
+  assert.equal(runnerRecord.status, 'succeeded');
+  assert.equal(runnerRecord.success, true);
+  assert.equal(runnerRecord.artifacts.files.run_outcome_envelope, 'run-outcome-envelope.json');
+  assert.equal(runnerRecord.artifacts.files.runner_execution_record, 'runner-execution-record.json');
 } finally {
   fs.rmSync(artifactDir, { recursive: true, force: true });
 }
@@ -398,6 +406,7 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'status.json'), 'utf8')).status, 'succeeded');
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'results.json'), 'utf8')).scenarios[0].id, 'build-site');
   assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'run-outcome-envelope.json'), 'utf8')).outcome.task_id, 'build-site');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(sharedRunDir, 'runner-execution-record.json'), 'utf8')).artifacts.files.status, 'status.json');
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }

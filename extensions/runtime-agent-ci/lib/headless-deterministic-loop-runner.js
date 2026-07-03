@@ -17,6 +17,7 @@ const {
 const { executeFanoutReconcileRun } = require('./fanout-reconcile-runner');
 const { resolveRuntimeProvider, runtimeIdFromOptions } = require('./runtime-provider-resolver.cjs');
 const { artifactManifestForFiles, artifactManifestRef, runtimeAgentArtifactPaths } = require('./artifact-paths.cjs');
+const { RUNNER_EXECUTION_RECORD_SCHEMA } = require('./runtime-contracts.cjs');
 
 async function runHeadlessDeterministicLoop(options = {}) {
   const spec = requiredObject(options.spec || options.config || options.plan, 'spec');
@@ -451,6 +452,10 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
       manifestFiles.push({ id: key, kind: headlessRuntimeArtifactKind(key), role: key, path: artifactPaths[key], content_type: 'application/json' });
     }
   }
+  if (artifactPaths.runner_execution_record) {
+    writeJsonFile(artifactPaths.runner_execution_record, runnerExecutionRecord(options.result, artifactPaths, options));
+    manifestFiles.push({ id: 'runner_execution_record', kind: 'runner-execution-record', role: 'runner_execution_record', label: 'Runner execution record', path: artifactPaths.runner_execution_record, content_type: 'application/json' });
+  }
   for (const artifact of normalizeArray(options.result?.outcome?.artifacts)) {
     if (artifact?.path) {
       manifestFiles.push(artifact);
@@ -459,6 +464,62 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
   if (artifactPaths.artifact_manifest) {
     writeJsonFile(artifactPaths.artifact_manifest, artifactManifestForFiles(artifactPaths, manifestFiles));
   }
+}
+
+function runnerExecutionRecord(result, artifactPaths, options = {}) {
+  const status = result?.status || 'failed';
+  return {
+    schema: RUNNER_EXECUTION_RECORD_SCHEMA,
+    compatibility: 'fixture-compatible-until-homeboy-core-exports-runner-execution-record-contract',
+    execution_kind: 'headless-deterministic-loop',
+    loop_id: result?.loop_id || '',
+    status,
+    success: ['succeeded', 'checkpointed'].includes(status),
+    exit_code: Number.isInteger(options.exitCode) ? options.exitCode : Number.isInteger(options.exit_code) ? options.exit_code : (status === 'succeeded' ? 0 : 1),
+    dry_run: result?.dry_run === true,
+    started_at: result?.started_at || '',
+    completed_at: result?.completed_at || '',
+    runtime: compactObject({
+      id: result?.runtime?.id,
+      backend: result?.runtime?.backend,
+    }),
+    tasks: normalizeArray(result?.tasks).map((task) => compactObject({
+      task_id: task.task_id,
+      status: task.outcome?.status,
+      loop_status: task.loop_policy?.status,
+      stop_reason: task.loop_policy?.stop_reason,
+    })),
+    artifacts: {
+      manifest: artifactManifestRef(artifactPaths),
+      files: artifactRecordFiles(artifactPaths),
+    },
+  };
+}
+
+function artifactRecordFiles(artifactPaths = {}) {
+  const root = artifactPaths.run_dir || '';
+  return compactObject({
+    status: artifactRecordPath(root, artifactPaths.status),
+    outcome: artifactRecordPath(root, artifactPaths.outcome),
+    results: artifactRecordPath(root, artifactPaths.results),
+    events: artifactRecordPath(root, artifactPaths.events),
+    loop_result: artifactRecordPath(root, artifactPaths.loop_result),
+    loop_policy: artifactRecordPath(root, artifactPaths.loop_policy),
+    run_outcome_envelope: artifactRecordPath(root, artifactPaths.run_outcome_envelope),
+    runner_execution_record: artifactRecordPath(root, artifactPaths.runner_execution_record),
+    artifact_manifest: artifactRecordPath(root, artifactPaths.artifact_manifest),
+  });
+}
+
+function artifactRecordPath(root, filePath) {
+  if (!filePath) {
+    return '';
+  }
+  if (!root) {
+    return path.basename(filePath);
+  }
+  const relative = path.relative(path.resolve(root), path.resolve(filePath)).replaceAll(path.sep, '/');
+  return relative && !relative.startsWith('../') && relative !== '..' && !path.isAbsolute(relative) ? relative : path.basename(filePath);
 }
 
 function headlessRuntimeArtifactKind(key) {

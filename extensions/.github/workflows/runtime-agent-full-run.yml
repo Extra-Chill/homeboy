@@ -558,6 +558,8 @@ jobs:
           HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/runtime-agent-run/outcome.json
           HOMEBOY_RUNTIME_AGENT_EVENTS_FILE: ${{ runner.temp }}/runtime-agent-run/events.json
           HOMEBOY_RUNTIME_AGENT_STATUS_FILE: ${{ runner.temp }}/runtime-agent-run/status.json
+          HOMEBOY_RUNTIME_AGENT_RUN_OUTCOME_ENVELOPE_FILE: ${{ runner.temp }}/runtime-agent-run/run-outcome-envelope.json
+          HOMEBOY_RUNTIME_AGENT_RUNNER_EXECUTION_RECORD_FILE: ${{ runner.temp }}/runtime-agent-run/runner-execution-record.json
           HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE: ${{ runner.temp }}/runtime-agent-run/loop-result.json
           HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE: ${{ runner.temp }}/runtime-agent-run/loop-policy.json
           HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/runtime-agent-replay-bundles', runner.temp) || '' }}
@@ -654,15 +656,17 @@ jobs:
           if-no-files-found: error
 
       - name: Upload agent results artifact
-        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' }}
+        if: ${{ always() && inputs.run_agent }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.transcript_artifact_name }}-results
+          name: ${{ inputs.transcript_artifact_name != '' && format('{0}-results', inputs.transcript_artifact_name) || 'runtime-agent-results' }}
           path: |
             ${{ runner.temp }}/runtime-agent-run/status.json
             ${{ runner.temp }}/runtime-agent-run/outcome.json
             ${{ runner.temp }}/runtime-agent-run/results.json
             ${{ runner.temp }}/runtime-agent-run/events.json
+            ${{ runner.temp }}/runtime-agent-run/run-outcome-envelope.json
+            ${{ runner.temp }}/runtime-agent-run/runner-execution-record.json
             ${{ runner.temp }}/runtime-agent-run/loop-result.json
             ${{ runner.temp }}/runtime-agent-run/loop-policy.json
             ${{ runner.temp }}/runtime-agent-run/*-runtime-stderr.txt
