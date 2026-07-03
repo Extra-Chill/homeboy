@@ -216,6 +216,107 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
     Some(lines.join("\n"))
 }
 
+pub(crate) fn render_cleanup_summary(payload: &Value) -> Option<String> {
+    render_artifact_cleanup_summary(payload).or_else(|| render_worktree_cleanup_summary(payload))
+}
+
+pub(crate) fn render_worktree_cleanup_summary(payload: &Value) -> Option<String> {
+    let payload = if payload.get("command").and_then(Value::as_str)? == "cleanup.resources" {
+        payload.get("worktree_providers")?
+    } else {
+        payload
+    };
+
+    if payload.get("command").and_then(Value::as_str)? != "cleanup.worktrees" {
+        return None;
+    }
+
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("preview");
+    let provider_count = payload
+        .get("provider_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let success_count = payload
+        .get("success_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let failure_count = payload
+        .get("failure_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let mut lines = vec![
+        "Worktree provider cleanup summary".to_string(),
+        format!(
+            "Mode: {}",
+            if mode == "apply" { "apply" } else { "preview" }
+        ),
+        format!("Providers: {provider_count}"),
+        format!("Succeeded: {success_count}"),
+        format!("Failed: {failure_count}"),
+    ];
+
+    if let Some(providers) = payload.get("providers").and_then(Value::as_array) {
+        for provider in providers {
+            let provider_id = provider
+                .get("provider_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let success = provider
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            lines.push(format!(
+                "Provider {provider_id}: {}",
+                if success { "ok" } else { "failed" }
+            ));
+            if let Some(command) = provider_command(provider) {
+                lines.push(format!("  Command: {command}"));
+            }
+            if let Some(phase) = provider.get("phase").and_then(Value::as_str) {
+                lines.push(format!("  Phase: {phase}"));
+            }
+            if let Some(progress) = provider.get("last_progress").and_then(Value::as_str) {
+                lines.push(format!("  Last observed progress: {progress}"));
+            }
+            if let Some(run_refs) = provider.get("run_refs").and_then(Value::as_array) {
+                for run_ref in run_refs {
+                    if let Some(run_id) = run_ref.get("run_id").and_then(Value::as_str) {
+                        lines.push(format!("  Run: {run_id}"));
+                    }
+                    if let Some(status_command) =
+                        run_ref.get("status_command").and_then(Value::as_str)
+                    {
+                        lines.push(format!("  Status command: {status_command}"));
+                    }
+                }
+            }
+            if let Some(follow_up) = provider.get("follow_up_command").and_then(Value::as_str) {
+                lines.push(format!("  Safe follow-up command: {follow_up}"));
+            }
+            if let Some(error) = provider.get("error").and_then(Value::as_str) {
+                lines.push(format!("  Error: {error}"));
+            }
+        }
+    }
+
+    lines.push(String::new());
+    Some(lines.join("\n"))
+}
+
+fn provider_command(provider: &Value) -> Option<String> {
+    let argv = provider.get("command_run")?.as_array()?;
+    let parts: Vec<String> = argv
+        .iter()
+        .filter_map(Value::as_str)
+        .map(shell_quote)
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 fn artifact_candidate_lines(payload: &Value, limit: usize) -> Vec<String> {
     payload
         .get("candidates")
@@ -358,5 +459,49 @@ mod tests {
         let first = summary.find("  - 2.0 KiB /tmp/repo/node_modules").unwrap();
         let second = summary.find("  - 1.0 KiB /tmp/repo/dist").unwrap();
         assert!(first < second);
+    }
+
+    #[test]
+    fn cleanup_worktrees_summary_surfaces_provider_progress_and_refs() {
+        let payload = json!({
+            "command": "cleanup.resources",
+            "mode": "apply",
+            "worktree_providers": {
+                "command": "cleanup.worktrees",
+                "mode": "apply",
+                "provider_count": 1,
+                "success_count": 1,
+                "failure_count": 0,
+                "providers": [
+                    {
+                        "provider_id": "fixture",
+                        "success": true,
+                        "mode": "apply",
+                        "command_run": ["provider-bin", "cleanup", "--apply"],
+                        "phase": "running",
+                        "last_progress": "removed 10/20",
+                        "run_refs": [
+                            {
+                                "run_id": "cleanup-run-1",
+                                "status_command": "provider status cleanup-run-1"
+                            }
+                        ],
+                        "follow_up_command": "provider status cleanup-run-1"
+                    }
+                ]
+            }
+        });
+
+        let summary = render_worktree_cleanup_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Worktree provider cleanup summary\n"));
+        assert!(summary.contains("Mode: apply\n"));
+        assert!(summary.contains("Provider fixture: ok\n"));
+        assert!(summary.contains("  Command: provider-bin cleanup --apply\n"));
+        assert!(summary.contains("  Phase: running\n"));
+        assert!(summary.contains("  Last observed progress: removed 10/20\n"));
+        assert!(summary.contains("  Run: cleanup-run-1\n"));
+        assert!(summary.contains("  Status command: provider status cleanup-run-1\n"));
+        assert!(summary.contains("  Safe follow-up command: provider status cleanup-run-1\n"));
     }
 }

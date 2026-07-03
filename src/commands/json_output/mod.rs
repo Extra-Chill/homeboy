@@ -99,7 +99,7 @@ pub fn run_command_output(
                     stdout_result
                         .as_ref()
                         .ok()
-                        .and_then(super::cleanup::render_artifact_cleanup_summary)
+                        .and_then(super::cleanup::render_cleanup_summary)
                 })
                 .flatten();
 
@@ -291,6 +291,7 @@ fn cleanup_summary_eligible(args: &crate::commands::cleanup::CleanupArgs) -> boo
     matches!(
         args.command,
         crate::commands::cleanup::CleanupCommand::Artifacts(_)
+            | crate::commands::cleanup::CleanupCommand::Worktrees(_)
     ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
