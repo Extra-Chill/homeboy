@@ -268,10 +268,7 @@ fn update_linked_extension(
             .join(source_dir)
     };
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-    let git_root_str = git::get_git_root(&source_dir.to_string_lossy())?;
-    let git_root = PathBuf::from(&git_root_str)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(git_root_str));
+    let git_root = linked_extension_git_root(extension_id, &source_dir)?;
     let old_branch = git::current_branch(&git_root);
     let old_source_revision = git::short_head_revision(&git_root);
 
@@ -341,6 +338,33 @@ fn update_linked_extension(
         },
         repaired_source_metadata: None,
     })
+}
+
+fn linked_extension_git_root(extension_id: &str, source_dir: &Path) -> Result<PathBuf> {
+    let mut candidate = Some(source_dir);
+    while let Some(path) = candidate {
+        if let Ok(git_root_str) = git::get_git_root(&path.to_string_lossy()) {
+            return Ok(PathBuf::from(&git_root_str)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(git_root_str)));
+        }
+        candidate = path.parent();
+    }
+
+    Err(Error::validation_invalid_argument(
+        "extension_id",
+        format!(
+            "Linked extension '{}' points at {}, but that path is not inside a git checkout Homeboy can update.",
+            extension_id,
+            source_dir.display()
+        ),
+        Some(extension_id.to_string()),
+        None,
+    )
+    .with_hint(format!(
+        "Repair by reinstalling from the original source: homeboy extension install <source-path-or-url> --id {} --reinstall",
+        extension_id
+    )))
 }
 
 /// Check if a git-cloned extension has updates available.

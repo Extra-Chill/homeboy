@@ -1413,6 +1413,38 @@ exec '{}' "$@"
         });
     }
 
+    #[test]
+    fn linked_update_reports_reinstall_repair_when_source_is_not_git_backed() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("copied-source");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+
+            install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            let error = update("wordpress", false)
+                .expect_err("non-git linked source should fail with repair guidance");
+
+            assert!(
+                error.message.contains("not inside a git checkout"),
+                "unexpected error: {}",
+                error.message
+            );
+            assert!(
+                error.hints.iter().any(|hint| hint.message.contains(
+                    "homeboy extension install <source-path-or-url> --id wordpress --reinstall"
+                )),
+                "expected reinstall repair hint, got: {:?}",
+                error.hints
+            );
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_run_setup_if_configured() {
