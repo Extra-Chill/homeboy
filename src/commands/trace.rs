@@ -21,7 +21,7 @@ use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,
-    LAB_TRACE_EXTRA_CAPABILITIES, TRACE_LAB_LABEL,
+    LAB_TRACE_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES, TRACE_LAB_LABEL,
 };
 
 mod aggregate;
@@ -273,7 +273,8 @@ impl TraceArgs {
             self.keep_overlay.then_some("--keep-overlay"),
             false,
             LAB_TRACE_EXTRA_CAPABILITIES,
-        );
+        )
+        .with_secret_env_sources(LAB_TRACE_SECRET_ENV_SOURCES);
         if self.is_compare_target_run() {
             contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;
         }

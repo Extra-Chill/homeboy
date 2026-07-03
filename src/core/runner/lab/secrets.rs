@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::command_contract::LabSecretEnvSource;
 use crate::core::agent_tasks::provider::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
@@ -40,15 +41,35 @@ pub(super) struct LabSecretEnvHandoffPlan {
 }
 
 pub(super) fn build_lab_secret_env_handoff_plan(
+    secret_env_sources: &[LabSecretEnvSource],
     args: &[String],
     mut env_delta: HashMap<String, String>,
 ) -> Result<LabSecretEnvHandoffPlan> {
-    let agent_task_secret_env = hydrate_agent_task_secret_env(args, &mut env_delta)?;
-    let trace_secret_env = hydrate_trace_secret_env(args, &mut env_delta)?;
-    let tunnel_secret_env = hydrate_tunnel_secret_env(args, &mut env_delta)?;
-    let mut secret_env_names = declared_agent_task_secret_env_for_handoff(args)?;
-    secret_env_names.extend(declared_trace_secret_env(args));
-    secret_env_names.extend(declared_tunnel_secret_env(args));
+    let agent_task_secret_env = if secret_env_sources.contains(&LabSecretEnvSource::AgentTask) {
+        hydrate_agent_task_secret_env(args, &mut env_delta)?
+    } else {
+        empty_agent_task_secret_env_metadata()
+    };
+    let trace_secret_env = if secret_env_sources.contains(&LabSecretEnvSource::Trace) {
+        hydrate_trace_secret_env(args, &mut env_delta)?
+    } else {
+        crate::core::trace_secrets::empty_status()
+    };
+    let tunnel_secret_env = if secret_env_sources.contains(&LabSecretEnvSource::Tunnel) {
+        hydrate_tunnel_secret_env(args, &mut env_delta)?
+    } else {
+        empty_tunnel_secret_env_metadata()
+    };
+    let mut secret_env_names = Vec::new();
+    if secret_env_sources.contains(&LabSecretEnvSource::AgentTask) {
+        secret_env_names.extend(declared_agent_task_secret_env_for_handoff(args)?);
+    }
+    if secret_env_sources.contains(&LabSecretEnvSource::Trace) {
+        secret_env_names.extend(declared_trace_secret_env(args));
+    }
+    if secret_env_sources.contains(&LabSecretEnvSource::Tunnel) {
+        secret_env_names.extend(declared_tunnel_secret_env(args));
+    }
     secret_env_names.sort();
     secret_env_names.dedup();
     let secret_env_plan = SecretEnvPlan::from_secret_env_names(secret_env_names.clone());
@@ -92,6 +113,21 @@ pub(super) fn build_lab_secret_env_handoff_plan(
         secret_env_plan,
         secret_env_names,
         runner_deferred_secret_env,
+    })
+}
+
+fn empty_agent_task_secret_env_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-agent-task-secret-env/v1",
+        "secret_env": [],
+        "runner_deferred_secret_env": [],
+    })
+}
+
+fn empty_tunnel_secret_env_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-tunnel-secret-env/v1",
+        "runner_deferred_secret_env": [],
     })
 }
 
@@ -210,11 +246,7 @@ fn hydrate_agent_task_secret_env_with_providers(
     runner_deferred_names.sort();
     runner_deferred_names.dedup();
     if names.is_empty() && runner_deferred_names.is_empty() {
-        return Ok(serde_json::json!({
-            "schema": "homeboy/lab-agent-task-secret-env/v1",
-            "secret_env": [],
-            "runner_deferred_secret_env": [],
-        }));
+        return Ok(empty_agent_task_secret_env_metadata());
     }
 
     let fallback_sources = subcommand_index(args, "agent-task")
@@ -291,6 +323,10 @@ pub(super) fn hydrate_tunnel_secret_env(
     _env: &mut HashMap<String, String>,
 ) -> Result<serde_json::Value> {
     let names = declared_tunnel_secret_env(args);
+    if names.is_empty() {
+        return Ok(empty_tunnel_secret_env_metadata());
+    }
+
     Ok(serde_json::json!({
         "schema": "homeboy/lab-tunnel-secret-env/v1",
         "runner_deferred_secret_env": names
@@ -1054,7 +1090,9 @@ mod tests {
         );
         std::env::set_var("HOMEBOY_TRACE_HANDOFF_SECRET_TEST", "trace-secret-value");
 
-        let plan = build_lab_secret_env_handoff_plan(&args, env_delta).expect("handoff plan");
+        let plan =
+            build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Trace], &args, env_delta)
+                .expect("handoff plan");
 
         assert_eq!(
             plan.env_delta
@@ -1101,6 +1139,27 @@ mod tests {
     }
 
     #[test]
+    fn lab_secret_env_handoff_plan_consumes_declared_sources_only() {
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=HOMEBOY_UNDECLARED_TRACE_SECRET_TEST".to_string(),
+        ];
+        let _secret = RemovedEnvVar::new("HOMEBOY_UNDECLARED_TRACE_SECRET_TEST");
+        std::env::set_var("HOMEBOY_UNDECLARED_TRACE_SECRET_TEST", "trace-secret-value");
+
+        let plan =
+            build_lab_secret_env_handoff_plan(&[], &args, HashMap::new()).expect("handoff plan");
+
+        assert!(plan.secret_env_names.is_empty());
+        assert!(plan.env_delta.is_empty());
+        assert!(plan.runner_deferred_secret_env.is_empty());
+    }
+
+    #[test]
     fn lab_secret_env_handoff_plan_reports_runner_deferred_requirements() {
         let args = vec![
             "homeboy".to_string(),
@@ -1112,7 +1171,9 @@ mod tests {
             "--token-env=HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string(),
         ];
 
-        let plan = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff plan");
+        let plan =
+            build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+                .expect("handoff plan");
 
         assert!(plan.env_delta.is_empty());
         assert_eq!(
@@ -1157,7 +1218,9 @@ mod tests {
             "https://preview-broker.example.test".to_string(),
             "--token-env=HOMEBOY_RUNNER_PREFLIGHT_TOKEN".to_string(),
         ];
-        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+        let handoff =
+            build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+                .expect("handoff");
         let runner = fixture_runner(HashMap::new());
 
         let err =
@@ -1182,7 +1245,9 @@ mod tests {
             "https://preview-broker.example.test".to_string(),
             "--token-env=HOMEBOY_UNKNOWN_RUNNER_TOKEN".to_string(),
         ];
-        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+        let handoff =
+            build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+                .expect("handoff");
 
         preflight_lab_secret_env_handoff("lab-a", None, &HashMap::new(), &handoff)
             .expect("unknown runner-side secret status should remain runner-deferred");
@@ -1202,7 +1267,9 @@ mod tests {
             "HOMEBOY_CONTROLLER_PREFLIGHT_SECRET",
             "controller-secret-value-must-not-leak",
         );
-        let handoff = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff");
+        let handoff =
+            build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Trace], &args, HashMap::new())
+                .expect("handoff");
         let runner = fixture_runner(HashMap::new());
 
         let err =
@@ -1243,8 +1310,12 @@ mod tests {
         )
         .expect("write plan");
 
-        let handoff = build_lab_secret_env_handoff_plan(&run_plan_args(&plan_path), HashMap::new())
-            .expect("handoff plan");
+        let handoff = build_lab_secret_env_handoff_plan(
+            &[LabSecretEnvSource::AgentTask],
+            &run_plan_args(&plan_path),
+            HashMap::new(),
+        )
+        .expect("handoff plan");
 
         assert_eq!(
             handoff.secret_env_plan.secret_env_names(),
@@ -1408,6 +1479,7 @@ mod tests {
         );
 
         let plan = build_lab_secret_env_handoff_plan(
+            &[LabSecretEnvSource::AgentTask],
             &[
                 "homeboy".to_string(),
                 "agent-task".to_string(),

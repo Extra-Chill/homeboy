@@ -394,6 +394,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
             source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy:
                 crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            secret_env_sources: Vec::new(),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),

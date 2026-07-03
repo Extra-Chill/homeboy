@@ -594,8 +594,11 @@ pub(crate) fn run_lab_offload_inner(
     }
     let env_delta_before_secret_handoff = env_delta.clone();
     lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
-    let secret_env_handoff =
-        build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
+    let secret_env_handoff = build_lab_secret_env_handoff_plan(
+        &contract.secret_env_sources,
+        &changed_since_preflight.args,
+        env_delta,
+    )?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
         plan: &plan,

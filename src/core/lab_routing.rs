@@ -356,6 +356,7 @@ pub fn lab_offload_command_from_route_contract(
 ) -> runners::LabOffloadCommand {
     let hot_label = route_contract.command.hot_label;
     let portability = route_contract.command.portability;
+    let secret_env_sources = route_contract.command.secret_env_sources.to_vec();
     let plan = lab_route_plan_from_route_contract(route_contract);
     runners::LabOffloadCommand {
         hot_label,
@@ -388,6 +389,7 @@ pub fn lab_offload_command_from_route_contract(
                 runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
         },
+        secret_env_sources,
         required_extensions: plan.required_extensions,
         required_capabilities: plan.required_capabilities,
         routing_policy: plan.routing_policy,
@@ -550,6 +552,7 @@ mod tests {
             capture_mutation_patch: true,
             mutation_flag: Some("--keep-overlay"),
             extra_required_capabilities: LAB_TRACE_EXTRA_CAPABILITIES,
+            secret_env_sources: crate::command_contract::LAB_TRACE_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
                 infer_source_path_tools: false,
