@@ -118,8 +118,7 @@ impl TestArgs {
             && self.lab_changed_files_json.is_none()
             && self.ci_job.is_none()
             && cli_passthrough_args.is_empty()
-            && self.setting_args.setting.is_empty()
-            && self.setting_args.setting_json.is_empty()
+            && !self.setting_args.has_overrides()
             && !self.baseline_args.baseline
             && !self.baseline_args.ignore_baseline
             && !self.baseline_args.ratchet
@@ -563,6 +562,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_settings_json_file_and_profile_alias() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "homeboy",
+            "--settings-json-file",
+            "base.json",
+            "--settings-profile",
+            "profile.json",
+        ])
+        .expect("test should parse settings file flags");
+
+        assert_eq!(
+            cli.test.setting_args.settings_json_file,
+            vec![PathBuf::from("base.json"), PathBuf::from("profile.json")]
+        );
+    }
+
+    #[test]
     fn self_check_dispatch_only_allows_unscoped_default_test() {
         let default = TestCli::try_parse_from(["test", "homeboy"])
             .expect("default test should parse")
@@ -576,6 +593,7 @@ mod tests {
             vec!["test", "homeboy", "--analyze"],
             vec!["test", "homeboy", "--changed-since", "origin/main"],
             vec!["test", "homeboy", "--setting", "runner=ci"],
+            vec!["test", "homeboy", "--settings-json-file", "profile.json"],
             vec!["test", "homeboy", "--baseline"],
             vec!["test", "homeboy", "--", "--filter=SmokeTest"],
         ] {
@@ -832,6 +850,18 @@ mod tests {
         let args = vec![
             "--setting".to_string(),
             "database_type=mysql".to_string(),
+            "--filter=SomeTest".to_string(),
+        ];
+        let result = filter_homeboy_flags(&args);
+        assert_eq!(result, vec!["--filter=SomeTest"]);
+    }
+
+    #[test]
+    fn filter_strips_settings_json_file_aliases() {
+        let args = vec![
+            "--settings-json-file".to_string(),
+            "base.json".to_string(),
+            "--settings-profile=profile.json".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);

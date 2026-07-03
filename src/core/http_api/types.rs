@@ -54,7 +54,7 @@ pub enum HttpEndpoint {
     SandboxToolRun { id: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
     pub id: String,
     pub kind: String,

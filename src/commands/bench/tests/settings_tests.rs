@@ -4,6 +4,7 @@ use super::*;
 fn unknown_setting_key_warns_before_run() {
     let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env", "iterations"]);
     let setting_args = SettingArgs {
+        settings_json_file: Vec::new(),
         // `bench_env` is a typo for the declared `workflow_bench_env`.
         setting: vec![("bench_env.CORPUS".to_string(), "1000".to_string())],
         setting_json: Vec::new(),
@@ -29,6 +30,7 @@ fn unknown_setting_key_warns_before_run() {
 fn declared_setting_key_does_not_warn() {
     let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
     let setting_args = SettingArgs {
+        settings_json_file: Vec::new(),
         setting: vec![("workflow_bench_env.CORPUS".to_string(), "1000".to_string())],
         setting_json: Vec::new(),
     };
@@ -40,6 +42,7 @@ fn declared_setting_key_does_not_warn() {
 fn declared_rig_setting_key_does_not_warn_as_extension_unknown() {
     let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
     let setting_args = SettingArgs {
+        settings_json_file: Vec::new(),
         setting: vec![(
             "fixture_matrix_namespace".to_string(),
             "nightly".to_string(),
@@ -55,6 +58,7 @@ fn declared_rig_setting_key_does_not_warn_as_extension_unknown() {
 fn unknown_setting_still_warns_when_not_declared_by_extension_or_rig() {
     let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
     let setting_args = SettingArgs {
+        settings_json_file: Vec::new(),
         setting: vec![(
             "unexpected_fixture_input".to_string(),
             "nightly".to_string(),

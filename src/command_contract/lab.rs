@@ -929,14 +929,6 @@ mod agent_task_checkout {
                 dispatch: args,
                 ..
             }) => {
-                let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                    || args
-                        .workspace
-                        .as_ref()
-                        .is_some_and(|workspace| !workspace.trim().is_empty());
-                if !has_workspace {
-                    return false;
-                }
                 let backend = args.backend.clone().or_else(default_backend);
                 backend.as_ref().is_some_and(|backend| {
                     provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
@@ -1267,8 +1259,11 @@ mod extension_ids {
                 component_id: args.comp.component.clone(),
                 path_override: args.comp.path.clone(),
                 capability,
-                settings_overrides: args.setting_args.setting.clone(),
-                settings_json_overrides: args.setting_args.setting_json.clone(),
+                settings_profile_json_overrides: args
+                    .setting_args
+                    .settings_profile_json_overrides()?,
+                settings_overrides: args.setting_args.settings_overrides()?,
+                settings_json_overrides: args.setting_args.settings_json_overrides()?,
                 extension_overrides: args.extension_override.extensions.clone(),
             })
         };
@@ -1298,6 +1293,7 @@ mod extension_ids {
                 path_override: args.comp.path.clone(),
                 capability,
                 settings_overrides: Vec::new(),
+                settings_profile_json_overrides: Vec::new(),
                 settings_json_overrides: Vec::new(),
                 extension_overrides: args.extension_override.extensions.clone(),
             })
