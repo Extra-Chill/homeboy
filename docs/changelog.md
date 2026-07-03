@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.9] - 2026-07-03
+
+### Changed
+- Split Lab bench dispatch extensions
+- materialize Lab secret env plans
+- consolidate command registry metadata
+- unify cleanup resource intents
+- add runner materialization contract
+- declare Lab secret env sources
+
 ## [0.280.8] - 2026-07-03
 
 ### Changed
