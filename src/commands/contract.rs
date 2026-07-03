@@ -46,8 +46,9 @@ use crate::core::runner_execution_envelope::{
     RUNNER_EXECUTION_RECORD_SCHEMA,
 };
 use crate::core::secret_env_plan::{
-    SecretEnvPlan, SecretEnvPlanMaterialization, SecretEnvPlanMaterializeRequest,
-    SECRET_ENV_PLAN_SCHEMA,
+    SecretEnvMaterializedHandoff, SecretEnvMaterializedHandoffRequest, SecretEnvPlan,
+    SecretEnvPlanMaterialization, SecretEnvPlanMaterializeRequest,
+    SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, SECRET_ENV_PLAN_SCHEMA,
 };
 use crate::core::{Error, ErrorCode, Result};
 
@@ -148,6 +149,7 @@ pub struct ContractMaterializeArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum ContractMaterializeKind {
+    SecretEnvHandoff,
     SecretEnvPlan,
 }
 
@@ -208,6 +210,7 @@ pub enum ContractNormalizeOutput {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContractMaterializeOutput {
+    SecretEnvHandoff(SecretEnvMaterializedHandoff),
     SecretEnvPlan(SecretEnvPlanMaterialization),
 }
 
@@ -488,10 +491,23 @@ fn materialize(args: ContractMaterializeArgs) -> Result<ContractMaterializeOutpu
     let value = read_json_value(args.input.as_deref(), args.input_file.as_ref())?;
 
     match args.kind {
+        ContractMaterializeKind::SecretEnvHandoff => {
+            materialize_secret_env_handoff(value).map(ContractMaterializeOutput::SecretEnvHandoff)
+        }
         ContractMaterializeKind::SecretEnvPlan => {
             materialize_secret_env_plan(value).map(ContractMaterializeOutput::SecretEnvPlan)
         }
     }
+}
+
+fn materialize_secret_env_handoff(value: Value) -> Result<SecretEnvMaterializedHandoff> {
+    let request: SecretEnvMaterializedHandoffRequest = deserialize_contract_value(
+        value,
+        "secret-env-handoff-materialize-request",
+        "expected a secret env handoff materialization request JSON object",
+    )?;
+
+    Ok(SecretEnvMaterializedHandoff::materialize_request(request))
 }
 
 fn materialize_secret_env_plan(value: Value) -> Result<SecretEnvPlanMaterialization> {
@@ -1478,6 +1494,10 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
         validate_json: validate_secret_env_plan,
     },
     ContractSchema {
+        id: SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA,
+        validate_json: validate_secret_env_materialized_handoff,
+    },
+    ContractSchema {
         id: FUZZ_WORKLOAD_SCHEMA,
         validate_json: validate_fuzz_workload,
     },
@@ -1526,6 +1546,12 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
 fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
     let plan: SecretEnvPlan = deserialize_contract(raw, SECRET_ENV_PLAN_SCHEMA)?;
     validate_schema_field(SECRET_ENV_PLAN_SCHEMA, &plan.schema)
+}
+
+fn validate_secret_env_materialized_handoff(raw: &str) -> homeboy::core::Result<()> {
+    let handoff: SecretEnvMaterializedHandoff =
+        deserialize_contract(raw, SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA)?;
+    validate_schema_field(SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, &handoff.schema)
 }
 
 fn validate_artifact_postprocess(raw: &str) -> homeboy::core::Result<()> {
@@ -1929,6 +1955,80 @@ mod tests {
         assert_eq!(output.run_id.as_deref(), Some("run-1"));
         assert_eq!(output.runner_id.as_deref(), Some("lab-a"));
         assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[test]
+    fn materializes_secret_env_handoff_without_values() {
+        let output = materialize_secret_env_handoff(json!({
+            "plan": {
+                "schema": SECRET_ENV_PLAN_SCHEMA,
+                "public_env": {
+                    "PUBLIC_CONTEXT": "public-value-that-should-not-be-in-handoff"
+                },
+                "requirements": [
+                    {
+                        "name": "API_TOKEN",
+                        "source_env_names": ["PRIMARY_API_TOKEN", "FALLBACK_API_TOKEN"]
+                    }
+                ]
+            },
+            "status": [
+                {
+                    "name": "API_TOKEN",
+                    "configured": true,
+                    "source": "env",
+                    "source_env_name": "FALLBACK_API_TOKEN",
+                    "missing_source_env_names": ["PRIMARY_API_TOKEN"]
+                }
+            ]
+        }))
+        .expect("secret env handoff should materialize");
+
+        assert_eq!(output.schema, SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA);
+        assert!(output.missing_secret_env_names.is_empty());
+        assert_eq!(output.env.len(), 1);
+        assert_eq!(output.env[0].name, "API_TOKEN");
+        assert_eq!(output.env[0].source, "env");
+        assert_eq!(
+            output.env[0].source_env_name.as_deref(),
+            Some("FALLBACK_API_TOKEN")
+        );
+        assert_eq!(
+            output.diagnostics.status[0].missing_source_env_names,
+            vec!["PRIMARY_API_TOKEN".to_string()]
+        );
+        let rendered = serde_json::to_string(&output).expect("handoff json");
+        assert!(rendered.contains("API_TOKEN"));
+        assert!(rendered.contains("FALLBACK_API_TOKEN"));
+        assert!(!rendered.contains("public-value-that-should-not-be-in-handoff"));
+        assert!(!rendered.contains("secret-value"));
+    }
+
+    #[test]
+    fn materializes_secret_env_handoff_missing_shape() {
+        let output = materialize_secret_env_handoff(json!({
+            "plan": {
+                "schema": SECRET_ENV_PLAN_SCHEMA,
+                "secret_env_names": ["API_TOKEN"]
+            },
+            "status": [
+                {
+                    "name": "API_TOKEN",
+                    "configured": false,
+                    "source": "missing"
+                }
+            ]
+        }))
+        .expect("missing handoff should materialize");
+
+        assert!(output.env.is_empty());
+        assert_eq!(
+            output.missing_secret_env_names,
+            vec!["API_TOKEN".to_string()]
+        );
+        assert_eq!(output.diagnostics.status[0].name, "API_TOKEN");
+        assert!(output.diagnostics.status[0].required);
+        assert!(!output.diagnostics.status[0].configured);
     }
 
     #[test]

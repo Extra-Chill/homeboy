@@ -170,6 +170,13 @@ pub struct SecretEnvMaterializedHandoff {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvMaterializedHandoffRequest {
+    pub plan: SecretEnvPlan,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<SecretEnvStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretEnvMaterializedHandoffEnv {
     pub name: String,
     pub source: String,
@@ -764,6 +771,10 @@ impl SecretEnvPlan {
 }
 
 impl SecretEnvMaterializedHandoff {
+    pub fn materialize_request(request: SecretEnvMaterializedHandoffRequest) -> Self {
+        Self::from_status(&request.plan, request.status)
+    }
+
     pub fn from_resolution(plan: &SecretEnvPlan, resolution: &SecretEnvResolution) -> Self {
         Self::from_status(plan, resolution.status.clone())
     }
