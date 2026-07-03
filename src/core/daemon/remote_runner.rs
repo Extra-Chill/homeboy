@@ -354,7 +354,8 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
 
 fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     auth.authorize(BrokerScope::Submit, None)?;
-    let request: RemoteRunnerJobRequest = parse_body(body, "remote runner job request")?;
+    let mut request: RemoteRunnerJobRequest = parse_body(body, "remote runner job request")?;
+    request.normalize();
     let public_request = request.public_metadata();
     let job = job_store.submit_remote_runner_job(request)?;
     Ok(json!({

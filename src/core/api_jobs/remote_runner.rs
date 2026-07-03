@@ -11,6 +11,7 @@ use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +64,8 @@ pub struct RemoteRunnerJobRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_names: Vec<String>,
     #[serde(default)]
+    pub secret_env_plan: SecretEnvPlan,
+    #[serde(default)]
     pub capture_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot: Option<SourceSnapshot>,
@@ -77,6 +80,32 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
+    pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
+        let mut base_plan = self
+            .runner_workload
+            .as_ref()
+            .map(|workload| workload.required_secrets.secret_env_plan.clone())
+            .filter(|plan| *plan != SecretEnvPlan::default());
+        if self.secret_env_plan != SecretEnvPlan::default() {
+            if let Some(plan) = base_plan.as_mut() {
+                plan.merge_from(self.secret_env_plan.clone());
+            } else {
+                base_plan = Some(self.secret_env_plan.clone());
+            }
+        }
+
+        let secret_env_plan = crate::core::runner::runner_exec_secret_env_plan(
+            &self.command,
+            None,
+            &self.secret_env_names,
+            &self.env,
+            base_plan,
+        );
+        self.secret_env_names = secret_env_plan.secret_env_names();
+        self.secret_env_plan = secret_env_plan.clone();
+        secret_env_plan
+    }
+
     pub(crate) fn required_extensions(&self) -> Vec<String> {
         self.runner_workload
             .as_ref()
@@ -86,10 +115,11 @@ impl RemoteRunnerJobRequest {
 
     pub(crate) fn public_metadata(&self) -> Self {
         let mut public = self.clone();
-        let secret_env_names = self
-            .secret_env_names
+        let mut secret_env_name_values = self.secret_env_plan.secret_env_names();
+        secret_env_name_values.extend(self.secret_env_names.clone());
+        let secret_env_names = secret_env_name_values
             .iter()
-            .map(String::as_str)
+            .map(|name| name.as_str())
             .collect::<HashSet<_>>();
         for (name, value) in public.env.iter_mut() {
             if secret_env_names.contains(name.as_str()) {
@@ -159,17 +189,7 @@ impl JobStore {
                 None,
             ));
         }
-        let secret_env_plan = crate::core::runner::runner_exec_secret_env_plan(
-            &request.command,
-            None,
-            &request.secret_env_names,
-            &request.env,
-            request
-                .runner_workload
-                .as_ref()
-                .map(|workload| workload.required_secrets.secret_env_plan.clone()),
-        );
-        request.secret_env_names = secret_env_plan.secret_env_names();
+        let secret_env_plan = request.normalize();
         crate::core::runner::workload::validate_runner_workload_dispatch(
             request.runner_workload.as_ref(),
             &request.runner_id,

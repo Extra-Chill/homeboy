@@ -54,6 +54,7 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
                 cwd: Some("/tmp".to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -235,6 +236,7 @@ fn reverse_worker_reports_execution_failure_to_broker() {
                 cwd: Some("/tmp".to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -276,6 +278,7 @@ fn reverse_worker_loop_reports_failed_job_status() {
                 cwd: Some("/tmp".to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -348,6 +351,7 @@ fn reverse_worker_skips_execution_when_claim_is_cancelled_before_start() {
                 cwd: Some("/tmp".to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -410,6 +414,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
                 cwd: Some("/tmp".to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -420,7 +425,7 @@ fn reverse_worker_skips_finish_when_cancelled_after_execution() {
             .expect("submit job");
         let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (broker_url, handle) =
-            spawn_cancelling_on_second_snapshot_broker(store.clone(), 4, Some(seen_paths.clone()));
+            spawn_cancelling_on_second_snapshot_broker(store.clone(), 5, Some(seen_paths.clone()));
         write_reverse_controller_session(&broker_url);
 
         let (output, exit_code) =
@@ -481,6 +486,7 @@ fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
                 cwd: Some(cwd.display().to_string()),
                 env: Default::default(),
                 secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
@@ -549,6 +555,7 @@ fn run_id_echo_request() -> RemoteRunnerJobRequest {
         cwd: Some("/tmp".to_string()),
         env: Default::default(),
         secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
         capture_patch: false,
         source_snapshot: None,
         require_paths: Vec::new(),

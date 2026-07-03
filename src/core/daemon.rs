@@ -19,6 +19,7 @@ use crate::core::runner::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process, Runner,
     RunnerProcessRequest,
 };
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
 
@@ -112,6 +113,8 @@ struct ExecRequest {
     env: HashMap<String, String>,
     #[serde(default)]
     secret_env_names: Vec<String>,
+    #[serde(default)]
+    secret_env_plan: SecretEnvPlan,
     #[serde(default)]
     capture_patch: bool,
     #[serde(default)]
@@ -481,17 +484,27 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
+    let mut base_plan = request
+        .runner_workload
+        .as_ref()
+        .map(|workload| workload.required_secrets.secret_env_plan.clone())
+        .filter(|plan| *plan != SecretEnvPlan::default());
+    if request.secret_env_plan != SecretEnvPlan::default() {
+        if let Some(plan) = base_plan.as_mut() {
+            plan.merge_from(request.secret_env_plan.clone());
+        } else {
+            base_plan = Some(request.secret_env_plan.clone());
+        }
+    }
     let secret_env_plan = crate::core::runner::runner_exec_secret_env_plan(
         &request.command,
         None,
         &request.secret_env_names,
         &request.env,
-        request
-            .runner_workload
-            .as_ref()
-            .map(|workload| workload.required_secrets.secret_env_plan.clone()),
+        base_plan,
     );
     request.secret_env_names = secret_env_plan.secret_env_names();
+    request.secret_env_plan = secret_env_plan.clone();
     crate::core::runner::workload::validate_runner_workload_dispatch(
         request.runner_workload.as_ref(),
         &request.runner_id,
@@ -508,7 +521,7 @@ fn enqueue_exec_job(
         command: request.command,
         env: request.env,
         secret_env_names: request.secret_env_names,
-        secret_env_plan: None,
+        secret_env_plan: Some(secret_env_plan),
         capture_patch: request.capture_patch,
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,
