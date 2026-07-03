@@ -7,14 +7,69 @@ fn daemon_job_context_error_preserves_in_flight_job_details() {
     )
     .with_hint("original hint");
 
-    let err = daemon_job_context_error("homeboy-lab", "job-123", source);
+    let err = daemon_job_context_error("homeboy-lab", "job-123", None, source);
 
-    assert_eq!(err.code, ErrorCode::InternalUnexpected);
+    assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
     assert_eq!(err.retryable, Some(true));
     assert_eq!(err.details["runner_id"], "homeboy-lab");
     assert_eq!(err.details["job_id"], "job-123");
     assert_eq!(err.hints[0].message, "original hint");
     assert!(err.message.contains("query runner daemon"));
+}
+
+#[test]
+fn daemon_job_context_error_preserves_persisted_run_retrieval() {
+    let source = Error::internal_json(
+        "EOF while parsing a value",
+        Some("parse daemon response".to_string()),
+    );
+
+    let err = daemon_job_context_error(
+        "homeboy-lab",
+        "job-123",
+        Some("runner-exec-lab-job-123"),
+        source,
+    );
+
+    assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+    assert_eq!(err.details["runner_id"], "homeboy-lab");
+    assert_eq!(err.details["job_id"], "job-123");
+    assert_eq!(err.details["persisted_run_id"], "runner-exec-lab-job-123");
+    assert_eq!(
+        err.details["recovery"]["persisted_run_show"],
+        "homeboy runs show runner-exec-lab-job-123"
+    );
+    assert_eq!(
+        err.details["recovery"]["persisted_run_evidence"],
+        "homeboy runs evidence runner-exec-lab-job-123"
+    );
+    assert!(err.hints.iter().any(|hint| hint
+        .message
+        .contains("Persisted run id: `runner-exec-lab-job-123`")));
+}
+
+#[test]
+fn malformed_daemon_response_json_is_structured_and_retryable() {
+    let err =
+        super::super::super::daemon_http_get::parse_daemon_response_json::<serde_json::Value>(
+            "{\"success\": true, \"data\":",
+            200,
+            "/jobs/job-123",
+            "parse daemon response",
+        )
+        .expect_err("malformed daemon JSON");
+
+    assert_eq!(err.code, ErrorCode::InternalJsonError);
+    assert_eq!(err.message, "Malformed runner daemon JSON response");
+    assert_eq!(err.retryable, Some(true));
+    assert_eq!(err.details["context"], "parse daemon response");
+    assert_eq!(err.details["http_status"], 200);
+    assert_eq!(err.details["path"], "/jobs/job-123");
+    assert_eq!(err.details["likely_truncated"], true);
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("known job/run")));
 }
 
 #[test]

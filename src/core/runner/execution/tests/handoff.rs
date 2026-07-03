@@ -1028,7 +1028,7 @@ fn daemon_polling_error_for_known_job_is_recoverable_runner_disconnect() {
         "query runner daemon: error sending request for url (http://127.0.0.1:1234/jobs/{job_id})"
     ));
 
-    let err = daemon_job_context_error("lab", job_id, source);
+    let err = daemon_job_context_error("lab", job_id, None, source);
 
     assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
     assert_eq!(err.retryable, Some(true));

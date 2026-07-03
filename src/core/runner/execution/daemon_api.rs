@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::core::error::{Error, Result};
 
 use super::super::broker_http;
-use super::super::daemon_http_get::daemon_get;
+use super::super::daemon_http_get::{daemon_get, parse_daemon_response_json};
 use super::super::{load, status, RunnerTunnelMode};
 
 #[allow(unused_imports)]
@@ -100,9 +100,12 @@ pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Resul
         .post(format!("{}{}", local_url.trim_end_matches('/'), path))
         .send()
         .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
+    let status_code = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|err| Error::internal_unexpected(format!("read runner daemon response: {err}")))?;
+    let envelope: DaemonEnvelope =
+        parse_daemon_response_json(&body, status_code, path, "parse daemon response")?;
     if !envelope.success {
         return Err(Error::internal_unexpected(format!(
             "daemon request failed: {}",

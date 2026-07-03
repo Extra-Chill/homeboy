@@ -137,8 +137,9 @@ pub(super) fn exec_via_daemon(
         }
         std::thread::sleep(Duration::from_millis(200));
         let job_id = job.id.to_string();
-        job = fetch_daemon_job_resilient(&client, local_url, &job_id)
-            .map_err(|err| daemon_job_context_error(&runner.id, &job_id, err))?;
+        job = fetch_daemon_job_resilient(&client, local_url, &job_id).map_err(|err| {
+            daemon_job_context_error(&runner.id, &job_id, persisted_run_id.as_deref(), err)
+        })?;
     }
     let job_id = job.id.to_string();
     let events = match fetch_daemon_events(&client, local_url, &job_id) {
@@ -542,7 +543,12 @@ pub(super) fn fetch_daemon_events(
     })
 }
 
-pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error) -> Error {
+pub(super) fn daemon_job_context_error(
+    runner_id: &str,
+    job_id: &str,
+    persisted_run_id: Option<&str>,
+    err: Error,
+) -> Error {
     let runner_exec_prefix = format!("homeboy runner exec {runner_id} --");
     let runner_runs_list =
         format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
@@ -551,6 +557,11 @@ pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error
     let runner_run_show = format!("{runner_exec_prefix} homeboy runs show <run-id>");
     let runner_run_evidence = format!("{runner_exec_prefix} homeboy runs evidence <run-id>");
     let runner_run_artifacts = format!("{runner_exec_prefix} homeboy runs artifacts <run-id>");
+    let persisted_run_show = persisted_run_id.map(|run_id| format!("homeboy runs show {run_id}"));
+    let persisted_run_evidence =
+        persisted_run_id.map(|run_id| format!("homeboy runs evidence {run_id}"));
+    let persisted_run_artifacts =
+        persisted_run_id.map(|run_id| format!("homeboy runs artifacts {run_id}"));
     let source_code = err.code.as_str();
     let source_message = err.message;
     let source_details = err.details;
@@ -564,6 +575,7 @@ pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error
             "status": "recoverable_followup_required",
             "runner_id": runner_id,
             "job_id": job_id,
+            "persisted_run_id": persisted_run_id,
             "reason": "daemon_job_poll_failed",
             "recovery": {
                 "mode": "durable_runner_job",
@@ -573,6 +585,9 @@ pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error
                 "runner_run_show": runner_run_show,
                 "runner_run_evidence": runner_run_evidence,
                 "runner_run_artifacts": runner_run_artifacts,
+                "persisted_run_show": persisted_run_show,
+                "persisted_run_evidence": persisted_run_evidence,
+                "persisted_run_artifacts": persisted_run_artifacts,
             },
             "source": {
                 "code": source_code,
@@ -586,7 +601,7 @@ pub(super) fn daemon_job_context_error(runner_id: &str, job_id: &str, err: Error
         runner_id,
         None,
         job_id,
-        None,
+        persisted_run_id,
         DaemonJobHandoffState::InFlight,
         true,
     ) {
