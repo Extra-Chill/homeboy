@@ -2,6 +2,7 @@
 //! output-file download, and stream-truncation guard.
 
 use super::*;
+use crate::core::build_identity;
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
@@ -463,6 +464,7 @@ pub(crate) fn run_lab_offload_inner(
         source_snapshot,
         remapped_args,
         agent_task_run_id,
+        runner_required_extensions,
         command,
         remote_command,
         remote_output_file,
@@ -523,6 +525,17 @@ pub(crate) fn run_lab_offload_inner(
         redact_argv_display(&command),
         runner_id,
         remote_cwd
+    );
+    eprintln!(
+        "Lab offload provenance: controller_exe=`{}` controller_build=`{}` source_args=`{}` remapped_args=`{}` required_extensions={} final_argv=`{}`.",
+        std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+        build_identity::current().display,
+        redact_argv_display(request.normalized_args),
+        redact_argv_display(&remapped_args),
+        serde_json::to_string(&runner_required_extensions).unwrap_or_else(|_| "[]".to_string()),
+        redact_argv_display(&remote_command),
     );
     if let Some(run_id) = &agent_task_run_id {
         emit_durable_run_id_before_execution(

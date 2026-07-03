@@ -13,6 +13,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) source_snapshot: SourceSnapshot,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
+    pub(crate) runner_required_extensions: Vec<String>,
     pub(crate) command: Vec<String>,
     pub(crate) remote_command: Vec<String>,
     pub(crate) remote_output_file: Option<String>,
@@ -441,6 +442,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         &contract.required_extensions,
         Path::new(&synced.local_path),
     )?;
+    let runner_required_extensions = runner_command_plan.required_extensions.clone();
     let command = build_lab_offload_remote_command(
         command_prefix_argv,
         &remapped_args,
@@ -467,6 +469,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         source_snapshot,
         remapped_args,
         agent_task_run_id,
+        runner_required_extensions,
         command,
         remote_command,
         remote_output_file,
