@@ -36,6 +36,7 @@ const OPENCODE_FATAL_LOG_PATTERNS = [
 		classification: 'provider_quota',
 	},
 ];
+const OPENCODE_PERMISSION_DENIED_PATTERN = /user rejected permission|permission policy rejected|policy denied|permission request denied/i;
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -321,7 +322,7 @@ function findArtifact(artifacts, declaration) {
 }
 
 function opencodeSuccessOutcome(context) {
-	return {
+	return withPolicyDeniedOutcome(context, {
 		status: 'succeeded',
 		summary: 'OpenCode completed successfully.',
 		diagnostics: [{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' }],
@@ -330,11 +331,11 @@ function opencodeSuccessOutcome(context) {
 			opencode_session: sessionMetadata(context),
 		},
 		...collectOpenCodeArtifacts(context),
-	};
+	});
 }
 
 function opencodeFailureOutcome(context) {
-	return {
+	return withPolicyDeniedOutcome(context, {
 		status: 'failed',
 		failure_classification: 'execution_failed',
 		failure_code: 'agent_task.opencode_failed',
@@ -346,7 +347,128 @@ function opencodeFailureOutcome(context) {
 			opencode_session: sessionMetadata(context),
 		},
 		...collectOpenCodeArtifacts(context),
+	});
+}
+
+function withPolicyDeniedOutcome(context = {}, terminal = {}) {
+	const denial = detectOpenCodePolicyDenial(context);
+	if (!denial) {
+		return terminal;
+	}
+	return {
+		...terminal,
+		status: 'failed',
+		failure_classification: 'policy_denied',
+		failure_code: 'agent_task.opencode_policy_denied',
+		summary: 'OpenCode stopped after a permission policy denial.',
+		diagnostics: [
+			...(Array.isArray(terminal.diagnostics) ? terminal.diagnostics : []),
+			{
+				class: 'opencode.policy_denied',
+				classification: 'policy_denied',
+				message: deniedToolCallSummary(denial),
+				data: { denied_tool_call: denial },
+			},
+		],
+		metadata: {
+			...(terminal.metadata || {}),
+			denied_tool_call: denial,
+		},
 	};
+}
+
+function deniedToolCallSummary(denial = {}) {
+	const details = [denial.tool, denial.command].filter(Boolean).join(': ');
+	return details ? `OpenCode permission policy denied tool call ${details}.` : 'OpenCode permission policy denied a tool call.';
+}
+
+function detectOpenCodePolicyDenial(context = {}) {
+	const spawnResult = context.spawnResult || {};
+	const text = redactKnownSecrets([
+		spawnResult.stdout,
+		spawnResult.stderr,
+	].filter(Boolean).join('\n'), context.spawnExtra?.env);
+	if (!OPENCODE_PERMISSION_DENIED_PATTERN.test(text)) {
+		return null;
+	}
+	return sanitizeDeniedToolCall(extractDeniedToolCall(text));
+}
+
+function extractDeniedToolCall(text = '') {
+	const parsed = parseJsonObjectsFromText(text);
+	for (const value of parsed) {
+		const found = findDeniedToolCall(value);
+		if (found) {
+			return found;
+		}
+	}
+	return {
+		tool: firstRegexCapture(text, /"(?:tool|name)"\s*:\s*"([^"]+)"/),
+		command: firstRegexCapture(text, /"command"\s*:\s*"([^"]+)"/),
+		timestamp: firstRegexCapture(text, /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/),
+	};
+}
+
+function parseJsonObjectsFromText(text = '') {
+	return String(text).split(/\r?\n/).map((line) => {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+			return null;
+		}
+		try {
+			return JSON.parse(trimmed);
+		} catch {
+			return null;
+		}
+	}).filter(Boolean);
+}
+
+function findDeniedToolCall(value, inherited = {}) {
+	if (!value || typeof value !== 'object') {
+		return null;
+	}
+	const current = {
+		tool: stringValue(value.tool || value.name || inherited.tool),
+		command: stringValue(value.command || value.input?.command || inherited.command),
+		timestamp: stringValue(value.timestamp || value.time?.created || value.created || value.created_at || value.time || inherited.timestamp),
+	};
+	const message = stringValue(value.error || value.message || value.text || value.output || value.state?.error || value.result?.error);
+	if (OPENCODE_PERMISSION_DENIED_PATTERN.test(message)) {
+		return current;
+	}
+	for (const child of Object.values(value)) {
+		if (Array.isArray(child)) {
+			for (const item of child) {
+				const found = findDeniedToolCall(item, current);
+				if (found) {
+					return found;
+				}
+			}
+		} else if (child && typeof child === 'object') {
+			const found = findDeniedToolCall(child, current);
+			if (found) {
+				return found;
+			}
+		}
+	}
+	return null;
+}
+
+function sanitizeDeniedToolCall(value = {}) {
+	return Object.fromEntries(Object.entries({
+		tool: stringValue(value.tool),
+		command: stringValue(value.command),
+		timestamp: stringValue(value.timestamp),
+	}).filter(([, entry]) => entry));
+}
+
+function firstRegexCapture(text, pattern) {
+	const match = String(text || '').match(pattern);
+	return match ? match[1] : '';
+}
+
+function stringValue(value) {
+	return typeof value === 'string' ? value : '';
 }
 
 function collectOpenCodeArtifacts(context = {}) {
@@ -387,10 +509,16 @@ function collectOpenCodeArtifacts(context = {}) {
 	const stderr = redactKnownSecrets(String(spawnResult.stderr || ''), context.spawnExtra?.env);
 	const transcript = [stdout, stderr].filter(Boolean).join('\n');
 	const patch = gitDiff(context.cwd);
+	const policyDenial = detectOpenCodePolicyDenial(context);
 	const resultEnvelope = JSON.stringify({
 		schema: 'homeboy/opencode-agent-result/v1',
 		task_id: request.task_id,
-		status: 'succeeded',
+		status: policyDenial ? 'failed' : 'succeeded',
+		...(policyDenial ? {
+			failure_classification: 'policy_denied',
+			failure_code: 'agent_task.opencode_policy_denied',
+			denied_tool_call: policyDenial,
+		} : {}),
 		exit_code: spawnResult.status,
 		command: context.commandSpec?.command,
 		args: Array.isArray(context.commandSpec?.args) ? context.commandSpec.args : [],

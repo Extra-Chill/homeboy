@@ -295,6 +295,71 @@ process.exit(0);
 	const quietAgentResult = JSON.parse(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.deepEqual(quietAgentResult.artifacts, { patch: false, transcript: false });
 
+	const deniedWorkspace = path.join(root, 'denied-workspace');
+	const deniedArtifactDir = path.join(root, 'denied-artifacts');
+	fs.mkdirSync(deniedWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: deniedWorkspace, encoding: 'utf8' });
+	fs.writeFileSync(path.join(deniedWorkspace, 'README.md'), 'unchanged\n');
+	spawnSync('git', ['add', 'README.md'], { cwd: deniedWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '-m', 'initial'], {
+		cwd: deniedWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+	const deniedCliPath = path.join(root, 'mock-opencode-policy-denied.cjs');
+	fs.writeFileSync(deniedCliPath, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  type: 'message',
+  timestamp: '2026-07-03T15:12:00.000Z',
+  parts: [{
+    type: 'tool',
+    tool: 'bash',
+    input: { command: 'cd /tmp && git clone https://example.invalid/private.git' },
+    state: { error: 'The user rejected permission to use this specific tool call.' }
+  }]
+}) + '\\n');
+process.exit(0);
+`);
+	const deniedResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-policy-denied',
+		workspace_path: deniedWorkspace,
+		artifacts_path: deniedArtifactDir,
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [deniedCliPath],
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(deniedResult.status, 'failed');
+	assert.equal(deniedResult.failure_classification, 'policy_denied');
+	assert.equal(deniedResult.failure_code, 'agent_task.opencode_policy_denied');
+	assert.equal(deniedResult.failure_category, 'task.policy_denied');
+	assert.equal(deniedResult.retryable, false);
+	assert.equal(deniedResult.metadata.missing_declared_artifacts, undefined);
+	assert.deepEqual(deniedResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
+	assert.deepEqual(deniedResult.metadata.denied_tool_call, {
+		tool: 'bash',
+		command: 'cd /tmp && git clone https://example.invalid/private.git',
+		timestamp: '2026-07-03T15:12:00.000Z',
+	});
+	assert.equal(deniedResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.policy_denied'), true);
+	assert.match(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8'), /rejected permission/);
+	assert.equal(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), '');
+	const deniedAgentResult = JSON.parse(fs.readFileSync(deniedResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
+	assert.equal(deniedAgentResult.status, 'failed');
+	assert.equal(deniedAgentResult.failure_classification, 'policy_denied');
+	assert.deepEqual(deniedAgentResult.denied_tool_call, deniedResult.metadata.denied_tool_call);
+
 	const inheritedPipeCliPath = path.join(root, 'mock-opencode-inherited-pipe.cjs');
 	fs.writeFileSync(inheritedPipeCliPath, `#!/usr/bin/env node
 const { spawn } = require('node:child_process');
