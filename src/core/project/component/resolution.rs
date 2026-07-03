@@ -61,7 +61,22 @@ pub fn resolve_project_component_with_standalone_snapshot(
     apply_standalone_component_fallbacks(&mut component, standalone_snapshot);
 
     let mut resolved = apply_component_overrides(&component, project);
-    resolved.local_path = attachment_local_path;
+    // Normalize the attachment `local_path` to an absolute path before it becomes
+    // the resolved component's machine-local checkout. Deploy resolves components
+    // directly through this function, while `release` reaches the same attachment
+    // via the composed inventory (project-attached components win on ID). Because
+    // `release` rejects a relative `local_path` outright (see
+    // `component::validate_local_path`) but deploy silently accepts one, a relative
+    // attachment value made the two commands resolve *different* checkouts for the
+    // same component id (#7410). Normalizing here — the single shared seam — makes
+    // `release`, `deploy`, and `component set` agree on one absolute path, matching
+    // the write-side normalization `component set` already applies (#6938). A tilde
+    // or absolute value is preserved as-is; a relative value is resolved against the
+    // current working directory, exactly as portable discovery already interprets it.
+    resolved.local_path = crate::core::component::normalize_component_local_path(
+        &attachment_local_path,
+    )
+    .unwrap_or(attachment_local_path);
 
     // Inherit project-level extensions when the component's homeboy.json doesn't
     // declare any. This handles clean tag clones from older releases where
@@ -351,5 +366,58 @@ mod tests {
                 "Component 'fixture' local_path '/tmp/homeboy-missing-component-path' does not exist",
             )
         }));
+    }
+
+    /// The resolved attachment `local_path` must be normalized to the *same*
+    /// absolute, lexically-clean checkout that `component set` persists — so
+    /// `homeboy release <id>` (which reaches this resolver through the composed
+    /// inventory) and `homeboy deploy` (which calls it directly) agree on one
+    /// source of truth instead of resolving different checkouts for the same id.
+    ///
+    /// Regression coverage for #7410 / #6938. This exercises the normalization
+    /// seam with a non-canonical attachment value (a `..` round-trip through the
+    /// parent), which `release`'s `validate_local_path` would otherwise leave
+    /// un-normalized while deploy silently accepted it. The value stays absolute
+    /// throughout, so the test needs no process-CWD mutation and is race-free.
+    #[test]
+    fn attachment_local_path_normalizes_matching_component_set() {
+        let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
+        let repo_path = repo.path().canonicalize().expect("canonical repo path");
+        let dir_name = repo_path.file_name().expect("repo dir name");
+
+        // A non-canonical but absolute attachment value: `<parent>/<dir>/../<dir>`.
+        // It points at the same checkout but is not lexically normalized, mirroring
+        // the drifted values that made `release` and `deploy` disagree.
+        let noncanonical = repo_path
+            .join("..")
+            .join(dir_name)
+            .to_string_lossy()
+            .to_string();
+
+        let project = project_with_attachment(None, noncanonical.clone());
+
+        let resolved =
+            resolve_project_component(&project, "fixture").expect("attachment resolves");
+
+        assert!(
+            std::path::Path::new(&resolved.local_path).is_absolute(),
+            "resolved local_path must be absolute, got {:?}",
+            resolved.local_path
+        );
+
+        // The resolver must agree with the write-side normalization that
+        // `component set` applies to the same value — one source of truth.
+        let component_set_value =
+            crate::core::component::normalize_component_local_path(&noncanonical)
+                .expect("normalize like component set");
+        assert_eq!(resolved.local_path, component_set_value);
+
+        // And it must point at the real checkout.
+        assert_eq!(
+            std::path::Path::new(&resolved.local_path)
+                .canonicalize()
+                .expect("canonical resolved path"),
+            repo_path
+        );
     }
 }
