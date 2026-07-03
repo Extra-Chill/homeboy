@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.14] - 2026-07-03
+
+### Changed
+- thin Codebox runtime profile boundary
+
 ## [3.23.13] - 2026-07-02
 
 ### Changed
