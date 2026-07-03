@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.280.8] - 2026-07-03
+
+### Changed
+- Log Lab offload command provenance
+- Refactor bench lab offload command planning
+
 ## [0.280.7] - 2026-07-02
 
 ### Changed
