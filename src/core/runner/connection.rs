@@ -9,9 +9,10 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::core::api_jobs::{ActiveRunnerJobSummary, RunnerJobSource};
+use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
+use crate::core::http_api::RunSummary;
 use crate::core::paths;
 use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
@@ -266,12 +267,15 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
             Some(session) => match runner_jobs(runner_id, session) {
-                Ok((active_jobs, stale_jobs)) => (
-                    active_jobs,
-                    stale_jobs,
-                    RunnerActiveJobState::Available,
-                    None,
-                ),
+                Ok((active_jobs, mut stale_jobs)) => {
+                    stale_jobs.extend(orphaned_child_run_jobs(runner_id, session, &active_jobs));
+                    (
+                        active_jobs,
+                        stale_jobs,
+                        RunnerActiveJobState::Available,
+                        None,
+                    )
+                }
                 Err(err) => (
                     Vec::new(),
                     Vec::new(),
@@ -381,6 +385,94 @@ fn runner_jobs(
         source,
     )?;
     Ok((active_jobs, stale_jobs))
+}
+
+fn orphaned_child_run_jobs(
+    runner_id: &str,
+    session: &RunnerSession,
+    active_jobs: &[ActiveRunnerJobSummary],
+) -> Vec<ActiveRunnerJobSummary> {
+    let Ok(runs) = runner_running_runs(session) else {
+        return Vec::new();
+    };
+    runs.into_iter()
+        .filter(|run| !child_run_has_active_job(run, active_jobs))
+        .map(|run| orphaned_child_run_job(runner_id, run))
+        .collect()
+}
+
+fn child_run_has_active_job(run: &RunSummary, active_jobs: &[ActiveRunnerJobSummary]) -> bool {
+    active_jobs.iter().any(|job| {
+        job.durable_run_id.as_deref() == Some(run.id.as_str())
+            || job.command.contains(run.id.as_str())
+    })
+}
+
+fn runner_running_runs(session: &RunnerSession) -> Result<Vec<RunSummary>> {
+    let Some(local_url) = session.local_url.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build runner runs client: {err}")))?;
+    let data = daemon_get(&client, local_url, "/runs?status=running&limit=1000")?;
+    let runs: Vec<RunSummary> =
+        serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse runner daemon running runs".to_string()),
+            )
+        })?;
+    Ok(runs
+        .into_iter()
+        .filter(|run| !is_synthetic_active_job_run_summary(run))
+        .collect())
+}
+
+fn is_synthetic_active_job_run_summary(run: &RunSummary) -> bool {
+    run.status_note
+        .as_deref()
+        .is_some_and(|note| note.starts_with("active runner job:"))
+}
+
+fn orphaned_child_run_job(runner_id: &str, run: RunSummary) -> ActiveRunnerJobSummary {
+    ActiveRunnerJobSummary {
+        runner_id: runner_id.to_string(),
+        job_id: format!("orphaned-child-run-{}", run.id),
+        operation: "child-run".to_string(),
+        source: "runner-observation".to_string(),
+        kind: run.kind,
+        status: JobStatus::Failed,
+        command: run
+            .command
+            .unwrap_or_else(|| format!("homeboy runs show {}", run.id)),
+        cwd: run.cwd,
+        started_at_ms: rfc3339_to_ms(&run.started_at).unwrap_or(0),
+        updated_at_ms: 0,
+        elapsed_ms: 0,
+        heartbeat_age_ms: 0,
+        claim: JobClaimMetadata {
+            claim_id: None,
+            claimed_by_runner_id: Some(runner_id.to_string()),
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+        },
+        claim_expires_in_ms: None,
+        lifecycle: None,
+        durable_run_id: Some(run.id),
+        stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
+        lifecycle_state: Some("stale".to_string()),
+        retryable: Some(true),
+        active_child_count: None,
+        active_cell_count: None,
+    }
+}
+
+fn rfc3339_to_ms(value: &str) -> Option<u64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok())
 }
 
 /// Parse a runner-jobs array (`key`) out of `body`, keep only jobs for
@@ -1659,6 +1751,48 @@ mod tests {
     }
 
     #[test]
+    fn child_run_matching_accepts_durable_run_id_or_command_reference() {
+        let run = sample_run_summary("run-child-1");
+        let by_durable_id = sample_active_job(Some("run-child-1"), "homeboy test wpcom");
+        let by_command = sample_active_job(None, "homeboy test wpcom --run run-child-1");
+        let unrelated = sample_active_job(Some("other-run"), "homeboy test wpcom");
+
+        assert!(child_run_has_active_job(&run, &[by_durable_id]));
+        assert!(child_run_has_active_job(&run, &[by_command]));
+        assert!(!child_run_has_active_job(&run, &[unrelated]));
+    }
+
+    #[test]
+    fn orphaned_child_run_job_reports_stale_retryable_runner_state() {
+        let job = orphaned_child_run_job("homeboy-lab", sample_run_summary("run-child-1"));
+
+        assert_eq!(job.runner_id, "homeboy-lab");
+        assert_eq!(job.job_id, "orphaned-child-run-run-child-1");
+        assert_eq!(job.source, "runner-observation");
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.durable_run_id.as_deref(), Some("run-child-1"));
+        assert_eq!(
+            job.stale_reason.as_deref(),
+            Some("child_run_running_without_active_runner_job")
+        );
+        assert_eq!(job.lifecycle_state.as_deref(), Some("stale"));
+        assert_eq!(job.retryable, Some(true));
+    }
+
+    #[test]
+    fn synthetic_active_job_run_summaries_are_not_child_runs() {
+        let mut synthetic = sample_run_summary("runner-job-job-1");
+        synthetic.status_note = Some(
+            "active runner job: source=direct-daemon kind=test runner=homeboy-lab".to_string(),
+        );
+
+        assert!(is_synthetic_active_job_run_summary(&synthetic));
+        assert!(!is_synthetic_active_job_run_summary(&sample_run_summary(
+            "run-child-1"
+        )));
+    }
+
+    #[test]
     fn active_runner_job_source_maps_direct_and_reverse_endpoints() {
         let mut direct = reverse_controller_session();
         direct.mode = RunnerTunnelMode::DirectSsh;
@@ -1709,6 +1843,53 @@ mod tests {
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),
             last_seen_at: Some(Utc::now().to_rfc3339()),
+        }
+    }
+
+    fn sample_run_summary(id: &str) -> RunSummary {
+        RunSummary {
+            id: id.to_string(),
+            kind: "test".to_string(),
+            status: "running".to_string(),
+            started_at: "2026-07-03T13:00:00Z".to_string(),
+            finished_at: None,
+            component_id: Some("wpcom".to_string()),
+            rig_id: None,
+            git_sha: None,
+            command: Some("homeboy test wpcom".to_string()),
+            cwd: Some("/workspace/wpcom".to_string()),
+            status_note: None,
+        }
+    }
+
+    fn sample_active_job(durable_run_id: Option<&str>, command: &str) -> ActiveRunnerJobSummary {
+        ActiveRunnerJobSummary {
+            runner_id: "homeboy-lab".to_string(),
+            job_id: "job-1".to_string(),
+            operation: "runner.exec".to_string(),
+            source: "direct-daemon".to_string(),
+            kind: "test".to_string(),
+            status: JobStatus::Running,
+            command: command.to_string(),
+            cwd: Some("/workspace/wpcom".to_string()),
+            started_at_ms: 0,
+            updated_at_ms: 0,
+            elapsed_ms: 0,
+            heartbeat_age_ms: 0,
+            claim: JobClaimMetadata {
+                claim_id: None,
+                claimed_by_runner_id: Some("homeboy-lab".to_string()),
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+            },
+            claim_expires_in_ms: None,
+            lifecycle: None,
+            durable_run_id: durable_run_id.map(str::to_string),
+            stale_reason: None,
+            lifecycle_state: Some("running".to_string()),
+            retryable: Some(false),
+            active_child_count: None,
+            active_cell_count: None,
         }
     }
 }
