@@ -9,6 +9,7 @@ homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--see
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--campaign-manifest <path>] [--campaign-workload <id>] [--lab-runner <id>] [--required-artifact <id>] [--execute|--dry-run] [--resume] [--allow-destructive --isolation isolated --isolation-proof <path>]
+homeboy fuzz stable plan --manifest <path> [--stable-id <id[,id]>] [--runner <id>] [--artifact-root <dir>] [--run-id-prefix <id>] [--tracker-ref <kind:id>] [--detach-after-handoff] [--component <id>] [--since <duration>] [--limit <n>] [--hotspot-limit <n>]
 homeboy fuzz run-campaign [<component>] [--rig <id>] [--campaign-manifest <path>] [--campaign-workload <id>] [--dry-run] [--resume] [fuzz run options]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--output-envelope <path>]
@@ -209,6 +210,50 @@ The resulting `campaign_plan.entries[]` are sorted by workload id, deduplicated,
 and include `run_id`, `tracker_refs`, `artifact_requirements`, `lab_runner`, a
 request copy scoped to the workload, and a command vector suitable for a caller
 or Lab orchestration layer to schedule explicitly.
+
+`homeboy fuzz stable plan --manifest <path>` reads a product-owned stable workload
+manifest and emits deterministic Lab command vectors without executing them. The
+manifest keeps product identity in data: Homeboy only reads `profile_id`, `rig`,
+`contracts[].id`, `contracts[].entry_workloads[]`, and an optional
+`contracts[].budgets.max_duration_seconds`. The `rig` value points at a rig JSON
+file, relative to the manifest package root when the manifest lives under
+`manifests/`, and Homeboy resolves the concrete rig id from that file.
+
+Example stable workload manifest:
+
+```json
+{
+  "schema": "example/stable-workloads/v1",
+  "profile_id": "stable-demo",
+  "rig": "rigs/demo/rig.json",
+  "contracts": [
+    {
+      "id": "read-paths",
+      "entry_workloads": ["generated-read-cases", "read-profile"],
+      "budgets": { "max_duration_seconds": 600 }
+    }
+  ]
+}
+```
+
+Example planner command:
+
+```bash
+homeboy fuzz stable plan \
+  --manifest manifests/stable-workloads.json \
+  --stable-id read-paths \
+  --run-id-prefix stable-demo-20260703 \
+  --runner lab-a \
+  --component demo-component \
+  --tracker-ref github_issue:owner/repo#123
+```
+
+The output variant is `stable_plan`. It includes `run_commands[]` entries for
+`homeboy fuzz run --lab-only --rig <resolved-rig-id> --workload <id>` with stable
+run ids shaped as `<prefix>-<stable-id>-<index>-<workload-id>`, plus comparison
+commands for `homeboy runs refs`, `homeboy runs compare`, and `homeboy runs
+hotspots`. Use those comparison commands only after Lab has completed at least two
+persisted fuzz runs.
 
 Campaign execution returns `variant: "run_campaign"` with `dispatch_records[]`.
 Each record includes the planned entry id, workload id, run id, command vector,
