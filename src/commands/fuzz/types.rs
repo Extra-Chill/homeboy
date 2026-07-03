@@ -71,6 +71,8 @@ pub(crate) enum FuzzCommand {
     List(FuzzListArgs),
     /// Build a fuzz execution request without executing it
     Plan(FuzzPlanArgs),
+    /// Plan stable workload Lab commands from a manifest without executing them
+    Stable(FuzzStableArgs),
     /// Execute or dry-run a generated fuzz campaign plan
     RunCampaign(FuzzPlanArgs),
     /// Execute the selected fuzz workload, persist fuzz evidence, and surface its campaign contract
@@ -310,6 +312,65 @@ pub(crate) struct FuzzPlanArgs {
     /// Skip campaign entries whose run id already exists in the persisted run store.
     #[arg(long = "resume")]
     pub(crate) resume: bool,
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzStableArgs {
+    #[command(subcommand)]
+    pub(crate) command: FuzzStableCommand,
+}
+
+#[derive(Subcommand, Clone)]
+pub(crate) enum FuzzStableCommand {
+    /// Emit stable workload Lab command JSON from a stable workload manifest.
+    Plan(FuzzStablePlanArgs),
+}
+
+#[derive(Args, Clone)]
+pub(crate) struct FuzzStablePlanArgs {
+    /// Stable workload manifest JSON path.
+    #[arg(long = "manifest", value_name = "PATH")]
+    pub(crate) manifest: PathBuf,
+
+    /// Limit to one or more stable workload ids. Repeatable and comma-separated.
+    #[arg(long = "stable-id", value_name = "ID[,ID]", value_delimiter = ',')]
+    pub(crate) stable_ids: Vec<String>,
+
+    /// Preferred Lab runner id to include in every command.
+    #[arg(long = "runner", value_name = "ID")]
+    pub(crate) runner: Option<String>,
+
+    /// Persisted artifact root to include in every command.
+    #[arg(long = "artifact-root", value_name = "DIR")]
+    pub(crate) artifact_root: Option<PathBuf>,
+
+    /// Stable run id prefix. Defaults to stable-YYYYMMDD.
+    #[arg(long = "run-id-prefix", value_name = "ID")]
+    pub(crate) run_id_prefix: Option<String>,
+
+    /// Extra tracker ref added to every run command. Repeatable. Format: KIND:ID.
+    #[arg(long = "tracker-ref", value_name = "KIND:ID")]
+    pub(crate) tracker_refs: Vec<String>,
+
+    /// Return after the Lab daemon accepts each run.
+    #[arg(long = "detach-after-handoff")]
+    pub(crate) detach_after_handoff: bool,
+
+    /// Optional component id for comparison commands.
+    #[arg(long = "component", value_name = "ID")]
+    pub(crate) component: Option<String>,
+
+    /// Lookback for refs compare command.
+    #[arg(long = "since", default_value = "30d")]
+    pub(crate) since: String,
+
+    /// Run-history limit for refs/compare commands.
+    #[arg(long = "limit", default_value_t = 50)]
+    pub(crate) limit: u64,
+
+    /// Hotspot compare row limit.
+    #[arg(long = "hotspot-limit", default_value_t = 20)]
+    pub(crate) hotspot_limit: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

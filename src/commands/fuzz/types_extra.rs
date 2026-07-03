@@ -25,6 +25,7 @@ pub enum FuzzOutput {
     Replay(FuzzReplayOutput),
     Minimize(FuzzReplayOutput),
     Inspect(FuzzInspectOutput),
+    StablePlan(FuzzStablePlanOutput),
 }
 
 #[derive(Serialize)]
@@ -253,6 +254,34 @@ pub struct FuzzCampaignRunOutput {
     pub run_ids: Vec<String>,
     pub result_refs: Vec<EvidenceRef>,
     pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzStablePlanOutput {
+    pub schema: String,
+    pub command: String,
+    pub manifest: String,
+    pub profile_id: Option<String>,
+    pub rig_id: String,
+    pub local_execution: bool,
+    pub run_id_prefix: String,
+    pub run_commands: Vec<FuzzStableRunCommandOutput>,
+    pub compare_commands: Vec<FuzzStableCompareCommandOutput>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzStableRunCommandOutput {
+    pub stable_workload_id: String,
+    pub workload_id: String,
+    pub run_id: String,
+    pub command: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzStableCompareCommandOutput {
+    pub purpose: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Serialize)]

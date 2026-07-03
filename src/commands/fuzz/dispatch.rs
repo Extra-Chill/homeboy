@@ -16,6 +16,7 @@ use super::inspect::run_inspect;
 use super::planning::{run_campaign, run_plan};
 use super::replay::{run_minimize, run_replay};
 use super::report::{run_report, run_validate};
+use super::stable::run_stable;
 use super::types::{
     FuzzArgs, FuzzCommand, FuzzContractOutput, FuzzDiscoverArgs, FuzzDiscoverOutput,
     FuzzDiscoverSummary, FuzzListArgs, FuzzListOutput, FuzzOutput,
@@ -37,6 +38,9 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
             Ok((FuzzOutput::RunCampaign(output), exit))
         }
         Some(FuzzCommand::Plan(plan_args)) => Ok((FuzzOutput::Plan(run_plan(plan_args)?), 0)),
+        Some(FuzzCommand::Stable(stable_args)) => {
+            Ok((FuzzOutput::StablePlan(run_stable(stable_args.command)?), 0))
+        }
         Some(FuzzCommand::RunCampaign(mut plan_args)) => {
             if !plan_args.dry_run {
                 plan_args.execute = true;

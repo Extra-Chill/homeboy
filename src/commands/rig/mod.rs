@@ -147,6 +147,11 @@ enum RigCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Validate rig package artifacts without touching the environment.
+    Package {
+        #[command(subcommand)]
+        command: RigPackageCommand,
+    },
     /// Tear down a rig: stop services and run its `down` pipeline
     Down {
         /// Rig ID
@@ -247,6 +252,15 @@ enum RigAppCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum RigPackageCommand {
+    /// Lint every rig and package-level manifest under a local package path.
+    Lint {
+        /// Local package directory containing rig.json or rigs/<id>/rig.json
+        manifest_path: std::path::PathBuf,
+    },
+}
+
 #[derive(Args)]
 struct RigRunArgs {
     /// Rig ID
@@ -307,6 +321,7 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
         RigCommand::Lint { target, id, all } => lint(&target, id.as_deref(), all),
+        RigCommand::Package { command } => package(command),
         RigCommand::Down { rig_id } => down(&rig_id),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
@@ -323,6 +338,52 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(command),
     }
+}
+
+fn package(command: RigPackageCommand) -> CmdResult<RigCommandOutput> {
+    match command {
+        RigPackageCommand::Lint { manifest_path } => package_lint(&manifest_path),
+    }
+}
+
+fn package_lint(manifest_path: &std::path::Path) -> CmdResult<RigCommandOutput> {
+    let lint_root = rig_package_lint_root(manifest_path);
+    let report = rig::lint::run_package_lint_at(&lint_root)?;
+    let exit_code = if report.failed == 0 { 0 } else { 1 };
+    Ok((
+        RigCommandOutput::Check(RigCheckOutput {
+            command: "rig.package.lint",
+            report: homeboy::core::rig::CheckReport {
+                rig_id: lint_root.to_string_lossy().to_string(),
+                run_id: None,
+                pipeline: report,
+                success: exit_code == 0,
+                artifact_index: None,
+            },
+        }),
+        exit_code,
+    ))
+}
+
+fn rig_package_lint_root(path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_file() && path.file_name().and_then(|name| name.to_str()) == Some("rig.json") {
+        if path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("rigs")
+        {
+            return path
+                .parent()
+                .and_then(|parent| parent.parent())
+                .and_then(|parent| parent.parent())
+                .unwrap_or(path)
+                .to_path_buf();
+        }
+        return path.parent().unwrap_or(path).to_path_buf();
+    }
+    path.to_path_buf()
 }
 
 fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {

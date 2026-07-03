@@ -6,6 +6,7 @@ mod inspect;
 mod planning;
 mod replay;
 mod report;
+mod stable;
 mod types;
 mod types_extra;
 mod workloads;
