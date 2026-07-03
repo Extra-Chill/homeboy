@@ -29,6 +29,8 @@ pub(super) struct NestedTerminalStateFailedExecutor;
 
 pub(super) struct NestedAgentResultFailedExecutor;
 
+pub(super) struct NestedFailedStatusMissingArtifactsExecutor;
+
 pub(super) struct SuccessMissingRequiredArtifactsExecutor;
 
 pub(super) struct SuccessEmptyRequiredTypedArtifactExecutor {
@@ -227,6 +229,32 @@ impl AgentTaskExecutorAdapter for NestedAgentResultFailedExecutor {
             }),
             artifact: None,
             metadata: Value::Null,
+        });
+        outcome
+    }
+}
+
+impl AgentTaskExecutorAdapter for NestedFailedStatusMissingArtifactsExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+        outcome.outputs = json!({
+            "provider_run_result": {
+                "status": "failed",
+                "metadata": {
+                    "provider_error": {
+                        "message": "OpenCode completed without producing declared artifact(s): patch, agent_result, transcript"
+                    },
+                    "run_id": "run-7367"
+                },
+                "refs": {
+                    "logs": ["file:///tmp/executor.stderr.log"],
+                    "artifact_bundles": ["file:///tmp/runtime-artifacts"]
+                }
+            }
         });
         outcome
     }

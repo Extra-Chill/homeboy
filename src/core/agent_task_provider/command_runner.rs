@@ -6,6 +6,8 @@ use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sourc
 use super::*;
 use crate::core::agent_task_executor_evidence::link_latest_executor_evidence;
 
+const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
     Secret(AgentTaskSecretResolutionError),
@@ -339,7 +341,13 @@ pub(super) fn run_provider_command_once(
             AgentTaskFailureClassification::Provider,
             "agent_task.provider_empty_stdout",
             format!("provider '{}' produced no JSON outcome", provider.id),
-            json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr }),
+            executor_process_diagnostic_data(
+                &provider.id,
+                &command,
+                &output.status,
+                &stdout,
+                &stderr,
+            ),
         );
     }
 
@@ -361,9 +369,60 @@ pub(super) fn run_provider_command_once(
                 "provider '{}' returned malformed JSON: {error}",
                 provider.id
             ),
-            json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr, "stdout": stdout }),
+            executor_process_diagnostic_data(
+                &provider.id,
+                &command,
+                &output.status,
+                &stdout,
+                &stderr,
+            ),
         ),
     }
+}
+
+fn executor_process_diagnostic_data(
+    provider_id: &str,
+    command: &str,
+    status: &std::process::ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) -> Value {
+    json!({
+        "provider": provider_id,
+        "command": command,
+        "exit_code": status.code(),
+        "signal": exit_signal(status),
+        "stdout": bounded_executor_output(stdout),
+        "stdout_bytes": stdout.len(),
+        "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "stderr": bounded_executor_output(stderr),
+        "stderr_bytes": stderr.len(),
+        "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+    })
+}
+
+fn bounded_executor_output(output: &str) -> String {
+    if output.len() <= EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES {
+        return output.to_string();
+    }
+
+    let mut start = output.len() - EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    output[start..].to_string()
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 fn provider_preflight_failure(

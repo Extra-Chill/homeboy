@@ -113,6 +113,55 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
 }
 
 #[test]
+fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
+    let scheduler = AgentTaskScheduler::new(NestedFailedStatusMissingArtifactsExecutor);
+
+    let aggregate = scheduler.run(plan_with_required_artifacts(&[
+        "patch",
+        "agent_result",
+        "transcript",
+    ]));
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    let outcome = &aggregate.outcomes[0];
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::ExecutionFailed)
+    );
+    assert!(outcome
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("outputs.provider_run_result.status=failed"));
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.nested_executor_failed_status"));
+    let nested_diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.nested_executor_failed_status")
+        .expect("nested executor failure diagnostic");
+    assert_eq!(
+        nested_diagnostic.data["provider_run_result"]["metadata"]["provider_error"]["message"],
+        json!("OpenCode completed without producing declared artifact(s): patch, agent_result, transcript")
+    );
+    assert_eq!(
+        nested_diagnostic.data["provider_run_result"]["refs"]["logs"][0],
+        json!("file:///tmp/executor.stderr.log")
+    );
+    assert_eq!(
+        nested_diagnostic.data["provider_run_result"]["refs"]["artifact_bundles"][0],
+        json!("file:///tmp/runtime-artifacts")
+    );
+    assert!(!outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_missing"));
+}
+
+#[test]
 fn empty_required_patch_artifact_is_valid_no_diff_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let patch_path = temp.path().join("patch.diff");
