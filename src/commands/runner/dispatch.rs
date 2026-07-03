@@ -12,7 +12,8 @@ use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
 use super::types::{RunnerCommandOutput, RunnerEnvOutput, RunnerOutput};
 use super::{
-    doctor, env as env_mod, jobs, policy, refresh_plan, registry, status as status_mod, workspace,
+    doctor, env as env_mod, jobs, lifecycle, policy, refresh_plan, registry, status as status_mod,
+    workspace,
 };
 
 pub fn run(
@@ -196,6 +197,15 @@ pub fn run(
             command,
         )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
+        RunnerCommand::Lifecycle {
+            runner_id,
+            workspace,
+            job_id,
+            run_id,
+            status,
+            exit_code,
+        } => lifecycle::lifecycle(runner_id, workspace, job_id, run_id, status, exit_code)
+            .map(|(output, exit_code)| (RunnerCommandOutput::Lifecycle(output), exit_code)),
         RunnerCommand::Job { command } => map_job(jobs::job(command)),
         RunnerCommand::Work {
             runner_id,
