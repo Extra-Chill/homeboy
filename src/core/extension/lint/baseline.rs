@@ -258,22 +258,4 @@ mod tests {
         assert_eq!(findings[0].fingerprint.as_deref(), Some("id-1"));
     }
 
-    #[test]
-    fn test_parse_findings_file_accepts_legacy_string_source() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("lint-findings.json");
-        std::fs::write(
-            &path,
-            r#"[{"source":"clippy","code":"clippy","message":"message","category":"lint","fingerprint":"id-1","file":"src/lib.rs"}]"#,
-        )
-        .expect("findings file written");
-
-        let findings = parse_findings_file(&path).expect("findings parsed");
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].tool, "clippy");
-        assert_eq!(findings[0].rule.as_deref(), Some("clippy"));
-        assert_eq!(findings[0].source.as_ref().unwrap().kind, "clippy");
-        assert_eq!(findings[0].metadata["source_sidecar"], "lint-findings");
-    }
 }

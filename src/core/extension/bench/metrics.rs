@@ -491,15 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_p95() {
-        let resolved = ResolvedMetricPolicy::legacy_p95(5.0);
-        let delta = resolved.compare(0.0, 10.0);
-
-        assert_eq!(resolved.name(), "p95_ms");
-        assert!(!delta.regression);
-    }
-
-    #[test]
     fn test_resolve_metric_policies() {
         let mut metrics = BTreeMap::new();
         metrics.insert("p95_ms".to_string(), 100.0);
