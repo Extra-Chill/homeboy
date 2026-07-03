@@ -1424,6 +1424,7 @@ fn run_location_index_contract_serializes_required_fields() {
         controller_location: "controller:mac.lan".to_string(),
         runner_id: "lab".to_string(),
         remote_job_id: "job-123".to_string(),
+        remote_cwd: "/srv/homeboy/project".to_string(),
         artifact_manifest_ref: RunnerHandoffArtifactManifestRef {
             schema: "homeboy/runner-artifact-manifest-ref/v1".to_string(),
             manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
@@ -1431,6 +1432,13 @@ fn run_location_index_contract_serializes_required_fields() {
                 .to_string(),
         },
         liveness_heartbeat_timestamp: "2026-06-30T15:58:00Z".to_string(),
+        follow_commands: RunnerHandoffFollowCommands {
+            job_logs: "homeboy runner job logs lab job-123 --follow".to_string(),
+            job_cancel: "homeboy runner job cancel lab job-123".to_string(),
+            status: Some("homeboy agent-task status agent-task-run-6454".to_string()),
+            logs: Some("homeboy agent-task logs agent-task-run-6454".to_string()),
+            artifacts: Some("homeboy agent-task artifacts agent-task-run-6454".to_string()),
+        },
     };
 
     let json = serde_json::to_value(&index).expect("serialize run location index");
@@ -1439,6 +1447,7 @@ fn run_location_index_contract_serializes_required_fields() {
     assert_eq!(json["controller_location"], "controller:mac.lan");
     assert_eq!(json["runner_id"], "lab");
     assert_eq!(json["remote_job_id"], "job-123");
+    assert_eq!(json["remote_cwd"], "/srv/homeboy/project");
     assert_eq!(
         json["artifact_manifest_ref"]["manifest_schema"],
         RUNNER_ARTIFACT_MANIFEST_SCHEMA
@@ -1448,6 +1457,10 @@ fn run_location_index_contract_serializes_required_fields() {
         "/srv/homeboy/project-homeboy-artifacts/homeboy-artifact-manifest.json"
     );
     assert_eq!(json["liveness_heartbeat_timestamp"], "2026-06-30T15:58:00Z");
+    assert_eq!(
+        json["follow_commands"]["job_logs"],
+        "homeboy runner job logs lab job-123 --follow"
+    );
 
     let round_trip: RunLocationIndex =
         serde_json::from_value(json).expect("deserialize run location index");
