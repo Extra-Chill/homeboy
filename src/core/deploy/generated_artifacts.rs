@@ -268,8 +268,16 @@ mod tests {
             r#"{"artifact_cleanup_paths":["plugins/agentic-ui-block/app/tools/common/dist"]}"#,
         )
         .expect("homeboy config");
-        std::fs::create_dir_all(dir.join("build")).expect("build dir");
-        std::fs::write(dir.join("build/studio-native.zip"), "artifact").expect("build artifact");
+        let generated_build_dir = deploy_generated_build_dir();
+        std::fs::create_dir_all(dir.join(&generated_build_dir)).expect("build dir");
+        std::fs::write(
+            dir.join(&generated_build_dir).join("component.zip"),
+            "artifact",
+        )
+        .expect("build artifact");
+        std::fs::create_dir_all(dir.join("build")).expect("undeclared build dir");
+        std::fs::write(dir.join("build/component.zip"), "artifact")
+            .expect("undeclared build artifact");
         std::fs::create_dir_all(dir.join("plugins/agentic-ui-block/app/tools/common/dist"))
             .expect("dist dir");
         std::fs::write(
@@ -298,8 +306,10 @@ mod tests {
         };
         let report = uncommitted_file_report_excluding_known_generated(&component).expect("status");
 
-        assert_eq!(report.unexpected, vec!["homeboy.json", "src.rs"]);
-        assert!(report.known_generated.contains(&"build/".to_string()));
+        assert_eq!(report.unexpected, vec!["build/", "homeboy.json", "src.rs"]);
+        assert!(report
+            .known_generated
+            .contains(&format!("{generated_build_dir}/")));
         assert!(report
             .known_generated
             .contains(&"plugins/agentic-ui-block/app/tools/common/dist/".to_string()));
