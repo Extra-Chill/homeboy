@@ -213,6 +213,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
         max_attempts: request.core.attempts.max(1),
         ..AgentTaskRetryPolicy::default()
     };
+    // Global provider rotation policy (`agent_task.rotation` in Homeboy config)
+    // flows into the plan options; per-task `metadata.provider_rotation`
+    // overrides it at dispatch time (#6978).
+    plan.options.rotation = defaults::load_config().agent_task.rotation;
     plan.metadata = serde_json::json!({
         "kind": "agent-task-dispatch",
         "repo": repo,
@@ -910,6 +914,54 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn dispatch_plan_applies_global_agent_task_rotation_policy() {
+        with_isolated_home(|_| {
+            let mut config = defaults::load_config();
+            config.agent_task.rotation = Some(
+                crate::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("fallback-backend-a".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    max_attempts: Some(2),
+                },
+            );
+            defaults::save_config(&config).expect("save config");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with rotation.".to_string()),
+                repo: Some("sample-plugin".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            let rotation = plan.options.rotation.expect("rotation policy on plan");
+            assert_eq!(rotation.entries.len(), 1);
+            assert_eq!(
+                rotation.entries[0].backend.as_deref(),
+                Some("fallback-backend-a")
+            );
+            assert_eq!(rotation.max_attempts, Some(2));
+        });
+    }
+
+    #[test]
+    fn dispatch_plan_leaves_rotation_unset_without_global_policy() {
+        with_isolated_home(|_| {
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook without rotation.".to_string()),
+                repo: Some("sample-plugin".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert!(plan.options.rotation.is_none());
+        });
     }
 
     #[test]

@@ -16,9 +16,10 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
     AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
     AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
-    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
-    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
-    AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
+    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
@@ -88,6 +89,8 @@ where
             .map(|request| ScheduledTask {
                 request,
                 attempt: 1,
+                rotation_index: 0,
+                rotation_attempts: Vec::new(),
             })
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
@@ -318,6 +321,8 @@ where
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: task_timeout_ms,
+                    rotation_index: scheduled.rotation_index,
+                    rotation_attempts: scheduled.rotation_attempts,
                 });
 
                 thread::spawn(move || {
@@ -400,8 +405,68 @@ where
                         queued.push_back(ScheduledTask {
                             request,
                             attempt: next_attempt,
+                            rotation_index: running_task.rotation_index,
+                            rotation_attempts: running_task.rotation_attempts,
                         });
                         continue;
+                    }
+                    let rotation_policy = AgentTaskScheduleSupport::rotation_policy_for_request(
+                        &running_task.request,
+                        plan.options.rotation.as_ref(),
+                    );
+                    if let Some(policy) = &rotation_policy {
+                        if AgentTaskScheduleSupport::should_rotate_provider(
+                            &outcome,
+                            policy,
+                            running_task.rotation_index,
+                            result.attempt,
+                        ) {
+                            let mut rotation_attempts = running_task.rotation_attempts;
+                            rotation_attempts.push(
+                                AgentTaskScheduleSupport::rotation_attempt_record(
+                                    &running_task.request,
+                                    &outcome,
+                                    result.attempt,
+                                    running_task.rotation_index,
+                                ),
+                            );
+                            let entry = &policy.entries[running_task.rotation_index];
+                            let mut request = running_task.request;
+                            AgentTaskScheduleSupport::apply_rotation_entry(&mut request, entry);
+                            request.parent_plan_id = Some(plan.plan_id.clone());
+                            let next_attempt = result.attempt + 1;
+                            events.push(event(
+                                &request.task_id,
+                                AgentTaskState::Queued,
+                                next_attempt,
+                                Some(format!(
+                                    "provider rotation queued: entry {} of {}",
+                                    running_task.rotation_index + 1,
+                                    policy.entries.len()
+                                )),
+                            ));
+                            queued.push_back(ScheduledTask {
+                                request,
+                                attempt: next_attempt,
+                                rotation_index: running_task.rotation_index + 1,
+                                rotation_attempts,
+                            });
+                            continue;
+                        }
+                    }
+                    let mut outcome = outcome;
+                    if !running_task.rotation_attempts.is_empty() {
+                        let mut rotation_attempts = running_task.rotation_attempts.clone();
+                        rotation_attempts.push(AgentTaskScheduleSupport::rotation_attempt_record(
+                            &running_task.request,
+                            &outcome,
+                            result.attempt,
+                            running_task.rotation_index,
+                        ));
+                        AgentTaskScheduleSupport::attach_rotation_evidence(
+                            &mut outcome,
+                            &rotation_attempts,
+                        );
                     }
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
@@ -447,6 +512,10 @@ where
 struct ScheduledTask {
     request: AgentTaskRequest,
     attempt: u32,
+    /// Rotation entries already consumed for this task (0 = original executor).
+    rotation_index: usize,
+    /// Ordered evidence for prior dispatch attempts under a rotation policy.
+    rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +528,10 @@ struct RunningTask {
     attempt: u32,
     started_at: Instant,
     timeout_ms: Option<u64>,
+    /// Rotation entries already consumed for this task (0 = original executor).
+    rotation_index: usize,
+    /// Ordered evidence for prior dispatch attempts under a rotation policy.
+    rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
 }
 
 struct TaskResult {

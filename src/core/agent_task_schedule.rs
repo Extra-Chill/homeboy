@@ -7,7 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::core::agent_task::{
-    AgentTaskComponentContract, AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskRequest,
+    AgentTaskComponentContract, AgentTaskFailureClassification, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AgentTaskRequest,
 };
 use crate::core::plan::{
     HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
@@ -392,6 +393,11 @@ mod config {
         pub timeout_ms: Option<u64>,
         #[serde(default)]
         pub retry: AgentTaskRetryPolicy,
+        /// Per-plan provider rotation policy. Takes precedence over the global
+        /// Homeboy config `agent_task.rotation`; a per-task
+        /// `metadata.provider_rotation` object overrides both (#6978).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rotation: Option<AgentTaskProviderRotationPolicy>,
     }
 
     impl Default for AgentTaskScheduleOptions {
@@ -406,6 +412,7 @@ mod config {
                 adaptive_concurrency: None,
                 timeout_ms: None,
                 retry: AgentTaskRetryPolicy::default(),
+                rotation: None,
             }
         }
     }
@@ -494,6 +501,80 @@ mod config {
         pub max_retries_total: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub retryable_failure_classifications: Vec<AgentTaskFailureClassification>,
+    }
+
+    /// Operator-configured provider rotation policy for agent-task execution.
+    ///
+    /// On a rotation-eligible failure (provider capacity classifications only:
+    /// `provider`, `transient`, `timeout`), the scheduler re-dispatches the same
+    /// task contract with the next entry in the chain until entries are
+    /// exhausted or the attempt bound is reached. Task-level failures
+    /// (`execution_failed`, `policy_denied`, `invalid_input`,
+    /// `capability_missing`) never rotate so a provider swap cannot mask a real
+    /// task failure or policy denial. The policy is pure operator data — core
+    /// hardcodes no provider or model names (#6978).
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct AgentTaskProviderRotationPolicy {
+        /// Ordered rotation chain. The first attempt always uses the task's own
+        /// executor; entry N handles the (N+1)-th attempt after a
+        /// rotation-eligible failure.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub entries: Vec<AgentTaskProviderRotationEntry>,
+        /// Bound on total dispatch attempts per task (including the first).
+        /// Defaults to `entries.len() + 1` when unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub max_attempts: Option<u32>,
+    }
+
+    impl AgentTaskProviderRotationPolicy {
+        /// Total dispatch attempts allowed per task, including the first
+        /// attempt on the task's own executor.
+        pub fn max_total_attempts(&self) -> u32 {
+            self.max_attempts
+                .unwrap_or_else(|| self.entries.len() as u32 + 1)
+                .max(1)
+        }
+    }
+
+    /// One rotation target: executor selector overrides and/or nested provider
+    /// config/model, mirroring the dispatch config layer shapes
+    /// (`--dispatch-selector` / `--dispatch-provider-config`). Unset fields
+    /// inherit the values from the failing attempt.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct AgentTaskProviderRotationEntry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub backend: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selector: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        /// JSON object merged over the executor's provider config (same shape
+        /// as `--dispatch-provider-config` / `--provider-config`).
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        pub provider_config: Value,
+    }
+
+    /// Durable evidence for one dispatch attempt of a task under a provider
+    /// rotation policy. Recorded in order on the final outcome under
+    /// `metadata.provider_rotation.attempts` so run records and
+    /// `agent-task status|logs` show which provider/model handled each attempt
+    /// and why failed attempts rotated.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct AgentTaskProviderRotationAttempt {
+        pub attempt: u32,
+        /// Number of rotation entries consumed before this attempt
+        /// (0 = the task's original executor).
+        pub rotation_index: usize,
+        pub backend: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selector: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        pub status: AgentTaskOutcomeStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub failure_classification: Option<AgentTaskFailureClassification>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub summary: Option<String>,
     }
 }
 

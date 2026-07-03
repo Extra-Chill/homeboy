@@ -309,6 +309,52 @@ impl AgentTaskExecutorAdapter for SuccessEmptyRequiredTypedArtifactExecutor {
     }
 }
 
+/// Executor that records every dispatched request and returns a scripted
+/// `(status, failure_classification)` sequence, one entry per call (the last
+/// entry repeats if calls outrun the script). Used to prove provider rotation
+/// behavior against exact executor selections per attempt.
+pub(super) struct RotationScriptedExecutor {
+    pub(super) script: Vec<(
+        AgentTaskOutcomeStatus,
+        Option<AgentTaskFailureClassification>,
+    )>,
+    pub(super) observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
+    pub(super) calls: Arc<AtomicUsize>,
+}
+
+impl RotationScriptedExecutor {
+    pub(super) fn new(
+        script: Vec<(
+            AgentTaskOutcomeStatus,
+            Option<AgentTaskFailureClassification>,
+        )>,
+    ) -> Self {
+        Self {
+            script,
+            observed: Arc::new(Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl AgentTaskExecutorAdapter for RotationScriptedExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.observed
+            .lock()
+            .expect("observed requests")
+            .push(request.clone());
+        let (status, classification) = self.script[call.min(self.script.len() - 1)];
+        let mut result = outcome(request.task_id, status);
+        result.failure_classification = classification;
+        result
+    }
+}
+
 pub(super) struct RecordingExecutor {
     pub(super) statuses: HashMap<String, AgentTaskOutcomeStatus>,
     pub(super) delay: Duration,

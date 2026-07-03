@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::core::agent_task_schedule::AgentTaskProviderRotationPolicy;
+
 #[path = "defaults/builtins.rs"]
 mod builtins;
 mod io;
@@ -190,6 +192,12 @@ pub struct AgentTaskConfig {
     pub default_backend: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secrets: HashMap<String, AgentTaskSecretSource>,
+    /// Global provider rotation policy for agent-task dispatch, settable via
+    /// `homeboy config set /agent_task/rotation <json> --json`. A per-plan
+    /// `options.rotation` or per-task `metadata.provider_rotation` override
+    /// takes precedence (#6978).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<AgentTaskProviderRotationPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -414,6 +422,45 @@ mod tests {
         let secret = config.agent_task.secrets.get("TOKEN").unwrap();
         assert_eq!(secret.source, "config");
         assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));
+    }
+
+    #[test]
+    fn homeboy_config_parses_agent_task_rotation_policy() {
+        let config: HomeboyConfig = serde_json::from_str(
+            r#"{
+                "agent_task": {
+                    "rotation": {
+                        "entries": [
+                            { "backend": "fallback-backend-a", "model": "fallback-model-a" },
+                            { "selector": "fallback-b.agent-task-executor", "provider_config": { "provider": "fallback-provider-b" } }
+                        ],
+                        "max_attempts": 3
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let rotation = config.agent_task.rotation.expect("rotation policy");
+        assert_eq!(rotation.entries.len(), 2);
+        assert_eq!(rotation.max_attempts, Some(3));
+        assert_eq!(
+            rotation.entries[0].backend.as_deref(),
+            Some("fallback-backend-a")
+        );
+        assert_eq!(
+            rotation.entries[0].model.as_deref(),
+            Some("fallback-model-a")
+        );
+        assert_eq!(
+            rotation.entries[1].selector.as_deref(),
+            Some("fallback-b.agent-task-executor")
+        );
+        assert_eq!(
+            rotation.entries[1].provider_config["provider"],
+            "fallback-provider-b"
+        );
+        assert!(HomeboyConfig::default().agent_task.rotation.is_none());
     }
 
     #[test]
