@@ -784,12 +784,13 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
 }
 
 fn is_command_local_runner_option(command: &Commands) -> bool {
-    matches!(
-        command,
+    match command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
-        })
-    )
+        }) => true,
+        Commands::Fuzz(args) => args.consumes_runner_as_plan_input(),
+        _ => false,
+    }
 }
 
 fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()> {

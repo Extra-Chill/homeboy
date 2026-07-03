@@ -370,15 +370,70 @@ mod tests {
 
         assert_eq!(output.rig_id, "demo-rig");
         assert_eq!(output.run_commands.len(), 1);
-        assert!(output.run_commands[0]
-            .command
-            .contains(&"--lab-only".to_string()));
-        assert!(output.run_commands[0]
-            .command
-            .contains(&"--max-duration".to_string()));
+        assert_eq!(
+            output.run_commands[0].command,
+            vec![
+                "homeboy",
+                "fuzz",
+                "run",
+                "--lab-only",
+                "--rig",
+                "demo-rig",
+                "--workload",
+                "read",
+                "--gate-profile",
+                "measurement",
+                "--run-id",
+                "stable-demo-api-01-read",
+                "--tracker-ref",
+                "stable-workload:api",
+                "--runner",
+                "lab",
+                "--detach-after-handoff",
+                "--max-duration",
+                "60s",
+                "--tracker-ref",
+                "issue:1",
+            ]
+        );
         assert!(output.compare_commands[0]
             .command
             .windows(2)
             .any(|pair| pair == ["--component", "component-a"]));
+        assert_eq!(
+            output.compare_commands[2].command,
+            vec![
+                "homeboy",
+                "runs",
+                "hotspots",
+                "--baseline-run",
+                "BASELINE_RUN_ID",
+                "--candidate-run",
+                "CANDIDATE_RUN_ID",
+                "--limit",
+                "3",
+                "--component",
+                "component-a",
+                "--lab-only",
+                "--runner",
+                "lab",
+            ]
+        );
+    }
+
+    #[test]
+    fn stable_plan_rejects_unknown_stable_id() {
+        let contracts = vec![StableWorkloadContract {
+            id: "known".to_string(),
+            entry_workloads: vec!["workload".to_string()],
+            budgets: serde_json::Map::new(),
+        }];
+        let result = selected_contracts(&contracts, &["missing".to_string()]);
+
+        let err = match result {
+            Ok(_) => panic!("unknown stable id should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("unknown stable workload id"));
     }
 }

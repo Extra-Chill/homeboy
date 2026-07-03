@@ -57,6 +57,15 @@ impl FuzzArgs {
             _ => self.run.extension_override.extensions.as_slice(),
         }
     }
+
+    pub(crate) fn consumes_runner_as_plan_input(&self) -> bool {
+        matches!(
+            self.command,
+            Some(FuzzCommand::Stable(FuzzStableArgs {
+                command: FuzzStableCommand::Plan(_),
+            }))
+        )
+    }
 }
 
 #[derive(Subcommand)]
