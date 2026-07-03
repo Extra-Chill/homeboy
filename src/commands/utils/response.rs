@@ -5,20 +5,76 @@
 use homeboy::core::error::Hint;
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use super::output::{write_output_file_atomically, OutputWriteOptions};
 
+const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v2";
+
 #[derive(Debug, Serialize)]
-pub struct CliResponse<T: Serialize> {
+pub struct CommandResultEnvelope<T: Serialize> {
+    pub schema: &'static str,
+    pub command: String,
     pub success: bool,
+    pub exit_code: i32,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<CommandRunRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<CommandArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<CommandEvidenceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<CommandDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<CliError>,
+    pub presentation: Option<CommandPresentationEnvelope>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct CliError {
+pub struct CommandRunRef {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    pub status_command: String,
+    pub watch_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandArtifactRef {
+    pub id: String,
+    pub kind: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandEvidenceRef {
+    pub id: String,
+    pub kind: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandDiagnostics {
     pub code: String,
     pub message: String,
     pub details: serde_json::Value,
@@ -28,12 +84,30 @@ pub struct CliError {
     pub retryable: Option<bool>,
 }
 
-impl<T: Serialize> CliResponse<T> {
-    pub fn success(data: T) -> Self {
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CommandPresentationEnvelope {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+}
+
+impl<T: Serialize> CommandResultEnvelope<T> {
+    pub fn success(command: &str, data: T) -> Self {
         Self {
+            schema: COMMAND_RESULT_SCHEMA,
+            command: command.to_string(),
             success: true,
+            exit_code: 0,
+            status: "succeeded".to_string(),
+            run: None,
+            summary: None,
+            next_actions: Vec::new(),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+            diagnostics: None,
             data: Some(data),
-            error: None,
+            presentation: None,
         }
     }
 
@@ -44,12 +118,20 @@ impl<T: Serialize> CliResponse<T> {
     }
 }
 
-impl CliResponse<()> {
-    fn from_error(err: &Error) -> Self {
+impl CommandResultEnvelope<()> {
+    fn from_error(command: &str, err: &Error, exit_code: i32) -> Self {
         Self {
+            schema: COMMAND_RESULT_SCHEMA,
+            command: command.to_string(),
             success: false,
-            data: None,
-            error: Some(CliError {
+            exit_code,
+            status: status_for_result(None, exit_code),
+            run: None,
+            summary: Some(err.message.clone()),
+            next_actions: err.hints.iter().map(|hint| hint.message.clone()).collect(),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+            diagnostics: Some(CommandDiagnostics {
                 code: err.code.as_str().to_string(),
                 message: err.message.clone(),
                 details: err.details.clone(),
@@ -60,11 +142,13 @@ impl CliResponse<()> {
                 },
                 retryable: err.retryable,
             }),
+            data: None,
+            presentation: None,
         }
     }
 }
 
-fn print_response<T: Serialize>(response: &CliResponse<T>) -> Result<()> {
+fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
     let payload = response.to_json()?;
@@ -83,13 +167,17 @@ fn print_response<T: Serialize>(response: &CliResponse<T>) -> Result<()> {
 }
 
 pub fn print_success<T: Serialize>(data: T) -> Result<()> {
-    print_response(&CliResponse::success(data))
+    print_response(&CommandResultEnvelope::success("unknown", data))
 }
 
 pub fn print_result<T: Serialize>(result: Result<T>) -> Result<()> {
     match result {
         Ok(data) => print_success(data),
-        Err(err) => print_response(&CliResponse::<()>::from_error(&err)),
+        Err(err) => print_response(&CommandResultEnvelope::<()>::from_error(
+            "unknown",
+            &err,
+            exit_code_for_error(err.code),
+        )),
     }
 }
 
@@ -171,34 +259,300 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
 }
 
 pub fn print_json_result(result: Result<serde_json::Value>, exit_code: i32) -> Result<()> {
-    print_response(&cli_response_for_json_result(&result, exit_code))
+    print_json_result_for_command(result, exit_code, "unknown", None)
+}
+
+pub fn print_json_result_for_command(
+    result: Result<Value>,
+    exit_code: i32,
+    command: &str,
+    presentation: Option<CommandPresentationEnvelope>,
+) -> Result<()> {
+    print_response(&cli_response_for_json_result_for_command(
+        &result,
+        exit_code,
+        command,
+        presentation,
+    ))
 }
 
 pub fn cli_response_for_json_result(
     result: &Result<serde_json::Value>,
     exit_code: i32,
-) -> CliResponse<serde_json::Value> {
+) -> CommandResultEnvelope<serde_json::Value> {
+    cli_response_for_json_result_for_command(result, exit_code, "unknown", None)
+}
+
+pub fn cli_response_for_json_result_for_command(
+    result: &Result<serde_json::Value>,
+    exit_code: i32,
+    command: &str,
+    presentation: Option<CommandPresentationEnvelope>,
+) -> CommandResultEnvelope<serde_json::Value> {
     match result {
-        Ok(data) => CliResponse {
-            success: exit_code == 0,
-            data: Some(data.clone()),
-            error: None,
-        },
-        Err(err) => {
-            let error_response = CliResponse::<()>::from_error(err);
-            CliResponse {
-                success: false,
-                data: None,
-                error: error_response.error,
-            }
+        Ok(data) => envelope_for_data(command, data.clone(), exit_code, presentation),
+        Err(err) => CommandResultEnvelope::<()>::from_error(command, err, exit_code).into_value(),
+    }
+}
+
+impl CommandResultEnvelope<()> {
+    fn into_value(self) -> CommandResultEnvelope<Value> {
+        CommandResultEnvelope {
+            schema: self.schema,
+            command: self.command,
+            success: self.success,
+            exit_code: self.exit_code,
+            status: self.status,
+            run: self.run,
+            summary: self.summary,
+            next_actions: self.next_actions,
+            artifacts: self.artifacts,
+            evidence: self.evidence,
+            diagnostics: self.diagnostics,
+            data: None,
+            presentation: self.presentation,
         }
     }
+}
+
+fn envelope_for_data(
+    command: &str,
+    data: Value,
+    exit_code: i32,
+    presentation: Option<CommandPresentationEnvelope>,
+) -> CommandResultEnvelope<Value> {
+    let success = exit_code == 0;
+    let run = run_ref_for_payload(command, &data);
+    let artifacts = artifact_refs_for_payload(&data);
+    let mut evidence = evidence_refs_for_payload(&data);
+
+    if evidence.is_empty() {
+        if let Some(run) = &run {
+            evidence.push(CommandEvidenceRef {
+                id: format!("{}-result", run.id),
+                kind: "command-result".to_string(),
+                uri: format!("homeboy://runs/{}/result", run.id),
+                semantic_key: Some("command_result".to_string()),
+            });
+        }
+    }
+
+    CommandResultEnvelope {
+        schema: COMMAND_RESULT_SCHEMA,
+        command: command.to_string(),
+        success,
+        exit_code,
+        status: status_for_result(Some(&data), exit_code),
+        run,
+        summary: summary_for_payload(&data, presentation.as_ref()),
+        next_actions: next_actions_for_payload(&data),
+        artifacts,
+        evidence,
+        diagnostics: None,
+        data: Some(data),
+        presentation,
+    }
+}
+
+fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
+    if exit_code != 0 {
+        return "failed".to_string();
+    }
+
+    data.and_then(|value| value.get("status").and_then(Value::as_str))
+        .and_then(normalize_status)
+        .unwrap_or("succeeded")
+        .to_string()
+}
+
+fn normalize_status(status: &str) -> Option<&'static str> {
+    match status.to_ascii_lowercase().as_str() {
+        "queued" => Some("queued"),
+        "running" | "in_progress" | "active" => Some("running"),
+        "succeeded" | "success" | "passed" | "pass" | "complete" | "completed" => Some("succeeded"),
+        "partial_failure" | "partial-failure" | "partial" => Some("partial_failure"),
+        "failed" | "failure" | "error" => Some("failed"),
+        "cancelled" | "canceled" => Some("cancelled"),
+        "timed_out" | "timed-out" | "timeout" => Some("timed_out"),
+        "stale" => Some("stale"),
+        _ => None,
+    }
+}
+
+fn run_ref_for_payload(command: &str, data: &Value) -> Option<CommandRunRef> {
+    let id = string_at(data, &["run_id"])
+        .or_else(|| string_at(data, &["run", "id"]))
+        .or_else(|| string_at(data, &["status", "run_id"]))
+        .or_else(|| synthetic_run_id(command, data));
+    let id = id?;
+    let kind = string_at(data, &["run", "kind"])
+        .or_else(|| string_at(data, &["kind"]))
+        .unwrap_or_else(|| command.to_string());
+    let location =
+        string_at(data, &["run", "location"]).or_else(|| string_at(data, &["artifact_path"]));
+
+    Some(CommandRunRef {
+        id: id.clone(),
+        kind,
+        source: "homeboy-cli".to_string(),
+        location,
+        started_at: string_at(data, &["run", "started_at"])
+            .or_else(|| string_at(data, &["started_at"])),
+        updated_at: string_at(data, &["run", "updated_at"])
+            .or_else(|| string_at(data, &["updated_at"])),
+        finished_at: string_at(data, &["run", "finished_at"])
+            .or_else(|| string_at(data, &["finished_at"])),
+        status_command: format!("homeboy runs show {id}"),
+        watch_command: format!("homeboy runs watch {id}"),
+    })
+}
+
+fn synthetic_run_id(command: &str, data: &Value) -> Option<String> {
+    if !matches!(command, "build" | "deploy" | "release") {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    command.hash(&mut hasher);
+    serde_json::to_string(data).ok()?.hash(&mut hasher);
+    Some(format!("{command}-{:016x}", hasher.finish()))
+}
+
+fn artifact_refs_for_payload(data: &Value) -> Vec<CommandArtifactRef> {
+    let mut refs = Vec::new();
+    collect_artifact_paths(data, &mut refs);
+    refs
+}
+
+fn collect_artifact_paths(value: &Value, refs: &mut Vec<CommandArtifactRef>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(path) = map.get("artifact_path").and_then(Value::as_str) {
+                let id = format!("artifact-{}", refs.len() + 1);
+                refs.push(CommandArtifactRef {
+                    id,
+                    kind: "file".to_string(),
+                    uri: path.to_string(),
+                    semantic_key: Some("artifact_path".to_string()),
+                });
+            }
+            if let Some(path) = map.get("durable_path").and_then(Value::as_str) {
+                let id = format!("artifact-{}", refs.len() + 1);
+                refs.push(CommandArtifactRef {
+                    id,
+                    kind: "file".to_string(),
+                    uri: path.to_string(),
+                    semantic_key: Some("durable_path".to_string()),
+                });
+            }
+            for child in map.values() {
+                collect_artifact_paths(child, refs);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_artifact_paths(item, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn evidence_refs_for_payload(data: &Value) -> Vec<CommandEvidenceRef> {
+    data.get("evidence_refs")
+        .or_else(|| data.get("evidence"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| evidence_ref_from_value(index, item))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn evidence_ref_from_value(index: usize, value: &Value) -> Option<CommandEvidenceRef> {
+    match value {
+        Value::String(uri) => Some(CommandEvidenceRef {
+            id: format!("evidence-{}", index + 1),
+            kind: "reference".to_string(),
+            uri: uri.clone(),
+            semantic_key: None,
+        }),
+        Value::Object(map) => Some(CommandEvidenceRef {
+            id: map
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("evidence")
+                .to_string(),
+            kind: map
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("reference")
+                .to_string(),
+            uri: map
+                .get("uri")
+                .or_else(|| map.get("path"))
+                .and_then(Value::as_str)?
+                .to_string(),
+            semantic_key: map
+                .get("semantic_key")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        _ => None,
+    }
+}
+
+fn summary_for_payload(
+    data: &Value,
+    presentation: Option<&CommandPresentationEnvelope>,
+) -> Option<String> {
+    presentation
+        .and_then(|presentation| presentation.stdout.clone())
+        .or_else(|| string_at(data, &["summary"]))
+        .or_else(|| string_at(data, &["message"]))
+        .map(|summary| summary.chars().take(4000).collect())
+}
+
+fn next_actions_for_payload(data: &Value) -> Vec<String> {
+    data.get("next_actions")
+        .or_else(|| data.get("hints"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn string_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().map(str::to_string)
 }
 
 /// Write the JSON output envelope to a file. Best-effort — failures are
 /// logged to stderr but don't affect the command's exit code.
 pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_code: i32) {
-    let response = cli_response_for_json_result(result, exit_code);
+    write_json_to_file_for_command(result, path, exit_code, "unknown", None);
+}
+
+pub fn write_json_to_file_for_command(
+    result: &Result<serde_json::Value>,
+    path: &str,
+    exit_code: i32,
+    command: &str,
+    presentation: Option<CommandPresentationEnvelope>,
+) {
+    let response =
+        cli_response_for_json_result_for_command(result, exit_code, command, presentation);
 
     let json = match serde_json::to_string_pretty(&response) {
         Ok(j) => j,
@@ -253,8 +607,10 @@ mod tests {
 
         let raw = std::fs::read_to_string(&output_path).expect("read output");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("final output json");
+        assert_eq!(parsed["schema"], COMMAND_RESULT_SCHEMA);
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["data"]["run_id"], "run-plan-atomic");
+        assert_eq!(parsed["run"]["id"], "run-plan-atomic");
         assert_eq!(parsed["data"]["complete"], true);
         assert!(
             std::fs::read_dir(dir.path())
@@ -266,5 +622,46 @@ mod tests {
                     .ends_with(".tmp")),
             "temporary output file should not remain after successful rename"
         );
+    }
+
+    #[test]
+    fn json_envelope_uses_v2_contract_and_embeds_presentation() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({ "run_id": "run-123", "hints": ["homeboy runs show run-123"] })),
+            0,
+            "observe",
+            Some(CommandPresentationEnvelope {
+                stdout: Some("Observed 3 events\n".to_string()),
+                stderr: None,
+            }),
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["schema"], COMMAND_RESULT_SCHEMA);
+        assert_eq!(value["command"], "observe");
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(value["run"]["id"], "run-123");
+        assert_eq!(value["run"]["status_command"], "homeboy runs show run-123");
+        assert_eq!(value["presentation"]["stdout"], "Observed 3 events\n");
+        assert_eq!(value["summary"], "Observed 3 events\n");
+        assert_eq!(value["next_actions"][0], "homeboy runs show run-123");
+    }
+
+    #[test]
+    fn build_deploy_and_release_payloads_get_stable_run_and_evidence_refs() {
+        for command in ["build", "deploy", "release"] {
+            let payload = Ok(json!({ "command": command, "component_id": "component-a" }));
+            let first = cli_response_for_json_result_for_command(&payload, 0, command, None);
+            let second = cli_response_for_json_result_for_command(&payload, 0, command, None);
+            let first = serde_json::to_value(first).expect("first json");
+            let second = serde_json::to_value(second).expect("second json");
+
+            assert!(first["run"]["id"]
+                .as_str()
+                .expect("run id")
+                .starts_with(command));
+            assert_eq!(first["run"]["id"], second["run"]["id"]);
+            assert_eq!(first["evidence"][0]["semantic_key"], "command_result");
+        }
     }
 }
