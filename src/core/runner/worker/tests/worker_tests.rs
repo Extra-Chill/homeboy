@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::core::api_jobs::{
     JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
 };
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::RunnerPolicy;
 use crate::test_support;
 
@@ -183,6 +184,59 @@ fn reverse_worker_uses_metadata_run_id_for_claimed_job_env() {
         assert_eq!(
             result["stdout"],
             serde_json::json!("metadata-run-456|metadata-run-456|metadata-run-456|unset")
+        );
+    });
+}
+
+#[test]
+fn reverse_worker_executes_from_envelope_dispatch_fields() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let mut request = run_id_echo_request();
+        request.command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s|%s|%s' \"$PUBLIC_VALUE\" \"$TOKEN_A\" \"$TOKEN_B\"".to_string(),
+        ];
+        request
+            .env
+            .insert("PUBLIC_VALUE".to_string(), "visible".to_string());
+        request
+            .env
+            .insert("TOKEN_A".to_string(), "secret-a".to_string());
+        request
+            .env
+            .insert("TOKEN_B".to_string(), "secret-b".to_string());
+        request.secret_env_names = vec!["TOKEN_A".to_string()];
+        request.secret_env_plan = SecretEnvPlan::from_secret_env_names(["TOKEN_B".to_string()]);
+        request.require_paths = vec!["/tmp".to_string()];
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("reverse-broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some("envelope-run-789".to_string()),
+            active_child_count: Some(1),
+            active_cell_count: Some(2),
+        });
+        store.submit_remote_runner_job(request).expect("submit job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        let job = output.job.expect("job");
+        assert_eq!(job.status, JobStatus::Succeeded);
+        handle.join().expect("mock broker joins");
+        let result = result_event_data(&store, job.id);
+        assert_eq!(
+            result["stdout"],
+            serde_json::json!("visible|[REDACTED]|[REDACTED]")
+        );
+        assert_eq!(
+            result["data"]["execution_record"]["path_materialization_plan"]["entries"][0]
+                ["remote_path"],
+            serde_json::json!("/tmp")
         );
     });
 }

@@ -11,6 +11,10 @@ use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
+use crate::core::runner_execution_envelope::{
+    RunnerExecutionDispatch, RunnerExecutionEnvelope, RunnerExecutionLifecycle,
+    RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
+};
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -106,11 +110,73 @@ impl RemoteRunnerJobRequest {
         secret_env_plan
     }
 
-    pub(crate) fn required_extensions(&self) -> Vec<String> {
-        self.runner_workload
+    pub(crate) fn execution_envelope(&self) -> RunnerExecutionEnvelope {
+        let mut request = self.clone();
+        let secret_env_plan = request.normalize();
+        let envelope_id = request
+            .runner_workload
             .as_ref()
-            .map(|workload| workload.required_extensions.clone())
-            .unwrap_or_default()
+            .map(|workload| workload.workload_id.clone())
+            .or_else(|| {
+                request
+                    .lifecycle
+                    .as_ref()
+                    .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
+            })
+            .or_else(|| {
+                request
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("run_id"))
+                    .and_then(|run_id| non_empty_string(run_id.as_str()))
+            })
+            .unwrap_or_else(|| {
+                format!("remote-runner:{}:{}", request.runner_id, request.operation)
+            });
+        let mut envelope = request
+            .runner_workload
+            .clone()
+            .map(RunnerExecutionEnvelope::from_runner_workload)
+            .unwrap_or_else(|| {
+                RunnerExecutionEnvelope::planned(&envelope_id, "remote_runner_job_request")
+            });
+
+        envelope.envelope_id = envelope_id.clone();
+        envelope.source.kind = "remote_runner_job_request".to_string();
+        envelope.source.ref_id = Some(envelope_id);
+        envelope.secret_env = Some(secret_env_plan);
+        envelope.dispatch = Some(RunnerExecutionDispatch {
+            runner_id: request.runner_id,
+            project_id: request.project_id,
+            operation: request.operation,
+            command: request.command,
+            cwd: request.cwd,
+            env: request.env,
+            source_snapshot: request.source_snapshot,
+            require_paths: request.require_paths,
+        });
+        envelope.lifecycle = request.lifecycle.map(RunnerExecutionLifecycle::from);
+        envelope.mutation_policy = RunnerExecutionMutationPolicy {
+            capture_patch: request.capture_patch,
+            ..envelope.mutation_policy.clone()
+        };
+        envelope.metadata = request.metadata.unwrap_or(Value::Null);
+        if envelope.result_refs.run_id.is_none() {
+            envelope.result_refs.run_id = envelope
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
+                .or_else(|| metadata_run_id(&envelope.metadata));
+        }
+        if envelope.result_refs.artifacts.is_empty() {
+            if let Some(workload) = envelope.runner_workload.as_ref() {
+                envelope.result_refs = RunnerExecutionResultRefs {
+                    artifacts: workload.result_refs.artifacts.clone(),
+                    ..envelope.result_refs.clone()
+                };
+            }
+        }
+        envelope
     }
 
     pub(crate) fn public_metadata(&self) -> Self {
@@ -128,6 +194,31 @@ impl RemoteRunnerJobRequest {
         }
         public
     }
+}
+
+impl From<RunnerJobLifecycleMetadata> for RunnerExecutionLifecycle {
+    fn from(lifecycle: RunnerJobLifecycleMetadata) -> Self {
+        Self {
+            source: lifecycle.source,
+            kind: lifecycle.kind,
+            durable_run_id: lifecycle.durable_run_id,
+            active_child_count: lifecycle.active_child_count,
+            active_cell_count: lifecycle.active_cell_count,
+        }
+    }
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn metadata_run_id(metadata: &Value) -> Option<String> {
+    metadata
+        .get("run_id")
+        .and_then(|run_id| non_empty_string(run_id.as_str()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
