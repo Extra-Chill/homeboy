@@ -22,7 +22,7 @@ const {
 } = require('../../.github/scripts/runtime-agent-full-run/build-runner-config.cjs');
 const {
 	dependencyEntries,
-} = require('../../.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs');
+} = require('../../runtime-agent-ci/lib/materialize-dependencies.cjs');
 
 const repoRoot = path.join(__dirname, '..', '..');
 const registry = runtimeRegistry({ repoRoot });
