@@ -290,8 +290,7 @@ mod artifact_links {
         Ok(artifacts)
     }
 
-    /// List the enriched artifact records for a run, including downstream
-    /// Lab job artifacts.
+    /// List the enriched artifact records attached to a run.
     ///
     /// Side-effect ordering matches the CLI: refresh mirrored daemon evidence,
     /// then index nested publication artifact refs, then list and enrich.
@@ -299,11 +298,10 @@ mod artifact_links {
         store: &ObservationStore,
         run_id: &str,
     ) -> Result<Vec<ArtifactRecord>> {
-        let run = require_run(store, run_id)?;
+        require_run(store, run_id)?;
         refresh_mirrored_daemon_evidence_best_effort(run_id);
         crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, run_id)?;
-        let mut artifacts = store.list_artifacts(run_id)?;
-        artifacts.extend(related_lab_artifacts_for_runner_job(store, &run)?);
+        let artifacts = store.list_artifacts(run_id)?;
         Ok(enrich_artifact_links(artifacts))
     }
 }
@@ -1357,16 +1355,14 @@ mod tests {
 
         // The hydrated record now parses into a non-zero matrix summary, where
         // the un-hydrated `remote_file` record would have summarized 0.
-        let summary =
-            crate::core::artifacts::summarize_matrix_artifacts("run-1", &hydrated, &[])
-                .expect("summary");
+        let summary = crate::core::artifacts::summarize_matrix_artifacts("run-1", &hydrated, &[])
+            .expect("summary");
         assert_eq!(summary.finding_count, 1);
         assert_eq!(summary.top_diagnostic_kinds[0].key, "missing_title");
         assert_eq!(summary.top_fixtures[0].key, "home");
 
-        let zero =
-            crate::core::artifacts::summarize_matrix_artifacts("run-1", &[remote], &[])
-                .expect("summary");
+        let zero = crate::core::artifacts::summarize_matrix_artifacts("run-1", &[remote], &[])
+            .expect("summary");
         assert_eq!(zero.finding_count, 0);
     }
 
@@ -1437,7 +1433,11 @@ mod tests {
             "homeboy bench run homeboy",
             serde_json::json!({ "lab": { "run_label": "meta-label" } }),
         );
-        let runs = vec![by_command.clone(), by_command_eq.clone(), by_metadata.clone()];
+        let runs = vec![
+            by_command.clone(),
+            by_command_eq.clone(),
+            by_metadata.clone(),
+        ];
 
         // Human label carried in the command resolves to its observation UUID.
         assert_eq!(

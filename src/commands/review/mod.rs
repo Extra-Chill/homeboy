@@ -174,7 +174,8 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
     }
 }
 
-fn dispatch_review_plan_step( // homeboy-audit: allow-thin-command-adapter
+fn dispatch_review_plan_step(
+    // homeboy-audit: allow-thin-command-adapter
     step: &PlanStep,
     args: &ReviewArgs,
     global: &GlobalArgs,
@@ -304,8 +305,10 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let mut lint_stage = None;
     let mut test_stage = None;
 
-    let stage_run = match review::execute_review_plan_steps(&quality_plan.steps, |step| { // homeboy-audit: allow-thin-command-adapter
-        dispatch_review_plan_step(step, &args, global, &component_label, &review_context) // homeboy-audit: allow-thin-command-adapter
+    let stage_run = match review::execute_review_plan_steps(&quality_plan.steps, |step| {
+        // homeboy-audit: allow-thin-command-adapter
+        dispatch_review_plan_step(step, &args, global, &component_label, &review_context)
+        // homeboy-audit: allow-thin-command-adapter
     }) {
         Ok(run) => run,
         Err(error) => {
@@ -338,6 +341,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
                 path_override: args.comp.path.clone(),
                 capability: None,
                 settings_overrides: Vec::new(),
+                settings_profile_json_overrides: Vec::new(),
                 settings_json_overrides: Vec::new(),
                 extension_overrides: args.extension_override.extensions.clone(),
             })?;

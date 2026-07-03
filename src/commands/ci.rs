@@ -403,6 +403,7 @@ fn run_list(args: CiListArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
         path_override: args.comp.path.clone(),
         capability: None,
         settings_overrides: Vec::new(),
+        settings_profile_json_overrides: Vec::new(),
         settings_json_overrides: Vec::new(),
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
@@ -436,6 +437,7 @@ fn run_ci(args: CiRunArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
         path_override: args.comp.path.clone(),
         capability: None,
         settings_overrides: Vec::new(),
+        settings_profile_json_overrides: Vec::new(),
         settings_json_overrides: Vec::new(),
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
@@ -471,6 +473,7 @@ fn run_autofix(args: CiAutofixArgs, _global: &GlobalArgs) -> CmdResult<CiOutput>
         path_override: args.comp.path.clone(),
         capability: None,
         settings_overrides: Vec::new(),
+        settings_profile_json_overrides: Vec::new(),
         settings_json_overrides: Vec::new(),
         extension_overrides: args.extension_override.extensions.clone(),
     })?;

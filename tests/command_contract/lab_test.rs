@@ -1068,7 +1068,7 @@ fn agent_task_git_checkout_policy_uses_default_backend_when_backend_is_omitted()
 }
 
 #[test]
-fn agent_task_git_checkout_policy_keeps_non_cwd_dispatch_snapshot_eligible() {
+fn agent_task_git_checkout_policy_covers_implicit_cwd_dispatch_workspace() {
     let command = parsed_command(&[
         "homeboy",
         "agent-task",
@@ -1084,11 +1084,33 @@ fn agent_task_git_checkout_policy_keeps_non_cwd_dispatch_snapshot_eligible() {
         panic!("expected agent-task command");
     };
 
-    assert!(!agent_task_provider_requires_cwd_git_checkout_with(
+    assert!(agent_task_provider_requires_cwd_git_checkout_with(
         &args.command,
         || Some("default-patch-provider".to_string()),
         |backend, _| backend == "default-patch-provider",
     ));
+
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
+        "--backend",
+        "generic-patch-provider",
+        "--prompt",
+        "cook",
+        "--no-finalize",
+    ]);
+    assert_eq!(
+        command
+            .lab_contract()
+            .expect("agent-task cook contract")
+            .workspace_mode_policy,
+        LabWorkspaceModePolicy::GitCheckoutRequired
+    );
 }
 
 #[test]

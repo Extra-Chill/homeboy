@@ -139,6 +139,14 @@ fn command_flag_specs(command: &Command) -> Vec<CliFlagSpec> {
                     takes_value,
                 });
             }
+            if let Some(aliases) = arg.get_all_aliases() {
+                for alias in aliases {
+                    flags.push(CliFlagSpec {
+                        flag: format!("--{}", alias),
+                        takes_value,
+                    });
+                }
+            }
             if let Some(short) = arg.get_short() {
                 flags.push(CliFlagSpec {
                     flag: format!("-{}", short),
@@ -529,13 +537,19 @@ pub struct DryRunArgs {
 }
 
 // ============================================================================
-// SettingArgs: --setting key=value + --setting-json key=<json>
+// SettingArgs: --settings-json-file + --setting key=value + --setting-json key=<json>
 // ============================================================================
+
+use std::path::{Path, PathBuf};
 
 /// Settings overrides flattened into every command that runs an extension
 /// capability (test, bench, lint, build, validate).
 ///
-/// Two flags by design:
+/// Three inputs by design:
+///
+/// - `--settings-json-file <file>` / `--settings-profile <file>` (typed):
+///   read a JSON object and apply each top-level key as a typed setting value.
+///   These values sit below explicit CLI overrides.
 ///
 /// - `--setting key=value` (string-coerced): the original "set this string
 ///   override" path. Values are always strings, mirroring how operators
@@ -556,6 +570,18 @@ pub struct DryRunArgs {
 /// strictly more expressive and was specified later in the merge order).
 #[derive(Args, Debug, Clone, Default)]
 pub struct SettingArgs {
+    /// Load typed setting overrides from a JSON object file. Repeatable.
+    ///
+    /// Each top-level object key becomes a setting key. Values retain their
+    /// JSON type. Explicit --setting and --setting-json flags override file
+    /// values for the same key.
+    #[arg(
+        long = "settings-json-file",
+        alias = "settings-profile",
+        value_name = "FILE"
+    )]
+    pub settings_json_file: Vec<PathBuf>,
+
     /// String setting override. Repeatable.
     ///
     /// Format: `--setting key=value`. Use dotted keys such as
@@ -580,4 +606,129 @@ pub struct SettingArgs {
     ///   --setting-json my_flag=true
     #[arg(long = "setting-json", value_parser = crate::commands::parse_key_json)]
     pub setting_json: Vec<(String, serde_json::Value)>,
+}
+
+impl SettingArgs {
+    pub fn settings_overrides(&self) -> homeboy::core::Result<Vec<(String, String)>> {
+        Ok(self.setting.clone())
+    }
+
+    pub fn settings_profile_json_overrides(
+        &self,
+    ) -> homeboy::core::Result<Vec<(String, serde_json::Value)>> {
+        let mut settings = Vec::new();
+
+        for path in &self.settings_json_file {
+            settings.extend(read_settings_json_file(path)?);
+        }
+
+        Ok(settings)
+    }
+
+    pub fn settings_json_overrides(
+        &self,
+    ) -> homeboy::core::Result<Vec<(String, serde_json::Value)>> {
+        Ok(self.setting_json.clone())
+    }
+
+    pub fn has_overrides(&self) -> bool {
+        !self.settings_json_file.is_empty()
+            || !self.setting.is_empty()
+            || !self.setting_json.is_empty()
+    }
+}
+
+fn read_settings_json_file(path: &Path) -> homeboy::core::Result<Vec<(String, serde_json::Value)>> {
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "settings-json-file",
+            format!("failed to read {}: {error}", path.display()),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(format!("settings JSON file {}", path.display())),
+            Some(raw.clone()),
+        )
+    })?;
+
+    let serde_json::Value::Object(map) = value else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "settings-json-file",
+            format!("{} must contain a JSON object", path.display()),
+            Some(path.display().to_string()),
+            None,
+        ));
+    };
+
+    Ok(map.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingArgs;
+
+    #[test]
+    fn settings_json_file_loads_typed_profile_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"mode":"file","retries":2,"env":{"A":"1"},"flag":true}"#,
+        )
+        .expect("write profile");
+
+        let args = SettingArgs {
+            settings_json_file: vec![path],
+            setting: vec![("mode".to_string(), "cli-string".to_string())],
+            setting_json: vec![("mode".to_string(), serde_json::json!("cli-json"))],
+        };
+
+        assert_eq!(
+            args.settings_overrides().expect("settings"),
+            vec![("mode".to_string(), "cli-string".to_string())]
+        );
+
+        let json = args
+            .settings_profile_json_overrides()
+            .expect("json settings");
+        assert_eq!(json.len(), 4);
+        assert_eq!(
+            json[0],
+            ("env".to_string(), serde_json::json!({ "A": "1" }))
+        );
+        assert_eq!(json[1], ("flag".to_string(), serde_json::json!(true)));
+        assert_eq!(json[2], ("mode".to_string(), serde_json::json!("file")));
+        assert_eq!(json[3], ("retries".to_string(), serde_json::json!(2)));
+
+        assert_eq!(
+            args.settings_json_overrides()
+                .expect("explicit json settings"),
+            vec![("mode".to_string(), serde_json::json!("cli-json"))]
+        );
+    }
+
+    #[test]
+    fn settings_json_file_rejects_non_object_json() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"["not", "an", "object"]"#).expect("write profile");
+
+        let args = SettingArgs {
+            settings_json_file: vec![path],
+            ..Default::default()
+        };
+
+        let error = args
+            .settings_profile_json_overrides()
+            .expect_err("non-object profile should fail");
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+    }
 }

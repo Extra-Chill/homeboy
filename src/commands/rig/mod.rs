@@ -1067,6 +1067,7 @@ mod tests {
             shared_state: Some(std::path::PathBuf::from("/tmp/homeboy-shared")),
             concurrency: 4,
             setting_args: SettingArgs {
+                settings_json_file: vec![],
                 setting: vec![("bench_env.CORPUS_SIZE".to_string(), "44".to_string())],
                 setting_json: vec![(
                     "artifact_env".to_string(),
