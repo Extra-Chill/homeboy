@@ -546,3 +546,64 @@ fn runs_artifacts_surfaces_static_html_preview_entrypoints() {
         assert_eq!(output.preview_entrypoints[0].public_url, None);
     });
 }
+
+#[test]
+fn runs_artifacts_returns_empty_for_run_when_only_mismatched_related_artifacts_exist() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let job_id = "job-123";
+        let requested_run = store
+            .start_run(sample_run(
+                "runner-exec",
+                "wpcom",
+                "wpcom-phpunit",
+                serde_json::json!({
+                    "lab": {
+                        "runner": { "id": "lab" },
+                        "remote_job": { "id": job_id }
+                    }
+                }),
+            ))
+            .expect("requested run");
+        store
+            .finish_run(&requested_run.id, RunStatus::Fail, None)
+            .expect("finish requested run");
+        let unrelated_run = store
+            .start_run(sample_run(
+                "bench",
+                "static-site-importer",
+                "static-site-fixture-matrix",
+                serde_json::json!({
+                    "scenario_id": "static-site-fixture-matrix",
+                    "lab": { "remote_job_id": job_id }
+                }),
+            ))
+            .expect("unrelated run");
+        store
+            .finish_run(&unrelated_run.id, RunStatus::Pass, None)
+            .expect("finish unrelated run");
+        let summary = home.path().join("unrelated-summary.json");
+        std::fs::write(&summary, br#"{"passed":true}"#).expect("summary");
+        store
+            .record_artifact_with_metadata(
+                &unrelated_run.id,
+                "summary",
+                &summary,
+                serde_json::json!({
+                    "local_run_id": "different-local-run",
+                    "remote_run_id": "different-remote-run",
+                    "scenario_id": "static-site-fixture-matrix"
+                }),
+            )
+            .expect("unrelated artifact");
+
+        let (output, _) = handlers::artifacts(&requested_run.id).expect("artifacts");
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+
+        assert_eq!(output.run_id, requested_run.id);
+        assert!(output.artifacts.is_empty());
+    });
+}

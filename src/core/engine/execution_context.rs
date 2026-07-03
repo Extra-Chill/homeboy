@@ -77,6 +77,10 @@ pub struct ResolveOptions {
     /// Additional settings from `--setting key=value` flags (string values).
     pub settings_overrides: Vec<(String, String)>,
 
+    /// Additional typed settings from settings profile files. Applied before
+    /// explicit CLI overrides so `--setting` and `--setting-json` win.
+    pub settings_profile_json_overrides: Vec<(String, serde_json::Value)>,
+
     /// Additional settings from `--setting-json key=<json>` flags (typed
     /// values). Applied after `settings_overrides` so JSON wins on
     /// conflict. Required for object-shaped settings whose dispatcher
@@ -104,6 +108,7 @@ impl ResolveOptions {
             path_override,
             capability: Some(capability),
             settings_overrides: settings,
+            settings_profile_json_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             extension_overrides: Vec::new(),
         }
@@ -124,6 +129,7 @@ impl ResolveOptions {
             path_override,
             capability: Some(capability),
             settings_overrides: settings,
+            settings_profile_json_overrides: Vec::new(),
             settings_json_overrides: settings_json,
             extension_overrides: Vec::new(),
         }
@@ -136,6 +142,7 @@ impl ResolveOptions {
             path_override,
             capability: None,
             settings_overrides: Vec::new(),
+            settings_profile_json_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             extension_overrides: Vec::new(),
         }
@@ -259,6 +266,11 @@ pub fn resolve_with_component(
                 })?;
             let accepted_setting_keys = ext_context.accepted_setting_keys.clone();
             let mut settings = ext_context.settings.clone();
+            // Merge settings profile files below explicit CLI overrides.
+            for (key, value) in &options.settings_profile_json_overrides {
+                settings.retain(|(k, _)| k != key);
+                settings.push((key.clone(), value.clone()));
+            }
             // Merge CLI string overrides on top (CLI string values stay strings).
             for (key, value) in &options.settings_overrides {
                 // Remove existing key if present (override semantics)
@@ -283,8 +295,16 @@ pub fn resolve_with_component(
         } else {
             // No extension context — only CLI overrides, wrapped as JSON strings.
             let mut settings = Vec::new();
+            for (key, value) in &options.settings_profile_json_overrides {
+                settings.retain(|(k, _)| k != key);
+                settings.push((key.clone(), value.clone()));
+            }
             for (key, value) in &options.settings_overrides {
                 merge_string_setting_override(&mut settings, key, value);
+            }
+            for (key, value) in &options.settings_json_overrides {
+                settings.retain(|(k, _)| k != key);
+                settings.push((key.clone(), value.clone()));
             }
             (None, None, settings, Vec::new())
         };
@@ -725,6 +745,7 @@ mod tests {
             path_override: None,
             capability: Some(ExtensionCapability::Lint),
             settings_overrides: Vec::new(),
+            settings_profile_json_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             extension_overrides: Vec::new(),
         };
@@ -1103,6 +1124,7 @@ mod tests {
                 ("mode".to_string(), "strict".to_string()),
                 ("lang".to_string(), "rust".to_string()),
             ],
+            settings_profile_json_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             extension_overrides: Vec::new(),
         };
@@ -1113,6 +1135,33 @@ mod tests {
             .settings
             .iter()
             .any(|(k, v)| k == "mode" && v == "strict"));
+    }
+
+    #[test]
+    fn explicit_cli_settings_override_profile_values() {
+        let options = ResolveOptions {
+            component_id: Some("test".to_string()),
+            path_override: Some("/tmp".to_string()),
+            capability: None,
+            settings_profile_json_overrides: vec![
+                ("mode".to_string(), serde_json::json!("profile")),
+                ("typed".to_string(), serde_json::json!("profile")),
+            ],
+            settings_overrides: vec![("mode".to_string(), "cli-string".to_string())],
+            settings_json_overrides: vec![("typed".to_string(), serde_json::json!("cli-json"))],
+            extension_overrides: Vec::new(),
+        };
+
+        let ctx = resolve(&options).expect("resolve should succeed");
+
+        assert!(ctx
+            .settings
+            .iter()
+            .any(|(k, v)| k == "mode" && v == "cli-string"));
+        assert!(ctx
+            .settings
+            .iter()
+            .any(|(k, v)| k == "typed" && v == &serde_json::json!("cli-json")));
     }
 
     #[test]
