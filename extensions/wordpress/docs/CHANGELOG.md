@@ -2,6 +2,16 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.17] - 2026-07-03
+
+### Changed
+- remove WooCommerce fixtures from WordPress extension
+
+## [3.23.16] - 2026-07-03
+
+### Changed
+- Set WP Codebox test runner Node heap default
+
 ## [3.23.15] - 2026-07-03
 
 ### Fixed

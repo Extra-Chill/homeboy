@@ -1224,6 +1224,17 @@ jq -n \
     + (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' > "$RECIPE_OPTIONS_FILE"
 
 WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE=1
+WP_CODEBOX_NODE_OPTIONS="${HOMEBOY_WP_CODEBOX_NODE_OPTIONS:-${NODE_OPTIONS:-}}"
+case " $WP_CODEBOX_NODE_OPTIONS " in
+    *" --max-old-space-size="*) ;;
+    *)
+        if [ -n "$WP_CODEBOX_NODE_OPTIONS" ]; then
+            WP_CODEBOX_NODE_OPTIONS="${WP_CODEBOX_NODE_OPTIONS} --max-old-space-size=8192"
+        else
+            WP_CODEBOX_NODE_OPTIONS="--max-old-space-size=8192"
+        fi
+        ;;
+esac
 
 if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
     fail_wp_codebox_phpunit_profile_setup "WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}"
@@ -1240,7 +1251,7 @@ if ! validation_errors=$(validate_wp_codebox_phpunit_recipe_profile); then
 fi
 
 set +e
-"${wp_codebox_command[@]}" recipe-run \
+NODE_OPTIONS="$WP_CODEBOX_NODE_OPTIONS" "${wp_codebox_command[@]}" recipe-run \
     --recipe "$RECIPE_FILE" \
     --artifacts "$ARTIFACTS_DIR" \
     --json \

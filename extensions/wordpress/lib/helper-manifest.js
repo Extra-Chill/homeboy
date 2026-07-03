@@ -23,21 +23,11 @@ const HELPER_PATHS = Object.freeze({
 	fixtureSetup: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fixture-setup.js'),
 });
 
-const PRODUCT_ADAPTERS = Object.freeze({
-	woocommerce: Object.freeze({
-		helpers: Object.freeze({
-			benchFixtures: path.join(WORDPRESS_EXTENSION_ROOT, 'scripts', 'bench', 'lib', 'woocommerce-fixtures.php'),
-			expensiveShipping: path.join(WORDPRESS_EXTENSION_ROOT, 'scripts', 'bench', 'lib', 'woocommerce-expensive-shipping.php'),
-		}),
-	}),
-});
-
 function getWordPressHelperManifest() {
 	return {
 		version: 1,
 		extensionRoot: WORDPRESS_EXTENSION_ROOT,
 		helpers: { ...HELPER_PATHS },
-		productAdapters: PRODUCT_ADAPTERS,
 	};
 }
 
