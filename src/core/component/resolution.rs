@@ -618,7 +618,8 @@ fn resolve_effective_inner(
                 // resolved"), even though `component set` and `deploy` resolve the
                 // same component to an absolute checkout. Normalizing here keeps all
                 // three in agreement (#7410).
-                let local_path = normalize_component_local_path(id).unwrap_or_else(|_| id.to_string());
+                let local_path =
+                    normalize_component_local_path(id).unwrap_or_else(|_| id.to_string());
 
                 if let Some(mut discovered) = try_discover_from_portable(id_path)? {
                     discovered.local_path = local_path;

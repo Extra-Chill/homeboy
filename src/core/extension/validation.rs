@@ -108,8 +108,7 @@ pub fn validate_extension_requirements(
                     // active iteration isn't rejected and steered to a re-clone via
                     // `homeboy extension update`. Cloned/copied installs still
                     // enforce, so genuinely incompatible non-dev versions are caught.
-                    if !constraint.matches(&installed_version)
-                        && !is_extension_linked(extension_id)
+                    if !constraint.matches(&installed_version) && !is_extension_linked(extension_id)
                     {
                         errors.push(format!(
                             "'{}' requires {}, but {} is installed",

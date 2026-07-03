@@ -256,8 +256,12 @@ fn update_dependency(
     })?;
 
     let extension_id = find_update_dependency_extension(downstream)?;
-    let payload =
-        build_update_dependency_payload(&target.downstream, &target.downstream_path, package, upstream);
+    let payload = build_update_dependency_payload(
+        &target.downstream,
+        &target.downstream_path,
+        package,
+        upstream,
+    );
 
     extension::execute_action(
         &extension_id,
@@ -323,8 +327,18 @@ mod tests {
     #[test]
     fn cascade_targets_preserve_topological_order() {
         let steps = vec![
-            step(1, "php-transformer", "static-site-importer", "chubes/php-transformer"),
-            step(2, "static-site-importer", "site-builder", "chubes/static-site-importer"),
+            step(
+                1,
+                "php-transformer",
+                "static-site-importer",
+                "chubes/php-transformer",
+            ),
+            step(
+                2,
+                "static-site-importer",
+                "site-builder",
+                "chubes/static-site-importer",
+            ),
         ];
 
         let targets = cascade_targets(&steps);
@@ -373,10 +387,7 @@ mod tests {
 
     #[test]
     fn cascade_targets_dedupe_identical_edges() {
-        let steps = vec![
-            step(1, "a", "b", "pkg/a"),
-            step(2, "a", "b", "pkg/a"),
-        ];
+        let steps = vec![step(1, "a", "b", "pkg/a"), step(2, "a", "b", "pkg/a")];
 
         let targets = cascade_targets(&steps);
 
@@ -402,7 +413,10 @@ mod tests {
 
         // The action runs against the dependent's checkout.
         assert_eq!(payload["release"]["component_id"], "static-site-importer");
-        assert_eq!(payload["release"]["local_path"], "/work/static-site-importer");
+        assert_eq!(
+            payload["release"]["local_path"],
+            "/work/static-site-importer"
+        );
 
         // The dependency block carries everything an extension needs to repin.
         assert_eq!(payload["dependency"]["released_id"], "php-transformer");

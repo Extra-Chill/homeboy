@@ -749,12 +749,7 @@ fn from_spec_resume_drives_workflow_lineage_then_blocks_on_pending_manual_gate()
             .controller
             .next_actions
             .iter()
-            .find(|action| {
-                matches!(
-                    action.action,
-                    AgentTaskLoopPolicyAction::RunGates { .. }
-                )
-            })
+            .find(|action| matches!(action.action, AgentTaskLoopPolicyAction::RunGates { .. }))
             .expect("run-gates action present");
         assert_eq!(gate_action.status, AgentTaskLoopActionStatus::Failed);
         assert!(result
@@ -762,8 +757,10 @@ fn from_spec_resume_drives_workflow_lineage_then_blocks_on_pending_manual_gate()
             .controller
             .next_actions
             .iter()
-            .any(|action| matches!(action.action, AgentTaskLoopPolicyAction::Complete { .. })
-                && action.status == AgentTaskLoopActionStatus::Pending));
+            .any(
+                |action| matches!(action.action, AgentTaskLoopPolicyAction::Complete { .. })
+                    && action.status == AgentTaskLoopActionStatus::Pending
+            ));
         assert!(result
             .value
             .controller

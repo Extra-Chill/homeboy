@@ -33,12 +33,8 @@ fn validate_version_target_conflict_different_pattern_errors() {
         artifact_path: None,
     }];
 
-    let result = validate_version_target_conflict(
-        &existing,
-        "component.meta",
-        "build=(.*)",
-        "test-comp",
-    );
+    let result =
+        validate_version_target_conflict(&existing, "component.meta", "build=(.*)", "test-comp");
     // Multiple targets per file with different patterns are now allowed
     // (e.g. release version + build metadata in the same file).
     assert!(result.is_ok());

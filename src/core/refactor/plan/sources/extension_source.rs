@@ -27,7 +27,7 @@ pub(super) fn try_extension_refactor_source_stage<T: Serialize>(
     root: &Path,
     source_result: &T,
     write: bool,
-    settings: &[(String, String)],
+    settings: &[(String, serde_json::Value)],
 ) -> crate::core::Result<Option<PlannedStage>> {
     let setting_key = format!("refactor.{}.extension", source);
     let Some(extension_id) = setting_value(settings, &setting_key) else {
@@ -215,12 +215,12 @@ pub(super) fn read_optional_json(path: &Path) -> Option<serde_json::Value> {
         .and_then(|content| serde_json::from_str(&content).ok())
 }
 
-fn setting_value<'a>(settings: &'a [(String, String)], key: &str) -> Option<&'a str> {
+fn setting_value<'a>(settings: &'a [(String, serde_json::Value)], key: &str) -> Option<&'a str> {
     settings
         .iter()
         .rev()
         .find(|(setting_key, _)| setting_key == key)
-        .map(|(_, value)| value.as_str())
+        .and_then(|(_, value)| value.as_str())
         .filter(|value| !value.trim().is_empty())
 }
 
@@ -335,7 +335,7 @@ mod tests {
                 false,
                 &[(
                     "refactor.audit.extension".to_string(),
-                    "generic".to_string(),
+                    serde_json::json!("generic"),
                 )],
             )
             .unwrap()
@@ -362,8 +362,11 @@ mod tests {
                 }),
                 true,
                 &[
-                    ("refactor.lint.extension".to_string(), "generic".to_string()),
-                    ("extension.setting".to_string(), "value".to_string()),
+                    (
+                        "refactor.lint.extension".to_string(),
+                        serde_json::json!("generic"),
+                    ),
+                    ("extension.setting".to_string(), serde_json::json!("value")),
                 ],
             )
             .unwrap()
@@ -405,7 +408,7 @@ mod tests {
                 false,
                 &[(
                     "refactor.audit.extension".to_string(),
-                    "fatal-source".to_string(),
+                    serde_json::json!("fatal-source"),
                 )],
             );
             let err = match result {

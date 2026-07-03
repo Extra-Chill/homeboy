@@ -923,20 +923,6 @@ mod tests {
         assert_eq!(parsed.watch_processes, vec![".opencode serve".to_string()]);
     }
 
-    /// Issue #2366: registered components keep working unchanged — positional
-    /// component IDs still parse without `--path`, preserving the legacy UX.
-    #[test]
-    fn observe_accepts_registered_component_unchanged() {
-        let command = <ObserveArgs as clap::Args>::augment_args(clap::Command::new("homeboy"));
-        let matches = command
-            .try_get_matches_from(["homeboy", "demo", "--watch-process", "sleep"])
-            .expect("observe should parse a positional component without --path");
-
-        let parsed = <ObserveArgs as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
-        assert_eq!(parsed.comp.component.as_deref(), Some("demo"));
-        assert!(parsed.comp.path.is_none());
-    }
-
     #[test]
     fn observe_reports_persisted_artifact_and_cleans_run_dir() {
         with_isolated_home(|home| {

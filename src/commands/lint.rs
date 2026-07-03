@@ -462,7 +462,7 @@ fn run_fix(
     let mut request = lint_refactor_request(
         ctx.component.clone(),
         ctx.source_path.clone(),
-        settings_to_legacy_strings(settings),
+        settings,
         lint_options,
         true,
     );
@@ -472,19 +472,6 @@ fn run_fix(
     let run = collect_refactor_sources(request)?;
 
     Ok(report::from_lint_fix(component_label, run))
-}
-
-fn settings_to_legacy_strings(settings: Vec<(String, serde_json::Value)>) -> Vec<(String, String)> {
-    settings
-        .into_iter()
-        .map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::String(value) => value,
-                value => value.to_string(),
-            };
-            (key, value)
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -693,7 +680,7 @@ mod tests {
         let request = lint_refactor_request(
             component.clone(),
             std::path::PathBuf::from("/tmp/demo"),
-            vec![("mode".to_string(), "strict".to_string())],
+            vec![("mode".to_string(), serde_json::json!("strict"))],
             LintSourceOptions {
                 selected_files: Some(vec!["src/lib.rs".to_string()]),
                 file: None,

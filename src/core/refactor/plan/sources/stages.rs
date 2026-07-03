@@ -29,7 +29,7 @@ pub(super) struct AuditStageRequest<'a> {
     pub(super) only: &'a [crate::core::code_audit::AuditFinding],
     pub(super) exclude: &'a [crate::core::code_audit::AuditFinding],
     pub(super) write: bool,
-    pub(super) settings: &'a [(String, String)],
+    pub(super) settings: &'a [(String, serde_json::Value)],
 }
 
 /// Format modified files between refactor stages.
@@ -283,7 +283,7 @@ pub(super) fn plan_audit_stage(
 pub(super) fn run_lint_stage(
     component: &Component,
     root: &Path,
-    settings: &[(String, String)],
+    settings: &[(String, serde_json::Value)],
     options: &LintSourceOptions,
     changed_files: Option<&[String]>,
     write: bool,
@@ -313,12 +313,11 @@ pub(super) fn run_lint_stage(
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
-    let typed_settings = extension::lint::settings_from_legacy_strings(settings);
     let build_lint_runner = |effective_glob: Option<&str>| {
         extension::lint::build_lint_runner(
             component,
             None,
-            &typed_settings,
+            settings,
             false,
             options.file.as_deref(),
             effective_glob,
@@ -528,7 +527,7 @@ pub(super) fn empty_lint_stage() -> PlannedStage {
 pub(super) fn run_test_stage(
     component: &Component,
     root: &Path,
-    settings: &[(String, String)],
+    settings: &[(String, serde_json::Value)],
     options: &TestSourceOptions,
     changed_test_files: Option<&[String]>,
     write: bool,
@@ -563,12 +562,13 @@ pub(super) fn run_test_stage(
     // NOT modify files. This separates diagnosis from fix application.
     //
     // Helper: build the test runner with the current stage options.
+    let (string_settings, json_settings) = split_refactor_settings(settings);
     let build_runner = || {
         extension::test::build_test_runner(
             component,
             None,
-            settings,
-            &[],
+            &string_settings,
+            &json_settings,
             options.skip_lint,
             false,
             None,
@@ -653,6 +653,21 @@ pub(super) fn run_test_stage(
         },
         fix_results,
     })
+}
+
+fn split_refactor_settings(
+    settings: &[(String, serde_json::Value)],
+) -> (Vec<(String, String)>, Vec<(String, serde_json::Value)>) {
+    settings
+        .iter()
+        .cloned()
+        .fold((Vec::new(), Vec::new()), |mut split, (key, value)| {
+            match value {
+                serde_json::Value::String(value) => split.0.push((key, value)),
+                value => split.1.push((key, value)),
+            }
+            split
+        })
 }
 
 /// Count fixes whose edits are ALL blocked from auto-apply — i.e., they'd be

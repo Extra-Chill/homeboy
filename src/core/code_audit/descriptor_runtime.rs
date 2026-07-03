@@ -103,9 +103,11 @@ fn run_generic_descriptor(
             Some(snapshot) => field_patterns::run(snapshot, &config.detector_profile),
             None => Vec::new(),
         },
-        GenericDetectorRunner::DeprecationAge => {
-            deprecation_age::run(context.all_fingerprints, context.root, &config.detector_profile)
-        }
+        GenericDetectorRunner::DeprecationAge => deprecation_age::run(
+            context.all_fingerprints,
+            context.root,
+            &config.detector_profile,
+        ),
         GenericDetectorRunner::DeadGuard => {
             dead_guard::run(context.per_file_fingerprints, context.root, config)
         }
@@ -136,16 +138,18 @@ fn run_generic_descriptor(
         GenericDetectorRunner::ParallelRunnerSetup => {
             parallel_runner_setup::run(context.all_fingerprints)
         }
-        GenericDetectorRunner::RemoteExecutionPreflight => {
-            remote_execution_preflight::run(context.all_fingerprints, &config.remote_execution_safety)
-        }
+        GenericDetectorRunner::RemoteExecutionPreflight => remote_execution_preflight::run(
+            context.all_fingerprints,
+            &config.remote_execution_safety,
+        ),
         GenericDetectorRunner::EnumDispatchContracts => match context.source_snapshot {
             Some(snapshot) => enum_dispatch_contracts::run(snapshot),
             None => Vec::new(),
         },
-        GenericDetectorRunner::PublicRegistryExposure => {
-            public_registry_exposure::run(context.all_fingerprints, &config.public_registry_exposure)
-        }
+        GenericDetectorRunner::PublicRegistryExposure => public_registry_exposure::run(
+            context.all_fingerprints,
+            &config.public_registry_exposure,
+        ),
         GenericDetectorRunner::CommandStatusContracts => {
             command_status_contracts::run(context.root, &config.command_status_contracts)
         }

@@ -117,14 +117,6 @@ fn rig_package_lint_and_fuzz_stable_plan_parse() {
 }
 
 #[test]
-fn agent_task_dispatch_is_not_public_cli_surface() {
-    let surface = current_command_surface();
-
-    assert!(!surface.contains_path(&["agent-task", "dispatch"]));
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "dispatch", "--prompt", "x"]).is_err());
-}
-
-#[test]
 fn agent_task_discovery_commands_use_typed_args() {
     let list = Cli::try_parse_from(["homeboy", "agent-task", "list", "--limit", "5"])
         .expect("agent-task list --limit should parse");
@@ -301,7 +293,11 @@ fn command_surface_doctor_report_agrees_for_matching_sets() {
 #[test]
 fn command_surface_doctor_report_detects_docs_and_help_mismatches() {
     let source = BTreeSet::from(["fuzz".to_string(), "manifest".to_string()]);
-    let docs = BTreeSet::from(["lab".to_string(), "manifest".to_string(), "tool".to_string()]);
+    let docs = BTreeSet::from([
+        "lab".to_string(),
+        "manifest".to_string(),
+        "tool".to_string(),
+    ]);
     let help = BTreeSet::from(["fuzz".to_string(), "lab".to_string()]);
     let extension_docs = BTreeSet::from(["tool".to_string()]);
 

@@ -118,8 +118,6 @@ impl AgentRuntimeDiagnosticsContract {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeToolDiagnosticDeclaration {
     pub tool: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_output: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configured_binary_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,8 +135,6 @@ pub struct AgentRuntimeToolDiagnosticDeclaration {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeRuntimeDiagnosticDeclaration {
     pub tool: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_output: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configured_binary_env: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,8 +188,6 @@ pub struct AgentRuntimeSourceConsistencyDiagnostic {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentRuntimeDiagnosticFollowup {
     pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -707,7 +701,6 @@ mod tests {
                     "diagnostics": {
                         "tools": [{
                             "tool": "example-runtime",
-                            "legacy_output": "example_runtime",
                             "configured_binary_env": ["EXAMPLE_RUNTIME_BIN"],
                             "install_dir_env": "EXAMPLE_RUNTIME_INSTALL_DIR",
                             "default_install_dir": "${HOME}/.cache/homeboy/example-runtime",
@@ -718,7 +711,6 @@ mod tests {
                         }],
                         "followups": [{
                             "label": "example_runtime_binary",
-                            "legacy_output": "managed_followups",
                             "command_script": "printf example-runtime",
                             "purpose": "Inspect the declared runtime binary."
                         }]

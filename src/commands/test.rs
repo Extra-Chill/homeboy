@@ -934,7 +934,7 @@ mod tests {
         let request = build_test_refactor_request(
             component.clone(),
             PathBuf::from("/tmp/demo"),
-            vec![("runner".to_string(), "ci".to_string())],
+            vec![("runner".to_string(), serde_json::json!("ci"))],
             TestSourceOptions {
                 selected_files: Some(vec!["tests/demo_test.rs".to_string()]),
                 skip_lint: true,

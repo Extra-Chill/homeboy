@@ -258,7 +258,7 @@ mod tests {
                     .to_string(),
             ),
             recovery_commands: vec![
-                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string(),
+                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
             ],
             extensions_synced: Vec::new(),
             extensions_skipped: Vec::new(),

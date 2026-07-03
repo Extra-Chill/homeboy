@@ -135,11 +135,7 @@ pub struct AgentTaskRequest {
     pub limits: AgentTaskLimits,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_artifacts: Vec<String>,
-    #[serde(
-        default,
-        alias = "artifactDeclarations",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,

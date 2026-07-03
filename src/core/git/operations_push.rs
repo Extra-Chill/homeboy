@@ -185,8 +185,9 @@ mod tests {
 
     #[test]
     fn token_push_injects_token_for_enterprise_https_remote() {
-        let url = resolve_push_remote_url(Some("https://github.a8c.com/owner/repo.git"), Some("tok"))
-            .expect("enterprise https remote should be accepted");
+        let url =
+            resolve_push_remote_url(Some("https://github.a8c.com/owner/repo.git"), Some("tok"))
+                .expect("enterprise https remote should be accepted");
         assert_eq!(
             url.as_deref(),
             Some("https://x-access-token:tok@github.a8c.com/owner/repo.git")
@@ -195,6 +196,8 @@ mod tests {
 
     #[test]
     fn token_push_rejects_ssh_remote() {
-        assert!(resolve_push_remote_url(Some("git@github.com:owner/repo.git"), Some("tok")).is_err());
+        assert!(
+            resolve_push_remote_url(Some("git@github.com:owner/repo.git"), Some("tok")).is_err()
+        );
     }
 }

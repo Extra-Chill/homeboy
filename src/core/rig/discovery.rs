@@ -82,7 +82,11 @@ fn discover_rigs_matching(
                         continue;
                     }
                 }
-                rigs.push(discovered_from_path(&rig_path, path.file_name(), package_path)?);
+                rigs.push(discovered_from_path(
+                    &rig_path,
+                    path.file_name(),
+                    package_path,
+                )?);
             }
         }
     }

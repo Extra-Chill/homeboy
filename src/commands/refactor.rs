@@ -874,7 +874,10 @@ fn run_refactor_sources_single(
             changed_since: changed_since.map(ToOwned::to_owned),
             only: only_findings,
             exclude: exclude_findings,
-            settings: settings.to_vec(),
+            settings: settings
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .collect(),
             lint: homeboy::core::refactor::plan::LintSourceOptions::default(),
             test: homeboy::core::refactor::plan::TestSourceOptions::default(),
             write,

@@ -351,10 +351,7 @@ mod tests {
         Project {
             id: "site".to_string(),
             base_path: Some("/srv/site".to_string()),
-            path_roots: HashMap::from([(
-                "package_root".to_string(),
-                "/opt/packages".to_string(),
-            )]),
+            path_roots: HashMap::from([("package_root".to_string(), "/opt/packages".to_string())]),
             ..Project::default()
         }
     }
@@ -448,12 +445,9 @@ mod tests {
                 ..Project::default()
             };
 
-            let resolved = resolve_effective_remote_path(
-                &project,
-                &component("packages/foo"),
-                "/srv/site",
-            )
-            .expect("resolve path");
+            let resolved =
+                resolve_effective_remote_path(&project, &component("packages/foo"), "/srv/site")
+                    .expect("resolve path");
 
             assert_eq!(resolved, "/srv/site/packages/foo");
         });

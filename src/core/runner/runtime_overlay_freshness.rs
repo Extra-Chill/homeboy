@@ -277,7 +277,8 @@ mod tests {
 
     use super::{
         assess_runtime_overlay_build_freshness, require_fresh_runtime_overlay,
-        stale_runtime_overlay_warning, RuntimeOverlayBuildStatus, REQUIRE_FRESH_RUNTIME_OVERLAY_ENV,
+        stale_runtime_overlay_warning, RuntimeOverlayBuildStatus,
+        REQUIRE_FRESH_RUNTIME_OVERLAY_ENV,
     };
 
     fn git(path: &Path, args: &[&str]) {

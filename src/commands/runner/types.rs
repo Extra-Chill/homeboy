@@ -188,8 +188,6 @@ pub struct SelectedRuntimeOutput {
 pub struct RunnerRuntimeDiagnostics {
     pub runtime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub legacy_output: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub configured_binary: Option<String>,
     pub configured_binary_source: String,
     pub managed_cache_source: String,

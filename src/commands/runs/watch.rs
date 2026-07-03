@@ -302,10 +302,7 @@ mod tests {
 
     /// Drive the loop with a virtual clock: each simulated sleep advances time,
     /// so timeouts are exercised without real waiting.
-    fn run_loop(
-        poller: &ScriptedPoller,
-        cfg: &WatchConfig,
-    ) -> homeboy::core::Result<WatchResult> {
+    fn run_loop(poller: &ScriptedPoller, cfg: &WatchConfig) -> homeboy::core::Result<WatchResult> {
         let clock = Cell::new(Duration::ZERO);
         let advance = |by: Duration| clock.set(clock.get() + by);
         run_watch_loop(

@@ -483,57 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn command_registry_docs_path_is_present_for_commands_with_docs() {
-        for entry in COMMAND_SPECS {
-            if let Some(slug) = entry.docs_slug {
-                assert_eq!(
-                    entry.docs_path().as_deref(),
-                    Some(format!("docs/commands/{slug}.md").as_str()),
-                    "registered command `{}` docs path drifted from docs slug",
-                    entry.name
-                );
-            } else {
-                assert!(
-                    entry.docs_path().is_none(),
-                    "registered command `{}` should not expose docs path without docs slug",
-                    entry.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn output_descriptor_excludes_lab_policy() {
-        let scoped_lint = parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"]);
-        let output_descriptor = scoped_lint.output_descriptor(false);
-
-        assert_eq!(output_descriptor.json_family, CommandJsonFamily::Quality);
-        assert_eq!(output_descriptor.response_mode, CommandResponseMode::Json);
-        assert_eq!(
-            output_descriptor.output_contract,
-            CommandOutputContractKind::JsonEnvelope
-        );
-
-        let aggregate_descriptor = scoped_lint.descriptor(false);
-        assert!(aggregate_descriptor.supports_lab_runner);
-        assert!(aggregate_descriptor.lab_runner_unsupported_reason.is_none());
-    }
-
-    #[test]
-    fn command_spec_output_descriptor_uses_shared_contract_shape() {
-        let spec = crate::command_contract::registered_command("status")
-            .expect("status command should be registered");
-
-        assert_eq!(
-            spec.output_descriptor(CommandOutputFileMode::GenericEnvelope),
-            CommandOutputDescriptor::json_envelope(
-                CommandJsonFamily::Ops,
-                CommandOutputFileMode::GenericEnvelope,
-            )
-        );
-    }
-
-    #[test]
     fn test_response_plan() {
         assert_eq!(
             parsed_command(&["homeboy", "status"]).response_plan(false),

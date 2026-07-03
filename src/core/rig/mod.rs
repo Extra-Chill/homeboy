@@ -704,7 +704,10 @@ mod schema_error_tests {
             error.message
         );
         assert!(
-            error.hints.iter().any(|h| h.message.contains("homeboy upgrade")),
+            error
+                .hints
+                .iter()
+                .any(|h| h.message.contains("homeboy upgrade")),
             "should hint to upgrade"
         );
     }
@@ -712,7 +715,10 @@ mod schema_error_tests {
     #[test]
     fn syntax_error_stays_invalid_json() {
         let err = serde_json::from_str::<serde_json::Value>("{ not json").unwrap_err();
-        assert!(matches!(err.classify(), serde_json::error::Category::Syntax));
+        assert!(matches!(
+            err.classify(),
+            serde_json::error::Category::Syntax
+        ));
 
         let path = Path::new("/tmp/broken/rig.json");
         let error = rig_spec_parse_error(err, path, None, Some("{ not json".to_string()));

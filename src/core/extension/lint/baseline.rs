@@ -257,5 +257,4 @@ mod tests {
         assert_eq!(findings[0].location.file.as_deref(), Some("src/lib.rs"));
         assert_eq!(findings[0].fingerprint.as_deref(), Some("id-1"));
     }
-
 }

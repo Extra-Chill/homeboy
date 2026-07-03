@@ -210,16 +210,25 @@ mod tests {
         assert_eq!(proof.passed, Some(false));
         assert_eq!(proof.exit_code, Some(2));
         assert_eq!(proof.error.as_deref(), Some("gate exceeded"));
-        assert_eq!(proof.gate_failures, vec!["p95_ms exceeded", "rss_mb exceeded"]);
+        assert_eq!(
+            proof.gate_failures,
+            vec!["p95_ms exceeded", "rss_mb exceeded"]
+        );
 
         // Declared container flattened to dotted scalar leaves.
-        assert_eq!(proof.signals.get("proof.rendered_contains_marker"), Some(&json!(true)));
+        assert_eq!(
+            proof.signals.get("proof.rendered_contains_marker"),
+            Some(&json!(true))
+        );
         assert_eq!(proof.signals.get("proof.opfs_resume"), Some(&json!(false)));
         assert_eq!(proof.signals.get("proof.http_status"), Some(&json!(200)));
         assert_eq!(proof.signals.get("proof.nested.value"), Some(&json!("ok")));
         // Top-level boolean proof signal and known scalar status signal.
         assert_eq!(proof.signals.get("marker_present"), Some(&json!(true)));
-        assert_eq!(proof.signals.get("observation_status"), Some(&json!("failed")));
+        assert_eq!(
+            proof.signals.get("observation_status"),
+            Some(&json!("failed"))
+        );
         // Per-scenario bench metrics + passed flag.
         assert_eq!(proof.signals.get("cold.passed"), Some(&json!(false)));
         assert_eq!(proof.signals.get("cold.p95_ms"), Some(&json!(42.0)));
