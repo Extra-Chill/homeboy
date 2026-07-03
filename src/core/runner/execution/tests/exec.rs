@@ -114,6 +114,43 @@ fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs
 }
 
 #[test]
+fn remote_daemon_secret_env_refs_require_missing_controller_refs() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        let mut runner = ssh_runner();
+        runner.workspace_root = Some(workspace.display().to_string());
+
+        let err = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["true".to_string()],
+            env: Default::default(),
+            secret_env_names: vec!["MISSING_CONTROLLER_SECRET".to_string()],
+            secret_env_plan: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(SourceSnapshot::existing_remote(
+                "lab",
+                &workspace.display().to_string(),
+                Some(&workspace.display().to_string()),
+            )),
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect_err("missing controller secret ref should fail during controller prep");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.details["field"], "secret_env");
+        assert!(err.message.contains("MISSING_CONTROLLER_SECRET"));
+    });
+}
+
+#[test]
 fn daemon_read_only_runner_exec_ignores_unrelated_missing_secret_env_refs() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
