@@ -20,6 +20,34 @@ fn apply_patch_step_accepts_noop_mutation_return() {
 }
 
 #[test]
+fn lab_remote_dispatch_preflight_requires_configured_homeboy_path() {
+    let runner = crate::core::runner::Runner {
+        id: "lab-default".to_string(),
+        kind: crate::core::runner::RunnerKind::Ssh,
+        server_id: Some("lab-default".to_string()),
+        workspace_root: Some("/srv/homeboy".to_string()),
+        settings: crate::core::server::RunnerSettings::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+
+    let err = crate::core::runner::remote_runner_homeboy_path(&runner, "Lab offload preflight")
+        .expect_err("missing remote homeboy_path fails before dispatch");
+
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("refusing to use bare `homeboy`"));
+    assert!(err.details["tried"]
+        .as_array()
+        .expect("tried hints")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("explicit remote Homeboy binary path"))));
+}
+
+#[test]
 fn lab_offload_rejects_truncated_runner_stdout() {
     let exec_output = RunnerExecOutput {
         variant: "exec",

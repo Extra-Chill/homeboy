@@ -6,7 +6,7 @@ use crate::core::error::{Error, Result};
 use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::server::{self, SshClient};
 
-use super::{Runner, RunnerKind, RunnerToolRegistry};
+use super::{remote_runner_homeboy_path, Runner, RunnerKind, RunnerToolRegistry};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunnerCapabilityPreflight {
@@ -252,7 +252,7 @@ impl RunnerCapabilitySnapshot {
         }
 
         let client = Self::ssh_client_for_runner(runner)?;
-        let probe = Self::batch_probe(runner, &client, preflight);
+        let probe = Self::batch_probe(runner, &client, preflight)?;
 
         Ok(Self {
             tools: probe.tools,
@@ -278,21 +278,21 @@ impl RunnerCapabilitySnapshot {
         runner: &Runner,
         client: &SshClient,
         preflight: &RunnerCapabilityPreflight,
-    ) -> RunnerCapabilityProbeResult {
+    ) -> Result<RunnerCapabilityProbeResult> {
         let tool_commands = RunnerToolRegistry::required_tools()
             .iter()
             .copied()
             .map(|tool| {
                 let command = if tool == RunnerRequiredTool::Homeboy {
-                    runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+                    remote_runner_homeboy_path(runner, "runner capability preflight")?
                 } else {
                     RunnerToolRegistry::spec_for_required_tool(tool)
                         .map(|spec| spec.command)
                         .unwrap_or_else(|| tool.id())
                 };
-                (tool, command.to_string())
+                Ok((tool, command.to_string()))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
         let output = client.execute(&batch_probe_script(
@@ -300,12 +300,12 @@ impl RunnerCapabilitySnapshot {
             &command_names,
             &capability_probes,
         ));
-        parse_batch_probe_output(
+        Ok(parse_batch_probe_output(
             &output.stdout,
             &tool_commands,
             &command_names,
             &capability_probes,
-        )
+        ))
     }
 
     fn local_batch_probe(
