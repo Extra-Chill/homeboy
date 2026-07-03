@@ -605,7 +605,7 @@ fn build_lab_offload_remote_command(
         path_remaps,
         remote_output_file,
     );
-    let remote_args = inject_required_extension_args(remote_args, &plan.required_extensions);
+    let remote_args = inject_required_extension_args(remote_args, &plan.command_extensions);
     command.extend(remote_args.into_iter().skip(1));
     command
 }
@@ -613,6 +613,7 @@ fn build_lab_offload_remote_command(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunnerCommandPlan {
     required_extensions: Vec<String>,
+    command_extensions: Vec<String>,
 }
 
 impl RunnerCommandPlan {
@@ -621,14 +622,21 @@ impl RunnerCommandPlan {
         route_required_extensions: &[String],
         primary_source_path: &Path,
     ) -> Result<Self> {
+        let bench_extensions =
+            bench_required_extensions_from_primary_rig(args, primary_source_path)?;
+        let bench_dispatch_extensions =
+            bench_dispatch_extensions_from_primary_rig(args, primary_source_path)?;
         let mut required_extensions = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
-        required_extensions.extend(bench_required_extensions_from_primary_rig(
-            args,
-            primary_source_path,
-        )?);
+        required_extensions.extend(bench_extensions);
+        let command_extensions = if bench_dispatch_extensions.is_empty() {
+            route_required_extensions.to_vec()
+        } else {
+            bench_dispatch_extensions
+        };
         Ok(Self {
             required_extensions: required_extensions.into_iter().collect(),
+            command_extensions,
         })
     }
 }
@@ -653,20 +661,55 @@ fn bench_required_extensions_from_primary_rig(
         let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
             continue;
         };
-        if explicit_extensions.is_empty() {
-            extension_ids.extend(rig::extension_ids_for_workloads(
-                &spec,
-                rig::RigWorkloadKind::Bench,
-            ));
-        } else {
+        if !explicit_extensions.is_empty() {
             extension_ids.extend(explicit_extensions.iter().cloned());
+            continue;
         }
         for extension_id in rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench) {
+            extension_ids.insert(extension_id.clone());
             extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
                 &spec,
                 rig::RigWorkloadKind::Bench,
                 &extension_id,
             ));
+        }
+        extension_ids.extend(bench_component_extensions_from_rig(
+            &spec,
+            explicit_component.as_deref(),
+        ));
+    }
+
+    Ok(extension_ids.into_iter().collect())
+}
+
+fn bench_dispatch_extensions_from_primary_rig(
+    args: &[String],
+    primary_source_path: &Path,
+) -> Result<Vec<String>> {
+    if !args.iter().any(|arg| arg == "bench") {
+        return Ok(Vec::new());
+    }
+
+    let rig_ids = bench_rig_ids_from_args(args);
+    if rig_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let explicit_component = bench_component_from_args(args);
+    let explicit_extensions = extension_overrides_from_args(args);
+    let mut extension_ids = std::collections::BTreeSet::new();
+    for rig_id in rig_ids {
+        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
+            continue;
+        };
+        if !explicit_extensions.is_empty() {
+            extension_ids.extend(explicit_extensions.iter().cloned());
+            continue;
+        }
+        let workload_extensions =
+            rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench);
+        if workload_extensions.len() == 1 {
+            extension_ids.extend(workload_extensions);
         }
         extension_ids.extend(bench_component_extensions_from_rig(
             &spec,
@@ -863,12 +906,14 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::Cli;
-    use clap::Parser;
 
     fn command_plan(required_extensions: &[&str]) -> RunnerCommandPlan {
         RunnerCommandPlan {
             required_extensions: required_extensions
+                .iter()
+                .map(|extension| extension.to_string())
+                .collect(),
+            command_extensions: required_extensions
                 .iter()
                 .map(|extension| extension.to_string())
                 .collect(),
@@ -992,31 +1037,15 @@ mod tests {
                 "--rig".to_string(),
                 "fixture-matrix".to_string(),
             ];
-            let cli = Cli::parse_from(&args);
-            let route_contract = cli
-                .command
-                .lab_route_contract()
-                .expect("route contract result")
-                .expect("bench supports lab offload");
-            let contract =
-                crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
-
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
                 &args,
                 "/runner/workspaces/node-project",
                 &[],
                 None,
-                &command_plan(
-                    &contract
-                        .required_extensions
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                ),
+                &command_plan(&["wordpress"]),
             );
 
-            assert_eq!(contract.required_extensions, vec!["wordpress".to_string()]);
             assert_eq!(
                 command,
                 vec![
@@ -1073,41 +1102,26 @@ mod tests {
                 "--rig".to_string(),
                 "static-site-importer-fixture-matrix".to_string(),
             ];
-            let cli = Cli::parse_from(&args);
-            let route_contract = cli
-                .command
-                .lab_route_contract()
-                .expect("route contract result")
-                .expect("bench supports lab offload");
-            let contract =
-                crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
-
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
                 &args,
                 "/runner/workspaces/static-site-importer",
                 &[],
                 None,
-                &command_plan(
-                    &contract
-                        .required_extensions
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                ),
+                &command_plan(&["nodejs"]),
             );
 
-            let wordpress_flag = command
+            let nodejs_flag = command
                 .windows(2)
-                .position(|window| window == ["--extension", "wordpress"])
-                .expect("final remote command includes --extension wordpress");
+                .position(|window| window == ["--extension", "nodejs"])
+                .expect("final remote command includes --extension nodejs");
             let rig_flag = command
                 .iter()
                 .position(|arg| arg == "--rig")
                 .expect("final remote command includes --rig");
             assert!(
-                wordpress_flag < rig_flag,
-                "--extension wordpress must be injected before --rig in final runner command: {}",
+                nodejs_flag < rig_flag,
+                "--extension nodejs must be injected before --rig in final runner command: {}",
                 command.join(" ")
             );
             assert_eq!(
@@ -1118,8 +1132,6 @@ mod tests {
                     "bench".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
-                    "--extension".to_string(),
-                    "wordpress".to_string(),
                     "static-site-importer".to_string(),
                     "--path".to_string(),
                     "/runner/workspaces/static-site-importer".to_string(),
@@ -1192,6 +1204,7 @@ mod tests {
                 plan.required_extensions,
                 vec!["nodejs".to_string(), "wordpress".to_string()]
             );
+            assert_eq!(plan.command_extensions, vec!["nodejs".to_string()]);
             assert_eq!(
                 command,
                 vec![
@@ -1200,8 +1213,6 @@ mod tests {
                     "bench".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
-                    "--extension".to_string(),
-                    "wordpress".to_string(),
                     "static-site-importer".to_string(),
                     "--path".to_string(),
                     "/runner/workspaces/static-site-importer".to_string(),
