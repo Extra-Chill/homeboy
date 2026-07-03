@@ -31,6 +31,11 @@ pub struct ArtifactFetchOutcome {
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
 
+    let existing = read_status()?;
+    if existing.state.is_some() || existing.stale_reason.is_some() {
+        let _ = super::stop()?;
+    }
+
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -55,6 +60,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
                     pid,
                     address: state.address,
                     state_path: state.state_path,
+                    lease_id: state.lease_id,
                 });
             }
         }

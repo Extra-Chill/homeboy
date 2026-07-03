@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
@@ -7,6 +8,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
@@ -41,23 +43,31 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
 static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new();
 
+const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
-const RUNTIME_PATH_SUFFIXES: &[&str] = &[
-    "_COMPONENT_PATH",
-    "_PROVIDER_PATH",
-    "_RUNTIME_PATH",
-];
+const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonState {
+    pub schema: String,
+    pub lease_id: String,
     pub address: String,
     pub pid: u32,
     pub state_path: String,
+    pub started_at: String,
+    pub last_seen_at: String,
+    pub build_identity: build_identity::BuildIdentity,
+    pub binary_sha256: Option<String>,
+    pub runtime_paths: DaemonRuntimeSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonStatus {
     pub running: bool,
+    pub fresh: bool,
+    pub reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
@@ -68,6 +78,7 @@ pub struct DaemonStartResult {
     pub pid: u32,
     pub address: String,
     pub state_path: String,
+    pub lease_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -78,17 +89,27 @@ pub struct DaemonStopResult {
     pub state_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct DaemonRuntimeSnapshot {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonRuntimeSnapshot {
     loaded_at: String,
     paths: Vec<DaemonRuntimePathSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct DaemonRuntimePathSnapshot {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonRuntimePathSnapshot {
     env: String,
     path: String,
     fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonLeaseValidation {
+    state: Option<DaemonState>,
+    running: bool,
+    fresh: bool,
+    reachable: bool,
+    stale_reason: Option<String>,
+    invalid_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,45 +178,152 @@ fn state_path() -> Result<PathBuf> {
 pub fn read_status() -> Result<DaemonStatus> {
     let path = state_path()?;
     let state_path = path.display().to_string();
+    let validation = validate_lease_file(&path)?;
 
+    Ok(DaemonStatus {
+        running: validation.running && validation.fresh && validation.reachable,
+        fresh: validation.fresh,
+        reachable: validation.reachable,
+        stale_reason: validation.stale_reason,
+        state: validation.state,
+        state_path,
+    })
+}
+
+fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
     if !path.exists() {
-        return Ok(DaemonStatus {
+        return Ok(DaemonLeaseValidation {
             running: false,
+            fresh: false,
+            reachable: false,
+            stale_reason: None,
             state: None,
-            state_path,
+            invalid_pid: None,
         });
     }
 
     let content = fs::read_to_string(&path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
-    let state: DaemonState = serde_json::from_str(&content)
-        .map_err(|e| Error::config_invalid_json(path.display().to_string(), e))?;
+    let state: DaemonState = match serde_json::from_str(&content) {
+        Ok(state) => state,
+        Err(error) => {
+            return Ok(DaemonLeaseValidation {
+                running: false,
+                fresh: false,
+                reachable: false,
+                stale_reason: Some(format!("invalid daemon lease: {error}")),
+                state: None,
+                invalid_pid: serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|value| value.get("pid").and_then(|pid| pid.as_u64()))
+                    .and_then(|pid| u32::try_from(pid).ok()),
+            });
+        }
+    };
 
-    Ok(DaemonStatus {
-        running: pid_is_running(state.pid),
+    let running = pid_is_running(state.pid);
+    if state.schema != DAEMON_LEASE_SCHEMA {
+        return Ok(stale_lease(
+            state,
+            running,
+            "unsupported daemon lease schema",
+        ));
+    }
+    if !running {
+        return Ok(stale_lease(state, false, "daemon lease pid is not running"));
+    }
+    let current_identity = build_identity::current();
+    if state.build_identity.version != current_identity.version
+        || state.build_identity.display != current_identity.display
+    {
+        return Ok(stale_lease(
+            state,
+            true,
+            "daemon build identity does not match current Homeboy binary",
+        ));
+    }
+    if state.binary_sha256 != current_binary_sha256()? {
+        return Ok(stale_lease(
+            state,
+            true,
+            "daemon binary hash does not match current Homeboy binary",
+        ));
+    }
+    if let Some(reason) = runtime_snapshot_stale_reason(&state.runtime_paths) {
+        return Ok(stale_lease(state, true, reason));
+    }
+
+    Ok(DaemonLeaseValidation {
+        running: true,
+        fresh: true,
+        reachable: true,
         state: Some(state),
-        state_path,
+        stale_reason: None,
+        invalid_pid: None,
     })
 }
 
+fn stale_lease(
+    state: DaemonState,
+    running: bool,
+    reason: impl Into<String>,
+) -> DaemonLeaseValidation {
+    DaemonLeaseValidation {
+        running,
+        fresh: false,
+        reachable: running,
+        stale_reason: Some(reason.into()),
+        state: Some(state),
+        invalid_pid: None,
+    }
+}
+
+fn runtime_snapshot_stale_reason(snapshot: &DaemonRuntimeSnapshot) -> Option<String> {
+    let stale: Vec<_> = snapshot
+        .paths
+        .iter()
+        .filter(|path| runtime_path_fingerprint(Path::new(&path.path)) != path.fingerprint)
+        .map(|path| path.env.clone())
+        .collect();
+    if stale.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "daemon runtime path fingerprints changed: {}",
+            stale.join(", ")
+        ))
+    }
+}
+
 pub fn stop() -> Result<DaemonStopResult> {
-    let status = read_status()?;
-    let Some(state) = status.state else {
+    let path = state_path()?;
+    let state_path_display = path.display().to_string();
+    let validation = validate_lease_file(&path)?;
+    let Some(pid) = validation
+        .state
+        .as_ref()
+        .map(|state| state.pid)
+        .or(validation.invalid_pid)
+    else {
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| {
+                Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
+            })?;
+        }
         return Ok(DaemonStopResult {
             stopped: false,
             pid: None,
-            state_path: status.state_path,
+            state_path: state_path_display,
         });
     };
 
-    let stopped = if pid_is_running(state.pid) {
-        terminate_pid(state.pid)?;
+    let stopped = if pid_is_running(pid) {
+        terminate_pid(pid)?;
         true
     } else {
         false
     };
 
-    let path = state_path()?;
     if path.exists() {
         fs::remove_file(&path).map_err(|e| {
             Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
@@ -204,8 +332,8 @@ pub fn stop() -> Result<DaemonStopResult> {
 
     Ok(DaemonStopResult {
         stopped,
-        pid: Some(state.pid),
-        state_path: status.state_path,
+        pid: Some(pid),
+        state_path: state_path_display,
     })
 }
 
@@ -322,7 +450,11 @@ fn completion_notify_loop(interval: std::time::Duration) {
 fn list_running_run_ids(store: &crate::core::observation::ObservationStore) -> Vec<String> {
     store
         .list_runs(crate::core::observation::RunListFilter {
-            status: Some(crate::core::observation::RunStatus::Running.as_str().to_string()),
+            status: Some(
+                crate::core::observation::RunStatus::Running
+                    .as_str()
+                    .to_string(),
+            ),
             limit: Some(1000),
             ..Default::default()
         })
@@ -396,6 +528,7 @@ where
                 "status": "ok",
                 "version": VERSION,
                 "build_identity": build_identity::current(),
+                "lease": heartbeat_lease().ok(),
             }),
             artifact: None,
         },
@@ -405,6 +538,7 @@ where
                 "version": VERSION,
                 "build_identity": build_identity::current(),
                 "runtime_paths": daemon_runtime_paths_body(),
+                "lease": heartbeat_lease().ok(),
             }),
             artifact: None,
         },
@@ -874,18 +1008,81 @@ fn write_state(addr: SocketAddr) -> Result<DaemonState> {
         })?;
     }
 
+    let now = chrono::Utc::now().to_rfc3339();
     let state = DaemonState {
+        schema: DAEMON_LEASE_SCHEMA.to_string(),
+        lease_id: Uuid::new_v4().to_string(),
         address: addr.to_string(),
         pid: std::process::id(),
         state_path: path.display().to_string(),
+        started_at: now.clone(),
+        last_seen_at: now,
+        build_identity: build_identity::current(),
+        binary_sha256: current_binary_sha256()?,
+        runtime_paths: capture_daemon_runtime_snapshot(),
     };
+    write_lease(&path, &state)?;
+    Ok(state)
+}
+
+fn heartbeat_lease() -> Result<DaemonState> {
+    let path = state_path()?;
+    let mut validation = validate_lease_file(&path)?;
+    let Some(mut state) = validation
+        .state
+        .take()
+        .filter(|_| validation.fresh && validation.running)
+    else {
+        return Err(Error::internal_unexpected("daemon lease is not fresh"));
+    };
+    state.last_seen_at = chrono::Utc::now().to_rfc3339();
+    write_lease(&path, &state)?;
+    Ok(state)
+}
+
+fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;
     fs::write(&path, body).map_err(|e| {
         Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
     })?;
-    Ok(state)
+    Ok(())
+}
+
+fn current_binary_sha256() -> Result<Option<String>> {
+    let exe = std::env::current_exe().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("resolve current executable for daemon lease".to_string()),
+        )
+    })?;
+    sha256_file_optional(&exe)
+}
+
+fn sha256_file_optional(path: &Path) -> Result<Option<String>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("open {}", path.display())),
+            ))
+        }
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Some(format!("{:x}", hasher.finalize())))
 }
 
 fn handle_connection<R>(

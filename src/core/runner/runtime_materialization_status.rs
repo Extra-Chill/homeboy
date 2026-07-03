@@ -249,6 +249,7 @@ mod tests {
                 local_url: Some("http://127.0.0.1:7357".to_string()),
                 tunnel_pid: Some(123),
                 remote_daemon_pid: Some(456),
+                remote_daemon_lease_id: Some("lease-456".to_string()),
                 homeboy_version: env!("CARGO_PKG_VERSION").to_string(),
                 homeboy_build_identity: Some("homeboy current-build".to_string()),
                 connected_at: "2026-06-19T00:00:00Z".to_string(),

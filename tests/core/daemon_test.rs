@@ -11,6 +11,29 @@ fn serialized_contains(value: &serde_json::Value, needle: &str) -> bool {
         .contains(needle)
 }
 
+fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
+    let path = state_path().expect("state path");
+    let now = chrono::Utc::now().to_rfc3339();
+    DaemonState {
+        schema: DAEMON_LEASE_SCHEMA.to_string(),
+        lease_id: "test-lease".to_string(),
+        address: address.to_string(),
+        pid,
+        state_path: path.display().to_string(),
+        started_at: now.clone(),
+        last_seen_at: now,
+        build_identity: build_identity::current(),
+        binary_sha256: current_binary_sha256().expect("binary hash"),
+        runtime_paths: capture_daemon_runtime_snapshot(),
+    }
+}
+
+fn write_daemon_state_for_test(state: &DaemonState) {
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, serde_json::to_string(state).expect("state json")).expect("write state");
+}
+
 #[test]
 fn parse_bind_addr_defaults_to_loopback_shape() {
     let addr = parse_bind_addr(DEFAULT_ADDR).expect("parse default");
@@ -36,6 +59,92 @@ fn state_path_uses_daemon_state_location() {
 }
 
 #[test]
+fn write_state_establishes_daemon_session_lease_identity() {
+    let _home = HomeGuard::new();
+
+    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    let status = read_status().expect("status");
+
+    assert_eq!(state.schema, DAEMON_LEASE_SCHEMA);
+    assert!(!state.lease_id.is_empty());
+    assert_eq!(
+        state.build_identity.display,
+        build_identity::current().display
+    );
+    assert!(state
+        .binary_sha256
+        .as_deref()
+        .is_some_and(|hash| hash.len() == 64));
+    assert!(status.running);
+    assert!(status.fresh);
+    assert!(status.reachable);
+    assert_eq!(status.state.expect("state").lease_id, state.lease_id);
+}
+
+#[test]
+fn health_route_refreshes_daemon_lease_heartbeat() {
+    let _home = HomeGuard::new();
+    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let response = route("GET", "/health");
+    let refreshed = read_status().expect("status").state.expect("state");
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(response.body["lease"]["lease_id"], state.lease_id);
+    assert_ne!(refreshed.last_seen_at, state.last_seen_at);
+}
+
+#[test]
+fn read_status_classifies_unknown_binary_freshness_as_stale() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.binary_sha256 = Some("unknown".to_string());
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert!(!status.running);
+    assert!(!status.fresh);
+    assert!(status.reachable);
+    assert!(status
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("binary hash"));
+}
+
+#[test]
+fn stop_clears_invalid_lease_state_without_accepting_legacy_shape() {
+    let _home = HomeGuard::new();
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "address": "127.0.0.1:49152",
+            "pid": u32::MAX,
+            "state_path": path.display().to_string(),
+        })
+        .to_string(),
+    )
+    .expect("write legacy state");
+
+    let status = read_status().expect("status");
+    let stopped = stop().expect("stop");
+
+    assert!(!status.running);
+    assert!(!status.fresh);
+    assert!(status
+        .stale_reason
+        .unwrap()
+        .contains("invalid daemon lease"));
+    assert!(!stopped.stopped);
+    assert_eq!(stopped.pid, Some(u32::MAX));
+    assert!(!path.exists());
+}
+
+#[test]
 fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
     let _home = HomeGuard::new();
     let path = state_path().expect("state path");
@@ -53,29 +162,32 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
 
     assert!(pid_is_running(std::process::id()));
     assert!(!pid_is_running(u32::MAX));
-    assert!(!read_status().expect("status").running);
+    let status = read_status().expect("status");
+    assert!(!status.running);
+    assert!(!status.fresh);
+    assert!(status
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("invalid daemon lease"));
 }
 
 #[test]
 fn read_status_reports_stale_state_as_not_running() {
     let _home = HomeGuard::new();
-    let path = state_path().expect("state path");
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(
-        &path,
-        serde_json::json!({
-            "address": "127.0.0.1:49152",
-            "pid": u32::MAX,
-            "state_path": path.display().to_string(),
-        })
-        .to_string(),
-    )
-    .expect("write state");
+    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
     assert!(!status.running);
+    assert!(!status.fresh);
     assert_eq!(status.state.expect("state").pid, u32::MAX);
+    assert!(status
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("pid is not running"));
 }
 
 #[test]

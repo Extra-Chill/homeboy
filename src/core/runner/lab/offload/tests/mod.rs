@@ -83,6 +83,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
             local_url: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
             homeboy_version: "homeboy 0.0.0".to_string(),
             homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
             connected_at: "2026-06-03T00:00:00Z".to_string(),

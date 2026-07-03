@@ -101,6 +101,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         Err(report) => return Ok(report),
     };
 
+    let remote_daemon_lease_id = daemon.lease_id.clone();
     let session = RunnerSession {
         runner_id: runner.id.clone(),
         mode: RunnerTunnelMode::DirectSsh,
@@ -113,6 +114,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         local_url: Some(local_url),
         tunnel_pid,
         remote_daemon_pid: daemon.pid,
+        remote_daemon_lease_id,
         homeboy_version: version,
         homeboy_build_identity: Some(identity.display),
         connected_at: Utc::now().to_rfc3339(),
@@ -180,6 +182,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         local_url: None,
         tunnel_pid: None,
         remote_daemon_pid: None,
+        remote_daemon_lease_id: None,
         homeboy_version,
         homeboy_build_identity: Some(homeboy_identity.display),
         connected_at: now.clone(),
@@ -946,44 +949,32 @@ mod remote_daemon {
     pub(super) struct RemoteDaemon {
         pub(super) address: String,
         pub(super) pid: Option<u32>,
+        pub(super) lease_id: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct RemoteDaemonStatus {
+        pub(super) daemon: Option<RemoteDaemon>,
+        pub(super) stale_reason: Option<String>,
     }
 
     pub(super) fn ensure_remote_daemon(
         client: &SshClient,
         homeboy: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
-        if let Some(daemon) = remote_daemon_status(client, homeboy)? {
-            if let Some(stale_reason) = remote_daemon_binary_stale(client, homeboy, &daemon)? {
-                log_status!(
-                    "runner",
-                    "Remote managed daemon is stale ({stale_reason}); restarting it"
-                );
-                remote_daemon_stop(client, homeboy)?;
-                return remote_daemon_start(client, homeboy);
-            }
+        let status = remote_daemon_status(client, homeboy)?;
+        if let Some(stale_reason) = status.stale_reason {
+            log_status!(
+                "runner",
+                "Remote managed daemon lease is stale ({stale_reason}); restarting it"
+            );
+            remote_daemon_stop(client, homeboy)?;
+            return remote_daemon_start(client, homeboy);
+        }
+        if let Some(daemon) = status.daemon {
             return Ok(daemon);
         }
         remote_daemon_start(client, homeboy)
-    }
-
-    pub(super) fn remote_daemon_binary_stale(
-        client: &SshClient,
-        homeboy: &str,
-        daemon: &RemoteDaemon,
-    ) -> std::result::Result<Option<String>, String> {
-        let Some(pid) = daemon.pid else {
-            return Ok(None);
-        };
-        let command = remote_daemon_binary_probe_command(homeboy, pid);
-        let output = client.execute(&command);
-        match classify_remote_daemon_binary_probe(output.exit_code, &output.stdout) {
-            RemoteDaemonBinaryProbe::Fresh | RemoteDaemonBinaryProbe::Unknown => Ok(None),
-            RemoteDaemonBinaryProbe::Stale(reason) => Ok(Some(reason)),
-            RemoteDaemonBinaryProbe::Failed => Err(command_failure_message(
-                "remote daemon binary freshness probe failed",
-                &output,
-            )),
-        }
     }
 
     /// Stop a remote homeboy daemon over SSH, surfacing a command-failure message on
@@ -1004,97 +995,76 @@ mod remote_daemon {
         Ok(())
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(super) enum RemoteDaemonBinaryProbe {
-        Fresh,
-        Stale(String),
-        Unknown,
-        Failed,
-    }
-
-    pub(super) fn classify_remote_daemon_binary_probe(
-        exit_code: i32,
-        stdout: &str,
-    ) -> RemoteDaemonBinaryProbe {
-        match exit_code {
-            0 => RemoteDaemonBinaryProbe::Fresh,
-            10 => RemoteDaemonBinaryProbe::Stale(stdout.trim().to_string()),
-            2 => RemoteDaemonBinaryProbe::Unknown,
-            _ => RemoteDaemonBinaryProbe::Failed,
-        }
-    }
-
-    pub(super) fn remote_daemon_binary_probe_command(homeboy: &str, pid: u32) -> String {
-        let quoted_homeboy = shell::quote_arg(homeboy);
-        format!(
-            r#"set -eu
-    pid={pid}
-    current=$(command -v {quoted_homeboy} 2>/dev/null || printf '%s\n' {quoted_homeboy})
-    current=$(readlink -f "$current" 2>/dev/null || printf '%s\n' "$current")
-    if [ ! -e "/proc/$pid/exe" ]; then
-      exit 2
-    fi
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-    if [ -z "$exe" ]; then
-      exit 2
-    fi
-    case "$exe" in
-      *" (deleted)")
-        printf 'daemon pid %s executable has been replaced: %s\n' "$pid" "$exe"
-        exit 10
-        ;;
-    esac
-    current_id=$(stat -Lc '%d:%i' "$current" 2>/dev/null || true)
-    daemon_id=$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null || true)
-    if [ -z "$current_id" ] || [ -z "$daemon_id" ]; then
-      exit 2
-    fi
-    if [ "$current_id" != "$daemon_id" ]; then
-      printf 'daemon pid %s executable inode differs from current Homeboy binary %s\n' "$pid" "$current"
-      exit 10
-    fi
-    exit 0"#
-        )
-    }
-
     pub(super) fn remote_daemon_status(
         client: &SshClient,
         homeboy: &str,
-    ) -> std::result::Result<Option<RemoteDaemon>, String> {
+    ) -> std::result::Result<RemoteDaemonStatus, String> {
         let command = format!("{} daemon status", shell::quote_arg(homeboy));
         let output = client.execute(&command);
         if !output.success {
-            return Ok(None);
+            return Ok(RemoteDaemonStatus {
+                daemon: None,
+                stale_reason: Some(command_failure_message(
+                    "remote daemon status failed",
+                    &output,
+                )),
+            });
         }
         let envelope = parse_envelope(&output.stdout)
             .map_err(|err| format!("remote daemon status returned invalid JSON: {}", err))?;
         if !envelope.success {
-            return Ok(None);
+            return Ok(RemoteDaemonStatus {
+                daemon: None,
+                stale_reason: None,
+            });
         }
         let Some(data) = envelope.data else {
-            return Ok(None);
+            return Ok(RemoteDaemonStatus {
+                daemon: None,
+                stale_reason: None,
+            });
         };
+        let stale_reason = data
+            .get("stale_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if !data
             .get("running")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            return Ok(None);
+            return Ok(RemoteDaemonStatus {
+                daemon: None,
+                stale_reason,
+            });
         }
         let Some(state) = data.get("state") else {
-            return Ok(None);
+            return Ok(RemoteDaemonStatus {
+                daemon: None,
+                stale_reason: Some(
+                    stale_reason
+                        .unwrap_or_else(|| "remote daemon status has no lease state".to_string()),
+                ),
+            });
         };
-        Ok(Some(RemoteDaemon {
-            address: state
-                .get("address")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            pid: state
-                .get("pid")
-                .and_then(Value::as_u64)
-                .and_then(|pid| u32::try_from(pid).ok()),
-        }))
+        Ok(RemoteDaemonStatus {
+            daemon: Some(RemoteDaemon {
+                address: state
+                    .get("address")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                pid: state
+                    .get("pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|pid| u32::try_from(pid).ok()),
+                lease_id: state
+                    .get("lease_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            }),
+            stale_reason,
+        })
     }
 
     pub(super) fn remote_daemon_start(
@@ -1133,6 +1103,10 @@ mod remote_daemon {
                 .get("pid")
                 .and_then(Value::as_u64)
                 .and_then(|pid| u32::try_from(pid).ok()),
+            lease_id: data
+                .get("lease_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
     }
 
@@ -1548,38 +1522,23 @@ mod tests {
     }
 
     #[test]
-    fn classifies_remote_daemon_binary_probe_results() {
-        assert_eq!(
-            classify_remote_daemon_binary_probe(0, ""),
-            RemoteDaemonBinaryProbe::Fresh
-        );
-        assert_eq!(
-            classify_remote_daemon_binary_probe(2, ""),
-            RemoteDaemonBinaryProbe::Unknown
-        );
-        assert_eq!(
-            classify_remote_daemon_binary_probe(
-                10,
-                "daemon pid 123 executable has been replaced\n"
-            ),
-            RemoteDaemonBinaryProbe::Stale(
-                "daemon pid 123 executable has been replaced".to_string()
-            )
-        );
-        assert_eq!(
-            classify_remote_daemon_binary_probe(1, "boom"),
-            RemoteDaemonBinaryProbe::Failed
-        );
-    }
+    fn parses_remote_daemon_status_lease_as_single_source_of_truth() {
+        let envelope = parse_envelope(
+            r#"{"success":true,"data":{"action":"status","running":true,"fresh":true,"reachable":true,"state":{"lease_id":"lease-1","address":"127.0.0.1:49152","pid":123}}}"#,
+        )
+        .expect("parse envelope");
+        let data = envelope.data.expect("status data");
+        let state = data.get("state").expect("lease state");
 
-    #[test]
-    fn remote_daemon_binary_probe_detects_deleted_or_replaced_executables() {
-        let command = remote_daemon_binary_probe_command("/home/user/.cargo/bin/homeboy", 3790534);
-
-        assert!(command.contains("/proc/$pid/exe"));
-        assert!(command.contains("*\" (deleted)\")"));
-        assert!(command.contains("stat -Lc '%d:%i'"));
-        assert!(command.contains("executable inode differs from current Homeboy binary"));
+        assert!(data.get("running").and_then(Value::as_bool).unwrap());
+        assert_eq!(
+            state.get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+        assert_eq!(
+            state.get("address").and_then(Value::as_str),
+            Some("127.0.0.1:49152")
+        );
     }
 
     #[test]
@@ -1652,6 +1611,7 @@ mod tests {
                 local_url: Some("http://127.0.0.1:49153".to_string()),
                 tunnel_pid: None,
                 remote_daemon_pid: None,
+                remote_daemon_lease_id: None,
                 homeboy_version: "test".to_string(),
                 homeboy_build_identity: Some("homeboy test+abc123".to_string()),
                 connected_at: Utc::now().to_rfc3339(),
@@ -1837,6 +1797,7 @@ mod tests {
             local_url: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
+            remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
             homeboy_build_identity: Some("homeboy test+abc123".to_string()),
             connected_at: Utc::now().to_rfc3339(),

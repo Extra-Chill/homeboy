@@ -156,6 +156,7 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
             pid: state.pid,
             address: state.address,
             state_path: state.state_path,
+            lease_id: state.lease_id,
         }),
         0,
     ))

@@ -280,17 +280,28 @@ fn daemon_freshness_mismatch(
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<Option<String>, String> {
-    let running_version = daemon_http_version(local_url)?;
+    let body = daemon_http_body(local_url)?;
+    if daemon_lease_id_from_body(&body).is_none() {
+        return Ok(Some(
+            "remote daemon version response did not include a session lease".to_string(),
+        ));
+    }
+    let running_version = daemon_version_from_body(&body)
+        .filter(|version| !version.trim().is_empty())
+        .map(|version| version.trim().to_string())
+        .ok_or_else(|| "remote daemon version response did not include a version".to_string())?;
     if !versions_match(&running_version, expected_version) {
         return Ok(Some(format!(
             "version {running_version} != configured runner version {expected_version}"
         )));
     }
 
-    let running_identity = match daemon_http_identity(local_url) {
-        Ok(identity) => identity,
-        Err(message) => return Ok(Some(message)),
-    };
+    let running_identity = daemon_identity_from_body(&body)
+        .filter(|identity| !identity.trim().is_empty())
+        .map(|identity| identity.trim().to_string())
+        .ok_or_else(|| {
+            "remote daemon version response did not include a build identity".to_string()
+        })?;
     if !versions_match(&running_identity, expected_identity) {
         return Ok(Some(format!(
             "identity {running_identity} != configured runner identity {expected_identity}"
@@ -298,4 +309,10 @@ fn daemon_freshness_mismatch(
     }
 
     Ok(None)
+}
+
+fn daemon_lease_id_from_body(body: &Value) -> Option<&str> {
+    body.pointer("/lease/lease_id")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/data/lease/lease_id").and_then(Value::as_str))
 }

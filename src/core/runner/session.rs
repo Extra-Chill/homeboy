@@ -194,6 +194,8 @@ pub struct RunnerSession {
     pub local_url: Option<String>,
     pub tunnel_pid: Option<u32>,
     pub remote_daemon_pid: Option<u32>,
+    #[serde(default)]
+    pub remote_daemon_lease_id: Option<String>,
     pub homeboy_version: String,
     #[serde(default)]
     pub homeboy_build_identity: Option<String>,
