@@ -244,6 +244,7 @@ mod tests {
         }))
         .expect("parse rig spec");
         let settings = SettingArgs {
+            settings_json_file: vec![],
             setting: vec![
                 (
                     "components.package.path".to_string(),
