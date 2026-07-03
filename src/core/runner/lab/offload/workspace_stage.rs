@@ -697,17 +697,16 @@ impl RunnerCommandPlan {
         route_required_extensions: &[String],
         primary_source_path: &Path,
     ) -> Result<Self> {
-        let bench_extensions =
-            bench_required_extensions_from_primary_rig(args, primary_source_path)?;
-        let bench_dispatch_extensions =
-            bench_dispatch_extensions_from_primary_rig(args, primary_source_path)?;
+        let rig_extensions = rig_required_extensions_from_primary_rig(args, primary_source_path)?;
+        let rig_dispatch_extensions =
+            rig_dispatch_extensions_from_primary_rig(args, primary_source_path)?;
         let mut required_extensions = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
-        required_extensions.extend(bench_extensions);
-        let command_extensions = if bench_dispatch_extensions.is_empty() {
+        required_extensions.extend(rig_extensions);
+        let command_extensions = if rig_dispatch_extensions.is_empty() {
             route_required_extensions.to_vec()
         } else {
-            bench_dispatch_extensions
+            rig_dispatch_extensions
         };
         Ok(Self {
             required_extensions: required_extensions.into_iter().collect(),
@@ -716,20 +715,20 @@ impl RunnerCommandPlan {
     }
 }
 
-fn bench_required_extensions_from_primary_rig(
+fn rig_required_extensions_from_primary_rig(
     args: &[String],
     primary_source_path: &Path,
 ) -> Result<Vec<String>> {
-    if !args.iter().any(|arg| arg == "bench") {
+    let Some(command) = rig_workload_command(args) else {
         return Ok(Vec::new());
-    }
+    };
 
-    let rig_ids = bench_rig_ids_from_args(args);
+    let rig_ids = rig_ids_from_args(args);
     if rig_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let explicit_component = bench_component_from_args(args);
+    let explicit_component = rig_workload_component_from_args(args, command);
     let explicit_extensions = extension_overrides_from_args(args);
     let mut extension_ids = std::collections::BTreeSet::new();
     for rig_id in rig_ids {
@@ -740,16 +739,17 @@ fn bench_required_extensions_from_primary_rig(
             extension_ids.extend(explicit_extensions.iter().cloned());
             continue;
         }
-        for extension_id in rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench) {
+        for extension_id in rig::extension_ids_for_workloads(&spec, command.workload_kind()) {
             extension_ids.insert(extension_id.clone());
             extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
                 &spec,
-                rig::RigWorkloadKind::Bench,
+                command.workload_kind(),
                 &extension_id,
             ));
         }
-        extension_ids.extend(bench_component_extensions_from_rig(
+        extension_ids.extend(rig_component_extensions_from_workload_command(
             &spec,
+            command,
             explicit_component.as_deref(),
         ));
     }
@@ -757,20 +757,20 @@ fn bench_required_extensions_from_primary_rig(
     Ok(extension_ids.into_iter().collect())
 }
 
-fn bench_dispatch_extensions_from_primary_rig(
+fn rig_dispatch_extensions_from_primary_rig(
     args: &[String],
     primary_source_path: &Path,
 ) -> Result<Vec<String>> {
-    if !args.iter().any(|arg| arg == "bench") {
+    let Some(command) = rig_workload_command(args) else {
         return Ok(Vec::new());
-    }
+    };
 
-    let rig_ids = bench_rig_ids_from_args(args);
+    let rig_ids = rig_ids_from_args(args);
     if rig_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let explicit_component = bench_component_from_args(args);
+    let explicit_component = rig_workload_component_from_args(args, command);
     let explicit_extensions = extension_overrides_from_args(args);
     let mut extension_ids = std::collections::BTreeSet::new();
     for rig_id in rig_ids {
@@ -781,18 +781,43 @@ fn bench_dispatch_extensions_from_primary_rig(
             extension_ids.extend(explicit_extensions.iter().cloned());
             continue;
         }
-        let workload_extensions =
-            rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench);
+        let workload_extensions = rig::extension_ids_for_workloads(&spec, command.workload_kind());
         if workload_extensions.len() == 1 {
             extension_ids.extend(workload_extensions);
         }
-        extension_ids.extend(bench_component_extensions_from_rig(
+        extension_ids.extend(rig_component_extensions_from_workload_command(
             &spec,
+            command,
             explicit_component.as_deref(),
         ));
     }
 
     Ok(extension_ids.into_iter().collect())
+}
+
+#[derive(Clone, Copy)]
+enum RigWorkloadCommand {
+    Bench,
+    Fuzz,
+}
+
+impl RigWorkloadCommand {
+    fn workload_kind(self) -> rig::RigWorkloadKind {
+        match self {
+            Self::Bench => rig::RigWorkloadKind::Bench,
+            Self::Fuzz => rig::RigWorkloadKind::Fuzz,
+        }
+    }
+}
+
+fn rig_workload_command(args: &[String]) -> Option<RigWorkloadCommand> {
+    if args.iter().any(|arg| arg == "bench") {
+        return Some(RigWorkloadCommand::Bench);
+    }
+    if args.iter().any(|arg| arg == "fuzz") {
+        return Some(RigWorkloadCommand::Fuzz);
+    }
+    None
 }
 
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
@@ -809,20 +834,26 @@ fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Opt
     Ok(Some(spec))
 }
 
-fn bench_component_extensions_from_rig(
+fn rig_component_extensions_from_workload_command(
     spec: &rig::RigSpec,
+    command: RigWorkloadCommand,
     explicit_component: Option<&str>,
 ) -> Vec<String> {
     let component_ids = explicit_component
         .map(|id| vec![id.to_string()])
-        .or_else(|| {
-            spec.bench.as_ref().map(|bench| {
+        .or_else(|| match command {
+            RigWorkloadCommand::Bench => spec.bench.as_ref().map(|bench| {
                 if bench.components.is_empty() {
                     bench.default_component.iter().cloned().collect()
                 } else {
                     bench.components.clone()
                 }
-            })
+            }),
+            RigWorkloadCommand::Fuzz => spec
+                .fuzz
+                .as_ref()
+                .and_then(|fuzz| fuzz.default_component.as_ref())
+                .map(|component| vec![component.clone()]),
         })
         .unwrap_or_default();
 
@@ -839,7 +870,7 @@ fn bench_component_extensions_from_rig(
     extension_ids.into_iter().collect()
 }
 
-fn bench_rig_ids_from_args(args: &[String]) -> Vec<String> {
+fn rig_ids_from_args(args: &[String]) -> Vec<String> {
     values_for_flag(args, "--rig")
         .into_iter()
         .flat_map(|value| {
@@ -881,8 +912,12 @@ fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
     values
 }
 
-fn bench_component_from_args(args: &[String]) -> Option<String> {
+fn rig_workload_component_from_args(
+    args: &[String],
+    command: RigWorkloadCommand,
+) -> Option<String> {
     let mut command_seen = false;
+    let mut subcommand_seen = false;
     let mut skip_next = false;
     let flags_with_values = [
         "--extension",
@@ -912,6 +947,37 @@ fn bench_component_from_args(args: &[String]) -> Option<String> {
         "--output",
         "--runner",
     ];
+    let fuzz_flags_with_values = [
+        "--extension",
+        "--path",
+        "--rig",
+        "--setting",
+        "--setting-json",
+        "--workload",
+        "--run-id",
+        "--tracker-ref",
+        "--seed",
+        "--inventory",
+        "--sequence-plan",
+        "--max-duration",
+        "--gate-profile",
+        "--isolation",
+        "--isolation-proof",
+        "--expect-metric",
+        "--action-model",
+        "--exploration-policy",
+        "--request-id",
+        "--operation",
+        "--operation-family",
+        "--case-budget",
+        "--duration-budget-seconds",
+        "--campaign-manifest",
+        "--campaign-workload",
+        "--lab-runner",
+        "--required-artifact",
+        "--output",
+        "--runner",
+    ];
     for arg in args.iter().skip(1) {
         if arg == "--" {
             return None;
@@ -921,13 +987,27 @@ fn bench_component_from_args(args: &[String]) -> Option<String> {
             continue;
         }
         if !command_seen {
-            if arg == "bench" {
+            if matches!(
+                (command, arg.as_str()),
+                (RigWorkloadCommand::Bench, "bench") | (RigWorkloadCommand::Fuzz, "fuzz")
+            ) {
                 command_seen = true;
             }
             continue;
         }
+        if matches!(command, RigWorkloadCommand::Fuzz)
+            && !subcommand_seen
+            && matches!(arg.as_str(), "list" | "run" | "plan" | "run-campaign")
+        {
+            subcommand_seen = true;
+            continue;
+        }
         if arg.starts_with('-') {
-            if flags_with_values.contains(&arg.as_str()) {
+            let takes_value = match command {
+                RigWorkloadCommand::Bench => flags_with_values.contains(&arg.as_str()),
+                RigWorkloadCommand::Fuzz => fuzz_flags_with_values.contains(&arg.as_str()),
+            };
+            if takes_value {
                 skip_next = true;
             }
             continue;
@@ -1296,6 +1376,154 @@ mod tests {
                     "--setting".to_string(),
                     "bench_env.FIXTURE_ROOT=/runner/workspaces/static-site-importer/fixtures"
                         .to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn runner_command_plan_for_primary_fuzz_rig_adds_workload_and_component_extensions() {
+        crate::test_support::with_isolated_home(|home| {
+            let primary = home.path().join("primary-homeboy-rigs");
+            let rig_dir = primary.join("rigs/jetpack-api-route-inventory");
+            std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                r#"{
+                    "components": {
+                        "jetpack": {
+                            "component_id": "jetpack",
+                            "path": "/controller/workspaces/jetpack",
+                            "extensions": { "wordpress": {} }
+                        }
+                    },
+                    "fuzz": { "default_component": "jetpack" },
+                    "fuzz_workloads": {
+                        "nodejs": [
+                            {
+                                "path": "${package.root}/fuzz/jetpack-api-route-inventory.fuzz.mjs",
+                                "env_provider_extensions": ["browser"]
+                            }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("primary rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "fuzz".to_string(),
+                "list".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+            ];
+            let plan =
+                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &args,
+                "/runner/workspaces/homeboy-rigs",
+                &[],
+                None,
+                &plan,
+            );
+
+            assert_eq!(
+                plan.required_extensions,
+                vec![
+                    "browser".to_string(),
+                    "nodejs".to_string(),
+                    "wordpress".to_string(),
+                ]
+            );
+            assert_eq!(
+                plan.command_extensions,
+                vec!["nodejs".to_string(), "wordpress".to_string()]
+            );
+            assert_eq!(
+                command,
+                vec![
+                    "/runner/bin/homeboy".to_string(),
+                    "--force-hot".to_string(),
+                    "fuzz".to_string(),
+                    "--extension".to_string(),
+                    "nodejs".to_string(),
+                    "--extension".to_string(),
+                    "wordpress".to_string(),
+                    "list".to_string(),
+                    "--rig".to_string(),
+                    "jetpack-api-route-inventory".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn runner_command_plan_for_primary_fuzz_rig_preserves_campaign_workload() {
+        crate::test_support::with_isolated_home(|home| {
+            let primary = home.path().join("primary-homeboy-rigs");
+            let rig_dir = primary.join("rigs/jetpack-api-route-inventory");
+            std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                r#"{
+                    "components": {
+                        "jetpack": {
+                            "component_id": "jetpack",
+                            "path": "/controller/workspaces/jetpack"
+                        }
+                    },
+                    "fuzz": { "default_component": "jetpack" },
+                    "fuzz_workloads": {
+                        "nodejs": [
+                            { "path": "${package.root}/fuzz/jetpack-api-route-inventory.fuzz.mjs" }
+                        ]
+                    }
+                }"#,
+            )
+            .expect("primary rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "fuzz".to_string(),
+                "run-campaign".to_string(),
+                "--execute".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+                "--campaign-workload".to_string(),
+                "rest-api-read".to_string(),
+            ];
+            let plan =
+                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &args,
+                "/runner/workspaces/homeboy-rigs",
+                &[],
+                None,
+                &plan,
+            );
+
+            assert_eq!(plan.required_extensions, vec!["nodejs".to_string()]);
+            assert_eq!(plan.command_extensions, vec!["nodejs".to_string()]);
+            assert_eq!(
+                command,
+                vec![
+                    "/runner/bin/homeboy".to_string(),
+                    "--force-hot".to_string(),
+                    "fuzz".to_string(),
+                    "--extension".to_string(),
+                    "nodejs".to_string(),
+                    "run-campaign".to_string(),
+                    "--execute".to_string(),
+                    "--rig".to_string(),
+                    "jetpack-api-route-inventory".to_string(),
+                    "--campaign-workload".to_string(),
+                    "rest-api-read".to_string(),
                 ]
             );
         });

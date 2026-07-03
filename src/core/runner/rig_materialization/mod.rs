@@ -416,8 +416,10 @@ fn is_bench_or_fuzz_rig_component_command(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
         Some("bench") => !lab_offload_rig_ids(args).is_empty(),
         Some("fuzz") => {
-            matches!(args.get(2).map(String::as_str), Some("list" | "run"))
-                && !lab_offload_rig_ids(args).is_empty()
+            matches!(
+                args.get(2).map(String::as_str),
+                Some("list" | "run" | "plan" | "run-campaign")
+            ) && !lab_offload_rig_ids(args).is_empty()
         }
         _ => false,
     }
@@ -959,6 +961,70 @@ mod tests {
             "candidate".to_string(),
         ];
         assert!(lab_offload_rig_ids(&passthrough).is_empty());
+    }
+
+    #[test]
+    fn remaps_fuzz_rig_list_to_primary_snapshot_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "list".to_string(),
+            "--rig".to_string(),
+            "jetpack-api-route-inventory".to_string(),
+        ];
+
+        let remapped = remap_rig_default_component_to_primary_snapshot(
+            &args,
+            "/runner/workspaces/rig-component",
+        );
+
+        assert_eq!(
+            remapped,
+            vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "list".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+                "--path".to_string(),
+                "/runner/workspaces/rig-component".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn remaps_fuzz_rig_run_campaign_execute_to_primary_snapshot_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "run-campaign".to_string(),
+            "--execute".to_string(),
+            "--rig".to_string(),
+            "jetpack-api-route-inventory".to_string(),
+            "--campaign-workload".to_string(),
+            "rest-api-read".to_string(),
+        ];
+
+        let remapped = remap_rig_default_component_to_primary_snapshot(
+            &args,
+            "/runner/workspaces/rig-component",
+        );
+
+        assert_eq!(
+            remapped,
+            vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "run-campaign".to_string(),
+                "--execute".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+                "--campaign-workload".to_string(),
+                "rest-api-read".to_string(),
+                "--path".to_string(),
+                "/runner/workspaces/rig-component".to_string(),
+            ]
+        );
     }
 
     #[test]
