@@ -98,7 +98,7 @@ pub struct RunnerWorkspaceSyncOutput {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct RunnerWorkspaceMaterializationPlan {
+pub struct RunnerWorkspaceMaterializationContract {
     pub workspace_root: String,
     pub local_path: String,
     pub local_basename: String,
@@ -108,6 +108,144 @@ pub struct RunnerWorkspaceMaterializationPlan {
     pub path_strategy: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_isolation_token: Option<String>,
+    pub declared_inputs: RunnerWorkspaceDeclaredInputs,
+    pub source_provenance: RunnerWorkspaceSourceProvenance,
+    pub dirty_policy: RunnerWorkspaceDirtyPolicy,
+    pub output_paths: RunnerWorkspaceOutputPaths,
+}
+
+pub type RunnerWorkspaceMaterializationPlan = RunnerWorkspaceMaterializationContract;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceDeclaredInputs {
+    pub path: String,
+    pub mode: RunnerWorkspaceSyncMode,
+    pub controller_routed_git: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_since_base: Option<String>,
+    pub git_fetch_refs: Vec<String>,
+    pub snapshot_includes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceSourceProvenance {
+    pub local_path: String,
+    pub local_basename: String,
+    pub identity: String,
+    pub path_strategy: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceDirtyPolicy {
+    pub allow_dirty_lab_workspace: bool,
+    pub workspace_cleanliness: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceOutputPaths {
+    pub workspace_root: String,
+    pub lab_workspaces_root: String,
+    pub remote_path: String,
+    pub artifact_dir: String,
+}
+
+impl RunnerWorkspaceOutputPaths {
+    pub fn for_remote_path(workspace_root: &str, remote_path: &str) -> Self {
+        let workspace_root = workspace_root.trim_end_matches('/').to_string();
+        Self {
+            lab_workspaces_root: format!("{workspace_root}/_lab_workspaces"),
+            workspace_root,
+            remote_path: remote_path.to_string(),
+            artifact_dir: Self::artifact_dir_for_workspace(remote_path),
+        }
+    }
+
+    pub fn artifact_dir_for_workspace(remote_path: &str) -> String {
+        format!("{}-homeboy-artifacts", remote_path.trim_end_matches('/'))
+    }
+}
+
+impl RunnerWorkspaceMaterializationContract {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_sync_options(
+        workspace_root: &str,
+        local_path: &str,
+        local_basename: &str,
+        remote_path: &str,
+        identity: &str,
+        path_strategy: &'static str,
+        options: &RunnerWorkspaceSyncOptions,
+        snapshot_includes: &[String],
+        workspace_cleanliness: &str,
+    ) -> Self {
+        let workspace_root = workspace_root.trim_end_matches('/').to_string();
+        let run_isolation_token = options
+            .run_isolation_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .map(ToString::to_string);
+        Self {
+            workspace_root: workspace_root.clone(),
+            local_path: local_path.to_string(),
+            local_basename: local_basename.to_string(),
+            remote_path: remote_path.to_string(),
+            sync_mode: options.mode,
+            identity: identity.to_string(),
+            path_strategy,
+            run_isolation_token: run_isolation_token.clone(),
+            declared_inputs: RunnerWorkspaceDeclaredInputs {
+                path: options.path.clone(),
+                mode: options.mode,
+                controller_routed_git: options.controller_routed_git,
+                changed_since_base: options.changed_since_base.clone(),
+                git_fetch_refs: options.git_fetch_refs.clone(),
+                snapshot_includes: snapshot_includes.to_vec(),
+            },
+            source_provenance: RunnerWorkspaceSourceProvenance {
+                local_path: local_path.to_string(),
+                local_basename: local_basename.to_string(),
+                identity: identity.to_string(),
+                path_strategy,
+            },
+            dirty_policy: RunnerWorkspaceDirtyPolicy {
+                allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
+                workspace_cleanliness: workspace_cleanliness.to_string(),
+            },
+            output_paths: RunnerWorkspaceOutputPaths::for_remote_path(&workspace_root, remote_path),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        workspace_root: &str,
+        local_path: &str,
+        local_basename: &str,
+        remote_path: &str,
+        sync_mode: RunnerWorkspaceSyncMode,
+        identity: &str,
+    ) -> Self {
+        let options = RunnerWorkspaceSyncOptions {
+            path: local_path.to_string(),
+            mode: sync_mode,
+            allow_dirty_lab_workspace: false,
+            ..Default::default()
+        };
+        Self::from_sync_options(
+            workspace_root,
+            local_path,
+            local_basename,
+            remote_path,
+            identity,
+            "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
+            &options,
+            &[],
+            match sync_mode {
+                RunnerWorkspaceSyncMode::Git => "clean_remote_required",
+                RunnerWorkspaceSyncMode::SnapshotGit => "snapshot_synthetic_git_unique_workspace",
+                RunnerWorkspaceSyncMode::Snapshot => "snapshot_unique_workspace",
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]

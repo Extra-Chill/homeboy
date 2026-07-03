@@ -7,7 +7,9 @@ use crate::core::runner::workspace::snapshot::{
     snapshot_archive_command, snapshot_install_command,
 };
 use crate::core::runner::workspace::sync::{list_workspaces, sync_workspace};
-use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+use crate::core::runner::workspace::types::{
+    RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+};
 use crate::core::runner::workspace::util::git_output;
 
 #[test]
@@ -237,6 +239,87 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
         assert!(second_remote_path.join("Cargo.toml").exists());
         assert!(!second_remote_path.join("sentinel.txt").exists());
         assert!(remote_path.join("sentinel.txt").exists());
+    });
+}
+
+#[test]
+fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_paths() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(source.path().join("src")).expect("src dir");
+        fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-contract","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, _) = sync_workspace(
+            "lab-local-contract",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: true,
+                changed_since_base: Some("origin/trunk".to_string()),
+                git_fetch_refs: vec!["refs/heads/trunk".to_string()],
+                snapshot_includes: vec!["src/**".to_string()],
+                allow_dirty_lab_workspace: true,
+                run_isolation_token: Some("run-123".to_string()),
+            },
+        )
+        .expect("sync workspace");
+
+        let contract = &output.materialization_plan;
+        assert_eq!(
+            contract.declared_inputs.path,
+            source.path().display().to_string()
+        );
+        assert_eq!(
+            contract.declared_inputs.mode,
+            RunnerWorkspaceSyncMode::Snapshot
+        );
+        assert!(contract.declared_inputs.controller_routed_git);
+        assert_eq!(
+            contract.declared_inputs.changed_since_base.as_deref(),
+            Some("origin/trunk")
+        );
+        assert_eq!(
+            contract.declared_inputs.git_fetch_refs,
+            vec!["refs/heads/trunk".to_string()]
+        );
+        assert_eq!(
+            contract.declared_inputs.snapshot_includes,
+            vec!["src/**".to_string()]
+        );
+        assert_eq!(contract.source_provenance.local_path, output.local_path);
+        assert_eq!(
+            contract.source_provenance.identity,
+            output.snapshot_identity
+        );
+        assert_eq!(contract.run_isolation_token.as_deref(), Some("run-123"));
+        assert!(contract.dirty_policy.allow_dirty_lab_workspace);
+        assert_eq!(
+            contract.dirty_policy.workspace_cleanliness,
+            output.workspace_cleanliness
+        );
+        assert_eq!(
+            contract.output_paths.workspace_root,
+            runner_root.path().display().to_string()
+        );
+        assert_eq!(contract.output_paths.remote_path, output.remote_path);
+        assert_eq!(
+            contract.output_paths.lab_workspaces_root,
+            format!("{}/_lab_workspaces", runner_root.path().display())
+        );
+        assert_eq!(
+            contract.output_paths.artifact_dir,
+            RunnerWorkspaceOutputPaths::artifact_dir_for_workspace(&output.remote_path)
+        );
     });
 }
 

@@ -104,8 +104,9 @@ use super::super::{
     prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
     LabRunnerGateDecision, MaterializedWorkspace, RunnerCapabilityPreflight,
     RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
-    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
+    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    WorkspaceCleanupPolicy,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};

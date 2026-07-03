@@ -449,17 +449,15 @@ mod tests {
                 runner_id: "homeboy-lab".to_string(),
                 local_path: "/Users/user/Developer/example-component".to_string(),
                 remote_path: "/home/user/Developer/example-component".to_string(),
-                materialization_plan: crate::core::runner::RunnerWorkspaceMaterializationPlan {
-                    workspace_root: "/home/user/Developer".to_string(),
-                    local_path: "/Users/user/Developer/example-component".to_string(),
-                    local_basename: "example-component".to_string(),
-                    remote_path: "/home/user/Developer/example-component".to_string(),
-                    sync_mode: crate::core::runner::RunnerWorkspaceSyncMode::Snapshot,
-                    identity: "snapshot".to_string(),
-                    path_strategy:
-                        "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
-                    run_isolation_token: None,
-                },
+                materialization_plan:
+                    crate::core::runner::RunnerWorkspaceMaterializationPlan::from_test_parts(
+                        "/home/user/Developer",
+                        "/Users/user/Developer/example-component",
+                        "example-component",
+                        "/home/user/Developer/example-component",
+                        crate::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+                        "snapshot",
+                    ),
                 current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
                     local_path: "/Users/user/Developer/example-component".to_string(),
                     remote_path: "/home/user/Developer/example-component".to_string(),
@@ -561,16 +559,14 @@ mod tests {
                     runner_id: "homeboy-lab".to_string(),
                     local_path: "/Users/user/Developer/other".to_string(),
                     remote_path: "/home/user/Developer/other".to_string(),
-                    materialization_plan: crate::core::runner::RunnerWorkspaceMaterializationPlan {
-                        workspace_root: "/home/user/Developer".to_string(),
-                        local_path: "/Users/user/Developer/other".to_string(),
-                        local_basename: "other".to_string(),
-                        remote_path: "/home/user/Developer/other".to_string(),
-                        sync_mode: crate::core::runner::RunnerWorkspaceSyncMode::Snapshot,
-                        identity: "snapshot".to_string(),
-                        path_strategy: "workspace_root_lab_workspaces_sanitized_basename_identity_digest",
-                        run_isolation_token: None,
-                    },
+                    materialization_plan: crate::core::runner::RunnerWorkspaceMaterializationPlan::from_test_parts(
+                        "/home/user/Developer",
+                        "/Users/user/Developer/other",
+                        "other",
+                        "/home/user/Developer/other",
+                        crate::core::runner::RunnerWorkspaceSyncMode::Snapshot,
+                        "snapshot",
+                    ),
                     current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
                         local_path: "/Users/user/Developer/other".to_string(),
                         remote_path: "/home/user/Developer/other".to_string(),
