@@ -21,7 +21,7 @@ pub enum WorktreeProviderCleanupMode {
     Apply,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WorktreeProviderCleanupOutput {
     pub command: &'static str,
     pub mode: WorktreeProviderCleanupMode,
@@ -31,7 +31,7 @@ pub struct WorktreeProviderCleanupOutput {
     pub providers: Vec<WorktreeProviderCleanupResult>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WorktreeProviderCleanupResult {
     pub provider_id: String,
     pub success: bool,
