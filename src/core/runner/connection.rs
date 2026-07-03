@@ -581,10 +581,18 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
 }
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
-    load(runner_id)?;
+    let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     if let Some(session) = &session {
+        if session.mode == RunnerTunnelMode::DirectSsh {
+            if let Err(err) = disconnect_remote_daemon(&runner, session) {
+                log_status!(
+                    "runner",
+                    "Could not stop remote daemon for runner `{runner_id}` during disconnect: {err}"
+                );
+            }
+        }
         if let Some(pid) = session.tunnel_pid {
             terminate_pid(pid);
         }
@@ -603,6 +611,58 @@ pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
         session,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn disconnect_remote_daemon(
+    runner: &Runner,
+    session: &RunnerSession,
+) -> std::result::Result<(), String> {
+    let Some((_, _, client)) =
+        remote_daemon::resolve_ssh_runner(runner).map_err(|err| err.message)?
+    else {
+        return Ok(());
+    };
+    let homeboy = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
+    let output = client.execute(&remote_daemon_disconnect_command(
+        homeboy,
+        session.remote_daemon_pid,
+    ));
+    if !output.success {
+        return Err(command_failure_message(
+            "remote daemon stop failed while disconnecting runner",
+            &output,
+        ));
+    }
+    Ok(())
+}
+
+fn remote_daemon_disconnect_command(homeboy: &str, remote_daemon_pid: Option<u32>) -> String {
+    let mut command = format!(
+        "{} daemon stop >/dev/null 2>&1 || true",
+        shell::quote_arg(homeboy)
+    );
+    if let Some(pid) = remote_daemon_pid {
+        command.push_str("\n");
+        command.push_str(&format!("pid={pid}\n"));
+        command.push_str("if [ -r \"/proc/$pid/cmdline\" ]; then\n");
+        command
+            .push_str("  cmdline=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || true)\n");
+        command.push_str("  case \"$cmdline\" in\n");
+        command.push_str("    *\" daemon serve \"*)\n");
+        command.push_str("      kill -TERM \"$pid\" 2>/dev/null || true\n");
+        command.push_str("      i=0\n");
+        command.push_str("      while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 20 ]; do\n");
+        command.push_str("        i=$((i + 1))\n");
+        command.push_str("        sleep 0.1\n");
+        command.push_str("      done\n");
+        command.push_str("      if kill -0 \"$pid\" 2>/dev/null; then\n");
+        command.push_str("        kill -KILL \"$pid\" 2>/dev/null || true\n");
+        command.push_str("      fi\n");
+        command.push_str("      ;;\n");
+        command.push_str("  esac\n");
+        command.push_str("fi");
+    }
+    command
 }
 
 mod remote_daemon {
@@ -1420,6 +1480,18 @@ mod tests {
         assert!(command.contains("*\" (deleted)\")"));
         assert!(command.contains("stat -Lc '%d:%i'"));
         assert!(command.contains("executable inode differs from current Homeboy binary"));
+    }
+
+    #[test]
+    fn remote_daemon_disconnect_command_guards_recorded_pid() {
+        let command = remote_daemon_disconnect_command("/opt/homeboy", Some(42));
+
+        assert!(command.contains("/opt/homeboy daemon stop"));
+        assert!(command.contains("pid=42"));
+        assert!(command.contains("/proc/$pid/cmdline"));
+        assert!(command.contains("*\" daemon serve \"*)"));
+        assert!(command.contains("kill -TERM \"$pid\""));
+        assert!(command.contains("kill -KILL \"$pid\""));
     }
 
     #[test]
