@@ -29,6 +29,7 @@ mod json_config;
 pub mod lease;
 pub mod lint;
 pub mod pipeline;
+pub mod resource_lifecycle;
 pub mod runner;
 pub mod service;
 pub mod source;
@@ -59,6 +60,9 @@ pub use lease::{
     ReleaseLeaseOutcome, RigRunLease, RIG_LEASE_TTL_ENV,
 };
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
+pub use resource_lifecycle::{
+    rig_resource_lifecycle_index, rig_resource_lifecycle_records, RigResourceLifecycleOptions,
+};
 pub use runner::{
     head_sha_and_branch, run_bench_prepare, run_check, run_check_groups, run_down,
     run_fuzz_prepare, run_lint, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport,

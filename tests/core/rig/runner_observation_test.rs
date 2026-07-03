@@ -5,8 +5,11 @@ use std::process::Command;
 
 use crate::core::observation::{ObservationStore, RunListFilter};
 use crate::core::paths;
+use crate::core::resource_lifecycle_index::{
+    resource_lifecycle_index_from_artifacts, ResourceLifecycleResourceStatus,
+};
 use crate::core::rig::runner::{run_check, run_up};
-use crate::core::rig::spec::{ComponentSpec, PipelineStep, RigSpec};
+use crate::core::rig::spec::{ComponentSpec, PipelineStep, RigResourcesSpec, RigSpec};
 use crate::core::rig::{RigSourceMetadata, RigState};
 use crate::test_support::with_isolated_home;
 
@@ -197,6 +200,12 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
         let sha = git_output(&repo, &["rev-parse", "HEAD"]);
 
         let mut rig = observation_spec("observed-up");
+        rig.resources = RigResourcesSpec {
+            exclusive: vec!["observed-runtime".to_string()],
+            paths: vec![repo.to_string_lossy().to_string()],
+            ports: vec![9981],
+            process_patterns: Vec::new(),
+        };
         rig.components.insert(
             "component".to_string(),
             ComponentSpec {
@@ -265,6 +274,24 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
             metadata["state"]["materialized"]["components"]["component"]["sha"],
             sha
         );
+
+        let artifacts = ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(&runs[0].id)
+            .expect("list artifacts");
+        let resource_index = resource_lifecycle_index_from_artifacts(&artifacts)
+            .expect("resource lifecycle index parses")
+            .expect("rig lifecycle index artifact exists");
+        assert_eq!(resource_index.resources.len(), 3);
+        assert!(resource_index.resources.iter().any(|record| {
+            record.kind == "rig_exclusive"
+                && record.path == "rig://observed-up/exclusive/observed-runtime"
+                && record.status == ResourceLifecycleResourceStatus::Active
+        }));
+        assert!(resource_index
+            .resources
+            .iter()
+            .any(|record| record.kind == "rig_path" && record.path == repo.to_string_lossy()));
     });
 }
 
