@@ -119,18 +119,18 @@ pub fn report(
         ),
     });
 
-    for spec in probes::tool_specs() {
+    for spec in probes::tool_specs(runner) {
         if spec.id == "homeboy" {
             continue;
         }
-        let probe = probes::remote_tool_probe(client, spec.command, spec.version_args);
-        checks.push(checks::tool_check(*spec, &probe));
+        let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
+        checks.push(checks::tool_check(spec.clone(), &probe));
         tools.insert(spec.id.to_string(), probe);
     }
 
     for command in normalized_required_tools(&options.required_tools) {
         let version_args = probes::required_tool_version_args(&command);
-        let probe = probes::remote_tool_probe(client, &command, version_args);
+        let probe = probes::remote_tool_probe(client, &command, &version_args);
         checks.push(checks::required_tool_check(&command, &probe));
         tools.entry(command).or_insert(probe);
     }

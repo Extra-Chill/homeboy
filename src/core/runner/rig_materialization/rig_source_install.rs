@@ -24,7 +24,7 @@ use super::super::{
 pub(super) fn rig_install_capability_preflight() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
         command: "rig.install".to_string(),
-        required_tools: vec![RunnerRequiredTool::Homeboy],
+        required_tools: vec![RunnerRequiredTool::homeboy()],
         required_commands: Vec::new(),
         required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
@@ -221,7 +221,10 @@ mod tests {
     fn rig_install_capability_preflight_requires_homeboy_tool() {
         let preflight = rig_install_capability_preflight();
         assert_eq!(preflight.command, "rig.install");
-        assert_eq!(preflight.required_tools, vec![RunnerRequiredTool::Homeboy]);
+        assert_eq!(
+            preflight.required_tools,
+            vec![RunnerRequiredTool::homeboy()]
+        );
         assert!(!preflight.is_empty());
     }
 

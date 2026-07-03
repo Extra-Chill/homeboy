@@ -1,8 +1,8 @@
 //! Source-built CLI dependency discovery and bootstrap for lab workspaces.
 //!
 //! Collects candidate workspace paths from provider configs and component
-//! contracts, resolves source-built Node CLI dependencies by parsing bare
-//! module imports, and bootstraps their production dependencies on the runner.
+//! contracts, resolves source-built CLI dependencies by parsing bare module
+//! imports, and bootstraps their production dependencies on the runner.
 //!
 //! Split out of `lab_workspaces.rs` to keep the workspace-mapping entry points
 //! separate from the dependency-discovery internals.
@@ -19,7 +19,6 @@ use super::lab_workspaces::{
 use super::workspace::git_output;
 use super::{
     exec, preflight_remote_argv_path_translation, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerRequiredTool,
 };
 
 pub(super) fn provider_config_candidate_paths(value: &serde_json::Value) -> Vec<String> {
@@ -83,6 +82,7 @@ pub(super) fn add_candidate_extra_workspace(
         path: canon,
         snapshot_includes,
         bootstrap_node_dependencies,
+        bootstrap_command: None,
         allow_dirty_lab_workspace: false,
         source_provenance: None,
     });
@@ -285,6 +285,7 @@ pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> 
                 path: canonical_existing_dir(&path, "extra_workspace")?,
                 snapshot_includes: Vec::new(),
                 bootstrap_node_dependencies: false,
+                bootstrap_command: None,
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             })
@@ -326,6 +327,7 @@ pub(super) fn discovered_validation_dependency_workspaces(
                 path,
                 snapshot_includes: Vec::new(),
                 bootstrap_node_dependencies: false,
+                bootstrap_command: None,
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             });
@@ -406,16 +408,12 @@ pub(super) fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
 }
 
 /// Capability-parity contract for the runner-side source-CLI dependency
-/// bootstrap. The clean dependency install is executed by the runner's
-/// JavaScript package-manager toolchain, so the runner must expose the
-/// corresponding runtime and package-manager tools. `exec` short-circuits this
-/// preflight for local runners and for SSH runners that already advertise the
-/// tools, so it is behavior-preserving on a provisioned runner and fails loudly
-/// before a remote run that would otherwise error mid-dispatch (#5422).
+/// bootstrap. The clean dependency install is executed by an external command,
+/// so the runner must expose the declared commands before remote dispatch.
 pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
         command: "lab.source_cli_bootstrap".to_string(),
-        required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Npm],
+        required_tools: Vec::new(),
         required_commands: Vec::new(),
         required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
@@ -445,17 +443,15 @@ pub(super) fn preflight_runtime_overlay_install_argv(
     )
 }
 
-pub(super) fn bootstrap_source_cli_node_dependencies(
+pub(super) fn bootstrap_source_cli_dependencies(
     runner_id: &str,
+    command: &[String],
     local_path: &str,
     remote_path: &str,
 ) -> Result<()> {
-    let command = vec![
-        "npm".to_string(),
-        "ci".to_string(),
-        "--omit=dev".to_string(),
-        "--ignore-scripts".to_string(),
-    ];
+    if command.is_empty() {
+        return Ok(());
+    }
 
     // Path-translation preflight: the source-built CLI workspace has already been
     // synced to a runner-side remote path; the dependency install runs with the
@@ -477,7 +473,7 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             cwd: Some(remote_path.to_string()),
             project_id: None,
             allow_diagnostic_ssh: false,
-            command,
+            command: command.to_vec(),
             env: HashMap::new(),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
@@ -485,11 +481,8 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
-            // Validate remote capability parity before dispatch: the bootstrap is
-            // executed by the runner-side JavaScript package-manager toolchain, so
-            // require those tools on the runner. `exec` no-ops this gate for local
-            // and already-capable SSH runners, so behavior is unchanged on a
-            // correctly provisioned runner and fails early otherwise (#5422).
+            // Validate remote capability parity before dispatch. Concrete command
+            // requirements are supplied declaratively by the workspace provider.
             capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),

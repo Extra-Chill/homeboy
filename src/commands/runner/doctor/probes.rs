@@ -1,8 +1,8 @@
 use super::*;
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
-pub fn tool_specs() -> &'static [RunnerToolSpec] {
-    RunnerToolRegistry::doctor_tools()
+pub fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
+    RunnerToolRegistry::doctor_tools(runner)
 }
 
 pub fn capabilities_from(
@@ -40,19 +40,19 @@ pub fn tool_available(tools: &BTreeMap<String, ToolProbe>, id: &str) -> bool {
     tools.get(id).map(|tool| tool.available).unwrap_or(false)
 }
 
-pub fn required_tool_version_args(command: &str) -> &'static [&'static str] {
+pub fn required_tool_version_args(command: &str) -> Vec<String> {
     let name = Path::new(command)
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or(command);
     if name == "homeboy" {
-        &["--version"]
+        vec!["--version".to_string()]
     } else {
-        &[]
+        Vec::new()
     }
 }
 
-pub fn local_tool_probe(command: &str, version_args: &[&str]) -> ToolProbe {
+pub fn local_tool_probe(command: &str, version_args: &[String]) -> ToolProbe {
     let path = common::local_command_line(
         "sh",
         &[
@@ -91,7 +91,7 @@ pub fn local_tool_probe(command: &str, version_args: &[&str]) -> ToolProbe {
     }
 }
 
-pub fn remote_tool_probe(client: &SshClient, command: &str, version_args: &[&str]) -> ToolProbe {
+pub fn remote_tool_probe(client: &SshClient, command: &str, version_args: &[String]) -> ToolProbe {
     let path = common::remote_line(
         client,
         &format!("command -v {}", common::shell_word(command)),

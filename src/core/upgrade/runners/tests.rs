@@ -104,7 +104,7 @@ fn upgrades_configured_runner_with_homeboy_path_and_skip_runner_guard() {
     let capability_plan = runner_upgrade_capability_plan();
     assert_eq!(
         capability_plan.required_tools,
-        vec![RunnerRequiredTool::Homeboy]
+        vec![RunnerRequiredTool::homeboy()]
     );
     assert_eq!(capability_plan.command, "homeboy upgrade");
 }

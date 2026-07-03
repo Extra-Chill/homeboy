@@ -10,7 +10,7 @@ use crate::core::secret_env_plan::SecretEnvPlan;
 
 use super::{
     LabOffloadCommand, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
-    RunnerCapabilityPreflight, RunnerRequiredTool,
+    RunnerCapabilityPreflight,
 };
 
 pub(crate) struct RunnerWorkloadBuildInput<'a> {
@@ -192,15 +192,11 @@ fn validate_runner_workload_required_secrets(
 
 fn validate_runner_workload_required_capabilities(workload: &RunnerWorkload) -> Result<()> {
     for capability in &workload.required_capabilities {
-        match capability.name.as_str() {
-            "extension_parity" | "playwright" => {}
-            _ if !capability.required => {}
-            name => {
-                return Err(workload_error(
-                    "runner_workload.required_capabilities",
-                    format!("runner workload requires unsupported capability `{name}`"),
-                ));
-            }
+        if capability.name.trim().is_empty() {
+            return Err(workload_error(
+                "runner_workload.required_capabilities",
+                "runner workload capability names must not be empty".to_string(),
+            ));
         }
     }
     Ok(())
@@ -350,28 +346,13 @@ fn dispatched_command_family(command_args: &[String]) -> RunnerWorkloadCommandFa
 }
 
 pub(crate) fn merge_runner_workload_capability_preflight(
-    mut preflight: Option<RunnerCapabilityPreflight>,
+    preflight: Option<RunnerCapabilityPreflight>,
     workload: Option<&RunnerWorkload>,
 ) -> Result<Option<RunnerCapabilityPreflight>> {
     let Some(workload) = workload else {
         return Ok(preflight);
     };
-    for capability in &workload.required_capabilities {
-        if capability.name == "playwright" && capability.required {
-            let preflight = preflight.get_or_insert_with(|| RunnerCapabilityPreflight {
-                command: workload.kind.command_label.clone(),
-                ..Default::default()
-            });
-            if !preflight
-                .required_tools
-                .contains(&RunnerRequiredTool::Playwright)
-            {
-                preflight
-                    .required_tools
-                    .push(RunnerRequiredTool::Playwright);
-            }
-        }
-    }
+    let _ = workload;
     Ok(preflight)
 }
 
@@ -1038,34 +1019,6 @@ mod tests {
             true,
         )
         .expect("empty secret handoff is valid when no categories are required");
-    }
-
-    #[test]
-    fn runner_workload_capabilities_merge_into_preflight() {
-        let plan = plan();
-        let command = command();
-        let workload = build_runner_workload(RunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: false,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-
-        let preflight = merge_runner_workload_capability_preflight(None, Some(&workload))
-            .expect("merge workload capabilities")
-            .expect("playwright preflight");
-        assert!(preflight
-            .required_tools
-            .contains(&RunnerRequiredTool::Playwright));
     }
 
     #[test]

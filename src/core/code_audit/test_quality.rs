@@ -681,7 +681,7 @@ fn test_evaluate_file_exists() {
         let findings = detect_vacuous_tests(
             "tests/deps_test.rs",
             r#"
-use homeboy::core::deps::{self, ComposerAction};
+use homeboy::core::deps;
 
 #[test]
 fn status_filters_to_one_package() {
@@ -690,11 +690,9 @@ fn status_filters_to_one_package() {
 }
 
 #[test]
-fn update_command_args_are_composer_first_and_package_scoped() {
-    assert_eq!(
-        deps::composer_command_args("fixture/package", &ComposerAction::Update),
-        vec!["update", "fixture/package"]
-    );
+fn status_uses_package_filter() {
+    let status = deps::status(Some("fixture"), Some("/tmp/fixture"), Some("fixture/one")).unwrap();
+    assert_eq!(status.packages.len(), 1);
 }
 "#,
         );

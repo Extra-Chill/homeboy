@@ -10,10 +10,9 @@ use crate::core::{agent_task_provider, component, worktree, Error, Result};
 
 use super::lab_workspaces_deps::{
     accepted_extra_lab_workspaces, add_candidate_extra_workspace, bare_module_imports,
-    bootstrap_source_cli_node_dependencies, canonical_existing_dir,
-    component_contract_candidate_paths, containing_checkout_or_parent,
-    discovered_validation_dependency_workspaces, provider_config_candidate_paths,
-    provider_config_source_cli_files,
+    bootstrap_source_cli_dependencies, canonical_existing_dir, component_contract_candidate_paths,
+    containing_checkout_or_parent, discovered_validation_dependency_workspaces,
+    provider_config_candidate_paths, provider_config_source_cli_files,
 };
 use super::{
     sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerValidationDependencySyncOutput,
@@ -74,6 +73,7 @@ pub(super) struct ExtraLabWorkspace {
     pub(super) path: PathBuf,
     pub(super) snapshot_includes: Vec<String>,
     pub(super) bootstrap_node_dependencies: bool,
+    pub(super) bootstrap_command: Option<Vec<String>>,
     pub(super) allow_dirty_lab_workspace: bool,
     pub(super) source_provenance: Option<serde_json::Value>,
 }
@@ -186,9 +186,10 @@ pub(super) fn sync_extra_lab_workspaces(
         .0;
         let mut entry = workspace_mapping_entry(&extra.role, &synced);
         entry.source_provenance = extra.source_provenance.clone();
-        if extra.bootstrap_node_dependencies {
-            bootstrap_source_cli_node_dependencies(
+        if let Some(command) = &extra.bootstrap_command {
+            bootstrap_source_cli_dependencies(
                 runner_id,
+                command,
                 &synced.local_path,
                 &synced.remote_path,
             )?;
@@ -389,6 +390,7 @@ pub(super) fn parse_runtime_overlays(
                 path,
                 snapshot_includes: spec.snapshot_includes,
                 bootstrap_node_dependencies: false,
+                bootstrap_command: None,
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             },
@@ -666,6 +668,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
                         path: canon,
                         snapshot_includes: Vec::new(),
                         bootstrap_node_dependencies: false,
+                        bootstrap_command: None,
                         allow_dirty_lab_workspace: false,
                         source_provenance: None,
                     });
@@ -1033,6 +1036,7 @@ fn add_candidate_workspace_ref_extra_workspace(
         path: canon,
         snapshot_includes: Vec::new(),
         bootstrap_node_dependencies: false,
+        bootstrap_command: None,
         allow_dirty_lab_workspace: false,
         source_provenance: Some(serde_json::json!({
             "source_provenance": "workspace_ref",
@@ -2389,6 +2393,7 @@ mod provider_config_candidate_paths_tests {
             path: PathBuf::from("/local/repo@cook"),
             snapshot_includes: Vec::new(),
             bootstrap_node_dependencies: false,
+            bootstrap_command: None,
             allow_dirty_lab_workspace: false,
             source_provenance: Some(serde_json::json!({
                 "source_provenance": "workspace_ref",

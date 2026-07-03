@@ -1,5 +1,5 @@
 use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
-use homeboy::core::deps::{self, ComposerAction, DependencyUpdateOptions};
+use homeboy::core::deps::{self, DependencyUpdateOptions};
 use std::fs;
 use tempfile::tempdir;
 
@@ -15,10 +15,6 @@ fn make_executable(path: &std::path::Path) {
         mode.set_mode(0o755);
         fs::set_permissions(path, mode).unwrap();
     }
-}
-
-fn fixture_component(path: &std::path::Path) -> (&'static str, String) {
-    ("fixture", path.display().to_string())
 }
 
 fn stack_component(id: &str, path: &str, edges: Vec<DependencyStackEdge>) -> Component {
@@ -46,152 +42,6 @@ fn script_stack_component(
         ..Default::default()
     });
     component
-}
-
-#[test]
-fn status_reads_composer_direct_constraints_and_lock_details() {
-    let dir = tempdir().unwrap();
-    let root = dir.path();
-    let (_, root_path) = fixture_component(root);
-
-    write_file(
-        &root.join("composer.json"),
-        r#"{
-            "name": "fixture/root",
-            "require": {
-                "php": ">=8.1",
-                "fixture/prod": "^1.0"
-            },
-            "require-dev": {
-                "fixture/dev": "dev-main"
-            }
-        }"#,
-    );
-    write_file(
-        &root.join("composer.lock"),
-        r#"{
-            "packages": [
-                {
-                    "name": "fixture/prod",
-                    "version": "1.2.3",
-                    "source": { "reference": "prod-ref" }
-                },
-                {
-                    "name": "fixture/transitive",
-                    "version": "0.1.0",
-                    "dist": { "reference": "transitive-ref" }
-                }
-            ],
-            "packages-dev": [
-                {
-                    "name": "fixture/dev",
-                    "version": "dev-main",
-                    "source": { "reference": "dev-ref" }
-                }
-            ]
-        }"#,
-    );
-
-    let status = deps::status(Some("fixture"), Some(&root_path), None).unwrap();
-
-    assert_eq!(status.component_id, "fixture");
-    assert_eq!(status.package_manager, "composer");
-    assert_eq!(status.packages.len(), 3);
-
-    let prod = status
-        .packages
-        .iter()
-        .find(|package| package.name == "fixture/prod")
-        .unwrap();
-    assert_eq!(prod.manifest_section.as_deref(), Some("require"));
-    assert_eq!(prod.constraint.as_deref(), Some("^1.0"));
-    assert_eq!(prod.locked_version.as_deref(), Some("1.2.3"));
-    assert_eq!(prod.locked_reference.as_deref(), Some("prod-ref"));
-
-    let dev = status
-        .packages
-        .iter()
-        .find(|package| package.name == "fixture/dev")
-        .unwrap();
-    assert_eq!(dev.manifest_section.as_deref(), Some("require-dev"));
-    assert_eq!(dev.constraint.as_deref(), Some("dev-main"));
-    assert_eq!(dev.locked_reference.as_deref(), Some("dev-ref"));
-
-    let transitive = status
-        .packages
-        .iter()
-        .find(|package| package.name == "fixture/transitive")
-        .unwrap();
-    assert_eq!(transitive.manifest_section, None);
-    assert_eq!(transitive.constraint, None);
-    assert_eq!(
-        transitive.locked_reference.as_deref(),
-        Some("transitive-ref")
-    );
-}
-
-#[test]
-fn status_filters_to_one_package() {
-    let dir = tempdir().unwrap();
-    let root = dir.path();
-    let (_, root_path) = fixture_component(root);
-
-    write_file(
-        &root.join("composer.json"),
-        r#"{
-            "name": "fixture/root",
-            "require": {
-                "fixture/one": "^1.0",
-                "fixture/two": "^2.0"
-            }
-        }"#,
-    );
-    write_file(
-        &root.join("composer.lock"),
-        r#"{ "packages": [], "packages-dev": [] }"#,
-    );
-
-    let status = deps::status(Some("fixture"), Some(&root_path), Some("fixture/two")).unwrap();
-
-    assert_eq!(status.packages.len(), 1);
-    assert_eq!(status.packages[0].name, "fixture/two");
-    assert_eq!(status.packages[0].constraint.as_deref(), Some("^2.0"));
-}
-
-#[test]
-fn test_composer_command_args() {
-    assert_eq!(
-        deps::composer_command_args(
-            "fixture/package",
-            &ComposerAction::Require {
-                constraint: "^2.0".to_string(),
-            },
-        ),
-        vec![
-            "require",
-            "fixture/package:^2.0",
-            "--with-dependencies",
-            "--no-interaction",
-        ]
-    );
-
-    assert_eq!(
-        deps::composer_command_args("fixture/package", &ComposerAction::Update),
-        vec![
-            "update",
-            "fixture/package",
-            "--with-dependencies",
-            "--no-interaction",
-        ]
-    );
-}
-
-#[test]
-fn composer_install_command_args_are_runtime_prep_safe() {
-    assert_eq!(
-        deps::composer_install_command_args(),
-        vec!["install", "--no-interaction", "--no-progress"]
-    );
 }
 
 #[test]

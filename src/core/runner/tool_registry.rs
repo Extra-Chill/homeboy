@@ -1,169 +1,161 @@
-use super::capabilities::RunnerRequiredTool;
+use super::capabilities::{RunnerCapabilityPreflight, RunnerRequiredTool};
+use super::Runner;
+use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerToolSpec {
     pub tool: Option<RunnerRequiredTool>,
-    pub id: &'static str,
-    pub capability_id: &'static str,
-    pub check_id: &'static str,
-    pub command: &'static str,
-    pub version_args: &'static [&'static str],
+    pub id: String,
+    pub capability_id: String,
+    pub check_id: String,
+    pub command: String,
+    pub version_args: Vec<String>,
     pub required: bool,
-    pub remediation: &'static str,
-    pub capability_remediation: &'static str,
+    pub remediation: String,
+    pub capability_remediation: String,
 }
 
 pub struct RunnerToolRegistry;
 
 impl RunnerToolRegistry {
-    pub const REQUIRED_TOOLS: &'static [RunnerRequiredTool] = &[
-        RunnerRequiredTool::Homeboy,
-        RunnerRequiredTool::Cargo,
-        RunnerRequiredTool::Git,
-        RunnerRequiredTool::Node,
-        RunnerRequiredTool::Npm,
-        RunnerRequiredTool::Pnpm,
-        RunnerRequiredTool::Php,
-        RunnerRequiredTool::Composer,
-        RunnerRequiredTool::Docker,
-        RunnerRequiredTool::Playwright,
-    ];
-
-    pub const DOCTOR_TOOLS: &'static [RunnerToolSpec] = &[
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Homeboy),
-            id: "homeboy",
-            capability_id: "homeboy",
-            check_id: "homeboy",
-            command: "homeboy",
-            version_args: &["--version"],
-            required: true,
-            remediation: "Install Homeboy on the remote runner or configure runner.homeboy_path/server.env.PATH",
-            capability_remediation: "Install Homeboy on the runner and ensure the configured homeboy_path works.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Cargo),
-            id: "cargo",
-            capability_id: "cargo",
-            check_id: "tool.cargo",
-            command: "cargo",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install Rust/Cargo and ensure cargo is on PATH",
-            capability_remediation: "Install Rust/Cargo and ensure cargo is on the runner PATH.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Git),
-            id: "git",
-            capability_id: "git",
-            check_id: "tool.git",
-            command: "git",
-            version_args: &["--version"],
-            required: true,
-            remediation: "Install git and ensure it is on PATH",
-            capability_remediation: "Install git and ensure it is on the runner PATH.",
-        },
-        RunnerToolSpec {
-            tool: None,
-            id: "gh",
-            capability_id: "gh",
-            check_id: "tool.github_cli",
-            command: "gh",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install GitHub CLI (`gh`) for PR and issue workflows",
-            capability_remediation: "Install GitHub CLI (`gh`) for PR and issue workflows",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Node),
-            id: "node",
-            capability_id: "node",
-            check_id: "tool.node",
-            command: "node",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install Node.js for JavaScript/TypeScript components",
-            capability_remediation: "Install Node.js and ensure node is on the runner PATH.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Npm),
-            id: "npm",
-            capability_id: "npm",
-            check_id: "tool.npm",
-            command: "npm",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install npm with Node.js",
-            capability_remediation: "Install npm with Node.js and ensure npm is on the runner PATH.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Pnpm),
-            id: "pnpm",
-            capability_id: "pnpm",
-            check_id: "tool.pnpm",
-            command: "pnpm",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install pnpm for repos that use pnpm-lock.yaml",
-            capability_remediation: "Install pnpm for repositories with pnpm-lock.yaml.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Php),
-            id: "php",
-            capability_id: "php",
-            check_id: "tool.php",
-            command: "php",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install PHP for WordPress/PHP components",
-            capability_remediation: "Install PHP for repositories with composer.json.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Composer),
-            id: "composer",
-            capability_id: "composer",
-            check_id: "tool.composer",
-            command: "composer",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install Composer for PHP dependencies",
-            capability_remediation: "Install Composer for repositories with composer.json.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Docker),
-            id: "docker",
-            capability_id: "docker",
-            check_id: "tool.docker",
-            command: "docker",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install and start Docker for container-backed rigs",
-            capability_remediation: "Install and start Docker for container-backed repositories.",
-        },
-        RunnerToolSpec {
-            tool: Some(RunnerRequiredTool::Playwright),
-            id: "playwright",
-            capability_id: "playwright+browsers",
-            check_id: "tool.playwright",
-            command: "playwright",
-            version_args: &["--version"],
-            required: false,
-            remediation: "Install Playwright CLI and browsers for browser traces",
-            capability_remediation: "Install Playwright CLI and browser binaries on the runner.",
-        },
-    ];
-
-    pub fn required_tools() -> &'static [RunnerRequiredTool] {
-        Self::REQUIRED_TOOLS
+    pub fn required_tools(
+        runner: &Runner,
+        preflight: &RunnerCapabilityPreflight,
+    ) -> Vec<RunnerRequiredTool> {
+        let mut tools = Vec::new();
+        push_unique(&mut tools, RunnerRequiredTool::homeboy());
+        push_unique(&mut tools, RunnerRequiredTool::git());
+        for tool in declared_tool_specs(runner)
+            .into_iter()
+            .filter_map(|spec| spec.tool)
+        {
+            push_unique(&mut tools, tool);
+        }
+        for tool in &preflight.required_tools {
+            push_unique(&mut tools, tool.clone());
+        }
+        tools
     }
 
-    pub fn doctor_tools() -> &'static [RunnerToolSpec] {
-        Self::DOCTOR_TOOLS
+    pub fn doctor_tools(runner: &Runner) -> Vec<RunnerToolSpec> {
+        let mut specs = intrinsic_tool_specs();
+        specs.extend(declared_tool_specs(runner));
+        specs
     }
 
-    pub fn spec_for_required_tool(tool: RunnerRequiredTool) -> Option<&'static RunnerToolSpec> {
-        Self::DOCTOR_TOOLS
+    pub fn spec_for_required_tool(tool: &RunnerRequiredTool) -> Option<RunnerToolSpec> {
+        intrinsic_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool.as_ref() == Some(tool))
+    }
+}
+
+fn intrinsic_tool_specs() -> Vec<RunnerToolSpec> {
+    vec![
+        RunnerToolSpec {
+            tool: Some(RunnerRequiredTool::homeboy()),
+            id: "homeboy".to_string(),
+            capability_id: "homeboy".to_string(),
+            check_id: "homeboy".to_string(),
+            command: "homeboy".to_string(),
+            version_args: vec!["--version".to_string()],
+            required: true,
+            remediation: "Install Homeboy on the remote runner or configure runner.homeboy_path/server.env.PATH".to_string(),
+            capability_remediation: "Install Homeboy on the runner and ensure the configured homeboy_path works.".to_string(),
+        },
+        RunnerToolSpec {
+            tool: Some(RunnerRequiredTool::git()),
+            id: "git".to_string(),
+            capability_id: "git".to_string(),
+            check_id: "tool.git".to_string(),
+            command: "git".to_string(),
+            version_args: vec!["--version".to_string()],
+            required: true,
+            remediation: "Install git and ensure it is on PATH".to_string(),
+            capability_remediation: "Install git and ensure it is on the runner PATH.".to_string(),
+        },
+    ]
+}
+
+fn declared_tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
+    let Some(value) = runner.resources.get("tools") else {
+        return Vec::new();
+    };
+    match value {
+        Value::Array(items) => items.iter().filter_map(declared_tool_spec).collect(),
+        Value::Object(map) => map
             .iter()
-            .find(|spec| spec.tool == Some(tool))
+            .filter_map(|(id, value)| declared_tool_spec_with_id(id, value))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn declared_tool_spec(value: &Value) -> Option<RunnerToolSpec> {
+    let id = value.get("id").and_then(Value::as_str)?.trim();
+    declared_tool_spec_with_id(id, value)
+}
+
+fn declared_tool_spec_with_id(id: &str, value: &Value) -> Option<RunnerToolSpec> {
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let command = value
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or(id)
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return None;
+    }
+    let version_args = value
+        .get("version_args")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["--version".to_string()]);
+    let tool = RunnerRequiredTool::new(id);
+    Some(RunnerToolSpec {
+        tool: Some(tool),
+        id: id.to_string(),
+        capability_id: value
+            .get("capability_id")
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .to_string(),
+        check_id: value
+            .get("check_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("tool.{id}")),
+        command,
+        version_args,
+        required: value
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        remediation: value
+            .get("remediation")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Install '{id}' and ensure it is on PATH")),
+        capability_remediation: value
+            .get("capability_remediation")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Install '{id}' on the runner and ensure it is on PATH.")),
+    })
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
     }
 }
