@@ -60,6 +60,9 @@ enum ComponentCommand {
         /// Discover component from a directory's homeboy.json instead of the registry
         #[arg(long)]
         path: Option<String>,
+        /// Accepted for consistency with other structured-output commands.
+        #[arg(long, hide = true)]
+        json: bool,
     },
     /// Update component configuration fields
     ///
@@ -304,7 +307,7 @@ pub fn run(
                 0,
             ))
         }
-        ComponentCommand::Show { id, path } => show(id.as_deref(), path.as_deref()),
+        ComponentCommand::Show { id, path, .. } => show(id.as_deref(), path.as_deref()),
         ComponentCommand::Set {
             args,
             local_path,
@@ -902,8 +905,28 @@ fn shared(id: Option<&str>) -> CmdResult<ComponentOutput> {
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use std::fs;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        component: ComponentArgs,
+    }
+
+    #[test]
+    fn parses_component_show_json_flag() {
+        let cli = TestCli::try_parse_from(["component", "show", "homeboy", "--json"])
+            .expect("component show --json should parse");
+
+        match cli.component.command {
+            ComponentCommand::Show { id, json, .. } => {
+                assert_eq!(id.as_deref(), Some("homeboy"));
+                assert!(json);
+            }
+            _ => panic!("expected component show command"),
+        }
+    }
 
     #[test]
     fn test_component_set_flags_has_any_all_none() {

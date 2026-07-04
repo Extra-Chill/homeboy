@@ -204,6 +204,10 @@ struct BenchListArgs {
     /// Additional arguments to pass to the bench runner (must follow --)
     #[arg(last = true)]
     args: Vec<String>,
+
+    /// Accepted for consistency with other structured-output commands.
+    #[arg(long, hide = true)]
+    json: bool,
 }
 
 #[derive(Args, Clone)]

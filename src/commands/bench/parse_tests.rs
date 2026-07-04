@@ -27,6 +27,17 @@ fn parses_bench_list_rig_flag() {
 }
 
 #[test]
+fn parses_bench_list_json_flag() {
+    let cli = TestCli::try_parse_from(["bench", "list", "--json"])
+        .expect("bench list --json should parse");
+
+    match cli.bench.command.expect("list command") {
+        BenchCommand::List(args) => assert!(args.json),
+        _ => panic!("expected bench list command"),
+    }
+}
+
+#[test]
 fn parses_repeated_scenario_flags() {
     let cli = TestCli::try_parse_from([
         "bench",
