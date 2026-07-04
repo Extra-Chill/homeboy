@@ -1,8 +1,10 @@
 use crate::command_contract::{
-    RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
-    RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision, RunnerWorkloadKind,
-    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+    RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
+    RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
+    RunnerWorkloadCapability, RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision,
+    RunnerWorkloadKind, RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs,
+    RunnerWorkloadSecrets, RunnerWorkloadState, RunnerWorkloadWorkspaceMappings,
+    RUNNER_WORKLOAD_SCHEMA,
 };
 use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
@@ -40,6 +42,7 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
                 input.command.hot_label,
             ),
         },
+        agent_task: None,
         workspace_mappings: RunnerWorkloadWorkspaceMappings {
             source_path_mode: source_path_mode_label(input.command.source_path_mode).to_string(),
             workspace_mode_policy: workspace_mode_policy_label(input.command.workspace_mode_policy)
@@ -79,6 +82,59 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
             artifacts: Vec::new(),
         },
     }
+}
+
+pub(crate) fn runner_workload_agent_task_from_command(
+    args: &[String],
+    run_id: Option<&str>,
+) -> Option<RunnerWorkloadAgentTask> {
+    let agent_task_index = args.iter().position(|arg| arg == "agent-task")?;
+    let action = args.get(agent_task_index + 1)?.as_str();
+    match action {
+        "cook" => run_id.map(|run_id| RunnerWorkloadAgentTask {
+            run_id: run_id.to_string(),
+            plan_ref: None,
+            dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Cook,
+            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+        }),
+        "dispatch" => run_id.map(|run_id| RunnerWorkloadAgentTask {
+            run_id: run_id.to_string(),
+            plan_ref: None,
+            dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Dispatch,
+            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
+        }),
+        "run-plan" => {
+            let plan_ref = option_value_after(args, agent_task_index + 1, "--plan")?;
+            let record_run_id = run_id
+                .map(str::to_string)
+                .or_else(|| option_value_after(args, agent_task_index + 1, "--record-run-id"))?;
+            Some(RunnerWorkloadAgentTask {
+                run_id: record_run_id,
+                plan_ref: Some(plan_ref),
+                dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                lifecycle_mirror_policy:
+                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn option_value_after(args: &[String], start_index: usize, option: &str) -> Option<String> {
+    let prefix = format!("{option}=");
+    let mut iter = args.iter().skip(start_index + 1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == option {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn required_extension_revisions(
@@ -1019,6 +1075,33 @@ mod tests {
             true,
         )
         .expect("empty secret handoff is valid when no categories are required");
+    }
+
+    #[test]
+    fn runner_workload_agent_task_contract_extracts_run_plan_lifecycle_fields() {
+        let agent_task = runner_workload_agent_task_from_command(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                "@/runner/plan.json".to_string(),
+                "--record-run-id=run-typed".to_string(),
+            ],
+            None,
+        )
+        .expect("agent task workload contract");
+
+        assert_eq!(agent_task.run_id, "run-typed");
+        assert_eq!(agent_task.plan_ref.as_deref(), Some("@/runner/plan.json"));
+        assert_eq!(
+            agent_task.dispatch_kind,
+            RunnerWorkloadAgentTaskDispatchKind::RunPlan
+        );
+        assert_eq!(
+            agent_task.lifecycle_mirror_policy,
+            RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+        );
     }
 
     #[test]

@@ -160,6 +160,8 @@ mod runner_workload_types {
         pub schema: String,
         pub workload_id: String,
         pub kind: RunnerWorkloadKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_task: Option<RunnerWorkloadAgentTask>,
         pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
         pub required_capabilities: Vec<RunnerWorkloadCapability>,
         pub required_secrets: RunnerWorkloadSecrets,
@@ -182,6 +184,30 @@ mod runner_workload_types {
     pub struct RunnerWorkloadKind {
         pub command_label: String,
         pub command_family: RunnerWorkloadCommandFamily,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunnerWorkloadAgentTask {
+        pub run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub plan_ref: Option<String>,
+        pub dispatch_kind: RunnerWorkloadAgentTaskDispatchKind,
+        pub lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerWorkloadAgentTaskDispatchKind {
+        Cook,
+        Dispatch,
+        RunPlan,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum RunnerWorkloadAgentTaskLifecycleMirrorPolicy {
+        None,
+        RunPlanAggregate,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

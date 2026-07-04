@@ -351,6 +351,7 @@ mod tests {
                 command_label: "lint".to_string(),
                 command_family: RunnerWorkloadCommandFamily::Quality,
             },
+            agent_task: None,
             workspace_mappings: RunnerWorkloadWorkspaceMappings {
                 source_path_mode: "cwd_or_path_flag".to_string(),
                 workspace_mode_policy: "changed_since_git_else_snapshot".to_string(),

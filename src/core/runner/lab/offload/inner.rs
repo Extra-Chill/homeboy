@@ -663,6 +663,9 @@ pub(crate) fn run_lab_offload_inner(
             .and_then(|proof| proof.get("id"))
             .and_then(|id| id.as_str()),
     });
+    runner_workload.agent_task =
+        runner_workload_agent_task_from_command(&remapped_args, agent_task_run_id.as_deref());
+    let agent_task_workload = runner_workload.agent_task.clone();
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["runner_workload"] =
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
@@ -996,6 +999,7 @@ pub(crate) fn run_lab_offload_inner(
 
     mirror_agent_task_run_plan_lifecycle(
         request.normalized_args,
+        agent_task_workload.as_ref(),
         &stdout,
         output_file_content.as_deref(),
         exec_output.job_events.as_deref(),
