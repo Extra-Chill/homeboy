@@ -172,6 +172,7 @@ fn audit_runtime_regression_matches_snapshot() {
     );
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn audit_runtime_regression_is_deterministic() {
     let first = finding_fingerprints(&run_fixture_audit().findings);

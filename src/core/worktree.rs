@@ -751,12 +751,6 @@ mod store_ops {
         ))
     }
 
-    fn is_missing_source_checkout_error(error: &Error) -> bool {
-        error.code == crate::core::error::ErrorCode::ValidationInvalidArgument
-            && error.details.get("field").and_then(|field| field.as_str())
-                == Some("source_checkout")
-    }
-
     pub(super) fn normalize_missing_path(path: &Path) -> PathBuf {
         let Some(parent) = path.parent() else {
             return path.to_path_buf();

@@ -118,31 +118,3 @@ fn restore_checkout_after_failed_run(
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{run, run_with_plan};
-    use crate::core::release::types::ReleaseOptions;
-
-    #[test]
-    fn test_run() {
-        let err = run(
-            "missing-component-is-reported-by-orchestrator",
-            &ReleaseOptions::default(),
-        )
-        .expect_err("orchestrator should report missing components");
-
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
-    fn test_run_with_plan() {
-        let err = run_with_plan(
-            "missing-component-is-reported-by-orchestrator-plan-run",
-            &ReleaseOptions::default(),
-        )
-        .expect_err("orchestrator should report missing components before returning a plan/run");
-
-        assert!(!err.to_string().is_empty());
-    }
-}

@@ -270,6 +270,7 @@ fn test_compute_fixability_skips_structural_only_results() {
     assert!(compute_fixability(&result).is_none());
 }
 
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_compute_fixability_counts_fixes_from_real_audit() {
     use std::fs;

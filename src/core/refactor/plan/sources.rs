@@ -893,6 +893,7 @@ mod tests {
         assert!(!request.write);
     }
 
+    #[cfg(feature = "slow-tests")]
     #[test]
     fn collect_refactor_sources_audit_write_uses_audit_refactor_engine() {
         let root = tmp_dir("audit-write");

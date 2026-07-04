@@ -1360,11 +1360,7 @@
     }
   ],
   "docs_dir": "docs",
-  "extensions": {
-    "rust": {
-      "rust_cargo_test_threads": 1
-    }
-  },
+  "extensions": {},
   "hooks": {},
   "id": "homeboy",
   "scripts": {
