@@ -202,7 +202,6 @@ pub struct ExtensionOverrideArgs {
     pub extensions: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl PositionalComponentArgs {
     pub fn load(&self) -> homeboy::core::Result<Component> {
         component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
@@ -517,13 +516,6 @@ impl LintSniffArgs {
 pub struct WriteModeArgs {
     #[arg(long)]
     pub write: bool,
-}
-
-#[allow(dead_code)]
-impl WriteModeArgs {
-    pub(crate) fn is_dry_run(&self) -> bool {
-        !self.write
-    }
 }
 
 // ============================================================================

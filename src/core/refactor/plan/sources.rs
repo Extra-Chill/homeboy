@@ -9,7 +9,6 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 mod audit_source;
 mod cache;
@@ -380,11 +379,7 @@ fn is_homeboy_owned_ci_artifact(path: &str) -> bool {
 }
 
 fn log_git_status_short(root: &Path) {
-    match Command::new("git")
-        .args(["status", "--short"])
-        .current_dir(root)
-        .output()
-    {
+    match git::run_git_output(root, &["status", "--short"], "git status --short") {
         Ok(output) if output.status.success() => {
             let status = String::from_utf8_lossy(&output.stdout);
             if status.trim().is_empty() {
@@ -427,11 +422,9 @@ fn clean_homeboy_owned_ci_artifacts(root: &Path) -> crate::core::Result<bool> {
         }
     }
 
-    let _ = Command::new("git")
-        .args(["restore", "--staged", "--worktree", "--"])
-        .args(HOMEBOY_OWNED_CI_ARTIFACT_DIRS)
-        .current_dir(root)
-        .output();
+    let mut restore_args = vec!["restore", "--staged", "--worktree", "--"];
+    restore_args.extend_from_slice(HOMEBOY_OWNED_CI_ARTIFACT_DIRS);
+    let _ = git::run_git_output(root, &restore_args, "git restore Homeboy CI artifacts");
 
     let root_str = root.to_string_lossy().to_string();
     Ok(!git::get_uncommitted_changes(&root_str)

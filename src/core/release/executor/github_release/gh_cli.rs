@@ -2,6 +2,7 @@
 
 use crate::core::component::GithubConfig;
 use crate::core::deploy::release_download::GitHubRepo;
+use crate::core::engine::shell::quote_arg;
 use crate::core::release::types::ReleaseState;
 
 pub(crate) fn gh_is_available() -> bool {
@@ -51,7 +52,7 @@ pub(super) fn gh_env_prefix(env: &[(String, String)]) -> String {
     let parts = env
         .iter()
         .filter(|(key, value)| !key.is_empty() && !value.is_empty())
-        .map(|(key, value)| format!("{}={}", key, shell_quote(value)))
+        .map(|(key, value)| format!("{}={}", key, quote_arg(value)))
         .collect::<Vec<_>>();
     if parts.is_empty() {
         String::new()
@@ -109,17 +110,6 @@ pub(super) fn safe_filename(value: &str) -> String {
             }
         })
         .collect()
-}
-
-pub(super) fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '=' | '@'))
-    {
-        return value.to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn gh_probe_succeeds(github: &GitHubRepo, config: &GithubConfig, args: &[&str]) -> bool {

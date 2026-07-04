@@ -69,11 +69,6 @@ impl ReleaseScope {
         git::get_latest_tag_any_with_prefix(&self.git_root, self.tag_prefix())
     }
 
-    #[allow(dead_code)]
-    pub fn previous_tag_before(&self, tag: &str) -> Result<Option<String>> {
-        git::get_previous_tag_before_with_prefix(&self.git_root, tag, self.tag_prefix())
-    }
-
     pub fn previous_tag_before_any(&self, tag: &str) -> Result<Option<String>> {
         git::get_previous_tag_before_any_with_prefix(&self.git_root, tag, self.tag_prefix())
     }
@@ -287,13 +282,6 @@ mod tests {
             ReleaseScope::resolve(&wordpress, "wordpress").expect("package scope");
 
         assert_eq!(root_scope.latest_tag().unwrap().as_deref(), Some("v2.10.0"));
-        assert_eq!(
-            root_scope
-                .previous_tag_before("v2.10.0")
-                .unwrap()
-                .as_deref(),
-            Some("v2.9.3")
-        );
         assert_eq!(root_scope.tag_name("2.10.1"), "v2.10.1");
         assert_eq!(
             wordpress_scope.latest_tag().unwrap().as_deref(),

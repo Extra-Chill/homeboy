@@ -9,7 +9,6 @@ pub(crate) struct MethodSignature {
     /// Full signature line (e.g., "public function execute(array $config): array").
     pub(crate) signature: String,
     /// The language this was extracted from.
-    #[allow(dead_code)]
     pub(crate) language: Language,
     /// Full method body (between braces), extracted from the conforming file.
     /// None if the body couldn't be extracted.

@@ -31,18 +31,12 @@ pub struct SymbolDiff {
     pub file: String,
     /// Exports that existed in the base but are gone in current.
     pub removed_exports: Vec<String>,
-    /// Exports that exist in current but not in base (new API).
-    #[allow(dead_code)] // Symmetric with removed_exports; used for impact reporting.
-    pub added_exports: Vec<String>,
     /// Exports that exist in both but with a likely rename (fuzzy matched).
     pub renamed_exports: Vec<(String, String)>, // (old_name, new_name)
     /// The type/class name changed.
     pub type_renamed: Option<(String, String)>, // (old_name, new_name)
     /// Hooks that were removed or renamed.
     pub removed_hooks: Vec<String>,
-    /// Hooks that were added.
-    #[allow(dead_code)] // Symmetric with removed_hooks; used for impact reporting.
-    pub added_hooks: Vec<String>,
 }
 
 /// A file affected by changes in another file.
@@ -164,11 +158,9 @@ pub(crate) fn diff_changed_files(
             (Some(base), None) => SymbolDiff {
                 file: file.clone(),
                 removed_exports: base.public_api.clone(),
-                added_exports: vec![],
                 renamed_exports: vec![],
                 type_renamed: None,
                 removed_hooks: base.hooks.iter().map(|h| h.name.clone()).collect(),
-                added_hooks: vec![],
             },
             // New file — nothing to trace (no old callers)
             (None, Some(_)) => continue,
@@ -204,7 +196,7 @@ fn diff_fingerprints(file: &str, base: &FileFingerprint, current: &FileFingerpri
         .collect();
 
     // Try to match removed → added as renames (simple: same position or similar name)
-    let (renamed, truly_removed, truly_added) = match_renames(&removed, &added);
+    let (renamed, truly_removed) = match_renames(&removed, &added);
 
     // Check type/class rename
     let type_renamed = match (&base.type_name, &current.type_name) {
@@ -220,19 +212,12 @@ fn diff_fingerprints(file: &str, base: &FileFingerprint, current: &FileFingerpri
         .difference(&current_hooks)
         .map(|s| s.to_string())
         .collect();
-    let added_hooks: Vec<String> = current_hooks
-        .difference(&base_hooks)
-        .map(|s| s.to_string())
-        .collect();
-
     SymbolDiff {
         file: file.to_string(),
         removed_exports: truly_removed,
-        added_exports: truly_added,
         renamed_exports: renamed,
         type_renamed,
         removed_hooks,
-        added_hooks,
     }
 }
 
@@ -242,11 +227,7 @@ fn diff_fingerprints(file: &str, base: &FileFingerprint, current: &FileFingerpri
 /// substring with an added name, treat it as a rename. Returns:
 /// - matched renames (old, new)
 /// - truly removed (no match found)
-/// - truly added (no match found)
-fn match_renames(
-    removed: &[String],
-    added: &[String],
-) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
+fn match_renames(removed: &[String], added: &[String]) -> (Vec<(String, String)>, Vec<String>) {
     let mut renames = Vec::new();
     let mut used_added: HashSet<usize> = HashSet::new();
     let mut truly_removed = Vec::new();
@@ -272,14 +253,7 @@ fn match_renames(
         }
     }
 
-    let truly_added: Vec<String> = added
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !used_added.contains(i))
-        .map(|(_, s)| s.clone())
-        .collect();
-
-    (renames, truly_removed, truly_added)
+    (renames, truly_removed)
 }
 
 /// Simple similarity score between two strings (0.0 = nothing in common, 1.0 = identical).
@@ -532,19 +506,18 @@ mod tests {
     fn test_match_renames_exact_pair() {
         let removed = vec!["doThing".to_string()];
         let added = vec!["doStuff".to_string(), "completelyNew".to_string()];
-        let (renames, truly_removed, truly_added) = match_renames(&removed, &added);
+        let (renames, truly_removed) = match_renames(&removed, &added);
 
         // doThing and doStuff share "do" + similar length — may or may not match
         // depending on threshold. The key test is that the function runs.
         assert!(renames.len() + truly_removed.len() == 1);
-        assert!(!truly_added.is_empty());
     }
 
     #[test]
     fn test_match_renames_clear_rename() {
         let removed = vec!["processRequest".to_string()];
         let added = vec!["processApiRequest".to_string()];
-        let (renames, truly_removed, _) = match_renames(&removed, &added);
+        let (renames, truly_removed) = match_renames(&removed, &added);
 
         // High similarity — should match
         assert_eq!(renames.len(), 1, "should detect rename");
@@ -630,7 +603,6 @@ mod tests {
 
         let diff = diff_fingerprints("Foo.php", &base, &current);
         assert!(diff.removed_hooks.contains(&"my_custom_action".to_string()));
-        assert!(diff.added_hooks.contains(&"my_renamed_action".to_string()));
     }
 
     #[test]
@@ -639,11 +611,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Foo.php".to_string(),
             removed_exports: vec!["doThing".to_string()],
-            added_exports: vec![],
             renamed_exports: vec![],
             type_renamed: None,
             removed_hooks: vec![],
-            added_hooks: vec![],
         };
 
         let bar = make_fingerprint(
@@ -683,11 +653,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Foo.php".to_string(),
             removed_exports: vec![],
-            added_exports: vec![],
             renamed_exports: vec![],
             type_renamed: Some(("FooHandler".to_string(), "BarHandler".to_string())),
             removed_hooks: vec![],
-            added_hooks: vec![],
         };
 
         let consumer = make_fingerprint(
@@ -717,11 +685,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Base.php".to_string(),
             removed_exports: vec![],
-            added_exports: vec![],
             renamed_exports: vec![],
             type_renamed: Some(("BaseTask".to_string(), "AbstractTask".to_string())),
             removed_hooks: vec![],
-            added_hooks: vec![],
         };
 
         let child = make_fingerprint(
@@ -751,11 +717,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Provider.php".to_string(),
             removed_exports: vec![],
-            added_exports: vec![],
             renamed_exports: vec![],
             type_renamed: None,
             removed_hooks: vec!["my_custom_hook".to_string()],
-            added_hooks: vec![],
         };
 
         let listener = make_fingerprint(
@@ -786,11 +750,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Foo.php".to_string(),
             removed_exports: vec!["doThing".to_string()],
-            added_exports: vec![],
             renamed_exports: vec![],
             type_renamed: None,
             removed_hooks: vec![],
-            added_hooks: vec![],
         };
 
         let foo = make_fingerprint(
@@ -819,11 +781,9 @@ mod tests {
         let diff = SymbolDiff {
             file: "Foo.php".to_string(),
             removed_exports: vec![],
-            added_exports: vec![],
             renamed_exports: vec![("doThing".to_string(), "doStuff".to_string())],
             type_renamed: None,
             removed_hooks: vec![],
-            added_hooks: vec![],
         };
 
         let bar = make_fingerprint(

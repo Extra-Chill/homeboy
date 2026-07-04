@@ -3,6 +3,7 @@ use crate::core::component::{
 };
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionCapability};
+use crate::core::git::{run_git, run_git_output};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -335,17 +336,10 @@ fn same_git_common_dir(a: &Path, b: &Path) -> bool {
 }
 
 fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let raw = run_git(dir, &["rev-parse", "--git-common-dir"], "git common dir")
+        .ok()?
+        .trim()
+        .to_string();
     if raw.is_empty() {
         return None;
     }
@@ -508,17 +502,14 @@ fn path_strictly_contains(parent: &Path, child: &Path) -> bool {
 
 /// Find the git root directory for a given path.
 pub(crate) fn detect_git_root(dir: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    let output = run_git_output(dir, &["rev-parse", "--show-toplevel"], "git root").ok()?;
+    if !output.status.success() {
+        return None;
+    }
 
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !path.is_empty() {
+        return Some(PathBuf::from(path));
     }
     None
 }
@@ -805,6 +796,7 @@ fn duplicate_portable_id_error(component_id: &str, paths: Vec<PathBuf>) -> Error
             "Use --path <component-dir> to disambiguate the intended component when the command supports path overrides".to_string(),
         ]),
     )
+    .with_hint("Use --path <component-dir> to disambiguate the intended component when the command supports path overrides")
 }
 
 #[cfg(test)]

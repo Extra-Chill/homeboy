@@ -1,7 +1,8 @@
 use crate::core::component::Component;
+use crate::core::engine::shell::quote_path;
+use crate::core::git::{run_git, run_git_output};
 use crate::core::transient_workspace_policy::TransientWorkspacePolicy;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::reconcile::{
     discover_reconcile_candidates, reconcile_status, standalone_registration_exists,
@@ -117,11 +118,7 @@ pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
         return Some(path.to_path_buf());
     }
 
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
-        .output()
-        .ok()?;
+    let output = run_git_output(path, &["rev-parse", "--show-toplevel"], "git rev-parse").ok()?;
     if !output.status.success() {
         return None;
     }
@@ -134,15 +131,7 @@ pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let value = run_git(path, args, "git metadata").ok()?.trim().to_string();
     if value.is_empty() {
         None
     } else {
@@ -151,5 +140,5 @@ fn git_output(path: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn shell_quote_for_hint(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    quote_path(value)
 }

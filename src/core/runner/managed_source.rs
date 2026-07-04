@@ -29,6 +29,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent_task_provider::AgentTaskProviderRunnerSource;
+use crate::core::engine::shell;
 
 /// A resolved, validated plan for syncing a single managed runner source. The
 /// `script` is a POSIX shell program intended to run on the runner.
@@ -108,7 +109,7 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
 
     match remote_url {
         Some(remote_url) => {
-            let quoted_remote = sq(remote_url);
+            let quoted_remote = shell::quote_path(remote_url);
             script.push_str(&format!("remote={quoted_remote}\n"));
             // Clone when the checkout (or its .git) is missing.
             script.push_str("if [ ! -d \"$dir/.git\" ]; then\n");
@@ -140,7 +141,7 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
 
     match git_ref {
         Some(git_ref) => {
-            let quoted_ref = sq(git_ref);
+            let quoted_ref = shell::quote_path(git_ref);
             script.push_str(&format!("ref={quoted_ref}\n"));
             // Resolve the ref preferring the remote-tracking form so a declared
             // branch syncs to origin's tip rather than a stale local branch.
@@ -179,22 +180,6 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
     script
 }
 
-/// POSIX single-quote escaping: wrap in single quotes and replace embedded
-/// single quotes with the `'\''` sequence.
-fn sq(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Render a shell expression for manifest-declared runner paths. Manifests are
 /// runner-side contracts, so leading `~` must resolve against the runner user,
 /// not the machine that planned the sync.
@@ -204,10 +189,10 @@ fn shell_path_expr(path: &str) -> String {
     }
 
     if let Some(rest) = path.strip_prefix("~/") {
-        return format!("\"${{HOME}}\"/{}", sq(rest));
+        return format!("\"${{HOME}}\"/{}", shell::quote_path(rest));
     }
 
-    sq(path)
+    shell::quote_path(path)
 }
 
 #[cfg(test)]
@@ -338,9 +323,9 @@ mod tests {
     }
 
     #[test]
-    fn sq_escapes_embedded_single_quotes() {
-        assert_eq!(sq("a'b"), "'a'\\''b'");
-        assert_eq!(sq("/plain/path"), "'/plain/path'");
+    fn shell_path_escapes_embedded_single_quotes() {
+        assert_eq!(shell::quote_path("a'b"), "'a'\\''b'");
+        assert_eq!(shell::quote_path("/plain/path"), "'/plain/path'");
     }
 
     #[test]

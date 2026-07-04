@@ -221,8 +221,8 @@ fn upload_snapshot(
     transfer.upload_file(&archive.display().to_string(), &remote_archive)?;
     let extract = format!(
         "set -e\nrm -rf {dest}\nmkdir -p {dest}\ntar -xf {archive} -C {dest}\nrm -f {archive}\n",
-        dest = sq(&plan.synced_source_path),
-        archive = sq(&remote_archive),
+        dest = shell::quote_path(&plan.synced_source_path),
+        archive = shell::quote_path(&remote_archive),
     );
     let (_output, exit_code) = exec(
         &runner.id,
@@ -593,22 +593,8 @@ fn shell_command(command: &[String]) -> String {
         .join(" ")
 }
 
-fn sq(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 fn shell_arg(value: &str) -> String {
-    sq(value)
+    shell::quote_path(value)
 }
 
 #[cfg(test)]
