@@ -65,7 +65,10 @@ pub struct TestCommandOutput {
     pub ci_context: Option<CiContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<crate::core::extension::ExtensionPhaseTiming>,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<Value>,
 }
 

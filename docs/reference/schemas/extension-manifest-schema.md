@@ -811,7 +811,7 @@ Extensions can provide embedded documentation.
 }
 ```
 
-Documentation files live in the extension's `docs/` directory. Topics resolve to `homeboy docs <extension_id>/<topic>`.
+Documentation files live in the extension's `docs/` directory. Topics resolve to `homeboy self docs <extension_id>/<topic>`.
 
 ## Capabilities and Storage Backend
 

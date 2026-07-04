@@ -245,7 +245,11 @@ fn activity_endpoint_exposes_activity_report_and_show() {
             .start_run(sample_run("test", "homeboy", "studio"))
             .expect("start run");
         store
-            .finish_run(&run.id, RunStatus::Fail, Some(serde_json::json!({ "exit_code": 1 })))
+            .finish_run(
+                &run.id,
+                RunStatus::Fail,
+                Some(serde_json::json!({ "exit_code": 1 })),
+            )
             .expect("finish run");
 
         let response = http_api::handle(HttpApiRequest {
@@ -269,7 +273,10 @@ fn activity_endpoint_exposes_activity_report_and_show() {
         })
         .expect("activity show");
         assert_eq!(response.endpoint, "activity.show");
-        assert_eq!(response.body["activity"]["items"][0]["refs"]["run_id"], run.id);
+        assert_eq!(
+            response.body["activity"]["items"][0]["refs"]["run_id"],
+            run.id
+        );
     });
 }
 

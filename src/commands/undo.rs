@@ -5,7 +5,7 @@ use homeboy::core::engine::undo;
 
 use super::CmdResult;
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct UndoArgs {
     #[command(subcommand)]
     pub command: Option<UndoCommand>,
@@ -15,7 +15,7 @@ pub struct UndoArgs {
     pub id: Option<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum UndoCommand {
     /// List available undo snapshots
     List,

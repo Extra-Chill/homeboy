@@ -171,7 +171,7 @@ pub fn run_main_lint_workflow(
         );
     }
 
-    hints.push("Full options: homeboy docs commands/lint".to_string());
+    hints.push("Full options: homeboy self docs commands/lint".to_string());
 
     if !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(

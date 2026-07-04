@@ -9,7 +9,7 @@ use crate::commands::{CmdResult, GlobalArgs};
 #[derive(Args, Debug, Clone)]
 pub struct ManifestArgs {}
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ManifestOutput {
     pub command: String,
     #[serde(flatten)]
@@ -19,7 +19,7 @@ pub struct ManifestOutput {
 pub fn run(_args: ManifestArgs, _global: &GlobalArgs) -> CmdResult<ManifestOutput> {
     Ok((
         ManifestOutput {
-            command: "manifest".to_string(),
+            command: "contract.manifest".to_string(),
             manifest: current_augmented_command_safety_manifest(),
         },
         0,

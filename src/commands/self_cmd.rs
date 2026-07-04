@@ -6,7 +6,7 @@ use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerStatusRep
 use homeboy::core::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 
-use crate::commands::{resources, CmdResult, GlobalArgs};
+use crate::commands::{docs, resources, CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct SelfArgs {
@@ -27,6 +27,8 @@ pub enum SelfCommand {
     Doctor(SelfDoctorArgs),
     /// Plan or delete orphaned Homeboy runtime temp entries
     CleanupRuntimeTmp(SelfCleanupRuntimeTmpArgs),
+    /// Display CLI documentation
+    Docs(docs::DocsArgs),
 }
 
 #[derive(Args)]
@@ -119,6 +121,28 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))
         }
+        SelfCommand::Docs(args) => {
+            let (output, exit_code) = docs::run(args, _global)?;
+            let json = serde_json::to_value(output)
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            Ok((json, exit_code))
+        }
+    }
+}
+
+pub fn is_docs_markdown(args: &SelfArgs) -> bool {
+    matches!(&args.command, SelfCommand::Docs(docs_args) if !docs::is_json_mode(docs_args))
+}
+
+pub fn run_docs_markdown(args: SelfArgs) -> CmdResult<String> {
+    match args.command {
+        SelfCommand::Docs(docs_args) => docs::run_markdown(docs_args),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "output_mode",
+            "Only `homeboy self docs` supports markdown output under `self`",
+            None,
+            None,
+        )),
     }
 }
 

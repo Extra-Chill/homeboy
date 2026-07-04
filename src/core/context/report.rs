@@ -608,7 +608,7 @@ fn build_actionable_next_steps(
 
     if Path::new("CLAUDE.md").exists() || Path::new("AGENTS.md").exists() {
         next_steps.push(
-            "Read CLAUDE.md for repo-specific guidance. Run `homeboy docs commands/commands-index` for all commands.".to_string(),
+            "Read CLAUDE.md for repo-specific guidance. Run `homeboy self docs commands/commands-index` for all commands.".to_string(),
         );
     }
 

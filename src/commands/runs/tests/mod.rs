@@ -1174,7 +1174,8 @@ fn findings_commands_list_and_show_records() {
             .expect("finding");
 
         let (output, _) = findings::findings(findings::RunsFindingsArgs {
-            run_id: run.id,
+            command: None,
+            run_id: Some(run.id),
             tool: Some("lint".to_string()),
             file: Some("src/foo.php".to_string()),
             fingerprint: None,

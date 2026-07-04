@@ -193,15 +193,21 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
 }
 
 fn attach_audit_actionable(output: &mut AuditCommandOutput, run_id: Option<String>) {
-    let Some(run_id) = run_id else { return; };
+    let Some(run_id) = run_id else {
+        return;
+    };
     let actionable = Some(actionable_metadata_value_for_run_ref(
         run_id,
         "audit",
         "homeboy-audit",
     ));
     match output {
-        AuditCommandOutput::Full { actionable: slot, .. }
-        | AuditCommandOutput::Compared { actionable: slot, .. } => *slot = actionable,
+        AuditCommandOutput::Full {
+            actionable: slot, ..
+        }
+        | AuditCommandOutput::Compared {
+            actionable: slot, ..
+        } => *slot = actionable,
         AuditCommandOutput::Conventions { .. }
         | AuditCommandOutput::BaselineSaved { .. }
         | AuditCommandOutput::Summary(_) => {}

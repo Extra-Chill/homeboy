@@ -66,5 +66,5 @@ paths are covered or missing per component.
 ## Related
 
 - [review](review.md)
-- [issues](issues.md)
+- [runs](runs.md)
 - [JSON output contract](../architecture/output-system.md)

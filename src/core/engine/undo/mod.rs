@@ -3,7 +3,7 @@
 //! Two subsystems sharing common primitives:
 //! - **Rollback** (`InMemoryRollback`): Ephemeral in-memory rollback for per-chunk
 //!   verification during fixer operations.
-//! - **Snapshot** (`UndoSnapshot`): Persistent disk-based undo for `homeboy undo`.
+//! - **Snapshot** (`UndoSnapshot`): Persistent disk-based undo for `homeboy refactor undo`.
 //!   Saves file state before `--write` operations, restores on demand.
 //!
 //! Both use [`FileStateEntry`] for capture and [`restore_entries`] for restore

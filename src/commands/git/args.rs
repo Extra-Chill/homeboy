@@ -94,7 +94,7 @@ pub(super) enum IssueCommand {
         number: u64,
 
         /// Close reason: completed (default) or not-planned. Use
-        /// `not-planned` to suppress re-filing by `homeboy issues reconcile`
+        /// `not-planned` to suppress re-filing by `homeboy runs findings reconcile`
         /// — the GitHub-native signal for "we have decided not to fix this."
         #[arg(short, long, default_value = "completed")]
         reason: String,

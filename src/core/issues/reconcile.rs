@@ -383,7 +383,7 @@ fn parse_issue_key(body: &str) -> Option<(String, String, String)> {
 fn close_resolved_comment(label: &str) -> String {
     format!(
         "All **{}** findings have been resolved. Closing automatically.\n\n\
-         Resolved by `homeboy issues reconcile`. If findings reappear, a new \
+         Resolved by `homeboy runs findings reconcile`. If findings reappear, a new \
          issue will be filed.",
         label
     )
@@ -391,7 +391,7 @@ fn close_resolved_comment(label: &str) -> String {
 
 fn close_dedupe_comment(keep: u64) -> String {
     format!(
-        "Closing as duplicate of #{} — consolidated by `homeboy issues reconcile`.\n\n\
+        "Closing as duplicate of #{} — consolidated by `homeboy runs findings reconcile`.\n\n\
          Going forward, a single issue per category is maintained and updated \
          on each CI run.",
         keep

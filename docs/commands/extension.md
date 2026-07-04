@@ -254,18 +254,18 @@ Extensions can provide their own top-level CLI commands and documentation topics
 Discover what’s available on your machine:
 
 ```sh
-homeboy docs list
+homeboy self docs list
 ```
 
 Render an extension-provided topic:
 
 ```sh
-homeboy docs <topic>
+homeboy self docs <topic>
 ```
 
 Because extension commands and docs are installed locally, the core CLI documentation stays focused on the extension system rather than any specific extension-provided commands.
 
 ## Related
 
-- [docs](docs.md)
+- [self](self.md)
 - [project](project.md)

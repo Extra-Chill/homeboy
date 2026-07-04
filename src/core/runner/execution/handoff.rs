@@ -46,7 +46,7 @@ pub(crate) fn lab_offload_handoff_hints(
             "Persisted run id: `{run_id}`. Status: `homeboy runs show {run_id}`; evidence: `homeboy runs evidence {run_id}`; artifacts: `homeboy runs artifacts {run_id}`."
         ));
         hints.push(
-            "If the command succeeded but those artifact readers show zero artifacts, promote or attach the produced output directory before using the run as review evidence; see `homeboy docs operators/artifact-loop-runner-matrix`.".to_string(),
+            "If the command succeeded but those artifact readers show zero artifacts, promote or attach the produced output directory before using the run as review evidence; see `homeboy self docs operators/artifact-loop-runner-matrix`.".to_string(),
         );
     } else if state == DaemonJobHandoffState::InFlight {
         hints.push(format!(

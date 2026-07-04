@@ -227,7 +227,7 @@ With `--baseline` comparison:
 
 ## Related
 
-- [docs](docs.md) — embedded documentation topics and codebase maps
+- [self](self.md) — embedded documentation topics and codebase maps
 - [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [lint](lint.md) — extension-driven code style validation
 - [JSON output contract](../architecture/output-system.md)

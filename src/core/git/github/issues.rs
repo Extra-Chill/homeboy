@@ -139,7 +139,7 @@ pub fn issue_close(
 ///
 /// At least one of `title`, `body`, `add_labels`, or `remove_labels` must be
 /// provided. Mirrors `gh issue edit <n> [--title ...] [--body ...]
-/// [--add-label ...] [--remove-label ...]`. Used by `homeboy issues reconcile`
+/// [--add-label ...] [--remove-label ...]`. Used by `homeboy runs findings reconcile`
 /// to refresh the body of existing issues (open OR closed) so the latest
 /// finding count and run link stay visible without duplicating the issue.
 pub fn issue_edit(

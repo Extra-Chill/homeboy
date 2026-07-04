@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::core::code_audit::FindingConfidence;
 use crate::core::finding::HomeboyFinding;
 
-/// Canonical input shape consumed by `homeboy issues reconcile`.
+/// Canonical input shape consumed by `homeboy runs findings reconcile`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReconcileFindingsInput {
     pub command: String,

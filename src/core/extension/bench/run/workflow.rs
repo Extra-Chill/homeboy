@@ -417,7 +417,7 @@ pub fn run_main_bench_workflow(
     for diagnostic in &diagnostics {
         hints.push(format_diagnostic_hint(diagnostic));
     }
-    hints.push("Full options: homeboy docs commands/bench".to_string());
+    hints.push("Full options: homeboy self docs commands/bench".to_string());
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
 

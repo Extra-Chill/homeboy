@@ -890,7 +890,7 @@ impl Error {
             "Documentation topic not found",
             serde_json::json!({ "topic": topic.into() }),
         )
-        .with_hint("Run 'homeboy docs list' to see available topics")
+        .with_hint("Run 'homeboy self docs list' to see available topics")
         .with_hint("Topics use path format: 'commands/deploy', 'commands/changes'")
     }
 

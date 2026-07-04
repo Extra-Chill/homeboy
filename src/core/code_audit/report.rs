@@ -112,7 +112,10 @@ pub enum AuditCommandOutput {
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension_phase_timings: Vec<ExtensionPhaseTiming>,
-        #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "_homeboy_actionable",
+            skip_serializing_if = "Option::is_none"
+        )]
         actionable: Option<Value>,
     },
 
@@ -148,7 +151,10 @@ pub enum AuditCommandOutput {
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension_phase_timings: Vec<ExtensionPhaseTiming>,
-        #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "_homeboy_actionable",
+            skip_serializing_if = "Option::is_none"
+        )]
         actionable: Option<Value>,
     },
 

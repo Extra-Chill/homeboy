@@ -378,13 +378,17 @@ mod tests {
     #[test]
     fn manifest_dispatches_as_json_workspace_output() {
         let (result, exit_code) = dispatch(
-            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            Commands::Contract(crate::commands::contract::ContractArgs {
+                command: crate::commands::contract::ContractCommand::Manifest(
+                    crate::commands::manifest::ManifestArgs {},
+                ),
+            }),
             &GlobalArgs {},
         );
 
         assert_eq!(exit_code, 0);
         let value = result.expect("manifest should dispatch as JSON");
-        assert_eq!(value["command"], "manifest");
+        assert_eq!(value["command"], "contract.manifest");
         assert!(value["commands"].is_array());
     }
 
@@ -523,8 +527,12 @@ mod tests {
     #[test]
     fn json_dispatch_family_comes_from_command_registry() {
         assert_eq!(
-            dispatch_family(&Commands::Manifest(
-                crate::commands::manifest::ManifestArgs {}
+            dispatch_family(&Commands::Contract(
+                crate::commands::contract::ContractArgs {
+                    command: crate::commands::contract::ContractCommand::Manifest(
+                        crate::commands::manifest::ManifestArgs {},
+                    ),
+                }
             )),
             CommandDispatchFamily::Workspace
         );

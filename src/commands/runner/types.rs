@@ -290,7 +290,10 @@ pub enum RunnerCommandOutput {
 pub struct RunnerExecutionCommandOutput {
     #[serde(flatten)]
     pub output: RunnerExecOutput,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<CommandActionableMetadata>,
 }
 

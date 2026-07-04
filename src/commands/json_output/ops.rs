@@ -2,8 +2,8 @@ use crate::cli_surface::Commands;
 
 use super::{map, JsonRun};
 use crate::commands::{
-    api, ci, daemon, db, deploy, file, git, issues, logs, self_cmd, server, ssh, status, triage,
-    upgrade, GlobalArgs,
+    api, auth, ci, daemon, db, deploy, file, git, http, logs, self_cmd, server, ssh, status,
+    triage, upgrade, GlobalArgs,
 };
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
@@ -20,7 +20,6 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Deploy(args) => map(deploy::run(args, global)),
         Commands::Daemon(args) => map(daemon::run(args, global)),
         Commands::Git(args) => map(git::run(args, global)),
-        Commands::Issues(args) => map(issues::run(args, global)),
         Commands::SelfCmd(args) => map(self_cmd::run(args, global)),
         Commands::Api(args) => map(api::run(args, global)),
         Commands::Upgrade(args) => map(upgrade::run(args, global)),

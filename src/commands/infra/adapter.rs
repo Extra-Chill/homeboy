@@ -177,10 +177,10 @@ mod tests {
         .is_ok());
 
         assert!(command_adapter(
-            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            parsed_command(&["homeboy", "contract", "manifest"]),
             CommandOutputFileMode::None,
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]

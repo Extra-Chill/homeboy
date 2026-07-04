@@ -8,7 +8,7 @@ Reference pages are intentionally dense. If you are deciding what to run next, s
 
 - [Root command and global flags](cli/homeboy-root-command.md)
 - [Command index](../commands/commands-index.md)
-- [Manifest command](../commands/manifest.md)
+- [Contract manifest command](../commands/contract.md)
 
 ## Configuration
 

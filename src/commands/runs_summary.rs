@@ -156,7 +156,7 @@ fn artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
         return vec![
             "Artifacts: none recorded".to_string(),
             format!(
-                "  hint: if this run produced files that reviewers need, promote or attach the output directory before sharing evidence; see `homeboy docs operators/artifact-loop-runner-matrix` and `homeboy runs evidence {run_id}`."
+                "  hint: if this run produced files that reviewers need, promote or attach the output directory before sharing evidence; see `homeboy self docs operators/artifact-loop-runner-matrix` and `homeboy runs evidence {run_id}`."
             ),
         ];
     }

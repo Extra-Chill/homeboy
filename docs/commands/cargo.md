@@ -19,7 +19,7 @@ through the project/extension layer.
 If `homeboy cargo ...` is unavailable, install or link the extension that
 provides the Cargo CLI tool. Static core docs describe the extension contract;
 availability in a specific installation depends on installed extension metadata
-and can be confirmed with `homeboy --help` or `homeboy docs list`.
+and can be confirmed with `homeboy --help` or `homeboy self docs list`.
 
 ## Related
 
