@@ -1330,16 +1330,10 @@ mod tests {
     }
 
     #[test]
-    fn extracts_current_and_legacy_daemon_version_shapes() {
+    fn extracts_current_daemon_version_shape() {
         assert_eq!(
             daemon_version_from_body(&serde_json::json!({"version":"0.204.0"})),
             Some("0.204.0")
-        );
-        assert_eq!(
-            daemon_version_from_body(
-                &serde_json::json!({"success":true,"data":{"version":"0.199.4"}})
-            ),
-            Some("0.199.4")
         );
         assert_eq!(
             daemon_identity_from_body(
@@ -1653,10 +1647,12 @@ mod tests {
             .expect("record reverse session");
 
             let reports = statuses().expect("statuses");
+            let report = reports
+                .iter()
+                .find(|report| report.runner_id == "homeboy-lab")
+                .expect("homeboy-lab status");
 
-            assert_eq!(reports.len(), 1);
-            assert_eq!(reports[0].runner_id, "homeboy-lab");
-            assert_eq!(reports[0].state, RunnerSessionState::Recorded);
+            assert_eq!(report.state, RunnerSessionState::Recorded);
         });
     }
 

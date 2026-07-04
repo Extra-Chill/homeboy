@@ -214,20 +214,12 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
 }
 
 pub(super) fn daemon_version_from_body(body: &Value) -> Option<&str> {
-    body.get("version").and_then(Value::as_str).or_else(|| {
-        body.get("data")
-            .and_then(|data| data.get("version"))
-            .and_then(Value::as_str)
-    })
+    body.get("version").and_then(Value::as_str)
 }
 
 pub(super) fn daemon_identity_from_body(body: &Value) -> Option<&str> {
     body.pointer("/build_identity/display")
         .and_then(Value::as_str)
-        .or_else(|| {
-            body.pointer("/data/build_identity/display")
-                .and_then(Value::as_str)
-        })
 }
 
 #[derive(Debug, Deserialize)]

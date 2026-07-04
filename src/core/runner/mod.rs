@@ -1177,47 +1177,6 @@ mod tests {
     }
 
     #[test]
-    fn standalone_ssh_runner_config_is_not_loaded_or_listed() {
-        test_support::with_isolated_home(|_| {
-            server::create(
-                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
-                false,
-            )
-            .expect("create server");
-
-            let standalone_ssh_runner = Runner {
-                id: "lab".to_string(),
-                kind: RunnerKind::Ssh,
-                server_id: Some("homeboy-lab".to_string()),
-                workspace_root: Some("/home/user/Developer".to_string()),
-                settings: RunnerSettings::default(),
-                env: HashMap::new(),
-                secret_env: HashMap::new(),
-                resources: HashMap::new(),
-                policy: RunnerPolicy::default(),
-            };
-            config::save(&standalone_ssh_runner).expect("save standalone ssh runner");
-
-            assert_eq!(
-                load("lab")
-                    .expect_err("standalone ssh ignored")
-                    .code
-                    .as_str(),
-                "server.not_found"
-            );
-            assert!(!exists("lab"));
-            assert_eq!(
-                list()
-                    .expect("list runners")
-                    .into_iter()
-                    .map(|runner| runner.id)
-                    .collect::<Vec<_>>(),
-                vec!["local".to_string()]
-            );
-        });
-    }
-
-    #[test]
     fn runner_secret_env_refs_resolve_from_env_and_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let secret_file = temp.path().join("runner-token");

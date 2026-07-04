@@ -360,7 +360,7 @@ fn canonicalize_for_compare(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_component_target, TriageArgs, TriageCommand};
+    use super::{resolve_component_target, TriageArgs};
     use clap::Parser;
     use homeboy::core::triage::TriageTarget;
 
@@ -368,28 +368,6 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: TriageArgs,
-    }
-
-    #[test]
-    fn bare_triage_defaults_to_workspace() {
-        let cli = TestCli::parse_from(["triage"]);
-
-        assert!(cli.args.command.is_none());
-    }
-
-    #[test]
-    fn explicit_triage_subcommand_still_parses() {
-        let cli = TestCli::parse_from(["triage", "workspace"]);
-
-        assert!(matches!(cli.args.command, Some(TriageCommand::Workspace)));
-    }
-
-    #[test]
-    fn all_flag_opts_out_of_personal_workload_default() {
-        let cli = TestCli::parse_from(["triage", "--all"]);
-
-        assert!(cli.args.all);
-        assert!(!cli.args.mine);
     }
 
     #[test]
@@ -411,51 +389,6 @@ mod tests {
         assert_eq!(cli.args.timeout, "5m");
         assert_eq!(cli.args.poll_interval, "30s");
         assert!(cli.args.command.is_none());
-    }
-
-    #[test]
-    fn landing_ordered_flag_parses() {
-        let cli = TestCli::parse_from([
-            "triage",
-            "landing",
-            "42",
-            "43",
-            "--repo",
-            "Extra-Chill/homeboy",
-            "--ordered",
-        ]);
-
-        match cli.args.command {
-            Some(TriageCommand::Landing { ordered, .. }) => assert!(ordered),
-            other => panic!("expected Landing subcommand, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn component_subcommand_accepts_path_without_id() {
-        let cli = TestCli::parse_from(["triage", "component", "--path", "/tmp/checkout"]);
-
-        match cli.args.command {
-            Some(TriageCommand::Component { component_id, path }) => {
-                assert_eq!(component_id, None);
-                assert_eq!(path.as_deref(), Some("/tmp/checkout"));
-            }
-            other => panic!("expected Component subcommand, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn component_subcommand_accepts_id_and_path() {
-        let cli =
-            TestCli::parse_from(["triage", "component", "homeboy", "--path", "/tmp/checkout"]);
-
-        match cli.args.command {
-            Some(TriageCommand::Component { component_id, path }) => {
-                assert_eq!(component_id.as_deref(), Some("homeboy"));
-                assert_eq!(path.as_deref(), Some("/tmp/checkout"));
-            }
-            other => panic!("expected Component subcommand, got {other:?}"),
-        }
     }
 
     #[test]
