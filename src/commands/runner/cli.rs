@@ -478,6 +478,10 @@ pub(super) enum RunnerBrokerCommand {
         /// Grant the worker scope (register/claim/event/finish/heartbeat)
         #[arg(long)]
         work: bool,
+
+        /// Store only on this controller; skip installing broker_auth.json on an SSH runner host
+        #[arg(long)]
+        no_install: bool,
     },
     /// Revoke a paired credential by id
     Revoke {
