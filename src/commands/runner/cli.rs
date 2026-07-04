@@ -14,6 +14,19 @@ pub struct RunnerArgs {
     pub(super) command: RunnerCommand,
 }
 
+impl RunnerArgs {
+    pub fn compact_exec_stdout(&self) -> bool {
+        matches!(
+            &self.command,
+            RunnerCommand::Exec {
+                json: false,
+                raw: false,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Subcommand)]
 pub(super) enum RunnerCommand {
     /// Register a local or SSH execution runner
@@ -315,6 +328,10 @@ pub(super) enum RunnerCommand {
         /// Relative paths are resolved from the runner exec cwd. Repeat for multiple summaries.
         #[arg(long = "summary", value_name = "PATH")]
         summary_outputs: Vec<String>,
+
+        /// Print the full structured runner execution envelope to stdout.
+        #[arg(long)]
+        json: bool,
 
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.
