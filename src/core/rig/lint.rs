@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use super::install::read_source_metadata;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
@@ -138,7 +139,54 @@ fn package_lint_root(rig: &RigSpec) -> Option<PathBuf> {
 }
 
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if let Some(authored_files) = collect_git_authored_files(root)? {
+        files.extend(authored_files);
+        return Ok(());
+    }
+
     collect_files_inner(root, files, "read rig package directory")
+}
+
+fn collect_git_authored_files(root: &Path) -> Result<Option<Vec<PathBuf>>> {
+    let Some(git_root) = crate::core::git::repo_root(root) else {
+        return Ok(None);
+    };
+
+    let git_root = git_root.canonicalize().unwrap_or(git_root);
+    let root = root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("canonicalize {}", root.display())),
+        )
+    })?;
+    let Ok(relative_root) = root.strip_prefix(&git_root) else {
+        return Ok(None);
+    };
+    let pathspec = if relative_root.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        relative_root.to_string_lossy().to_string()
+    };
+    let output = Command::new("git")
+        .args(["ls-files", "-z", "--", &pathspec])
+        .current_dir(&git_root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| Error::internal_io(error.to_string(), Some("git ls-files".into())))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let files = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .map(|entry| git_root.join(entry))
+        .filter(|path| path.is_file())
+        .filter(|path| !has_ignored_directory(root.as_path(), path))
+        .collect();
+    Ok(Some(files))
 }
 
 fn collect_files_inner(
@@ -170,6 +218,18 @@ fn ignored_directory(name: &OsStr) -> bool {
     IGNORED_DIRECTORIES
         .iter()
         .any(|ignored| name == OsStr::new(ignored))
+}
+
+fn has_ignored_directory(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .any(|component| ignored_directory(component.as_os_str()))
+        })
+        .unwrap_or(false)
 }
 
 fn conflict_marker_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -639,6 +699,31 @@ fn display_relative(root: &Path, file: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run git fixture command");
+
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn portability_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("paths are portable"))
+            .expect("portability step")
+    }
 
     #[test]
     fn aggregate_step_reports_failure_details() {
@@ -738,6 +823,55 @@ mod tests {
         let error = portability_step.error.as_ref().expect("error");
         assert!(error.contains("~/Developer"));
         assert!(error.contains("shared_paths[0]"));
+    }
+
+    #[test]
+    fn package_lint_ignores_gitignored_untracked_generated_files() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        git(temp.path(), &["init", "--quiet"]);
+        let rig_dir = temp.path().join("rigs").join("portable");
+        let artifact_dir = temp.path().join("artifacts");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        fs::write(temp.path().join(".gitignore"), "artifacts/\n").expect("write gitignore");
+        fs::write(rig_dir.join("rig.json"), r#"{ "id": "portable" }"#).expect("write rig");
+        fs::write(
+            artifact_dir.join("run.homeboy-bench.json"),
+            r#"{ "path": "/Users/chubes/Developer/static-site-importer" }"#,
+        )
+        .expect("write generated artifact");
+        git(
+            temp.path(),
+            &["add", ".gitignore", "rigs/portable/rig.json"],
+        );
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        assert_eq!(portability_step(&outcome).status, "pass");
+    }
+
+    #[test]
+    fn package_lint_reports_tracked_authored_portability_failures() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        git(temp.path(), &["init", "--quiet"]);
+        let rig_dir = temp.path().join("rigs").join("portable");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "id": "portable", "pipeline": { "check": [{ "command": "ls /Users/chubes/project" }] } }"#,
+        )
+        .expect("write rig");
+        git(temp.path(), &["add", "rigs/portable/rig.json"]);
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let portability_step = portability_step(&outcome);
+
+        assert_eq!(portability_step.status, "fail");
+        assert!(portability_step
+            .error
+            .as_ref()
+            .expect("portability error")
+            .contains("/Users paths"));
     }
 
     #[test]
