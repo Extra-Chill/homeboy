@@ -15,8 +15,10 @@ pub use trace_config::{
     TraceToolchainProvenanceConfig,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homeboy: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

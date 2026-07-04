@@ -4,6 +4,7 @@ use super::execution::{extension_ready_status, is_extension_compatible};
 use super::lifecycle::read_source_revision;
 use super::manifest::ActionType;
 use super::registry::{broken_extension_links, is_extension_linked, load_all_extensions};
+use super::{evaluate_core_compatibility, CoreCompatibilityReport};
 
 /// Summary of an extension for list views.
 #[derive(Debug, Clone, Serialize)]
@@ -14,6 +15,7 @@ pub struct ExtensionSummary {
     pub description: String,
     pub runtime: String,
     pub compatible: bool,
+    pub core_compatibility: CoreCompatibilityReport,
     pub ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_reason: Option<String>,
@@ -88,6 +90,13 @@ pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<Ex
                 .map(|_| true);
 
             let source_revision = read_source_revision(&ext.id);
+            let core_compatibility = evaluate_core_compatibility(
+                ext.requires
+                    .as_ref()
+                    .and_then(|requires| requires.homeboy.as_deref()),
+                source_revision.clone(),
+            )
+            .unwrap_or_else(|_| CoreCompatibilityReport::undeclared(source_revision.clone()));
 
             ExtensionSummary {
                 id: ext.id.clone(),
@@ -105,6 +114,7 @@ pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<Ex
                     "platform".to_string()
                 },
                 compatible,
+                core_compatibility,
                 ready: ready_status.ready,
                 ready_reason: ready_status.reason,
                 ready_detail: ready_status.detail,
@@ -131,6 +141,7 @@ pub fn list_summaries(project: Option<&crate::core::project::Project>) -> Vec<Ex
             description: String::new(),
             runtime: String::new(),
             compatible: false,
+            core_compatibility: CoreCompatibilityReport::undeclared(None),
             ready: false,
             ready_reason: Some("target_missing".to_string()),
             ready_detail: Some(format!("Linked target does not exist: {}", target)),

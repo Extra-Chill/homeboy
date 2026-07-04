@@ -23,6 +23,7 @@ use super::env_provider;
 use super::exec_context;
 use super::load_extension;
 use super::manifest::{ExtensionManifest, RuntimeConfig};
+use super::read_source_revision;
 use super::runner_contract::RunnerStepFilter;
 use super::runtime_helper;
 use super::scope::ExtensionScope;
@@ -572,6 +573,15 @@ pub(crate) fn prepare_capability_run(
     }
 
     let manifest = load_extension_manifest_from_dir(&execution.extension_path)?;
+    super::validate_core_compatibility(
+        "extension",
+        &execution.extension_id,
+        manifest
+            .get("requires")
+            .and_then(|requires| requires.get("homeboy"))
+            .and_then(serde_json::Value::as_str),
+        read_source_revision(&execution.extension_id),
+    )?;
     let settings_json = build_settings_json_from_manifest(
         &manifest,
         &execution.settings,
@@ -725,6 +735,15 @@ fn execute_extension_runtime(
     // - Direct execution cannot handle bash scripts or shell features
     // See executor.rs for detailed execution strategy decision tree
     let extension = load_extension(extension_id)?;
+    super::validate_core_compatibility(
+        "extension",
+        extension_id,
+        extension
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
+        read_source_revision(extension_id),
+    )?;
     let runtime = extension_runtime(&extension)?;
     let run_command = runtime.run_command.as_ref().ok_or_else(|| {
         Error::config(format!(
