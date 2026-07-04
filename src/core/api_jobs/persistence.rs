@@ -71,8 +71,37 @@ pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Res
             Some("serialize daemon job store".to_string()),
         )
     })?;
-    fs::write(path, body)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("write {}", path.display()))))
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jobs.json"),
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    fs::write(&temp_path, body).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("write {}", temp_path.display())),
+        )
+    })?;
+    if let Ok(file) = fs::File::open(&temp_path) {
+        file.sync_all().map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("sync {}", temp_path.display())))
+        })?;
+    }
+    fs::rename(&temp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "rename {} to {}",
+                temp_path.display(),
+                path.display()
+            )),
+        )
+    })
 }
 
 pub(super) fn reconcile_stale_jobs(

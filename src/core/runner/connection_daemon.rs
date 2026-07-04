@@ -13,6 +13,7 @@ use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_start,
     remote_daemon_stop, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
 };
+use crate::core::runner::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::core::runner::daemon_freshness::repair_or_fail;
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
@@ -216,8 +217,10 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
         .send()
         .map_err(|err| format!("query remote daemon version: {err}"))?;
     let status_code = response.status().as_u16();
-    let body: Value = response
-        .json()
+    let body_text = response
+        .text()
+        .map_err(|err| format!("read remote daemon version response: {err}"))?;
+    let body: Value = parse_json_from_mixed_stdout(&body_text)
         .map_err(|err| format!("parse remote daemon version response: {err}"))?;
     if status_code >= 400 {
         return Err(format!(

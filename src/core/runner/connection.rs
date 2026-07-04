@@ -1110,7 +1110,29 @@ mod remote_daemon {
     }
 
     pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
-        serde_json::from_str(stdout.trim())
+        parse_json_from_mixed_stdout(stdout)
+    }
+
+    pub(crate) fn parse_json_from_mixed_stdout<T>(stdout: &str) -> serde_json::Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        match serde_json::from_str(stdout.trim()) {
+            Ok(value) => Ok(value),
+            Err(original) => {
+                for (index, ch) in stdout.char_indices() {
+                    if ch != '{' {
+                        continue;
+                    }
+                    let mut stream =
+                        serde_json::Deserializer::from_str(&stdout[index..]).into_iter();
+                    if let Some(Ok(value)) = stream.next() {
+                        return Ok(value);
+                    }
+                }
+                Err(original)
+            }
+        }
     }
 
     pub(super) fn parse_loopback_daemon_addr(address: &str) -> std::result::Result<SocketAddr, ()> {
@@ -1341,6 +1363,24 @@ mod tests {
                 .get("address")
                 .unwrap(),
             "127.0.0.1:49152"
+        );
+    }
+
+    #[test]
+    fn parses_daemon_envelope_after_noisy_stdout_preamble() {
+        let envelope = parse_envelope(
+            "Setting up Swift test infrastructure...\nSwift unavailable; Swift extension installed but not ready...\n{\"success\":true,\"data\":{\"action\":\"start\",\"address\":\"127.0.0.1:49152\",\"pid\":123,\"lease_id\":\"lease-1\"}}\n",
+        )
+        .expect("parse envelope after preamble");
+
+        assert!(envelope.success);
+        assert_eq!(
+            envelope
+                .data
+                .unwrap()
+                .get("address")
+                .and_then(Value::as_str),
+            Some("127.0.0.1:49152")
         );
     }
 
