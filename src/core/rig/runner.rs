@@ -199,12 +199,21 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
 /// Run the `check` pipeline. Unlike `up`, does NOT fail-fast — reports every
 /// failing check so the user can fix them all in one pass.
 pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
+    run_check_with_settings(rig, &[])
+}
+
+/// Run the `check` pipeline with invocation settings materialized as
+/// `HOMEBOY_SETTINGS_<KEY>` env vars for command expansion/execution.
+pub fn run_check_with_settings(
+    rig: &RigSpec,
+    settings: &[(String, String)],
+) -> Result<CheckReport> {
     let observer = RigRunObserver::start(rig, "check");
 
     let mut result = (|| {
         let requirements = evaluate_requirements(rig);
         let package_lint = run_package_lint(rig)?;
-        let check_outcome = run_pipeline(rig, "check", false)?;
+        let check_outcome = run_pipeline_with_settings(rig, "check", false, settings)?;
         let outcome = merge_check_outcomes(vec![requirements, package_lint, check_outcome]);
 
         let mut state = RigState::load(&rig.id)?;
@@ -285,7 +294,17 @@ fn merge_check_outcomes(outcomes: Vec<PipelineOutcome>) -> PipelineOutcome {
 /// This intentionally does not update `last_check`: the report is a scoped
 /// command preflight, not proof that the whole rig passed `homeboy rig check`.
 pub fn run_check_groups(rig: &RigSpec, groups: &[String]) -> Result<CheckReport> {
-    let outcome = run_pipeline_check_groups(rig, groups, false)?;
+    run_check_groups_with_settings(rig, groups, &[])
+}
+
+/// Run grouped check-pipeline steps with invocation settings materialized as
+/// `HOMEBOY_SETTINGS_<KEY>` env vars for command expansion/execution.
+pub fn run_check_groups_with_settings(
+    rig: &RigSpec,
+    groups: &[String],
+    settings: &[(String, String)],
+) -> Result<CheckReport> {
+    let outcome = run_pipeline_check_groups(rig, groups, false, settings)?;
 
     Ok(CheckReport {
         rig_id: rig.id.clone(),
@@ -566,9 +585,15 @@ fn merge_prepare_outcomes(
 /// service the rig knows about (belt + suspenders — spec authors sometimes
 /// forget to add `service stop` steps to `down`).
 pub fn run_down(rig: &RigSpec) -> Result<DownReport> {
-    let _lease = acquire_active_run_lease(rig, "down")?;
+    run_down_with_settings(rig, &[])
+}
+
+/// Tear down a rig with invocation settings available to resource expansion and
+/// the `down` pipeline as `HOMEBOY_SETTINGS_<KEY>` env vars.
+pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> Result<DownReport> {
+    let _lease = super::lease::acquire_active_run_lease_with_settings(rig, "down", settings)?;
     let pipeline = if rig.pipeline.contains_key("down") {
-        Some(run_pipeline(rig, "down", false)?)
+        Some(run_pipeline_with_settings(rig, "down", false, settings)?)
     } else {
         None
     };

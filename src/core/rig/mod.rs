@@ -56,15 +56,17 @@ pub use install::{
     StackSourceMetadata,
 };
 pub use lease::{
-    acquire_active_run_lease, active_run_leases, release_active_run_lease, ActiveRigRunLease,
-    ReleaseLeaseOutcome, RigRunLease, RIG_LEASE_TTL_ENV,
+    acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
+    release_active_run_lease, ActiveRigRunLease, ReleaseLeaseOutcome, RigRunLease,
+    RIG_LEASE_TTL_ENV,
 };
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use resource_lifecycle::{
     rig_resource_lifecycle_index, rig_resource_lifecycle_records, RigResourceLifecycleOptions,
 };
 pub use runner::{
-    head_sha_and_branch, run_bench_prepare, run_check, run_check_groups, run_down,
+    head_sha_and_branch, run_bench_prepare, run_check, run_check_groups,
+    run_check_groups_with_settings, run_check_with_settings, run_down, run_down_with_settings,
     run_fuzz_prepare, run_lint, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport,
     CheckReport, DownReport, FuzzPrepareReport, RepairReport, RepairResourceReport,
     RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,

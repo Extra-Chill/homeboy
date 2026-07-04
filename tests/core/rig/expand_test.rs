@@ -4,7 +4,9 @@
 //! public function of the module; additional cases cover edge conditions.
 
 use crate::core::paths;
-use crate::core::rig::expand::{expand_resources, expand_vars};
+use crate::core::rig::expand::{
+    expand_resources, expand_resources_with_settings, expand_vars, expand_vars_with_settings,
+};
 use crate::core::rig::spec::{
     ComponentSpec, DiscoverSpec, RigSpec, ServiceKind, ServiceSpec, SymlinkSpec,
 };
@@ -134,6 +136,26 @@ fn test_expand_vars_env_variable() {
 }
 
 #[test]
+fn test_expand_vars_settings_override_inherited_env() {
+    let previous = std::env::var("HOMEBOY_SETTINGS_RIG_NAMESPACE").ok();
+    std::env::set_var("HOMEBOY_SETTINGS_RIG_NAMESPACE", "inherited");
+    let rig = rig_with("t", HashMap::new());
+
+    let expanded = expand_vars_with_settings(
+        &rig,
+        "ns=${env.HOMEBOY_SETTINGS_RIG_NAMESPACE}",
+        &[("rig_namespace".to_string(), "cli".to_string())],
+    );
+
+    match previous {
+        Some(value) => std::env::set_var("HOMEBOY_SETTINGS_RIG_NAMESPACE", value),
+        None => std::env::remove_var("HOMEBOY_SETTINGS_RIG_NAMESPACE"),
+    }
+
+    assert_eq!(expanded, "ns=cli");
+}
+
+#[test]
 fn test_expand_vars_unknown_token_is_literal() {
     let rig = rig_with("t", HashMap::new());
     assert_eq!(expand_vars(&rig, "${unknown.thing}"), "${unknown.thing}");
@@ -212,6 +234,22 @@ fn test_expand_resources_expands_string_entries() {
         assert_eq!(resources.process_patterns, vec!["app-server-child.mjs"]);
         assert_eq!(resources.paths, expected_paths);
     });
+}
+
+#[test]
+fn test_expand_resources_with_settings_expands_exclusive_and_paths() {
+    let mut rig = rig_with("settings-resources", HashMap::new());
+    rig.resources.exclusive = vec!["fixture:${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()];
+    rig.resources.paths =
+        vec!["/tmp/fixture-${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()];
+
+    let resources = expand_resources_with_settings(
+        &rig,
+        &[("fixture_namespace".to_string(), "bench-a".to_string())],
+    );
+
+    assert_eq!(resources.exclusive, vec!["fixture:bench-a"]);
+    assert_eq!(resources.paths, vec!["/tmp/fixture-bench-a"]);
 }
 
 #[test]

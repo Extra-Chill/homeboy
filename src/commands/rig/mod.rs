@@ -156,6 +156,8 @@ enum RigCommand {
     Down {
         /// Rig ID
         rig_id: String,
+        #[command(flatten)]
+        setting_args: SettingArgs,
     },
     /// Repair safe declared drift without running the full `up` pipeline
     Repair {
@@ -322,7 +324,10 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
         RigCommand::Lint { target, id, all } => lint(&target, id.as_deref(), all),
         RigCommand::Package { command } => package(command),
-        RigCommand::Down { rig_id } => down(&rig_id),
+        RigCommand::Down {
+            rig_id,
+            setting_args,
+        } => down(&rig_id, &setting_args),
         RigCommand::Repair { rig_id } => repair(&rig_id),
         RigCommand::Sync { rig_id, dry_run } => sync(&rig_id, dry_run),
         RigCommand::Run(args) => run_profile(args),
@@ -791,9 +796,10 @@ fn apply_check_path_override(rig: &mut rig::RigSpec, path: &str) -> homeboy::cor
     Ok(())
 }
 
-fn down(rig_id: &str) -> CmdResult<RigCommandOutput> {
+fn down(rig_id: &str, setting_args: &SettingArgs) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(rig_id)?;
-    let report = rig::run_down(&rig)?;
+    let settings = materialized_setting_env_args(setting_args)?;
+    let report = rig::run_down_with_settings(&rig, &settings)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         RigCommandOutput::Down(RigDownOutput {
@@ -802,6 +808,26 @@ fn down(rig_id: &str) -> CmdResult<RigCommandOutput> {
         }),
         exit_code,
     ))
+}
+
+fn materialized_setting_env_args(
+    setting_args: &SettingArgs,
+) -> homeboy::core::Result<Vec<(String, String)>> {
+    let mut settings = Vec::new();
+    settings.extend(
+        setting_args
+            .settings_profile_json_overrides()?
+            .into_iter()
+            .map(|(key, value)| (key, value.to_string())),
+    );
+    settings.extend(setting_args.settings_overrides()?);
+    settings.extend(
+        setting_args
+            .settings_json_overrides()?
+            .into_iter()
+            .map(|(key, value)| (key, value.to_string())),
+    );
+    Ok(settings)
 }
 
 fn repair(rig_id: &str) -> CmdResult<RigCommandOutput> {

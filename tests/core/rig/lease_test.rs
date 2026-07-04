@@ -2,8 +2,8 @@
 
 use crate::core::error::ErrorCode;
 use crate::core::rig::lease::{
-    acquire_active_run_lease, active_run_leases, release_active_run_lease, ReleaseLeaseOutcome,
-    RIG_LEASE_TTL_ENV,
+    acquire_active_run_lease, acquire_active_run_lease_with_settings, active_run_leases,
+    release_active_run_lease, ReleaseLeaseOutcome, RIG_LEASE_TTL_ENV,
 };
 use crate::core::rig::spec::{RigResourcesSpec, RigSpec};
 use crate::core::rig::{run_up, RigRunLease};
@@ -152,6 +152,32 @@ fn test_acquire_active_run_lease_blocks_env_expanded_exclusive_resources() {
 
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
         assert!(conflict.message.contains("studio-runtime:bench-a"));
+
+        drop(lease);
+    });
+}
+
+#[test]
+fn test_acquire_active_run_lease_expands_settings_in_resources() {
+    with_isolated_home(|_| {
+        let resources = RigResourcesSpec {
+            exclusive: vec!["fixture:${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
+            paths: vec!["/tmp/fixture-${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
+            ports: Vec::new(),
+            process_patterns: Vec::new(),
+        };
+        let studio = rig("studio", resources.clone());
+        let studio_bfb = rig("studio-bfb", resources);
+        let settings = vec![("fixture_namespace".to_string(), "bench-a".to_string())];
+
+        let lease = acquire_active_run_lease_with_settings(&studio, "bench", &settings)
+            .expect("first lease")
+            .expect("resourceful rig leases");
+        let conflict = acquire_active_run_lease_with_settings(&studio_bfb, "bench", &settings)
+            .expect_err("settings-expanded token conflicts");
+
+        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
+        assert!(conflict.message.contains("fixture:bench-a"));
 
         drop(lease);
     });

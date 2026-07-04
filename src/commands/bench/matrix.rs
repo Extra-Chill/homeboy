@@ -46,8 +46,9 @@ fn prepare_rig_bench_context(
     let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
     source.spec = spec.clone();
-    let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
     let prepare_settings = bench_prepare_settings(args);
+    let lease =
+        rig::lease::acquire_active_run_lease_with_settings(&spec, "bench", &prepare_settings)?;
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
         if !prepare.success {
             return Err(homeboy::core::Error::rig_pipeline_failed(
@@ -697,7 +698,12 @@ fn run_component_with_rig_context(
     let selected_scenarios = selected_scenario_ids(args, rig_spec)?;
 
     if let Some(spec) = rig_spec {
-        run_rig_workload_preflight(spec, ctx.extension_id.as_deref(), &selected_scenarios)?;
+        run_rig_workload_preflight(
+            spec,
+            ctx.extension_id.as_deref(),
+            &selected_scenarios,
+            &ctx.resolved_settings().string_overrides(),
+        )?;
     }
 
     let observation = observation::start(BenchObservationStart {
@@ -845,6 +851,7 @@ fn run_rig_workload_preflight(
     spec: &RigSpec,
     extension_id: Option<&str>,
     scenario_ids: &[String],
+    settings: &[(String, String)],
 ) -> homeboy::core::Result<()> {
     let groups = rig::check_groups_for_bench_scenarios(spec, scenario_ids).or_else(|| {
         extension_id.and_then(|id| {
@@ -852,8 +859,8 @@ fn run_rig_workload_preflight(
         })
     });
     let check = match groups {
-        Some(groups) => rig::run_check_groups(spec, &groups)?,
-        None => rig::run_check(spec)?,
+        Some(groups) => rig::run_check_groups_with_settings(spec, &groups, settings)?,
+        None => rig::run_check_with_settings(spec, settings)?,
     };
     if !check.success {
         return Err(homeboy::core::Error::rig_pipeline_failed(
@@ -1083,17 +1090,23 @@ mod tests {
             )
             .expect("parse rig spec");
 
-            run_rig_workload_preflight(&rig_spec, None, &["rest-product-batch-import".to_string()])
-                .expect("REST scenario should skip unrelated admin checks");
+            run_rig_workload_preflight(
+                &rig_spec,
+                None,
+                &["rest-product-batch-import".to_string()],
+                &[],
+            )
+            .expect("REST scenario should skip unrelated admin checks");
 
             assert!(run_rig_workload_preflight(
                 &rig_spec,
                 None,
                 &["admin-page-assets".to_string()],
+                &[],
             )
             .is_err());
 
-            assert!(run_rig_workload_preflight(&rig_spec, None, &[]).is_err());
+            assert!(run_rig_workload_preflight(&rig_spec, None, &[], &[]).is_err());
         });
     }
 
@@ -1116,7 +1129,7 @@ mod tests {
             )
             .expect("parse rig spec");
 
-            let err = run_rig_workload_preflight(&rig_spec, None, &[])
+            let err = run_rig_workload_preflight(&rig_spec, None, &[], &[])
                 .expect_err("failed check should abort bench preflight");
             let message = err.to_string();
 
@@ -1172,10 +1185,13 @@ mod tests {
             )
             .expect("parse rig spec");
 
-            assert!(
-                run_rig_workload_preflight(&rig_spec, None, &["unknown-scenario".to_string()],)
-                    .is_err()
-            );
+            assert!(run_rig_workload_preflight(
+                &rig_spec,
+                None,
+                &["unknown-scenario".to_string()],
+                &[],
+            )
+            .is_err());
         });
     }
 

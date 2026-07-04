@@ -85,7 +85,7 @@ fn test_run_pipeline_check_groups() {
     )
     .expect("parse rig");
 
-    let outcome = run_pipeline_check_groups(&rig, &["desktop-app".to_string()], false)
+    let outcome = run_pipeline_check_groups(&rig, &["desktop-app".to_string()], false, &[])
         .expect("scoped pipeline runs");
 
     assert!(outcome.is_success());
