@@ -93,6 +93,15 @@ pub(super) fn join_kebab(words: &[String]) -> String {
     words.join("-")
 }
 
+/// Join words as Title-Kebab-Case: `["sample", "plugin", "agent"]` → `"Sample-Plugin-Agent"`
+pub(super) fn join_title_kebab(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| capitalize(w))
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 /// Join words as snake_case: `["sample", "plugin", "agent"]` → `"sample_plugin_agent"`
 pub(super) fn join_snake(words: &[String]) -> String {
     words.join("_")
