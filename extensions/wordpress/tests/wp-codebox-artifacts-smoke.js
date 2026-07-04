@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const wordpressArtifactAdapter = require('../lib/wp-codebox-artifacts');
 const {
   resolveWpCodeboxArtifactPath,
   resolveWpCodeboxManifestArtifactPath,
@@ -10,29 +11,26 @@ const {
   wpCodeboxArtifactManifestV1,
   wpCodeboxArtifactPath,
   wpCodeboxBrowserArtifacts,
-} = require('../lib/wp-codebox-artifacts');
+} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-contract-adapter');
+
+assert.equal(wordpressArtifactAdapter.resolveWpCodeboxArtifactPath, resolveWpCodeboxArtifactPath);
 
 const codeboxResult = {
   artifacts: {
     directory: '/tmp/codebox-artifacts',
-    summary: { path: 'summary.json', kind: 'json' },
-  },
-  files: {
-    visualDiff: 'files/browser/visual-compare/visual-diff.json',
+    files: [
+      { name: 'summary', path: 'summary.json', kind: 'json' },
+      { name: 'visualDiff', path: 'files/browser/visual-compare/visual-diff.json' },
+    ],
   },
 };
 
 assert.equal(wpCodeboxArtifactDirectory(codeboxResult, '/tmp/fallback'), '/tmp/codebox-artifacts');
-assert.equal(wpCodeboxArtifactDirectory({ artifacts: { path: '/tmp/codebox-artifacts-path' } }, ''), '/tmp/codebox-artifacts-path');
-assert.equal(wpCodeboxArtifactDirectory({ artifactsDirectory: '/tmp/camel-artifacts' }, ''), '/tmp/camel-artifacts');
-assert.equal(wpCodeboxArtifactDirectory({ artifacts_directory: '/tmp/snake-artifacts' }, ''), '/tmp/snake-artifacts');
 assert.equal(wpCodeboxArtifactDirectory({}, '/tmp/fallback'), '/tmp/fallback');
 assert.equal(wpCodeboxArtifactPath({ path: 'artifact.json' }), 'artifact.json');
 assert.equal(wpCodeboxArtifactPath('artifact.json'), 'artifact.json');
-assert.deepEqual(wpCodeboxArtifactByKey(codeboxResult, 'summary'), { path: 'summary.json', kind: 'json' });
-assert.equal(wpCodeboxArtifactByKey(codeboxResult, 'visualDiff'), 'files/browser/visual-compare/visual-diff.json');
-assert.equal(wpCodeboxArtifactByKey({ artifactFiles: { report: 'report.json' } }, 'report'), 'report.json');
-assert.equal(wpCodeboxArtifactByKey({ artifact_files: { report: 'snake-report.json' } }, 'report'), 'snake-report.json');
+assert.deepEqual(wpCodeboxArtifactByKey(codeboxResult, 'summary'), { name: 'summary', path: 'summary.json', kind: 'json' });
+assert.deepEqual(wpCodeboxArtifactByKey(codeboxResult, 'visualDiff'), { name: 'visualDiff', path: 'files/browser/visual-compare/visual-diff.json' });
 assert.equal(resolveWpCodeboxArtifactPath({
   codeboxResult,
   key: 'visualDiff',

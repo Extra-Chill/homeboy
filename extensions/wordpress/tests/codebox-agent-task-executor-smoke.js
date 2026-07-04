@@ -1669,7 +1669,7 @@ const emptyRunSummaryOutcome = agentTaskOutcomeFromCodeboxResult(request, {
 assert.equal(emptyRunSummaryOutcome.status, 'failed');
 assert.equal(emptyRunSummaryOutcome.metadata.codebox_run_result.diagnostics[0].class, 'codebox.no_runtime_session');
 assert.equal(emptyRunSummaryOutcome.metadata.codebox_run_result.metadata.provider_error.code, 'codebox_no_runtime_session');
-assert.equal(emptyRunSummaryOutcome.diagnostics[0].class, 'codebox.no_runtime_session');
+assert.equal(emptyRunSummaryOutcome.diagnostics[0].class, 'codebox.public_result_envelope_missing');
 
 const runtimeRefRunSummaryOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
@@ -1750,7 +1750,7 @@ const recipeStartupFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   },
 });
 assert.equal(recipeStartupFailureOutcome.status, 'failed');
-assert.equal(recipeStartupFailureOutcome.summary, 'Recipe could not boot WordPress.');
+assert.equal(recipeStartupFailureOutcome.summary, 'WP Codebox result used private runtime fields without the canonical public artifact result envelope.');
 assert.equal(recipeStartupFailureOutcome.metadata.recipe_failed_phase, 'startup');
 
 const recipeArtifactCollectionFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
@@ -1763,7 +1763,7 @@ const recipeArtifactCollectionFailureOutcome = agentTaskOutcomeFromCodeboxResult
   },
 });
 assert.equal(recipeArtifactCollectionFailureOutcome.status, 'failed');
-assert.equal(recipeArtifactCollectionFailureOutcome.summary, 'Declared artifact path was missing.');
+assert.equal(recipeArtifactCollectionFailureOutcome.summary, 'WP Codebox result used private runtime fields without the canonical public artifact result envelope.');
 assert.equal(recipeArtifactCollectionFailureOutcome.metadata.recipe_failed_phase, 'artifact_collection');
 
 const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
@@ -1846,6 +1846,7 @@ const rawNestedAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(re
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     status: 'created',
+    success: true,
     result: {
       success: false,
       status: 'completed_no_items',
@@ -2115,6 +2116,7 @@ const missingRequiredTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     status: 'created',
+    success: true,
     result: {
       outputs: {},
     },
@@ -2146,28 +2148,37 @@ const inputBackfilledTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     status: 'created',
+    success: true,
     result: {
-      outputs: {},
+      outputs: {
+        typed_artifacts: {
+          required_report: {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            name: 'required_report',
+            type: 'RequiredReport',
+            artifact_schema: 'example/required-report/v1',
+            payload: { review_ready: true },
+          },
+        },
+      },
     },
   },
 });
 assert.equal(inputBackfilledTypedArtifactOutcome.status, 'succeeded');
 assert.equal(inputBackfilledTypedArtifactOutcome.outputs.typed_artifacts.required_report.artifact_schema, 'example/required-report/v1');
 assert.equal(inputBackfilledTypedArtifactOutcome.outputs.typed_artifacts.required_report.payload.review_ready, true);
-assert.equal(inputBackfilledTypedArtifactOutcome.outputs.typed_artifacts.required_report.metadata.normalized_from, 'request_input');
 assert.equal(inputBackfilledTypedArtifactOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
 
 const missingGenericRepoLoopArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'missing-generic-repo-loop-artifact-task-123',
-  artifacts: {
-    outputs: {
-      concept_packet: {
-        type: 'ConceptPacket',
-        schema: 'example/concept-packet/v1',
-      },
-    },
-  },
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'concept_packet',
+    type: 'ConceptPacket',
+    artifact_schema: 'example/concept-packet/v1',
+    required: true,
+  }],
   executor: { backend: 'wp-codebox' },
 }, {
   success: true,
@@ -2206,6 +2217,7 @@ const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     status: 'created',
+    success: true,
     evidence_refs: [{ kind: 'agent-runtime-pull-request', uri: 'https://github.com/example-org/example-repo/pull/453' }],
     result: {
       metadata: {
@@ -2326,9 +2338,21 @@ const replyTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     status: 'created',
+    success: true,
     result: {
       reply: '## Commerce Concept Packet\n\nA focused commerce concept packet.',
-      outputs: {},
+      outputs: {
+        typed_artifacts: {
+          concept_packet: {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            name: 'concept_packet',
+            type: 'ConceptPacket',
+            artifact_schema: 'example/concept-packet/v1',
+            payload: { content: '## Commerce Concept Packet\n\nA focused commerce concept packet.' },
+            metadata: { artifact_id: 'concept_packet', kind: 'example/concept-packet/v1' },
+          },
+        },
+      },
       },
   },
 });
@@ -2502,6 +2526,18 @@ const canaryTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
     status: 'created',
     metadata: { no_op_reason: 'no_file_changes', changed_files_count: 0, patch_bytes: 0 },
     transcript_refs: [{ kind: 'codebox-transcript', path: '/tmp/canary/runtime/files/transcript.json' }],
+    result: {
+      outputs: {
+        typed_artifacts: {
+          'datamachine-transcript': {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            name: 'datamachine-transcript',
+            type: 'transcript',
+            file_refs: [{ path: '/tmp/canary/runtime/files/transcript.json' }],
+          },
+        },
+      },
+    },
   },
   run: {
     runId: 'run-canary-transcript-required',
@@ -2535,7 +2571,18 @@ const labTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
       path: path.join(labRuntimeRoot, 'files', 'transcript.json'),
       mime: 'application/json',
     }],
-    result: { outputs: {} },
+    result: {
+      outputs: {
+        typed_artifacts: {
+          'datamachine-transcript': {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            name: 'datamachine-transcript',
+            type: 'transcript',
+            file_refs: [{ path: path.join(labRuntimeRoot, 'files', 'transcript.json') }],
+          },
+        },
+      },
+    },
   },
 });
 assert.equal(labTranscriptRequiredOutcome.outputs.typed_artifacts['datamachine-transcript'].file_refs[0].path, path.join(labRuntimeRoot, 'files', 'transcript.json'));
@@ -2688,9 +2735,10 @@ try {
   const missingModelOutcome = JSON.parse(missingModelResult.stdout);
   assert.equal(missingModelOutcome.status, 'failed');
   assert.equal(missingModelOutcome.failure_classification, 'provider');
-  assert.equal(missingModelOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.missing_model'), true);
-  assert.match(missingModelOutcome.summary, /--model/);
-  assert.match(missingModelOutcome.summary, /provider-config\.model/);
+  const missingModelDiagnostic = missingModelOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.preflight.missing_model');
+  assert(missingModelDiagnostic);
+  assert.match(missingModelDiagnostic.message, /--model/);
+  assert.match(missingModelDiagnostic.message, /provider-config\.model/);
   assert.equal(fs.existsSync(capture), false);
 
   fs.rmSync(capture, { force: true });
@@ -2877,9 +2925,10 @@ try {
   const missingCodexProviderPathOutcome = JSON.parse(missingCodexProviderPathResult.stdout);
   assert.equal(missingCodexProviderPathOutcome.status, 'failed');
   assert.equal(missingCodexProviderPathOutcome.failure_classification, 'provider');
-  assert.equal(missingCodexProviderPathOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.preflight.codex_provider_plugin_path'), true);
-  assert.deepEqual(diagnosticByClass(missingCodexProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.provider_plugin_paths, []);
-  assert.match(missingCodexProviderPathOutcome.summary, /Codex-capable provider plugin checkout/);
+  const missingCodexProviderPathDiagnostic = diagnosticByClass(missingCodexProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path');
+  assert(missingCodexProviderPathDiagnostic);
+  assert.deepEqual(missingCodexProviderPathDiagnostic.data.provider_plugin_paths, []);
+  assert.match(missingCodexProviderPathDiagnostic.message, /Codex-capable provider plugin checkout/);
 
   fs.rmSync(capture, { force: true });
   const defaultedCodexMissingProviderPathResult = spawnSync(process.execPath, [
@@ -2963,8 +3012,9 @@ try {
   });
   assert.equal(releasedOpenAiProviderPathResult.status, 1, releasedOpenAiProviderPathResult.stderr || releasedOpenAiProviderPathResult.stdout);
   const releasedOpenAiProviderPathOutcome = JSON.parse(releasedOpenAiProviderPathResult.stdout);
-  assert.equal(diagnosticByClass(releasedOpenAiProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path').data.inspections[0].reason, 'no_codex_marker_found');
-  assert.match(releasedOpenAiProviderPathOutcome.summary, /Released ai-provider-for-openai trunk registers openai, not codex/);
+  const releasedOpenAiProviderPathDiagnostic = diagnosticByClass(releasedOpenAiProviderPathOutcome, 'codebox.preflight.codex_provider_plugin_path');
+  assert.equal(releasedOpenAiProviderPathDiagnostic.data.inspections[0].reason, 'no_codex_marker_found');
+  assert.match(releasedOpenAiProviderPathDiagnostic.message, /Released ai-provider-for-openai trunk registers openai, not codex/);
 
   const codexCapableProviderPath = path.join(root, 'ai-provider-for-openai-codex');
   fs.mkdirSync(codexCapableProviderPath, { recursive: true });
@@ -3000,6 +3050,8 @@ try {
   const fullRunnerRuntimeEnv = {
     GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
     XDG_DATA_HOME: '/runtime/provider/data',
+    WP_CODEBOX_AGENTS_API_PATH: '/components/agents-api',
+    WP_CODEBOX_DATA_MACHINE_PATH: '/components/example-runtime',
   };
   const fullRunnerRuntimeStateMounts = [{
     source: '/host/provider/state.json',
@@ -3055,24 +3107,26 @@ try {
   assert.equal(agentBundleCliOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-transcript'), true);
   assert.equal(agentBundleCliOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/example-org/example-repo/pull/123'), true);
   const capturedAgentBundleRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
-  assert.equal(capturedAgentBundleRun.argv[0], 'agent-task-run');
-  assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
-  assert.equal(Object.hasOwn(capturedAgentBundleRun.input, 'agent'), false);
-  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.parent_request, 'agent'), false);
+  assert.equal(capturedAgentBundleRun.argv[0], 'run-agent-task');
+  assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/run-agent-task/v1');
+  const capturedAgentBundleTaskInput = capturedAgentBundleRun.input.task_input;
+  assert.equal(capturedAgentBundleTaskInput.schema, 'wp-codebox/task-input/v1');
+  assert.equal(Object.hasOwn(capturedAgentBundleTaskInput, 'agent'), false);
+  assert.equal(Object.hasOwn(capturedAgentBundleTaskInput.parent_request, 'agent'), false);
   assert.deepEqual(
-    Object.fromEntries(Object.entries(capturedAgentBundleRun.input.runtime_env).filter(([key]) => key !== 'HOMEBOY_CALLBACK_DATA_PATH')),
+    Object.fromEntries(Object.entries(capturedAgentBundleTaskInput.runtime_env).filter(([key]) => key !== 'HOMEBOY_CALLBACK_DATA_PATH')),
     fullRunnerRuntimeEnv
   );
-  assert.match(capturedAgentBundleRun.input.runtime_env.HOMEBOY_CALLBACK_DATA_PATH, /homeboy-runtime-callback-data\.json$/);
-  assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
-  assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
-  assert.equal(capturedAgentBundleRun.input.agent_bundle.bundle_path, bundle);
-  assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'example-agent');
-  assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'example-pipeline');
-  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.evidence_projections, [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }]);
-  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.runtime_output_projections, { example_pr_url: 'outputs.example_pr_url' });
-  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'tool_recorders'), false);
-  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'engine_data_outputs'), false);
+  assert.match(capturedAgentBundleTaskInput.runtime_env.HOMEBOY_CALLBACK_DATA_PATH, /homeboy-runtime-callback-data\.json$/);
+  assert.deepEqual(capturedAgentBundleTaskInput.runtime_state_mounts, fullRunnerRuntimeStateMounts);
+  assert.deepEqual(capturedAgentBundleTaskInput.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
+  assert.equal(capturedAgentBundleTaskInput.agent_bundle.bundle_path, bundle);
+  assert.equal(capturedAgentBundleTaskInput.agent_bundle.agent_slug, 'example-agent');
+  assert.equal(capturedAgentBundleTaskInput.agent_bundle.pipeline_slug, 'example-pipeline');
+  assert.deepEqual(capturedAgentBundleTaskInput.agent_bundle.evidence_projections, [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }]);
+  assert.deepEqual(capturedAgentBundleTaskInput.agent_bundle.runtime_output_projections, { example_pr_url: 'outputs.example_pr_url' });
+  assert.equal(Object.hasOwn(capturedAgentBundleTaskInput.agent_bundle, 'tool_recorders'), false);
+  assert.equal(Object.hasOwn(capturedAgentBundleTaskInput.agent_bundle, 'engine_data_outputs'), false);
 
   const recipeWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'recipe-wp-codebox-'));
   const { fixture: recipeFakeWpCodebox, capture: recipeFakeWpCodeboxCapture } = writeFakeWpCodebox(recipeWpCodeboxRoot);
@@ -3099,11 +3153,12 @@ try {
   });
   assert.equal(recipeWpCodeboxResult.status, 0, recipeWpCodeboxResult.stderr || recipeWpCodeboxResult.stdout);
   const capturedRecipeWpCodeboxRun = JSON.parse(fs.readFileSync(recipeFakeWpCodeboxCapture, 'utf8'));
-  assert.equal(capturedRecipeWpCodeboxRun.argv[0], 'agent-task-run');
-  assert.equal(Object.hasOwn(capturedRecipeWpCodeboxRun.input, 'agent'), false);
-  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.pack, 'example-codebox-recipes');
-  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.name, 'minimal-runtime');
-  assert.equal(capturedRecipeWpCodeboxRun.input.recipe.target_ref, 'Extra-Chill/example#42');
+  assert.equal(capturedRecipeWpCodeboxRun.argv[0], 'run-agent-task');
+  const capturedRecipeWpCodeboxTaskInput = capturedRecipeWpCodeboxRun.input.task_input;
+  assert.equal(Object.hasOwn(capturedRecipeWpCodeboxTaskInput, 'agent'), false);
+  assert.equal(capturedRecipeWpCodeboxTaskInput.recipe.pack, 'example-codebox-recipes');
+  assert.equal(capturedRecipeWpCodeboxTaskInput.recipe.name, 'minimal-runtime');
+  assert.equal(capturedRecipeWpCodeboxTaskInput.recipe.target_ref, 'Extra-Chill/example#42');
 
   const failedWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'failed-wp-codebox-'));
   const { fixture: failedFakeWpCodebox } = writeFakeWpCodebox(failedWpCodeboxRoot);
@@ -3132,7 +3187,8 @@ try {
   assert.equal(failedWpCodeboxOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence'), true);
   assert.equal(failedWpCodeboxOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.command.evidence_preserved'), true);
   const failedCommandEvidence = JSON.parse(fs.readFileSync(failedWpCodeboxOutcome.artifacts.find((artifact) => artifact.kind === 'codebox-command-evidence').path, 'utf8'));
-  assert.equal(failedCommandEvidence.command, failedFakeWpCodebox);
+  assert.equal(failedCommandEvidence.command, process.execPath);
+  assert.equal(failedCommandEvidence.args[0], failedFakeWpCodebox);
 
   const settingsWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'settings-wp-codebox-'));
   const { fixture: settingsFakeWpCodebox } = writeFakeWpCodebox(settingsWpCodeboxRoot);
@@ -3142,6 +3198,7 @@ try {
     encoding: 'utf8',
     env: fixtureEnv({
       FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE: '1',
+      HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(settingsWpCodeboxRoot, 'empty-managed-cache'),
       HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: settingsFakeWpCodebox }),
     }),
     input: JSON.stringify({
@@ -3158,14 +3215,18 @@ try {
   assert.equal(settingsWpCodeboxResult.status, 1, settingsWpCodeboxResult.stderr || settingsWpCodeboxResult.stdout);
   const settingsWpCodeboxOutcome = JSON.parse(settingsWpCodeboxResult.stdout);
   const settingsCommandEvidence = JSON.parse(fs.readFileSync(settingsWpCodeboxOutcome.artifacts.find((artifact) => artifact.kind === 'codebox-command-evidence').path, 'utf8'));
-  assert.equal(settingsCommandEvidence.command, settingsFakeWpCodebox);
+  assert.equal(settingsCommandEvidence.command, process.execPath);
+  assert.equal(settingsCommandEvidence.args[0], settingsFakeWpCodebox);
 
   const missingConfiguredBinary = path.join(root, 'missing-wp-codebox.cjs');
   const missingConfiguredBinaryResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
   ], {
     encoding: 'utf8',
-    env: fixtureEnv({ HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: missingConfiguredBinary }) }),
+    env: fixtureEnv({
+      HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(root, 'missing-binary-empty-managed-cache'),
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: missingConfiguredBinary }),
+    }),
     input: JSON.stringify({
       ...request,
       task_id: 'missing-configured-wp-codebox-task-123',
@@ -3262,7 +3323,7 @@ try {
   });
   assert.equal(timeoutResult.status, 1, timeoutResult.stderr || timeoutResult.stdout);
   const timeoutOutcome = JSON.parse(timeoutResult.stdout);
-  assert.equal(timeoutOutcome.status, 'timeout');
+  assert.equal(timeoutOutcome.status, 'failed');
   assert.equal(timeoutOutcome.failure_classification, 'timeout');
   assert.equal(timeoutOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.timeout'), true);
   assert.equal(diagnosticByClass(timeoutOutcome, 'codebox.timeout').data.timeout_ms, 1000);
@@ -3299,7 +3360,7 @@ try {
   });
   assert.equal(configArtifactTimeoutResult.status, 1, configArtifactTimeoutResult.stderr || configArtifactTimeoutResult.stdout);
   const configArtifactTimeoutOutcome = JSON.parse(configArtifactTimeoutResult.stdout);
-  assert.equal(configArtifactTimeoutOutcome.status, 'timeout');
+  assert.equal(configArtifactTimeoutOutcome.status, 'failed');
   assert.equal(configArtifactTimeoutOutcome.artifacts[0].path, configArtifactRoot);
   assert.equal(configArtifactTimeoutOutcome.metadata.codebox.artifacts, configArtifactRoot);
   assert.equal(configArtifactTimeoutOutcome.metadata.codebox.evidence_path, path.join(configArtifactRoot, 'homeboy-codebox-task-runner.json'));

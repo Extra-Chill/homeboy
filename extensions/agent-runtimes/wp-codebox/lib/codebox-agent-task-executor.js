@@ -210,6 +210,7 @@ function providerContract(options = {}) {
     provider_credential_boundary: providerCredentialBoundary(),
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     agent_fanout_adapter: wpCodeboxAgentFanoutAdapterContract(),
+    config_preflights: runtimeExecutorManifest().config_preflights,
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
     status: 'active',

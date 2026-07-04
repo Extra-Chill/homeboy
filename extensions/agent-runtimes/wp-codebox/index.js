@@ -14,4 +14,5 @@ module.exports = {
 	...require('./lib/provider-outcome-normalizer'),
 	...require('./lib/wp-codebox-runtime-contract-source'),
 	...require('./lib/wp-codebox-runtime-readiness'),
+	...require('./lib/wp-codebox-contract-adapter'),
 };

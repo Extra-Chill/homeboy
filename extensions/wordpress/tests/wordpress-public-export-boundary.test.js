@@ -54,13 +54,12 @@ assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipe, 'function'
 assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzSuiteTaskRequest, 'function');
 assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzRuntimeTaskRequest, 'function');
 
-assert.equal(typeof wordpress.resolveWpCodeboxArtifactPath, 'function');
-assert.equal(typeof wordpress.runWpCodeboxRecipe, 'function');
-assert.equal(typeof wordpress.buildWpCodeboxFuzzPlanRecipe, 'function');
-assert.equal(typeof wordpress.wpCodeboxFuzzSuiteTaskRequest, 'function');
-assert.equal(wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA, 'wp-codebox/fuzz-suite/v1');
-assert.equal(wordpress.wpCodeboxFuzzSuiteTaskRequest({ taskId: 'public-suite' }).executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
-assert.equal(typeof wordpress.applyApprovedWpCodeboxArtifact, 'function');
+assert.equal(wordpress.resolveWpCodeboxArtifactPath, undefined);
+assert.equal(wordpress.runWpCodeboxRecipe, undefined);
+assert.equal(wordpress.buildWpCodeboxFuzzPlanRecipe, undefined);
+assert.equal(wordpress.wpCodeboxFuzzSuiteTaskRequest, undefined);
+assert.equal(wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA, undefined);
+assert.equal(wordpress.applyApprovedWpCodeboxArtifact, undefined);
 assert.equal(wordpress.compareCodeboxMemoryResults, undefined);
 assert.equal(wordpress.createStaticSiteFanoutPlan, undefined);
 
