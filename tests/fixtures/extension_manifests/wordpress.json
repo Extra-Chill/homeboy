@@ -1,0 +1,45 @@
+{
+  "name": "WordPress",
+  "version": "3.6.1",
+  "provides": {
+    "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
+    "capabilities": ["fingerprint", "refactor", "crossref", "validate"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "lint.producers": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "trace.results": true,
+    "annotations": false
+  },
+  "agent_task": {
+    "runtime_requirements": {
+      "required_capabilities": ["browser_runtime", "wordpress_sandbox"],
+      "integration_contract": "homeboy-wordpress-agent-task/v1"
+    }
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
+    "refactor": "scripts/refactor.py",
+    "crossref": "scripts/test/crossref.php",
+    "validate": "scripts/validation/validate-syntax.sh",
+    "format": "scripts/format.sh"
+  },
+  "component_env": { "detect_script": "scripts/env/detect.sh" },
+  "deploy": {
+    "protected_path_suffixes": ["/plugins", "/themes"],
+    "archive_install": [{
+      "path_pattern": "/wp-content/plugins/",
+      "staging_path": "/tmp/homeboy-staging",
+      "root_must_match_target_basename": true,
+      "required_header": { "file": "{{targetBasename}}.php", "contains": "Plugin Name:" }
+    }]
+  },
+  "lint": { "extension_script": "scripts/lint-runner.sh" },
+  "test": { "extension_script": "scripts/test-runner.sh" },
+  "bench": { "extension_script": "scripts/bench/bench-runner.sh" },
+  "trace": { "extension_script": "scripts/trace/trace-runner.sh" }
+}

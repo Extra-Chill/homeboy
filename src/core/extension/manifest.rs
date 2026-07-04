@@ -12,8 +12,7 @@ pub const EXTENSION_CONTRACT_PRODUCER_SCHEMA: &str = "homeboy/extension-contract
 
 // Keep broad manifest wiring here while leaf config structs live in focused files.
 pub use super::manifest_action_config::{
-    ActionConfig, InputConfig, OutputConfig, OutputSchema, RuntimeConfig, SelectOption,
-    SettingConfig,
+    ActionConfig, InputConfig, RuntimeConfig, SelectOption, SettingConfig,
 };
 pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
@@ -370,8 +369,9 @@ pub struct ExecutableCapability {
     pub runtime: RuntimeConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<InputConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<OutputConfig>,
+
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// Desktop/platform UI config: pinned files, database, discovery, commands.

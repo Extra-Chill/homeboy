@@ -10,6 +10,7 @@ use crate::core::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult, ObservationSpanStatus,
 };
 use crate::core::rig::RigStateSnapshot;
+use crate::core::structured_sidecar;
 
 use super::preview::TracePreviewMetadata;
 
@@ -320,7 +321,7 @@ pub fn parse_trace_results_file(path: &Path) -> Result<TraceResults> {
 
 fn parse_trace_results_str(raw: &str) -> Result<TraceResults> {
     let mut deserializer = serde_json::Deserializer::from_str(raw);
-    serde_path_to_error::deserialize(&mut deserializer).map_err(|e| {
+    let parsed = serde_path_to_error::deserialize(&mut deserializer).map_err(|e| {
         let path = e.path().to_string();
         let path = if path == "." { "$".to_string() } else { path };
         Error::internal_json(
@@ -331,7 +332,17 @@ fn parse_trace_results_str(raw: &str) -> Result<TraceResults> {
             ),
             Some("trace.parsing.deserialize".to_string()),
         )
-    })
+    })?;
+
+    let payload = serde_json::to_value(&parsed).map_err(|e| {
+        Error::internal_json(
+            format!("Failed to validate trace results JSON: {}", e),
+            Some("trace.parsing.deserialize".to_string()),
+        )
+    })?;
+    structured_sidecar::validate_payload("trace.results", &payload)?;
+
+    Ok(parsed)
 }
 
 pub fn parse_trace_list_str(raw: &str) -> Result<TraceList> {

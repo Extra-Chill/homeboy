@@ -1,0 +1,37 @@
+{
+  "name": "Node.js",
+  "version": "3.2.0",
+  "provides": {
+    "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
+    "capabilities": ["format", "validate"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "trace.results": true,
+    "trace.artifacts": true,
+    "annotations": false
+  },
+  "platform": {
+    "discovery": {
+      "find_command": "find /home -name 'package.json' -type f",
+      "base_path_transform": "dirname",
+      "display_name_command": "basename {{basePath}}"
+    },
+    "default_pinned_files": ["package.json", "tsconfig.json"]
+  },
+  "component_type": {
+    "version_targets": [{ "file": "package.json", "pattern": "\\\"version\\\":\\s*\\\"([0-9.]+)\\\"" }]
+  },
+  "ci": {
+    "profiles": {
+      "pr": { "label": "Pull request checks", "jobs": ["lint", "test", "build"] }
+    },
+    "jobs": {
+      "lint": { "check_names": ["Lint"], "command": "lint", "provider": "github-actions", "workflow": "ci.yml", "fidelity": "local-equivalent" }
+    }
+  }
+}

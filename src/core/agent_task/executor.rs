@@ -6,7 +6,7 @@ pub struct AgentTaskExecutor {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "runtime", skip_serializing_if = "Option::is_none")]
     pub runtime_selection: Option<AgentTaskRuntimeSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
@@ -22,11 +22,11 @@ pub struct AgentTaskExecutor {
 pub struct AgentTaskRuntimeSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "backend", skip_serializing_if = "Option::is_none")]
     pub executor_backend: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "selector", skip_serializing_if = "Option::is_none")]
     pub executor_provider_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
     pub ai_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

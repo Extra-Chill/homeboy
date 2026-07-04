@@ -67,6 +67,7 @@ mod validate;
 use std::path::Path;
 
 use crate::core::error::{Error, Result};
+use crate::core::structured_sidecar;
 
 use super::artifact_validation;
 use super::metric_policy_preset::expand_metric_policy_presets;
@@ -139,6 +140,7 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
             Some("bench.parsing.deserialize".to_string()),
         )
     })?;
+    structured_sidecar::validate_payload("bench.results", &value)?;
     if let Some(object) = value.as_object_mut() {
         object.remove("schema");
         object.remove("lifecycle");

@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::component::{Component, ScopedExtensionConfig};
+use crate::core::config::ConfigEntity;
 use std::collections::HashMap;
 
 #[test]
@@ -189,6 +190,59 @@ fn manifest_parses_declared_structured_sidecars() {
     assert_eq!(sidecars[6].name, "trace.results");
     assert_eq!(sidecars[6].path, "trace.json");
     assert_eq!(sidecars[6].producer.as_deref(), Some("trace"));
+}
+
+#[test]
+fn extension_manifest_accepts_real_extension_fixture_shapes() {
+    for (fixture_id, raw) in [
+        (
+            "rust",
+            include_str!("../../../tests/fixtures/extension_manifests/rust.json"),
+        ),
+        (
+            "fixture-js-runtime",
+            include_str!("../../../tests/fixtures/extension_manifests/js_runtime.json"),
+        ),
+        (
+            "go",
+            include_str!("../../../tests/fixtures/extension_manifests/go.json"),
+        ),
+        (
+            "swift",
+            include_str!("../../../tests/fixtures/extension_manifests/swift.json"),
+        ),
+        (
+            "wordpress",
+            include_str!("../../../tests/fixtures/extension_manifests/wordpress.json"),
+        ),
+        (
+            "managed-preview",
+            include_str!("../../../tests/fixtures/extension_manifests/managed-preview.json"),
+        ),
+    ] {
+        let mut manifest: ExtensionManifest = serde_json::from_str(raw)
+            .unwrap_or_else(|err| panic!("{fixture_id} manifest should parse: {err}"));
+        if manifest.id.is_empty() {
+            manifest.set_id(fixture_id.to_string());
+        }
+
+        assert_eq!(manifest.id, fixture_id);
+        assert!(!manifest.name.is_empty());
+    }
+}
+
+#[test]
+fn executable_pruned_fields_remain_loadable_as_unknown_manifest_data() {
+    let raw = include_str!("../../../tests/fixtures/extension_manifests/swift.json");
+    let manifest: ExtensionManifest =
+        serde_json::from_str(raw).expect("swift fixture should parse");
+    let executable = manifest.executable.expect("executable fixture");
+
+    assert_eq!(
+        executable.runtime.run_command.as_deref(),
+        Some("bash {{extension_path}}/scripts/test-runner.sh")
+    );
+    assert!(executable.extra.contains_key("output"));
 }
 
 #[test]

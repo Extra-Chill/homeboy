@@ -2,12 +2,13 @@
 
 Extension manifests define extension metadata, runtime behavior, platform behaviors, and integration points. Stored as `<extension_id>/<extension_id>.json` in the extension directory.
 
+Extension identity is path-derived: Homeboy derives the extension `id` from the extension directory. A manifest may include `id` for compatibility with external tools, but CLI code does not require it as serialized manifest data.
+
 ## Schema
 
 ```json
 {
   "name": "string",
-  "id": "string",
   "version": "string",
   "description": "string",
   "provides": {},
@@ -33,17 +34,17 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 ### Required Fields
 
 - **`name`** (string): Human-readable extension name
-- **`id`** (string): Unique extension identifier (must match directory name)
 - **`version`** (string): Extension version (semantic versioning)
 
 ### Optional Fields
 
 - **`description`** (string): Extension description
+- **`id`** (string): Optional compatibility field for external consumers; Homeboy derives the authoritative extension ID from the directory name.
 - **`provides`** (object): File extensions and capabilities this extension handles
 - **`scripts`** (object): Scripts that implement extension capabilities (fingerprint, refactor)
 - **`audit`** (object): Docs audit config — ignore patterns, feature detection, test mapping
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
-- **`executable`** (object): Standalone tool runtime, inputs, output schema
+- **`executable`** (object): Standalone tool runtime and inputs
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
 - **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
@@ -210,9 +211,11 @@ Known sidecar names default to these run-directory paths when `path` is omitted:
 | `resource.summary` | `resource-summary.json` |
 | `annotations` | `annotations` |
 
-### Inspection Behavior
+### Runtime Enforcement
 
 Core exposes declared sidecars through manifest inspection, including `homeboy extension show <id>` JSON output. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
+
+Known core sidecars are also validated when Homeboy reads the sidecar file. The lint, test, bench, and trace read paths validate the JSON shape for their known sidecar key before typed parsing. Malformed sidecars produce parse/validation errors instead of panics or silent skips.
 
 ## Extension Materialization Source
 
@@ -443,7 +446,7 @@ Changed-test and drift workflows use the canonical `test.drift` contract. `audit
 
 ## Executable Runtime Configuration
 
-Executable runtime configuration defines how executable extensions are executed.
+Executable runtime configuration defines how executable extensions are executed by the CLI.
 
 ```json
 {
@@ -453,7 +456,29 @@ Executable runtime configuration defines how executable extensions are executed.
       "setup_command": "string",
       "ready_check": "string",
       "entrypoint": "string",
+      "args": "string",
       "env": {}
+    },
+    "inputs": [
+      {
+        "id": "string",
+        "type": "string",
+        "label": "string",
+        "arg": "string"
+      }
+    ]
+  }
+}
+```
+
+The CLI contract intentionally omits Desktop-only runtime metadata such as runtime type, Playwright browser installs, default site selection, runtime dependency installs, and executable output display schemas. Unknown manifest fields remain loadable for external consumers, but CLI behavior is defined by the fields below.
+
+```json
+{
+  "executable": {
+    "runtime": {
+      "run_command": "bash {{extension_path}}/scripts/run.sh",
+      "ready_check": "which bash"
     }
   }
 }
@@ -471,6 +496,7 @@ Executable runtime configuration defines how executable extensions are executed.
   - Example: `"test -f ./venv/bin/python3"`
 - **`entrypoint`** (string): Extension entrypoint script (optional)
   - Example: `"main.py"`
+- **`args`** (string): Default argument template used by command substitution (optional)
 - **`env`** (object): Environment variables to set during execution
   - Values can use template variables
   - Example: `{"MY_VAR": "{{extensionPath}}/data"}`

@@ -5,10 +5,6 @@ use super::manifest::{ActionType, BuiltinAction, HttpMethod};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
-    /// Desktop app runtime type (python/shell/cli). CLI ignores this field.
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub runtime_type: Option<String>,
-
     /// Shell command to execute when running the extension.
     /// Template variables: {{entrypoint}}, {{args}}, {{extensionPath}}, plus project context vars.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,18 +29,6 @@ pub struct RuntimeConfig {
     /// Default args template (used in template substitution).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
-
-    /// Default site for this extension (used by some CLI extensions).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_site: Option<String>,
-
-    /// Desktop app: Python dependencies to install.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<Vec<String>>,
-
-    /// Desktop app: Playwright browsers to install.
-    #[serde(rename = "playwrightBrowsers", skip_serializing_if = "Option::is_none")]
-    pub playwright_browsers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,21 +54,6 @@ pub struct InputConfig {
 pub struct SelectOption {
     pub value: String,
     pub label: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputConfig {
-    pub schema: OutputSchema,
-    pub display: String,
-    pub selectable: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputSchema {
-    #[serde(rename = "type")]
-    pub schema_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

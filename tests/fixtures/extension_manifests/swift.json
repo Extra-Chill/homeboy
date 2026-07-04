@@ -1,0 +1,44 @@
+{
+  "name": "Swift",
+  "version": "2.6.1",
+  "provides": {
+    "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
+    "capabilities": ["fingerprint", "validate"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": false,
+    "test.failures": true,
+    "test.coverage": false,
+    "annotations": false
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
+    "validate": "scripts/validate.sh"
+  },
+  "platform": {
+    "discovery": {
+      "find_command": "find /Users /home -name '*.swift'",
+      "base_path_transform": "identity",
+      "display_name_command": "basename {{basePath}}"
+    }
+  },
+  "lint": { "extension_script": "scripts/lint-runner.sh" },
+  "test": { "extension_script": "scripts/test-runner.sh" },
+  "executable": {
+    "runtime": {
+      "setup_command": "bash {{extension_path}}/scripts/setup.sh",
+      "ready_check": "which swift",
+      "run_command": "bash {{extension_path}}/scripts/test-runner.sh",
+      "type": "shell",
+      "playwrightBrowsers": ["chromium"],
+      "dependencies": ["desktop-only-package"],
+      "default_site": "desktop-preview"
+    },
+    "output": {
+      "schema": { "type": "array" },
+      "display": "table",
+      "selectable": true
+    }
+  }
+}

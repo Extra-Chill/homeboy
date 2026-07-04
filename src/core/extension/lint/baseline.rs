@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::engine::baseline::{self as generic, BaselineConfig, Fingerprintable};
 use crate::core::finding::{FindingSource, HomeboyFinding};
+use crate::core::structured_sidecar;
 
 const BASELINE_KEY: &str = "lint";
 
@@ -66,24 +67,29 @@ pub fn parse_findings_file(path: &Path) -> crate::core::error::Result<Vec<Homebo
         return Ok(Vec::new());
     }
 
-    let mut raw_findings: Vec<serde_json::Value> = serde_json::from_str(&content).map_err(|e| {
+    let mut payload: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         crate::core::Error::internal_io(
             format!("Malformed lint findings JSON in {}: {}", path.display(), e),
             Some("lint.baseline.parse".to_string()),
         )
     })?;
 
-    for finding in &mut raw_findings {
+    structured_sidecar::validate_payload("lint.findings", &payload)?;
+
+    let serde_json::Value::Array(ref mut raw_findings) = payload else {
+        unreachable!("structured sidecar validation guarantees lint findings are an array");
+    };
+
+    for finding in raw_findings {
         normalize_legacy_lint_finding(finding);
     }
 
-    let findings: Vec<HomeboyFinding> =
-        serde_json::from_value(serde_json::Value::Array(raw_findings)).map_err(|e| {
-            crate::core::Error::internal_io(
-                format!("Malformed lint findings JSON in {}: {}", path.display(), e),
-                Some("lint.baseline.parse".to_string()),
-            )
-        })?;
+    let findings: Vec<HomeboyFinding> = serde_json::from_value(payload).map_err(|e| {
+        crate::core::Error::internal_io(
+            format!("Malformed lint findings JSON in {}: {}", path.display(), e),
+            Some("lint.baseline.parse".to_string()),
+        )
+    })?;
 
     Ok(findings
         .into_iter()
