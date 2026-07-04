@@ -5,7 +5,7 @@ use crate::core::engine::codebase_scan::{
     ExtensionFilter, ScanConfig,
 };
 use crate::core::error::{Error, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::safety::detect_collisions;
@@ -14,6 +14,23 @@ use super::types::{
     RenameSpec, RenameTargeting,
 };
 use std::cmp::Reverse;
+
+const REPO_CONFIG_DOTFILES: &[&str] = &[
+    ".dockerignore",
+    ".editorconfig",
+    ".eslintignore",
+    ".eslintrc",
+    ".gitattributes",
+    ".gitignore",
+    ".gitmodules",
+    ".markdownlintignore",
+    ".npmrc",
+    ".prettierignore",
+    ".prettierrc",
+    ".stylelintignore",
+    ".stylelintrc",
+    ".yarnrc",
+];
 
 // Boundary matching and literal matching are provided by crate::core::engine::codebase_scan.
 // See: find_boundary_matches(), find_literal_matches()
@@ -85,7 +102,7 @@ pub fn find_references_with_targeting(
     } else {
         scan_config_for_scope(&spec.scope)
     };
-    let files = target_files(codebase_scan::walk_files(root, &config), root, targeting);
+    let files = content_scan_files(root, &config, &spec.scope, targeting);
 
     // Build the working variant list — may be extended by discovery
     let mut all_variants = spec.variants.clone();
@@ -238,7 +255,7 @@ pub fn generate_renames_with_targeting(
 ) -> RenameResult {
     let references = find_references_with_targeting(spec, root, targeting);
     let config = scan_config_for_scope(&spec.scope);
-    let files = target_files(codebase_scan::walk_files(root, &config), root, targeting);
+    let files = content_scan_files(root, &config, &spec.scope, targeting);
     let path_rename_files = target_files(
         codebase_scan::walk_files(root, &scan_config_for_path_renames()),
         root,
@@ -358,6 +375,38 @@ pub fn generate_renames_with_targeting(
     }
 }
 
+fn content_scan_files(
+    root: &Path,
+    config: &ScanConfig,
+    scope: &RenameScope,
+    targeting: &RenameTargeting,
+) -> Vec<PathBuf> {
+    let mut files = target_files(codebase_scan::walk_files(root, config), root, targeting);
+
+    if !matches!(scope, RenameScope::Config | RenameScope::All) {
+        return files;
+    }
+
+    let mut seen: HashSet<PathBuf> = files.iter().cloned().collect();
+    let repo_config_files =
+        codebase_scan::walk_entries(root, &ScanConfig::default(), |name, is_dir| {
+            !is_dir && REPO_CONFIG_DOTFILES.contains(&name)
+        })
+        .into_iter()
+        .filter_map(|entry| match entry {
+            codebase_scan::WalkEntry::File(path) => Some(path),
+            codebase_scan::WalkEntry::Dir(_) => None,
+        });
+
+    for file in target_files(repo_config_files.collect(), root, targeting) {
+        if seen.insert(file.clone()) {
+            files.push(file);
+        }
+    }
+
+    files
+}
+
 fn rename_path_segments(path: &str, variants: &[CaseVariant]) -> String {
     path.split('/')
         .map(|segment| {
@@ -460,8 +509,51 @@ pub fn apply_renames(result: &mut RenameResult, root: &Path) -> Result<()> {
                 Some("rename.apply".to_string()),
             ));
         }
+
+        prune_empty_renamed_source_dirs(&result.file_renames, root);
     }
 
     result.applied = true;
     Ok(())
+}
+
+fn prune_empty_renamed_source_dirs(file_renames: &[FileRename], root: &Path) {
+    let mut source_dirs: Vec<PathBuf> = file_renames
+        .iter()
+        .filter_map(|rename| root.join(&rename.from).parent().map(Path::to_path_buf))
+        .collect();
+
+    source_dirs.sort_by_key(|path| Reverse(path.components().count()));
+    source_dirs.dedup();
+
+    for dir in source_dirs {
+        remove_empty_parents(&dir, root);
+    }
+}
+
+fn remove_empty_parents(dir: &Path, root: &Path) {
+    let mut current = dir;
+
+    while current != root && current.starts_with(root) {
+        if !current.is_dir() {
+            break;
+        }
+
+        match std::fs::read_dir(current) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    break;
+                }
+                if std::fs::remove_dir(current).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
 }

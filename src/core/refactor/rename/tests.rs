@@ -245,6 +245,76 @@ fn path_renames_include_skipped_content_files_in_renamed_directory() {
 }
 
 #[test]
+fn repo_config_dotfiles_are_content_edited() {
+    let dir = std::env::temp_dir().join("homeboy_refactor_repo_config_dotfile_edit_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join(".gitignore"),
+        "plugins/host/studio-native/build/\nplugins/host/studio-native/assets/\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::literal("studio-native", "wp-build", RenameScope::All);
+    let mut result = generate_renames(&spec, &dir);
+
+    let edit = result
+        .edits
+        .iter()
+        .find(|edit| edit.file == ".gitignore")
+        .expect(".gitignore should be content-edit eligible");
+    assert!(edit.new_content.contains("plugins/host/wp-build/build/"));
+    assert!(!edit.new_content.contains("studio-native"));
+
+    apply_renames(&mut result, &dir).unwrap();
+
+    let content = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert_eq!(
+        content,
+        "plugins/host/wp-build/build/\nplugins/host/wp-build/assets/\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn path_renames_prune_emptied_source_directories() {
+    let dir = std::env::temp_dir().join("homeboy_refactor_prune_empty_source_dirs_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("plugins/host/studio-native/assets")).unwrap();
+    std::fs::create_dir_all(dir.join("plugins/host/studio-native/build/js")).unwrap();
+
+    std::fs::write(
+        dir.join("plugins/host/studio-native/assets/studio-native-logo.svg"),
+        "<svg></svg>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plugins/host/studio-native/build/js/app.js"),
+        "console.log('ok');\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::literal("studio-native", "wp-build", RenameScope::All);
+    let mut result = generate_renames(&spec, &dir);
+
+    apply_renames(&mut result, &dir).unwrap();
+
+    assert!(dir
+        .join("plugins/host/wp-build/assets/wp-build-logo.svg")
+        .exists());
+    assert!(dir.join("plugins/host/wp-build/build/js/app.js").exists());
+    assert!(!dir.join("plugins/host/studio-native/assets").exists());
+    assert!(!dir.join("plugins/host/studio-native/build/js").exists());
+    assert!(!dir.join("plugins/host/studio-native/build").exists());
+    assert!(!dir.join("plugins/host/studio-native").exists());
+    assert!(dir.join("plugins/host").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn path_renames_preserve_intermediate_segments_under_renamed_ancestor() {
     let dir = std::env::temp_dir().join("homeboy_refactor_nested_path_segment_test");
     let _ = std::fs::remove_dir_all(&dir);
