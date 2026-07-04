@@ -166,6 +166,28 @@ fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
 }
 
 #[test]
+fn file_route_accepts_request_workspace_root_without_runner_config() {
+    let _home = HomeGuard::new();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/files/mkdir",
+        Some(serde_json::json!({
+            "runner_id": "file-lab-without-local-config",
+            "workspace_root": workspace.display().to_string(),
+            "path": workspace.join("artifacts").display().to_string(),
+        })),
+        &JobStore::default(),
+    );
+
+    assert_eq!(response.status_code, 200, "mkdir body: {}", response.body);
+    assert!(workspace.join("artifacts").is_dir());
+}
+
+#[test]
 fn file_routes_upload_and_download_inside_runner_workspace_root() {
     let _home = HomeGuard::new();
     let temp = tempfile::tempdir().expect("tempdir");

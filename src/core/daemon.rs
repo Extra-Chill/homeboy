@@ -220,12 +220,16 @@ struct ExecRequest {
 struct FilePathRequest {
     runner_id: String,
     path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct FileUploadRequest {
     runner_id: String,
     path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
     content_base64: String,
 }
 
@@ -798,7 +802,11 @@ fn create_runner_file_directory(
             )
         })?;
     broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
-    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    let path = resolve_runner_workspace_path(
+        &request.runner_id,
+        &request.path,
+        request.workspace_root.as_deref(),
+    )?;
     fs::create_dir_all(&path).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("create {}", path.display())))
     })?;
@@ -820,7 +828,11 @@ fn upload_runner_file(
             )
         })?;
     broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
-    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    let path = resolve_runner_workspace_path(
+        &request.runner_id,
+        &request.path,
+        request.workspace_root.as_deref(),
+    )?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             Error::internal_io(
@@ -861,7 +873,11 @@ fn download_runner_file(
             )
         })?;
     broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
-    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    let path = resolve_runner_workspace_path(
+        &request.runner_id,
+        &request.path,
+        request.workspace_root.as_deref(),
+    )?;
     let content = fs::read(&path).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
     })?;
@@ -873,19 +889,29 @@ fn download_runner_file(
     }))
 }
 
-fn resolve_runner_workspace_path(runner_id: &str, requested_path: &str) -> Result<PathBuf> {
-    let runner = crate::core::runner::load(runner_id)?;
-    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace_root",
-            format!("runner `{runner_id}` file API requires workspace_root"),
-            Some(runner_id.to_string()),
-            Some(vec![
-                "Configure the runner workspace_root before using daemon file transfer."
-                    .to_string(),
-            ]),
-        )
-    })?;
+fn resolve_runner_workspace_path(
+    runner_id: &str,
+    requested_path: &str,
+    request_workspace_root: Option<&str>,
+) -> Result<PathBuf> {
+    let loaded_runner;
+    let workspace_root = match request_workspace_root.filter(|root| !root.trim().is_empty()) {
+        Some(root) => root,
+        None => {
+            loaded_runner = crate::core::runner::load(runner_id)?;
+            loaded_runner.workspace_root.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace_root",
+                    format!("runner `{runner_id}` file API requires workspace_root"),
+                    Some(runner_id.to_string()),
+                    Some(vec![
+                        "Configure the runner workspace_root before using daemon file transfer."
+                            .to_string(),
+                    ]),
+                )
+            })?
+        }
+    };
     let root = fs::canonicalize(workspace_root).map_err(|err| {
         Error::internal_io(
             err.to_string(),

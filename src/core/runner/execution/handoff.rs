@@ -215,13 +215,14 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
                 "reverse runner session has no broker URL",
             ));
         };
+        let broker_token = super::super::broker_auth::broker_submit_token_for_runner(&runner.id)?;
         broker_http::post_json(
             &client,
             broker_url,
             &path,
             json!({}),
             "cancel reverse runner broker job",
-            super::super::broker_auth::broker_token_from_env().as_deref(),
+            broker_token.as_deref(),
         )?
     } else {
         return Err(runner_job_cancel_unsupported(

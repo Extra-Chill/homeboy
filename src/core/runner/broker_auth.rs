@@ -9,9 +9,11 @@
 //!
 //! * **Pairing.** An operator pairs a worker by minting a *runner credential*
 //!   on the broker host (`broker_auth_pair`). Pairing generates a random bearer
-//!   token, stores only its SHA-256 hash, and binds it to a single `runner_id`
-//!   with a set of [`BrokerScope`]s. The plaintext token is returned exactly
-//!   once so it can be handed to the worker; it is never persisted or logged.
+//!   token, stores its SHA-256 hash for enforcement, and binds it to a single
+//!   `runner_id` with a set of [`BrokerScope`]s. The controller copy may retain
+//!   the plaintext token so controller-side submit/file requests can attach it;
+//!   enforcement-host installs strip plaintext token material and keep hashes
+//!   only.
 //! * **Controller submit.** Job submission (`POST /runner/jobs`) is authorized
 //!   by a credential carrying the [`BrokerScope::Submit`] scope. Worker claims
 //!   are authorized by [`BrokerScope::Work`]. A credential may hold both.
@@ -26,8 +28,8 @@
 //!   broker into loopback-only smoke mode, which is gated to loopback binds.
 //!
 //! Tokens live in `~/.config/homeboy/broker_auth.json` with `0600` perms on
-//! Unix and are never emitted in normal command output — only the one-time mint
-//! response carries the plaintext.
+//! Unix. Plaintext token material is only kept in the controller-side copy and
+//! is never installed on runner enforcement hosts.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -53,6 +55,19 @@ pub fn broker_token_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Resolve the controller-side broker submit token for `runner_id`.
+///
+/// `HOMEBOY_BROKER_TOKEN` remains an explicit override. Otherwise, use the
+/// newest active submit credential for the runner whose controller-local token
+/// still matches its persisted hash.
+pub fn broker_submit_token_for_runner(runner_id: &str) -> Result<Option<String>> {
+    if let Some(token) = broker_token_from_env() {
+        return Ok(Some(token));
+    }
+    let store = BrokerAuthStore::load()?;
+    Ok(store.submit_token_for_runner(runner_id))
 }
 
 /// Authorization scopes a broker credential may grant.
@@ -83,6 +98,11 @@ pub struct BrokerCredential {
     pub runner_id: String,
     /// Lowercase hex SHA-256 of the bearer token. Never the plaintext.
     pub token_sha256: String,
+    /// Controller-local plaintext token for attaching authenticated submit
+    /// requests. Stripped before installing the store on broker enforcement
+    /// hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     /// Granted scopes.
     #[serde(default)]
     pub scopes: BTreeSet<BrokerScope>,
@@ -302,6 +322,7 @@ impl BrokerAuthStore {
             id: id.clone(),
             runner_id: runner_id.clone(),
             token_sha256: sha256_hex(&token),
+            token: Some(token.clone()),
             scopes,
             revoked_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -326,6 +347,32 @@ impl BrokerAuthStore {
             }
         }
         revoked
+    }
+
+    pub fn enforcement_copy(&self) -> Self {
+        let mut copy = self.clone();
+        for credential in &mut copy.credentials {
+            credential.token = None;
+        }
+        copy
+    }
+
+    pub fn submit_token_for_runner(&self, runner_id: &str) -> Option<String> {
+        self.credentials
+            .iter()
+            .rev()
+            .filter(|credential| {
+                credential.is_active()
+                    && credential.runner_id == runner_id
+                    && credential.scopes.contains(&BrokerScope::Submit)
+            })
+            .find_map(|credential| {
+                let token = credential.token.as_deref()?.trim();
+                if token.is_empty() || sha256_hex(token) != credential.token_sha256 {
+                    return None;
+                }
+                Some(token.to_string())
+            })
     }
 }
 
@@ -544,16 +591,68 @@ mod tests {
     }
 
     #[test]
-    fn minted_token_is_high_entropy_and_hashed_not_stored_plain() {
+    fn minted_token_is_high_entropy_and_controller_store_keeps_plaintext() {
         let (store, token) = store_with("runner-a", BrokerScope::Work);
         assert!(token.starts_with("hbk_"));
         assert!(token.len() > 32);
-        // Plaintext never appears in the persisted credential.
-        assert!(store
+        assert_eq!(store.credentials[0].token_sha256, sha256_hex(&token));
+        assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
+    }
+
+    #[test]
+    fn enforcement_copy_strips_plaintext_tokens() {
+        let (store, token) = store_with("runner-a", BrokerScope::Work);
+        let enforcement_store = store.enforcement_copy();
+
+        assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
+        assert!(enforcement_store
             .credentials
             .iter()
-            .all(|cred| cred.token_sha256 != token));
-        assert_eq!(store.credentials[0].token_sha256, sha256_hex(&token));
+            .all(|credential| credential.token.is_none()));
+        assert_eq!(
+            enforcement_store.credentials[0].token_sha256,
+            sha256_hex(&token)
+        );
+    }
+
+    #[test]
+    fn submit_token_for_runner_selects_newest_matching_submit_credential() {
+        let mut store = BrokerAuthStore::default();
+        store
+            .pair("cred-1", "runner-a", scopes(&[BrokerScope::Submit]))
+            .expect("pair first");
+        let newest = store
+            .pair(
+                "cred-2",
+                "runner-a",
+                scopes(&[BrokerScope::Submit, BrokerScope::Work]),
+            )
+            .expect("pair second");
+        store
+            .pair("cred-3", "runner-b", scopes(&[BrokerScope::Submit]))
+            .expect("pair other runner");
+
+        assert_eq!(
+            store.submit_token_for_runner("runner-a").as_deref(),
+            Some(newest.token.as_str())
+        );
+    }
+
+    #[test]
+    fn submit_token_for_runner_ignores_missing_or_mismatched_plaintext() {
+        let mut store = BrokerAuthStore::default();
+        let usable = store
+            .pair("cred-1", "runner-a", scopes(&[BrokerScope::Submit]))
+            .expect("pair first");
+        store
+            .pair("cred-2", "runner-a", scopes(&[BrokerScope::Submit]))
+            .expect("pair second");
+        store.credentials[1].token = Some("wrong-token".to_string());
+
+        assert_eq!(
+            store.submit_token_for_runner("runner-a").as_deref(),
+            Some(usable.token.as_str())
+        );
     }
 
     #[test]
@@ -582,10 +681,10 @@ mod tests {
                     Some("runner-a"),
                 )
                 .expect("work token survives store round trip");
-            assert!(loaded
-                .credentials
-                .iter()
-                .all(|credential| credential.token_sha256 != minted.token));
+            assert_eq!(
+                loaded.submit_token_for_runner("runner-a").as_deref(),
+                Some(minted.token.as_str())
+            );
         });
     }
 
