@@ -450,6 +450,7 @@ fn list_args(component: Option<&str>, rig: Vec<String>) -> BenchListArgs {
         scenario_ids: Vec::new(),
         setting_args: SettingArgs::default(),
         args: Vec::new(),
+        json: false,
     }
 }
 
