@@ -772,6 +772,11 @@ mod install_flows {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
         write_rig(package.path(), "lint-dm", &minimal_rig("lint-dm"));
+        fs::write(
+            package.path().join("homeboy-rig-package.json"),
+            r#"{"lint_ignore_directories":[".datamachine"]}"#,
+        )
+        .expect("write rig package manifest");
         let datamachine = package.path().join(".datamachine");
         fs::create_dir_all(&datamachine).expect("datamachine dir");
         fs::write(datamachine.join("notes.txt"), "<<<<<<< ours\n")

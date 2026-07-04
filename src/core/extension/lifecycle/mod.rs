@@ -255,14 +255,8 @@ fn copy_shared_refresh_assets(source_root: Option<&Path>, durable_root: &Path) -
         return Ok(());
     };
 
-    for shared_dir in [
-        "scripts/lib",
-        "dependency-adapters",
-        "agent-runtimes",
-        "runtime-agent-ci",
-        "agent-task-contracts",
-    ] {
-        let source = source_root.join(shared_dir);
+    for shared_dir in install_sources::shared_assets_for_root(source_root) {
+        let source = source_root.join(&shared_dir);
         if source.is_dir() {
             copy_dir_recursive(&source, &durable_root.join(shared_dir))?;
         }

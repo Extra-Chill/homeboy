@@ -5,6 +5,7 @@
 //! assets, and linking a local source directory. Kept in a sibling module so
 //! the lifecycle root stays under the structural line/item thresholds (#5241).
 
+use serde::Deserialize;
 use std::path::Path;
 
 use crate::core::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
@@ -21,6 +22,55 @@ use super::{
     derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata,
     InstallResult,
 };
+
+#[derive(Debug, Deserialize)]
+struct ExtensionRootManifest {
+    #[serde(default)]
+    shared_assets: Vec<SharedAssetDeclaration>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SharedAssetDeclaration {
+    Path(String),
+    Object { path: String },
+}
+
+impl SharedAssetDeclaration {
+    fn into_path(self) -> String {
+        match self {
+            SharedAssetDeclaration::Path(path) => path,
+            SharedAssetDeclaration::Object { path } => path,
+        }
+    }
+}
+
+pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
+    let declared = std::fs::read_to_string(source_root.join("homeboy-extension-root.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ExtensionRootManifest>(&raw).ok())
+        .map(|manifest| {
+            manifest
+                .shared_assets
+                .into_iter()
+                .map(SharedAssetDeclaration::into_path)
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !declared.is_empty() {
+        return declared;
+    }
+
+    vec![
+        "scripts/lib".to_string(),
+        "dependency-adapters".to_string(),
+        "agent-runtimes".to_string(),
+        "runtime-agent-ci".to_string(),
+        "agent-task-contracts".to_string(),
+    ]
+}
 
 pub(super) fn install_configured_extension(
     source: &str,
@@ -243,25 +293,19 @@ fn install_shared_assets_from_root(
         return Ok(());
     };
 
-    for shared_dir in [
-        "scripts/lib",
-        "dependency-adapters",
-        "agent-runtimes",
-        "runtime-agent-ci",
-        "agent-task-contracts",
-    ] {
-        let source = source_root.join(shared_dir);
+    for shared_dir in shared_assets_for_root(source_root) {
+        let source = source_root.join(&shared_dir);
         if !source.is_dir() {
             continue;
         }
 
-        let target = match shared_dir {
+        let target = match shared_dir.as_str() {
             "agent-runtimes" => paths::agent_runtimes()?,
-            "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
-            "dependency-adapters" => extensions_dir.join(shared_dir),
+            "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(&shared_dir),
+            "dependency-adapters" => extensions_dir.join(&shared_dir),
             // Shared extension libraries install under the extensions root so
             // installed wrappers can source `../../../scripts/lib/...`.
-            _ => extensions_dir.join(shared_dir),
+            _ => extensions_dir.join(&shared_dir),
         };
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -271,11 +315,11 @@ fn install_shared_assets_from_root(
                 )
             })?;
         }
-        remove_existing_target(&target, shared_dir)?;
+        remove_existing_target(&target, &shared_dir)?;
 
         match mode {
             SharedAssetMode::Copy => copy_dir_recursive(&source, &target)?,
-            SharedAssetMode::Symlink => symlink_shared_asset(&source, &target, shared_dir)?,
+            SharedAssetMode::Symlink => symlink_shared_asset(&source, &target, &shared_dir)?,
         }
     }
 

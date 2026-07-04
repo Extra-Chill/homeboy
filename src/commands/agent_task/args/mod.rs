@@ -96,9 +96,9 @@ pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
 
-    /// Named provider profile for common executor/model pairings. Explicit --backend/--model values win.
-    #[arg(long = "provider-profile", value_enum, value_name = "PROFILE")]
-    pub provider_profile: Option<AgentTaskProviderProfile>,
+    /// Named provider profile declared by an installed executor provider. Explicit --backend/--model values win.
+    #[arg(long = "provider-profile", value_name = "PROFILE")]
+    pub provider_profile: Option<String>,
 
     /// Secret environment variable name to hydrate for the provider. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
@@ -120,12 +120,6 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub run_plan: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum AgentTaskProviderProfile {
-    /// Run through the opencode executor and request GPT-5.5/Codex model configuration.
-    OpencodeCodexGpt55,
-}
-
 #[derive(Args, Debug, Clone)]
 pub struct AgentTaskFanoutInputArgs {
     /// Batch-cook fanout spec JSON file, @file, inline JSON, or - for stdin.
@@ -140,10 +134,7 @@ pub struct AgentTaskFanoutInputArgs {
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Default extension-provider selector for cooks without one: a Homeboy
-    /// executor provider id (e.g. `sample.executor-provider`), NOT
-    /// an AI runtime name (codex, opencode, claude-code). Set the AI runtime via
-    /// --provider-config. Run `homeboy agent-task providers` for valid ids.
+    /// Default extension-provider selector for cooks without one. Run `homeboy agent-task providers` for valid provider ids.
     #[arg(
         long = "selector",
         visible_alias = "provider-id",
@@ -513,7 +504,7 @@ pub struct AgentTaskCookArgs {
     pub protected_branches: Vec<String>,
 
     /// AI tool disclosure line for the PR body.
-    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
     /// AI assistance scope for the PR body.
@@ -571,8 +562,8 @@ pub struct AgentTaskLoopDefineArgs {
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
     /// `sample.executor-provider`) that runs loop-spawned dispatch
-    /// actions when the action omits one. This is NOT a model or AI runtime name
-    /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
+    /// actions when the action omits one. This is not model/runtime provider
+    /// configuration; pass runtime-specific values in --dispatch-provider-config.
     /// Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
@@ -587,8 +578,8 @@ pub struct AgentTaskLoopDefineArgs {
 
     /// Agent/model provider config (JSON, @file, or -): the nested AI
     /// runtime/provider/model the selected executor uses for loop-spawned
-    /// dispatch actions when the action omits one. Put AI runtime names like
-    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
+    /// dispatch actions when the action omits one. Put runtime-specific provider
+    /// selection here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }
@@ -614,8 +605,8 @@ pub struct AgentTaskLoopResumeArgs {
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
     /// `sample.executor-provider`) that runs loop-spawned dispatch
-    /// actions when the action omits one. This is NOT a model or AI runtime name
-    /// (codex, opencode, claude-code) — pass those in --dispatch-provider-config.
+    /// actions when the action omits one. This is not model/runtime provider
+    /// configuration; pass runtime-specific values in --dispatch-provider-config.
     /// Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
@@ -630,8 +621,8 @@ pub struct AgentTaskLoopResumeArgs {
 
     /// Agent/model provider config (JSON, @file, or -): the nested AI
     /// runtime/provider/model the selected executor uses for loop-spawned
-    /// dispatch actions when the action omits one. Put AI runtime names like
-    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
+    /// dispatch actions when the action omits one. Put runtime-specific provider
+    /// selection here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }

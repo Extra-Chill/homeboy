@@ -94,7 +94,10 @@ fn provider_resolution_failure_outcome(
                 "available_provider_ids": candidate_ids,
             }),
         ),
-        ProviderResolution::SelectorMismatch { available_ids } => failure_outcome(
+        ProviderResolution::SelectorMismatch {
+            available_ids,
+            selector_hint,
+        } => failure_outcome(
             request,
             AgentTaskOutcomeStatus::Failed,
             AgentTaskFailureClassification::CapabilityMissing,
@@ -107,10 +110,7 @@ fn provider_resolution_failure_outcome(
                 "backend": request.executor.backend,
                 "selector": request.executor.selector,
                 "available_provider_ids": available_ids,
-                "hint": selector_runtime_provider_hint(
-                    &request.executor.backend,
-                    request.executor.selector.as_deref(),
-                ),
+                "hint": selector_hint,
             }),
         ),
     }

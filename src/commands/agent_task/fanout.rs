@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
+use homeboy::core::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::core::agent_tasks::batch;
 use homeboy::core::agent_tasks::dispatch_service::{
     self, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::core::agent_tasks::provider;
+use homeboy::core::agent_tasks::provider::{self, AgentTaskProviderCatalog};
 use homeboy::core::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
@@ -24,7 +25,7 @@ use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
     AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs, AgentTaskProviderProfile,
+    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
 
@@ -695,23 +696,37 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
 }
 
 fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
-    match args.provider_profile {
-        Some(AgentTaskProviderProfile::OpencodeCodexGpt55) => {
-            if args.backend.is_none() {
-                args.backend = Some("opencode".to_string());
-            }
-            if args.model.is_none() {
-                args.model = Some("gpt-5.5".to_string());
-            }
-        }
-        None => {}
+    let Some(profile) = selected_provider_profile(args.provider_profile.as_deref()) else {
+        return;
+    };
+    if args.backend.is_none() {
+        args.backend = profile.backend;
     }
+    if args.selector.is_none() {
+        args.selector = profile.selector;
+    }
+    if args.model.is_none() {
+        args.model = profile.model;
+    }
+    if args.provider_config.is_none() {
+        args.provider_config = profile.provider_config.map(|value| value.to_string());
+    }
+}
+
+fn selected_provider_profile(name: Option<&str>) -> Option<AgentTaskProviderProfileDeclaration> {
+    let name = name?.trim();
+    AgentTaskProviderCatalog::discover()
+        .providers()
+        .iter()
+        .flat_map(|provider| provider.cli.profiles.iter())
+        .find(|profile| profile.name == name)
+        .cloned()
 }
 
 fn provider_selection_preflight(args: &AgentTaskFanoutCookBatchArgs) -> Value {
     let warnings = provider_selection_warnings(args);
     serde_json::json!({
-        "profile": args.provider_profile.map(provider_profile_name),
+        "profile": args.provider_profile,
         "executor": {
             "backend": args.backend,
             "selector": args.selector,
@@ -723,21 +738,11 @@ fn provider_selection_preflight(args: &AgentTaskFanoutCookBatchArgs) -> Value {
 }
 
 fn provider_selection_warnings(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
-    let Some(backend) = args.backend.as_deref() else {
-        return Vec::new();
-    };
-    if backend.eq_ignore_ascii_case("codex") {
-        return vec![
-            "--backend codex selects the Codex CLI executor backend. For opencode-native execution with Codex/GPT-5.5, use --provider-profile opencode-codex-gpt55 or --backend opencode --model gpt-5.5."
-                .to_string(),
-        ];
-    }
-    Vec::new()
-}
-
-fn provider_profile_name(profile: AgentTaskProviderProfile) -> &'static str {
-    match profile {
-        AgentTaskProviderProfile::OpencodeCodexGpt55 => "opencode-codex-gpt55",
+    match args.provider_profile.as_deref() {
+        Some(name) if selected_provider_profile(Some(name)).is_none() => vec![format!(
+            "provider profile '{name}' is not declared by installed executor providers; run `homeboy agent-task providers` to inspect available profiles"
+        )],
+        _ => Vec::new(),
     }
 }
 
@@ -929,7 +934,18 @@ fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
 }
 
 fn default_ai_tool() -> String {
-    "OpenCode (GPT-5.5)".to_string()
+    AgentTaskProviderCatalog::discover()
+        .providers()
+        .iter()
+        .find_map(|provider| provider.cli.default_ai_disclosure.clone())
+        .or_else(|| {
+            AgentTaskProviderCatalog::discover()
+                .providers()
+                .iter()
+                .flat_map(|provider| provider.cli.profiles.iter())
+                .find_map(|profile| profile.ai_disclosure.clone())
+        })
+        .unwrap_or_else(|| "AI-assisted".to_string())
 }
 
 fn default_ai_used_for() -> String {
@@ -1176,42 +1192,38 @@ mod tests {
     }
 
     #[test]
-    fn cook_batch_provider_profile_sets_opencode_codex_defaults() {
+    fn cook_batch_unknown_provider_profile_warns_without_core_defaults() {
         let mut args = cook_batch_args();
         args.backend = None;
         args.model = None;
-        args.provider_profile = Some(AgentTaskProviderProfile::OpencodeCodexGpt55);
+        args.provider_profile = Some("example-profile".to_string());
 
         let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(
             value["preflight"]["provider_selection"]["profile"],
-            "opencode-codex-gpt55"
+            "example-profile"
         );
-        assert_eq!(
-            value["preflight"]["provider_selection"]["executor"]["backend"],
-            "opencode"
-        );
-        assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
-        assert_eq!(value["plan"]["cooks"][0]["backend"], "opencode");
-        assert_eq!(value["plan"]["cooks"][0]["model"], "gpt-5.5");
+        assert!(value["preflight"]["provider_selection"]["warnings"][0]
+            .as_str()
+            .expect("warning")
+            .contains("not declared"));
     }
 
     #[test]
-    fn cook_batch_warns_when_codex_backend_selects_codex_cli_executor() {
+    fn cook_batch_does_not_warn_for_specific_backend_names_in_core() {
         let mut args = cook_batch_args();
-        args.backend = Some("codex".to_string());
+        args.backend = Some("example".to_string());
         args.provider_config = None;
 
         let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
 
         assert_eq!(exit_code, 0);
-        let warning = value["preflight"]["provider_selection"]["warnings"][0]
-            .as_str()
-            .expect("warning");
-        assert!(warning.contains("Codex CLI executor backend"));
-        assert!(warning.contains("--provider-profile opencode-codex-gpt55"));
+        assert!(value["preflight"]["provider_selection"]["warnings"]
+            .as_array()
+            .expect("warnings")
+            .is_empty());
     }
 
     #[test]
@@ -1246,7 +1258,7 @@ mod tests {
         assert_eq!(args.from, "origin/main");
         assert_eq!(
             args.provider_profile,
-            Some(AgentTaskProviderProfile::OpencodeCodexGpt55)
+            Some("opencode-codex-gpt55".to_string())
         );
     }
 }

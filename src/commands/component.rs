@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn component_discovery_value_flags_temp_local_path() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let checkout = temp.path().join("opencode").join("homeboy-temp");
+        let checkout = temp.path().join("tmp").join("homeboy-temp");
         fs::create_dir_all(checkout.join(".git")).expect("git dir");
         fs::write(checkout.join("homeboy.json"), r#"{"id":"homeboy"}"#).expect("homeboy.json");
         let component = Component::new(
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(value["local_path_diagnostic"]["warning"]
             .as_str()
             .unwrap_or_default()
-            .contains("temporary/opencode checkout"));
+            .contains("transient workspace checkout"));
         assert!(value["local_path_diagnostic"]["repair_command"]
             .as_str()
             .unwrap_or_default()

@@ -150,6 +150,7 @@ pub mod top_n;
 pub mod trace_compare;
 pub mod trace_experiment;
 pub mod trace_secrets;
+pub(crate) mod transient_workspace_policy;
 pub mod triage;
 pub mod tunnel;
 #[cfg(test)]

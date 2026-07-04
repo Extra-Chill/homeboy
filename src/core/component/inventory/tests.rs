@@ -491,7 +491,7 @@ fn reconcile_flags_relative_local_path_and_repairs_to_absolute() {
 fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
     let dir = TempDir::new().unwrap();
     let stable_checkout = dir.path().join("Developer").join("homeboy");
-    let temp_checkout = dir.path().join("opencode").join("homeboy-issue-4202-temp");
+    let temp_checkout = dir.path().join("tmp").join("homeboy-issue-4202-temp");
     init_git_repo(&stable_checkout);
     init_git_repo(&temp_checkout);
     write_portable_id(&stable_checkout, "homeboy");
@@ -523,7 +523,7 @@ fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
         .warning
         .as_deref()
         .unwrap_or_default()
-        .contains("temporary/opencode checkout"));
+        .contains("transient workspace checkout"));
     assert!(diagnostic
         .repair_command
         .as_deref()
@@ -541,7 +541,7 @@ fn reconcile_repairs_temp_checkout_to_unique_stable_candidate() {
         .join("components");
     fs::create_dir_all(&config_components).unwrap();
     let stable_checkout = dir.path().join("Developer").join("homeboy");
-    let temp_checkout = dir.path().join("opencode").join("homeboy-temp");
+    let temp_checkout = dir.path().join("tmp").join("homeboy-temp");
     init_git_repo(&stable_checkout);
     init_git_repo(&temp_checkout);
     write_portable_id(&stable_checkout, "homeboy");

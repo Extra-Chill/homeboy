@@ -90,6 +90,11 @@ pub struct AgentTaskExecutorProvider {
     pub role_aliases: AgentTaskProviderRoleAliases,
     #[serde(
         default,
+        skip_serializing_if = "AgentTaskProviderCliMetadata::is_empty"
+    )]
+    pub cli: AgentTaskProviderCliMetadata,
+    #[serde(
+        default,
         skip_serializing_if = "AgentTaskProviderResultContract::is_empty"
     )]
     pub result_contract: AgentTaskProviderResultContract,
@@ -107,6 +112,39 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderCliMetadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_selector_hints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<AgentTaskProviderProfileDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ai_disclosure: Option<String>,
+}
+
+impl AgentTaskProviderCliMetadata {
+    pub(super) fn is_empty(&self) -> bool {
+        self.reserved_selector_hints.is_empty()
+            && self.profiles.is_empty()
+            && self.default_ai_disclosure.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderProfileDeclaration {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_disclosure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -259,12 +259,15 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
                 )]),
             ));
         }
-        ProviderResolution::SelectorMismatch { available_ids } => {
+        ProviderResolution::SelectorMismatch {
+            available_ids,
+            selector_hint,
+        } => {
             let mut suggestions = vec![format!(
                 "Available provider ids for backend '{backend}': {}.",
                 available_ids.join(", ")
             )];
-            if let Some(hint) = selector_runtime_provider_hint(backend, selector) {
+            if let Some(hint) = selector_hint {
                 suggestions.push(hint);
             }
             return Err(Error::validation_invalid_argument(

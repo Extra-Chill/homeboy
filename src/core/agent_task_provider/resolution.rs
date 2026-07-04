@@ -85,7 +85,10 @@ pub(crate) enum ProviderResolution<'a> {
     /// One or more providers matched the backend/extension alias, but the
     /// supplied selector did not match any of them. The selectable provider
     /// ids are surfaced so the operator can correct the `--selector`.
-    SelectorMismatch { available_ids: Vec<String> },
+    SelectorMismatch {
+        available_ids: Vec<String>,
+        selector_hint: Option<String>,
+    },
 }
 
 pub(crate) fn selector_runtime_provider_hint(
@@ -93,13 +96,36 @@ pub(crate) fn selector_runtime_provider_hint(
     selector: Option<&str>,
 ) -> Option<String> {
     let selector = selector?.trim();
-    if !matches!(selector, "codex" | "opencode" | "claude-code") {
+    let catalog = AgentTaskProviderCatalog::discover();
+    let reserved = catalog
+        .providers()
+        .iter()
+        .flat_map(|provider| provider.cli.reserved_selector_hints.iter())
+        .any(|hint| hint == selector);
+    if !reserved {
         return None;
     }
 
     Some(format!(
-        "'{selector}' looks like a nested AI runtime provider, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass the AI provider in --dispatch-provider-config instead."
+        "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --dispatch-provider-config instead."
     ))
+}
+
+fn selector_runtime_provider_hint_from_providers(
+    providers: &[&AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> Option<String> {
+    let selector = selector?.trim();
+    let reserved = providers
+        .iter()
+        .flat_map(|provider| provider.cli.reserved_selector_hints.iter())
+        .any(|hint| hint == selector);
+    reserved.then(|| {
+        format!(
+            "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --dispatch-provider-config instead."
+        )
+    })
 }
 
 impl<'a> ProviderResolution<'a> {
@@ -133,6 +159,11 @@ pub(crate) fn resolve_provider_for_backend<'a>(
             return ProviderResolution::Resolved(provider);
         }
         return ProviderResolution::SelectorMismatch {
+            selector_hint: selector_runtime_provider_hint_from_providers(
+                &exact_matches,
+                backend,
+                selector,
+            ),
             available_ids: exact_matches
                 .iter()
                 .map(|provider| provider.id.clone())
@@ -183,6 +214,11 @@ fn resolve_provider_by_extension_alias<'a>(
         {
             Some(provider) => ProviderResolution::Resolved(provider),
             None => ProviderResolution::SelectorMismatch {
+                selector_hint: selector_runtime_provider_hint_from_providers(
+                    &alias_matches,
+                    backend,
+                    Some(selector),
+                ),
                 available_ids: alias_matches
                     .iter()
                     .map(|provider| provider.id.clone())
