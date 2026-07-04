@@ -158,6 +158,21 @@ pub fn run(
                 dry_run,
             },
         )),
+        RunnerCommand::DevSync {
+            runner_id,
+            homeboy_source,
+            homeboy_binary,
+            extensions,
+            reconnect,
+            dry_run,
+        } => map_dev_sync(runner::runner_dev_sync(runner::RunnerDevSyncOptions {
+            runner_id,
+            homeboy_source,
+            homeboy_binary,
+            extensions,
+            reconnect,
+            dry_run,
+        })),
         RunnerCommand::Exec {
             id,
             cwd,
@@ -704,6 +719,12 @@ fn map_refresh_homeboy(
     result: CmdResult<runner::HomeboyBinaryRefreshOutput>,
 ) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::RefreshHomeboy(output), exit_code))
+}
+
+fn map_dev_sync(
+    result: homeboy::core::Result<(runner::RunnerDevSyncOutput, i32)>,
+) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::DevSync(output), exit_code))
 }
 
 fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {

@@ -1,12 +1,18 @@
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::error::{Error, Result};
 use crate::core::output::MergeOutput;
 
 use super::{
     connect, disconnect, exec, load, merge, normalize_runner_command_env_for_homeboy_path,
-    RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerFileTransfer,
 };
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
@@ -57,6 +63,57 @@ pub struct HomeboyBinaryRefreshOutput {
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerDevSyncOptions {
+    pub runner_id: String,
+    pub homeboy_source: Option<String>,
+    pub homeboy_binary: Option<String>,
+    pub extensions: Vec<String>,
+    pub reconnect: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerDevSyncBinaryProvenance {
+    pub sha256: String,
+    pub hash: String,
+    pub local_binary: String,
+    pub remote_binary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerDevSyncPlan {
+    pub runner_id: String,
+    pub workspace_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_binary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_binary: Option<String>,
+    pub reconnect: bool,
+    pub followup_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerDevSyncOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    pub runner_id: String,
+    pub dry_run: bool,
+    pub plan: RunnerDevSyncPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<RunnerDevSyncBinaryProvenance>,
+    pub extensions_deferred: Vec<String>,
+    pub updated_fields: Vec<String>,
+    pub daemon_refreshed: bool,
+    pub reconnect_required: bool,
+    pub next_actions: Vec<String>,
 }
 
 pub fn plan_homeboy_binary_refresh(
@@ -206,11 +263,7 @@ pub fn refresh_homeboy_binary(
     }
 
     let identity = parse_identity(&exec_output.stdout)?;
-    let env = refreshed_runner_env(&plan.runner_id, &plan.binary_path)?;
-    let patch = serde_json::json!({
-        "homeboy_path": plan.binary_path,
-        "env": env,
-    });
+    let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
     let updated_fields = match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
         MergeOutput::Single(result) => result.updated_fields,
         MergeOutput::Bulk(_) => Vec::new(),
@@ -239,6 +292,195 @@ pub fn refresh_homeboy_binary(
         },
         0,
     ))
+}
+
+pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
+    let runner = load(&options.runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner dev-sync requires the runner to configure workspace_root",
+            Some(options.runner_id.clone()),
+            Some(vec![
+                "Set runner.workspace_root before selecting a managed dev binary slot.".to_string(),
+            ]),
+        )
+    })?;
+    Ok(RunnerDevSyncPlan {
+        runner_id: runner.id.clone(),
+        workspace_root: workspace_root.to_string(),
+        local_binary: options.homeboy_binary.clone(),
+        remote_binary: options
+            .homeboy_binary
+            .as_ref()
+            .and_then(|path| sha256_file(Path::new(path)).ok())
+            .map(|sha| dev_binary_path(workspace_root, &sha)),
+        reconnect: options.reconnect,
+        followup_commands: dev_sync_followups(&runner.id, options.reconnect),
+    })
+}
+
+pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOutput, i32)> {
+    if options.homeboy_binary.is_some() && options.homeboy_source.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_binary",
+            "Pass either --homeboy-binary or --homeboy-source, not both",
+            None,
+            None,
+        ));
+    }
+    if !options.extensions.is_empty() {
+        validate_extension_specs(&options.extensions)?;
+    }
+
+    let mut plan = plan_runner_dev_sync(&options)?;
+    if options.dry_run {
+        return Ok((
+            RunnerDevSyncOutput {
+                variant: "dev_sync",
+                command: "runner.dev_sync",
+                runner_id: plan.runner_id.clone(),
+                dry_run: true,
+                plan,
+                binary: None,
+                extensions_deferred: options.extensions,
+                updated_fields: Vec::new(),
+                daemon_refreshed: false,
+                reconnect_required: !options.reconnect,
+                next_actions: dev_sync_next_actions(&options.runner_id, options.reconnect),
+            },
+            0,
+        ));
+    }
+
+    let source_path = options.homeboy_source.as_deref().map(expand_path);
+    let local_binary = match options.homeboy_binary.as_deref() {
+        Some(path) => expand_path(path),
+        None => build_local_homeboy_binary(source_path.as_deref())?,
+    };
+    let sha256 = sha256_file(&local_binary)?;
+    let hash = sha256[..16].to_string();
+    let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
+    plan.local_binary = Some(local_binary.display().to_string());
+    plan.remote_binary = Some(remote_binary.clone());
+
+    let runner = load(&options.runner_id)?;
+    let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
+    let remote_parent = Path::new(&remote_binary)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or_else(|| Error::internal_json("invalid remote dev binary path".to_string(), None))?;
+    transfer.ensure_directory(remote_parent)?;
+    transfer.upload_file(&local_binary.display().to_string(), &remote_binary)?;
+
+    let chmod_script = format!("chmod 0755 {}", sq(&remote_binary));
+    let (_chmod, chmod_exit) = exec(
+        &options.runner_id,
+        RunnerExecOptions {
+            cwd: None,
+            project_id: None,
+            allow_diagnostic_ssh: true,
+            command: vec!["bash".to_string(), "-lc".to_string(), chmod_script],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            env_materialization: None,
+            capture_patch: false,
+            raw_exec: true,
+            source_snapshot: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            require_paths: Vec::new(),
+            runner_workload: None,
+            run_id: None,
+            detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
+        },
+    )?;
+    if chmod_exit != 0 {
+        return Ok((dev_sync_failure_output(options, plan, None), chmod_exit));
+    }
+
+    let (refresh_output, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+        runner_id: options.runner_id.clone(),
+        mode: HomeboyBinaryRefreshMode::Select {
+            binary_path: remote_binary.clone(),
+        },
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        reconnect: options.reconnect,
+        dry_run: false,
+    })?;
+    if exit_code != 0 {
+        return Ok((dev_sync_failure_output(options, plan, None), exit_code));
+    }
+
+    let source_revision = source_path.as_deref().and_then(git_revision);
+    let dirty = source_path.as_deref().is_some_and(git_dirty);
+    let binary = RunnerDevSyncBinaryProvenance {
+        sha256: sha256.clone(),
+        hash,
+        local_binary: local_binary.display().to_string(),
+        remote_binary: remote_binary.clone(),
+        source_path: source_path.map(|path| path.display().to_string()),
+        source_revision,
+        dirty,
+    };
+
+    let mut runner = load(&options.runner_id)?;
+    runner.resources.insert(
+        "dev_sync".to_string(),
+        serde_json::json!({
+            "schema": "homeboy/runner-dev-sync/v1",
+            "homeboy": binary,
+            "extensions": [],
+            "extensions_deferred": options.extensions,
+        }),
+    );
+    let patch = serde_json::json!({ "resources": runner.resources });
+    let mut updated_fields = refresh_output.updated_fields;
+    if let MergeOutput::Single(result) = merge(Some(&options.runner_id), &patch.to_string(), &[])? {
+        updated_fields.extend(result.updated_fields);
+    }
+
+    Ok((
+        RunnerDevSyncOutput {
+            variant: "dev_sync",
+            command: "runner.dev_sync",
+            runner_id: options.runner_id.clone(),
+            dry_run: false,
+            plan,
+            binary: Some(binary),
+            extensions_deferred: options.extensions,
+            updated_fields,
+            daemon_refreshed: refresh_output.daemon_refreshed,
+            reconnect_required: refresh_output.reconnect_required,
+            next_actions: dev_sync_next_actions(&options.runner_id, options.reconnect),
+        },
+        0,
+    ))
+}
+
+fn dev_sync_failure_output(
+    options: RunnerDevSyncOptions,
+    plan: RunnerDevSyncPlan,
+    binary: Option<RunnerDevSyncBinaryProvenance>,
+) -> RunnerDevSyncOutput {
+    RunnerDevSyncOutput {
+        variant: "dev_sync",
+        command: "runner.dev_sync",
+        runner_id: options.runner_id.clone(),
+        dry_run: false,
+        plan,
+        binary,
+        extensions_deferred: options.extensions,
+        updated_fields: Vec::new(),
+        daemon_refreshed: false,
+        reconnect_required: !options.reconnect,
+        next_actions: dev_sync_next_actions(&options.runner_id, options.reconnect),
+    }
 }
 
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
@@ -284,6 +526,140 @@ fn refreshed_runner_env(
     let mut env = runner.env;
     normalize_runner_command_env_for_homeboy_path(&mut env, Some(homeboy_path));
     Ok(env)
+}
+
+fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> {
+    let env = refreshed_runner_env(runner_id, homeboy_path)?;
+    let mut resources = load(runner_id)?.resources;
+    resources.remove("dev_sync");
+    Ok(serde_json::json!({
+        "homeboy_path": homeboy_path,
+        "env": env,
+        "resources": resources,
+    }))
+}
+
+fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
+    let source_path = match source_path {
+        Some(path) => path.to_path_buf(),
+        None => {
+            std::env::current_dir().map_err(|err| Error::internal_json(err.to_string(), None))?
+        }
+    };
+    let manifest = source_path.join("Cargo.toml");
+    if !manifest.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_source",
+            "homeboy source path must contain Cargo.toml",
+            Some(source_path.display().to_string()),
+            None,
+        ));
+    }
+    let status = Command::new("cargo")
+        .args(["build", "--release", "--bin", "homeboy", "--manifest-path"])
+        .arg(&manifest)
+        .status()
+        .map_err(|err| {
+            Error::internal_json(err.to_string(), Some("build local homeboy".to_string()))
+        })?;
+    if !status.success() {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_source",
+            format!("cargo build failed with status {status}"),
+            Some(source_path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(source_path.join("target/release/homeboy"))
+}
+
+fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
+    format!(
+        "{}/_homeboy_binaries/dev/{}/homeboy",
+        workspace_root.trim_end_matches('/'),
+        &sha256[..16]
+    )
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).map_err(|err| {
+        Error::validation_invalid_argument(
+            "homeboy_binary",
+            format!("could not read binary: {err}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| Error::internal_json(err.to_string(), None))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn expand_path(path: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(path).to_string())
+}
+
+fn git_revision(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &path.display().to_string(), "rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_dirty(path: &Path) -> bool {
+    Command::new("git")
+        .args(["-C", &path.display().to_string(), "status", "--porcelain"])
+        .output()
+        .ok()
+        .is_some_and(|output| !output.stdout.is_empty())
+}
+
+fn validate_extension_specs(specs: &[String]) -> Result<()> {
+    for spec in specs {
+        let Some((id, path)) = spec.split_once('=') else {
+            return Err(Error::validation_invalid_argument(
+                "extensions",
+                "extension dev-sync specs must use id=path",
+                Some(spec.clone()),
+                None,
+            ));
+        };
+        if id.trim().is_empty() || path.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "extensions",
+                "extension dev-sync specs must include a non-empty id and path",
+                Some(spec.clone()),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn dev_sync_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
+    dev_sync_next_actions(runner_id, reconnect)
+}
+
+fn dev_sync_next_actions(runner_id: &str, reconnect: bool) -> Vec<String> {
+    let mut actions = refresh_followups(runner_id, reconnect);
+    actions.push(format!(
+        "homeboy runner refresh-homeboy {} --ref main --reconnect",
+        shell_arg(runner_id)
+    ));
+    actions
 }
 
 fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {
@@ -454,6 +830,45 @@ mod tests {
                 Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
             );
             assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
+            assert_eq!(
+                env.get("HOMEBOY_COMMAND").map(String::as_str),
+                Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn dev_binary_path_uses_content_hash_slot() {
+        assert_eq!(
+            dev_binary_path("/runner/ws/", "0123456789abcdef9999"),
+            "/runner/ws/_homeboy_binaries/dev/0123456789abcdef/homeboy"
+        );
+    }
+
+    #[test]
+    fn refresh_patch_clears_dev_sync_provenance() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{
+                    "id": "lab-local",
+                    "kind": "local",
+                    "workspace_root": "/runner/ws",
+                    "homeboy_path": "/old/homeboy",
+                    "resources": {
+                        "dev_sync": {"schema":"homeboy/runner-dev-sync/v1"},
+                        "keep": {"enabled": true}
+                    }
+                }"#,
+                false,
+            )
+            .expect("create runner");
+
+            let patch = refreshed_runner_patch("lab-local", "/runner/ws/homeboy")
+                .expect("build refresh patch");
+
+            assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
+            assert!(patch["resources"].get("dev_sync").is_none());
+            assert_eq!(patch["resources"]["keep"]["enabled"], true);
         });
     }
 }

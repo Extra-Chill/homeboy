@@ -190,6 +190,48 @@ status` also reports controller, configured executable, active daemon version,
 build identity, drift signals, and refresh commands under
 `selected_lab_runner.runner_homeboy`.
 
+Refreshing back to a release clears any `runner dev-sync` provenance from the
+runner record. Use this when a lab runner should stop executing a controller-local
+dev build and return to a clean release/ref-selected binary.
+
+### `dev-sync`
+
+```sh
+homeboy runner dev-sync <runner-id> --homeboy-source /path/to/homeboy --reconnect
+homeboy runner dev-sync <runner-id> --homeboy-binary /path/to/target/release/homeboy
+homeboy runner dev-sync <runner-id> --homeboy-source . --extensions sample-runtime=/path/to/runtime
+```
+
+`runner dev-sync` is the fast-loop handoff for iterating against a Lab runner
+without cutting a release. It builds the controller-local Homeboy source checkout
+unless `--homeboy-binary` points at a prebuilt local binary, hashes that binary,
+uploads it to a runner-managed content-addressed slot under
+`<workspace_root>/_homeboy_binaries/dev/<hash>/homeboy`, probes it with
+`self identity`, and selects that exact runner-side binary using the same
+selection machinery as `runner refresh-homeboy --select`.
+
+The selected dev binary becomes authoritative for both daemon and child executor
+processes: Homeboy updates `runner.homeboy_path`, prepends the selected binary
+directory to the runner `PATH`, and sets `HOMEBOY_COMMAND` to the selected
+absolute binary path. This avoids stale `homeboy` binaries shadowing runner jobs
+through inherited `PATH` state.
+
+The command records dev provenance under the runner `resources.dev_sync` block:
+binary SHA-256, content hash, runner-side path, source revision, dirty flag, and
+deferred extension specs. `runner show` exposes the full runner record and
+`runner status` surfaces the same block under
+`selected_lab_runner.runner_homeboy.dev_sync` so operators can see dev mode at a
+glance.
+
+`--extensions id=path` is accepted and recorded in the dev-sync provenance. The
+binary handoff is first-class in this release; extension source relink/parity is
+deferred and remains visible in `extensions_deferred` output rather than silently
+pretending extension parity was changed.
+
+The JSON output includes `next_actions`, including a ready-to-copy
+`runner status` command and the release/ref refresh command that reverts the
+runner from dev mode.
+
 Pass one or more `--require-tool <command>` values when a provider or job path
 knows it needs additional runner-side commands before starting expensive work.
 Doctor resolves each command on the runner `PATH` and reports missing requested

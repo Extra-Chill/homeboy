@@ -107,8 +107,9 @@ pub(crate) use git_dependency_materialization::{
     RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
 };
 pub use homeboy_refresh::{
-    plan_homeboy_binary_refresh, refresh_homeboy_binary, HomeboyBinaryRefreshMode,
+    plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync, HomeboyBinaryRefreshMode,
     HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
+    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,
