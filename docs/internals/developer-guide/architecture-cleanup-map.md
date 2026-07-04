@@ -43,17 +43,7 @@ Recommended service boundaries:
 
 ## Static Guards
 
-Existing tests already protect several boundaries:
-
-- `tests/architecture_core_agnostic_test.rs::core_source_does_not_depend_on_command_layer` prevents `src/core` from importing `commands` or CLI surface modules.
-- `tests/architecture_core_agnostic_test.rs::command_layer_uses_explicit_core_facades_only` keeps command imports on explicit core facades instead of private implementation modules.
-- `tests/architecture_core_agnostic_test.rs::core_facades_expose_explicit_groups_not_wildcards` prevents facade wildcard exports from hiding accidental public surface growth.
-- `tests/architecture_core_agnostic_test.rs::architecture_docs_source_paths_exist` verifies architecture/developer-guide markdown claims that reference `src/...` paths.
-- `homeboy.json` `audit.thin_command_adapter` is the ratchet for command-layer orchestration density.
-
-Run lightweight verification through the normal test suite in CI. Local agents on
-resource-constrained machines can still review these guards as static source
-checks without running Cargo locally.
+`homeboy.json` `audit.thin_command_adapter` is the ratchet for command-layer orchestration density.
 
 ## Compatibility-Removal Inventory
 

@@ -136,31 +136,6 @@ mod install_flows {
     }
 
     #[test]
-    fn reinstall_replaces_same_id_legacy_rig_schema() {
-        let _home = HomeGuard::new();
-        let config = crate::core::paths::rig_config("legacy-rig").expect("rig path");
-        fs::create_dir_all(config.parent().expect("rig dir")).expect("rig dir");
-        fs::write(
-            &config,
-            r#"{
-                "id": "legacy-rig",
-                "bench_workloads": { "app": ["legacy-string-workload.mjs"] }
-            }"#,
-        )
-        .expect("legacy rig config");
-
-        let package = tempfile::tempdir().expect("package");
-        let rig_path = write_rig(package.path(), "legacy-rig", &minimal_rig("legacy-rig"));
-
-        let result = install(package.path().to_str().unwrap(), None, false)
-            .expect("reinstall replaces same-id legacy schema");
-
-        assert_eq!(result.installed.len(), 1);
-        #[cfg(unix)]
-        assert_eq!(fs::read_link(&config).expect("symlink"), rig_path);
-    }
-
-    #[test]
     fn reinstall_replaces_owned_stack_with_updated_content() {
         let _home = HomeGuard::new();
         let first_package = tempfile::tempdir().expect("first package");

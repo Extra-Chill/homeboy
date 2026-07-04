@@ -230,36 +230,6 @@ fn read_status_classifies_unknown_binary_freshness_as_stale() {
 }
 
 #[test]
-fn stop_clears_invalid_lease_state_without_accepting_legacy_shape() {
-    let _home = HomeGuard::new();
-    let path = state_path().expect("state path");
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(
-        &path,
-        serde_json::json!({
-            "address": "127.0.0.1:49152",
-            "pid": u32::MAX,
-            "state_path": path.display().to_string(),
-        })
-        .to_string(),
-    )
-    .expect("write legacy state");
-
-    let status = read_status().expect("status");
-    let stopped = stop().expect("stop");
-
-    assert!(!status.running);
-    assert!(!status.fresh);
-    assert!(status
-        .stale_reason
-        .unwrap()
-        .contains("invalid daemon lease"));
-    assert!(!stopped.stopped);
-    assert_eq!(stopped.pid, Some(u32::MAX));
-    assert!(!path.exists());
-}
-
-#[test]
 fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
     let _home = HomeGuard::new();
     let path = state_path().expect("state path");

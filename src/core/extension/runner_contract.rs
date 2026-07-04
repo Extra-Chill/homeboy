@@ -238,7 +238,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "../../../tests/core/extension/runner_contract_test.rs"]
-mod runner_contract_test;

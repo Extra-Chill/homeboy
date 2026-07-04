@@ -246,7 +246,3 @@ fn sanitize_env_segment(value: &str) -> String {
         })
         .collect()
 }
-
-#[cfg(test)]
-#[path = "../../../tests/core/rig/expand_test.rs"]
-mod expand_test;

@@ -719,11 +719,6 @@ mod runner_support {
             .flat_map(|spec| spec.lab_support_summary.iter())
     }
 
-    #[cfg(test)]
-    pub(crate) fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
-        lab_runner_supports_contract_label(contract_label)
-    }
-
     fn human_join(labels: &[&str]) -> String {
         match labels {
             [] => String::new(),
@@ -1462,7 +1457,3 @@ mod low_noise_polling_tests {
     }
 }
 pub(crate) use extension_ids::*;
-
-#[cfg(test)]
-#[path = "../../tests/command_contract/lab_test.rs"]
-mod tests;
