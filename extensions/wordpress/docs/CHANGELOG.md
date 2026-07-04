@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.32] - 2026-07-04
+
+### Changed
+- Declare core extension seam data
+
 ## [3.23.31] - 2026-07-04
 
 ### Changed
