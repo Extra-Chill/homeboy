@@ -60,6 +60,62 @@ fn provider_preflight_reports_missing_secret_readiness() {
 }
 
 #[test]
+fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
+    let secret_value = "super-secret-provider-token";
+    std::env::set_var("HOMEBOY_TEST_PROVIDER_SECRET", secret_value);
+    let script = script(&format!(
+        r#"cat <<'JSON'
+{{"schema":"{AGENT_TASK_OUTCOME_SCHEMA}","task_id":"codex-failed","status":"failed","summary":"Codex CLI exited with status 1.","failure_classification":"provider","artifacts":[],"typed_artifacts":[],"evidence_refs":[],"diagnostics":[],"outputs":null,"workflow":null,"follow_up":null,"metadata":null}}
+JSON
+printf '%s\n' 'Codex stderr: quota exhausted; token={secret_value}' >&2
+exit 1
+"#
+    ));
+    let (mut request, mut provider) = request("codex-failed", format!("sh {script}"));
+    request.executor.secret_env = vec!["HOMEBOY_TEST_PROVIDER_SECRET".to_string()];
+    provider.id = "codex.provider".to_string();
+    provider.backend = "codex".to_string();
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    std::env::remove_var("HOMEBOY_TEST_PROVIDER_SECRET");
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.provider_process_failed")
+        .expect("process failure diagnostic");
+    assert!(diagnostic.message.contains("codex.provider"));
+    assert!(diagnostic.message.contains("codex"));
+    assert!(diagnostic.message.contains("status 1"));
+    assert_eq!(diagnostic.data["provider"], "codex.provider");
+    assert_eq!(diagnostic.data["provider_backend"], "codex");
+    assert_eq!(diagnostic.data["exit_code"], 1);
+    let stderr = diagnostic.data["stderr"].as_str().expect("stderr tail");
+    assert!(stderr.contains("quota exhausted"));
+    assert!(stderr.contains("[redacted]"));
+    assert!(!stderr.contains(secret_value));
+    assert!(diagnostic.data["stdout"]
+        .as_str()
+        .expect("stdout tail")
+        .contains("Codex CLI exited with status 1."));
+    assert!(diagnostic.data["remediation_hints"]
+        .as_array()
+        .expect("remediation hints")
+        .iter()
+        .any(|hint| hint
+            .as_str()
+            .is_some_and(|value| value.contains("stdout/stderr"))));
+
+    let aggregate =
+        crate::core::agent_task_aggregate::AgentTaskAggregateReport::from(vec![outcome]);
+    assert!(aggregate.tasks[0]
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.provider_process_failed"));
+}
+
+#[test]
 fn required_extension_ids_follow_selected_agent_task_providers() {
     let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
     provider_a.id = "provider-a".to_string();
