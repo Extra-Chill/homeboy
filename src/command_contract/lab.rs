@@ -919,7 +919,6 @@ impl Commands {
                         command: agent_task::AgentTaskAuthCommand::Status(_),
                     }),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_AUTH_STATUS_LAB_LABEL),
-            Commands::Audit(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Bench(args) => return args.portability_contract(),
             Commands::Fuzz(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Extension(args) if args.is_update_command() => {
@@ -936,8 +935,7 @@ impl Commands {
                     .lab_contract(args);
                 return CommandPortabilityContract::lab_optional(contract);
             }
-            Commands::Lint(args) => return args.portability_contract(),
-            Commands::Review(args) => return CommandPortabilityContract::lab(args.lab_contract()),
+            Commands::Review(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Refactor(args) if args.is_hot_resource_command() => {
                 LabCommandContract::portable(
                     "refactor",
@@ -948,7 +946,6 @@ impl Commands {
                 )
             }
             Commands::Rig(args) => return args.portability_contract(),
-            Commands::Test(args) => return CommandPortabilityContract::lab(args.lab_contract()),
             Commands::Trace(args) => return args.portability_contract(),
             Commands::Tunnel(args) => return args.portability_contract(),
             _ => return CommandPortabilityContract::none(),
@@ -1209,6 +1206,11 @@ impl LabCommandContract {
         self
     }
 
+    pub(crate) const fn with_hot_label(mut self, hot_label: &'static str) -> Self {
+        self.hot_label = hot_label;
+        self
+    }
+
     pub(crate) const fn with_secret_env_sources(
         mut self,
         sources: &'static [LabSecretEnvSource],
@@ -1275,23 +1277,13 @@ impl Commands {
 
         let mut extension_ids = BTreeSet::new();
         match self {
-            Commands::Audit(args) => {
-                extension_ids.extend(args.extension_override.extensions.clone())
-            }
             Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
             Commands::Fuzz(args) => {
                 extension_ids.extend(args.extension_override_ids().iter().cloned())
             }
-            Commands::Lint(args) => {
-                extension_ids.extend(args.extension_override.extensions.clone())
-            }
             Commands::Review(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone());
                 extension_ids.extend(review_lab_extension_ids(args)?);
-            }
-            Commands::Test(args) => {
-                extension_ids.extend(args.extension_override.extensions.clone());
-                extension_ids.extend(test_lab_extension_ids(args)?);
             }
             Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
             _ => {}

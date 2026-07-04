@@ -84,7 +84,7 @@ pub fn route_after_parse(
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
 
-    // For component-targeted write/fix commands (`homeboy lint --fix <component>`,
+    // For component-targeted write/fix commands (`homeboy review lint --fix <component>`,
     // `homeboy refactor --from lint --write <component>`), the component is
     // resolved on the controller to its source checkout and the args are
     // rewritten to `--path <source>`. Without this, the offload syncs and
@@ -349,24 +349,27 @@ type ChangedScopeRequest<'a> = (
 
 fn changed_scope_request(command: &Commands) -> Option<ChangedScopeRequest<'_>> {
     match command {
-        Commands::Lint(args) => Some((
-            args.comp.component.as_ref(),
-            args.comp.path.as_ref(),
-            args.changed_since.as_deref(),
-            args.changed_only,
-        )),
-        Commands::Review(args) => Some((
-            args.comp.component.as_ref(),
-            args.comp.path.as_ref(),
-            args.changed_since.as_deref(),
-            args.changed_only,
-        )),
-        Commands::Test(args) => Some((
-            args.comp.component.as_ref(),
-            args.comp.path.as_ref(),
-            args.changed_since.as_deref(),
-            false,
-        )),
+        Commands::Review(args) => match &args.command {
+            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => Some((
+                lint_args.comp.component.as_ref(),
+                lint_args.comp.path.as_ref(),
+                lint_args.changed_since.as_deref(),
+                lint_args.changed_only,
+            )),
+            Some(crate::commands::review::ReviewCommand::Test(test_args)) => Some((
+                test_args.comp.component.as_ref(),
+                test_args.comp.path.as_ref(),
+                test_args.changed_since.as_deref(),
+                false,
+            )),
+            None => Some((
+                args.comp.component.as_ref(),
+                args.comp.path.as_ref(),
+                args.changed_since.as_deref(),
+                args.changed_only,
+            )),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -861,14 +864,17 @@ fn rewrite_component_target_to_path(
     normalized_args: &[String],
 ) -> Option<Vec<String>> {
     let (component_id, has_path_override) = match command {
-        Commands::Lint(args) => (
-            args.lab_offload_positional_component(),
-            args.lab_offload_has_path_override(),
-        ),
         Commands::Refactor(args) if args.is_hot_resource_command() => (
             args.lab_offload_positional_component(),
             args.lab_offload_has_path_override(),
         ),
+        Commands::Review(args) => match &args.command {
+            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => (
+                lint_args.lab_offload_positional_component(),
+                lint_args.lab_offload_has_path_override(),
+            ),
+            _ => return None,
+        },
         _ => return None,
     };
 
@@ -908,9 +914,18 @@ fn rewrite_ad_hoc_lab_workspace_to_path(
     }
 
     let needs_path = match command {
-        Commands::Audit(args) => args.comp.component.is_none() && args.comp.path.is_none(),
-        Commands::Lint(args) => args.comp.component.is_none() && args.comp.path.is_none(),
-        Commands::Test(args) => args.comp.component.is_none() && args.comp.path.is_none(),
+        Commands::Review(args) => match &args.command {
+            Some(crate::commands::review::ReviewCommand::Audit(audit_args)) => {
+                audit_args.audit.comp.component.is_none() && audit_args.audit.comp.path.is_none()
+            }
+            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => {
+                lint_args.comp.component.is_none() && lint_args.comp.path.is_none()
+            }
+            Some(crate::commands::review::ReviewCommand::Test(test_args)) => {
+                test_args.comp.component.is_none() && test_args.comp.path.is_none()
+            }
+            _ => false,
+        },
         _ => false,
     };
     if !needs_path {
@@ -1126,11 +1141,17 @@ mod tests {
 
     #[test]
     fn changed_scope_lint_is_lab_portable() {
-        let cli = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
+        let cli = Cli::parse_from([
+            "homeboy",
+            "review",
+            "lint",
+            "--changed-since",
+            "origin/main",
+        ]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(command.hot_label, "lint");
+        assert_eq!(command.hot_label, "review lint");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
     }
@@ -1141,6 +1162,7 @@ mod tests {
             "homeboy",
             "--runner",
             "homeboy-lab",
+            "review",
             "test",
             "--changed-since",
             "origin/main",
@@ -1149,7 +1171,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert_eq!(command.hot_label, "test");
+        assert_eq!(command.hot_label, "review test");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
     }
@@ -1198,6 +1220,7 @@ mod tests {
             r#"{"EXTRA_PATH":"/tmp/extra","EMPTY":null}"#,
             "--runner-workspace-root",
             "/srv/job-workspace",
+            "review",
             "test",
             "studio-native",
         ]);
@@ -1221,11 +1244,11 @@ mod tests {
 
     #[test]
     fn lab_job_overrides_reject_invalid_env_shapes() {
-        let cli = Cli::parse_from(["homeboy", "--runner-env", "NO_EQUALS", "test"]);
+        let cli = Cli::parse_from(["homeboy", "--runner-env", "NO_EQUALS", "review"]);
         let err = lab_job_overrides(&cli).expect_err("invalid pair");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
 
-        let cli = Cli::parse_from(["homeboy", "--lab-env-json", "[]", "test"]);
+        let cli = Cli::parse_from(["homeboy", "--lab-env-json", "[]", "review"]);
         let err = lab_job_overrides(&cli).expect_err("invalid json object");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
     }
@@ -1234,6 +1257,7 @@ mod tests {
     fn changed_since_lint_keeps_git_scope_for_lab_runner() {
         let normalized = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "lint".to_string(),
             "--changed-since".to_string(),
             "origin/main".to_string(),
@@ -1251,6 +1275,7 @@ mod tests {
             "homeboy".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
+            "review".to_string(),
             "test".to_string(),
             "--changed-since=origin/main".to_string(),
             "--skip-lint".to_string(),
@@ -1350,7 +1375,7 @@ mod tests {
     #[test]
     fn lab_route_dispatch_timeout_plumbs_core_timeout() {
         let trace_cli = Cli::parse_from(["homeboy", "trace", "list"]);
-        let lint_cli = Cli::parse_from(["homeboy", "lint"]);
+        let lint_cli = Cli::parse_from(["homeboy", "review", "lint"]);
 
         assert_eq!(
             lab_route_dispatch_timeout(&trace_cli.command, false),
@@ -1691,11 +1716,11 @@ mod tests {
 
     #[test]
     fn lab_command_preserves_portable_contract_shape() {
-        let cli = Cli::parse_from(["homeboy", "lint"]);
+        let cli = Cli::parse_from(["homeboy", "review", "lint"]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(command.hot_label, "lint");
+        assert_eq!(command.hot_label, "review lint");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
         assert!(command.routing_policy.requires_extension_parity);
@@ -2275,11 +2300,11 @@ mod tests {
 
     #[test]
     fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
-        let cli = Cli::parse_from(["homeboy", "audit", "--baseline"]);
+        let cli = Cli::parse_from(["homeboy", "review", "audit", "--baseline"]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(command.hot_label, "audit");
+        assert_eq!(command.hot_label, "review audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
         assert!(command.routing_policy.requires_extension_parity);
@@ -2287,11 +2312,11 @@ mod tests {
 
     #[test]
     fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
-        let cli = Cli::parse_from(["homeboy", "audit", "--ratchet"]);
+        let cli = Cli::parse_from(["homeboy", "review", "audit", "--ratchet"]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(command.hot_label, "audit");
+        assert_eq!(command.hot_label, "review audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
         assert!(command.routing_policy.requires_extension_parity);
@@ -2313,6 +2338,7 @@ mod tests {
     fn strip_component_target_replaces_positional_with_path() {
         let args = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "lint".to_string(),
             "--fix".to_string(),
             "sample-component".to_string(),
@@ -2324,6 +2350,7 @@ mod tests {
             rewritten,
             vec![
                 "homeboy".to_string(),
+                "review".to_string(),
                 "lint".to_string(),
                 "--fix".to_string(),
                 "--path".to_string(),
@@ -2420,6 +2447,7 @@ mod tests {
     fn rewrite_component_target_skips_when_path_override_present() {
         let cli = Cli::parse_from([
             "homeboy",
+            "review",
             "lint",
             "--fix",
             "sample-component",
@@ -2428,6 +2456,7 @@ mod tests {
         ]);
         let normalized = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "lint".to_string(),
             "--fix".to_string(),
             "sample-component".to_string(),
@@ -2442,9 +2471,10 @@ mod tests {
     fn rewrite_component_target_skips_without_component() {
         // No positional component and no --path: source resolves from CWD, so
         // there is nothing to rewrite.
-        let cli = Cli::parse_from(["homeboy", "lint", "--fix"]);
+        let cli = Cli::parse_from(["homeboy", "review", "lint", "--fix"]);
         let normalized = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "lint".to_string(),
             "--fix".to_string(),
         ];
@@ -2465,9 +2495,10 @@ mod tests {
 
     #[test]
     fn lab_route_source_path_args_keeps_component_id_without_patch_capture() {
-        let cli = Cli::parse_from(["homeboy", "lint", "sample-component"]);
+        let cli = Cli::parse_from(["homeboy", "review", "lint", "sample-component"]);
         let normalized = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "lint".to_string(),
             "sample-component".to_string(),
         ];
@@ -2480,8 +2511,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
         let cwd = std::env::current_dir().expect("current dir");
-        let cli = Cli::parse_from(["homeboy", "lint"]);
-        let normalized = vec!["homeboy".to_string(), "lint".to_string()];
+        let cli = Cli::parse_from(["homeboy", "review", "lint"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+        ];
 
         let rewritten = rewrite_ad_hoc_lab_workspace_to_path(&cli.command, &normalized)
             .expect("pathless lint should become explicit path");
@@ -2490,6 +2525,7 @@ mod tests {
             rewritten,
             vec![
                 "homeboy".to_string(),
+                "review".to_string(),
                 "lint".to_string(),
                 "--path".to_string(),
                 cwd.to_string_lossy().to_string(),
@@ -2502,9 +2538,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let _cwd = CwdGuard::set(dir.path());
         let cwd = std::env::current_dir().expect("current dir");
-        let cli = Cli::parse_from(["homeboy", "test", "--", "--filter", "ExampleTest"]);
+        let cli = Cli::parse_from(["homeboy", "review", "test", "--", "--filter", "ExampleTest"]);
         let normalized = vec![
             "homeboy".to_string(),
+            "review".to_string(),
             "test".to_string(),
             "--".to_string(),
             "--filter".to_string(),
@@ -2518,6 +2555,7 @@ mod tests {
             rewritten,
             vec![
                 "homeboy".to_string(),
+                "review".to_string(),
                 "test".to_string(),
                 "--path".to_string(),
                 cwd.to_string_lossy().to_string(),
@@ -2530,13 +2568,14 @@ mod tests {
 
     #[test]
     fn rewrite_ad_hoc_lab_workspace_skips_registered_component_or_path() {
-        let component_cli = Cli::parse_from(["homeboy", "lint", "homeboy"]);
-        let path_cli = Cli::parse_from(["homeboy", "audit", "--path", "/tmp/homeboy"]);
+        let component_cli = Cli::parse_from(["homeboy", "review", "lint", "homeboy"]);
+        let path_cli = Cli::parse_from(["homeboy", "review", "audit", "--path", "/tmp/homeboy"]);
 
         assert!(rewrite_ad_hoc_lab_workspace_to_path(
             &component_cli.command,
             &[
                 "homeboy".to_string(),
+                "review".to_string(),
                 "lint".to_string(),
                 "homeboy".to_string(),
             ],
@@ -2546,6 +2585,7 @@ mod tests {
             &path_cli.command,
             &[
                 "homeboy".to_string(),
+                "review".to_string(),
                 "audit".to_string(),
                 "--path".to_string(),
                 "/tmp/homeboy".to_string(),

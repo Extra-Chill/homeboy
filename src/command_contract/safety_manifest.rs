@@ -192,7 +192,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "mutates dependency manifests, lockfiles, or installed dependency trees";
         }
-        ["ci", "autofix"] => {
+        ["review", "ci", "autofix"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "commits and pushes prepared CI autofix changes";
@@ -455,7 +455,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state";
             metadata.dangerous_flags = vec!["--apply"];
         }
-        ["audit-baseline", "refresh"] | ["audit-baseline", "merge"] => {
+        ["review", "audit", "baseline", "refresh"] | ["review", "audit", "baseline", "merge"] => {
             metadata.mutates = true;
             metadata.output_notes =
                 "mutates persisted audit baseline data in component configuration";

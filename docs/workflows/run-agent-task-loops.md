@@ -31,7 +31,7 @@ homeboy agent-task cook \
   --cwd /path/to/homeboy@fix-issue \
   --to-worktree homeboy@fix-issue \
   --task-url https://github.com/Extra-Chill/homeboy/issues/123 \
-  --verify "homeboy test homeboy" \
+  --verify "homeboy review test homeboy" \
   --prompt @task.txt
 ```
 

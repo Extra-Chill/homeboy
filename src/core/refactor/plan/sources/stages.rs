@@ -127,7 +127,7 @@ pub(super) fn reject_remaining_lint_fix_findings(
         None,
         Some(vec![
             "The worktree may be partially fixed; inspect the remaining lint findings before continuing".to_string(),
-            "Rerun homeboy lint without --fix to see the current diagnostics".to_string(),
+            "Rerun homeboy review lint without --fix to see the current diagnostics".to_string(),
         ]),
     ))
 }

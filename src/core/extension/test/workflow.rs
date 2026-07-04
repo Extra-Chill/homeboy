@@ -254,7 +254,7 @@ pub fn auto_fix_test_drift(
         } else if result.total_replacements > 0 {
             crate::log_status!(
                 "hint",
-                "Re-run tests: homeboy test {} --analyze",
+                "Re-run tests: homeboy review test {} --analyze",
                 component_id
             );
         }
@@ -277,7 +277,7 @@ pub fn auto_fix_test_drift(
             AutofixMode::DryRun
         },
         output.replacements,
-        Some(format!("homeboy test {} --analyze", component_id)),
+        Some(format!("homeboy review test {} --analyze", component_id)),
         vec![format!(
             "Use --since <ref> to target a drift window (current: {})",
             since

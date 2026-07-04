@@ -158,7 +158,7 @@ fn producer_summary_label(producer_summaries: &[FindingProducerSummary]) -> Stri
         .join(", ")
 }
 
-/// Build a [`LintCommandOutput`] from a `homeboy lint --fix` dispatch.
+/// Build a [`LintCommandOutput`] from a `homeboy review lint --fix` dispatch.
 ///
 /// `--fix` is a thin alias for `homeboy refactor <component> --from lint
 /// --write`, so the fix path receives a `RefactorSourceRun` rather than the
@@ -190,7 +190,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
     let mut hints = run.hints.clone();
     if run.applied {
         hints.push(format!(
-            "Re-run lint to confirm clean: homeboy lint {}",
+            "Re-run lint to confirm clean: homeboy review lint {}",
             component_label
         ));
     } else if run.files_modified == 0 && run.warnings.is_empty() {

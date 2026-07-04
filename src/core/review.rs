@@ -367,7 +367,7 @@ mod tests {
             passed: false,
             exit_code: 1,
             finding_count: 3,
-            hint: "Deep dive: homeboy lint".to_string(),
+            hint: "Deep dive: homeboy review lint".to_string(),
             skipped_reason: None,
             output: Some(serde_json::json!({ "ok": false })),
         };

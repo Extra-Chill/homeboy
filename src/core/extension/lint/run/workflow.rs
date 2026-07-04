@@ -147,7 +147,7 @@ pub fn run_main_lint_workflow(
     // Per the contract under #1459 (issue #1507), autofixable findings never
     // fail the run; they nudge. The CTA is rendered here in core, not by each
     // extension's runner, so every language extension benefits from a single
-    // consistent prose. `homeboy lint --fix` is the ergonomic alias and is
+    // consistent prose. `homeboy review lint --fix` is the ergonomic adapter and is
     // listed first; the canonical `homeboy refactor --from lint --write`
     // invocation follows for users who want the longer form.
     if !lint_clean {
@@ -175,7 +175,7 @@ pub fn run_main_lint_workflow(
 
     if !args.baseline_flags.baseline && baseline_comparison.is_none() {
         hints.push(format!(
-            "Save lint baseline: homeboy lint {} --baseline",
+            "Save lint baseline: homeboy review lint {} --baseline",
             args.component_label
         ));
     }
@@ -352,7 +352,7 @@ pub fn run_self_check_lint_workflow_with_progress(
         if harness_error {
             vec![format!(
                 "Lint self-check harness for {} exited {} with no findings — the wrapper failed, not the linter. \
-Re-run `homeboy lint {}` or skip only this gate with `--skip-checks=lint`.",
+Re-run `homeboy review lint {}` or skip only this gate with `--skip-checks=lint`.",
                 component.id, output.exit_code, component.id
             )]
         } else {

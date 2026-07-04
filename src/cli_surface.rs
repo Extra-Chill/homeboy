@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, audit, audit_baseline, bench, build, ci, cleanup, component, config,
-    contract, daemon, db, deploy, extension, file, fleet, fuzz, git, lint, logs, observe, project,
-    refactor, release, report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack,
-    status, test, trace, triage, tunnel, upgrade, worktree,
+    activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db, deploy,
+    extension, file, fleet, fuzz, git, logs, observe, project, refactor, release, report, review,
+    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, trace, triage, tunnel,
+    upgrade, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -93,8 +93,6 @@ pub enum Commands {
     Ssh(ssh::SshArgs),
     /// Manage SSH server configurations
     Server(server::ServerArgs),
-    /// Run tests for a component
-    Test(test::TestArgs),
     /// Run performance benchmarks for a component
     Bench(bench::BenchArgs),
     /// Run generic fuzz workloads for a component
@@ -106,14 +104,10 @@ pub enum Commands {
     Trace(trace::TraceArgs),
     /// Passively observe a running system and persist timeline evidence
     Observe(observe::ObserveArgs),
-    /// Lint a component
-    Lint(lint::LintArgs),
     /// Database operations
     Db(db::DbArgs),
     /// Manage component dependencies
     Deps(DepsArgs),
-    /// Inspect CI reproduction profiles and discovered CI surfaces
-    Ci(ci::CiArgs),
     /// Remote file operations
     File(file::FileArgs),
     /// Manage fleets (groups of projects)
@@ -140,19 +134,12 @@ pub enum Commands {
     Cleanup(cleanup::CleanupArgs),
     /// Git operations for components
     Git(git::GitArgs),
-    /// Run a local build quality gate for a component
-    Build(build::BuildArgs),
     /// Plan release workflows
     Release(release::ReleaseArgs),
     /// Render reports from Homeboy structured output artifacts
     Report(report::ReportArgs),
     /// Run scoped audit + lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
-    /// Audit code conventions and detect architectural drift
-    Audit(audit::AuditArgs),
-    /// Refresh and inspect generated audit baseline data
-    #[command(name = "audit-baseline")]
-    AuditBaseline(audit_baseline::AuditBaselineArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
@@ -542,15 +529,12 @@ mod entry_command_impls {
                 Commands::Project(_) => "project",
                 Commands::Ssh(_) => "ssh",
                 Commands::Server(_) => "server",
-                Commands::Test(_) => "test",
                 Commands::Bench(_) => "bench",
                 Commands::Fuzz(_) => "fuzz",
                 Commands::Trace(_) => "trace",
                 Commands::Observe(_) => "observe",
-                Commands::Lint(_) => "lint",
                 Commands::Db(_) => "db",
                 Commands::Deps(_) => "deps",
-                Commands::Ci(_) => "ci",
                 Commands::File(_) => "file",
                 Commands::Fleet(_) => "fleet",
                 Commands::Logs(_) => "logs",
@@ -564,12 +548,9 @@ mod entry_command_impls {
                 Commands::Status(_) => "status",
                 Commands::Cleanup(_) => "cleanup",
                 Commands::Git(_) => "git",
-                Commands::Build(_) => "build",
                 Commands::Release(_) => "release",
                 Commands::Report(_) => "report",
                 Commands::Review(_) => "review",
-                Commands::Audit(_) => "audit",
-                Commands::AuditBaseline(_) => "audit-baseline",
                 Commands::Refactor(_) => "refactor",
                 Commands::Rig(_) => "rig",
                 Commands::Runner(_) => "runner",
@@ -881,7 +862,7 @@ mod tests {
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["self", "doctor"]));
-        assert!(surface.contains_path(&["ci", "list"]));
+        assert!(surface.contains_path(&["review", "ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
@@ -894,7 +875,7 @@ mod tests {
         assert!(surface.contains_path(&["self"]));
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["self", "doctor"]));
-        assert!(surface.contains_path(&["ci", "list"]));
+        assert!(surface.contains_path(&["review", "ci", "list"]));
         assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["tunnel", "artifact-origin", "dom-boxes"]));
         assert!(surface.contains_path(&["observe"]));
@@ -1074,8 +1055,6 @@ mod tests {
         for command in ["runner", "rig"] {
             assert_docs_cover_subcommands(command);
         }
-
-        assert_docs_cover_flags("audit");
     }
 
     #[test]

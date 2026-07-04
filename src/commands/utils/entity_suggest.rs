@@ -155,7 +155,7 @@ pub fn generate_entity_hints(
             unrecognized, entity_label, id, id
         )),
         "build" => hints.push(format!(
-            "'{}' matches {} '{}'. Run: homeboy build {}",
+            "'{}' matches {} '{}'. Run: homeboy review build {}",
             unrecognized, entity_label, id, id
         )),
         "deploy" => hints.push(format!(

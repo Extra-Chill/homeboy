@@ -490,13 +490,19 @@ mod tests {
 
     #[test]
     fn changed_scope_commands_are_hot_but_file_scoped_lint_is_not() {
-        let changed_lint = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
+        let changed_lint = Cli::parse_from([
+            "homeboy",
+            "review",
+            "lint",
+            "--changed-since",
+            "origin/main",
+        ]);
         let hot = hot_command(&changed_lint.command).expect("changed-scope lint is hot");
-        assert_eq!(hot.label, "lint");
+        assert_eq!(hot.label, "review lint");
         assert!(hot.lab_offload_supported);
         assert!(hot.lab_offload_unsupported_reason.is_none());
 
-        let file_lint = Cli::parse_from(["homeboy", "lint", "--file", "src/main.rs"]);
+        let file_lint = Cli::parse_from(["homeboy", "review", "lint", "--file", "src/main.rs"]);
         assert!(hot_command(&file_lint.command).is_none());
     }
 
@@ -574,6 +580,7 @@ mod tests {
             command,
             &[
                 "homeboy".to_string(),
+                "review".to_string(),
                 "lint".to_string(),
                 "--changed-since".to_string(),
                 "origin/main".to_string(),
@@ -585,7 +592,7 @@ mod tests {
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
-            Some("homeboy --force-hot --allow-local-hot lint --changed-since origin/main")
+            Some("homeboy --force-hot --allow-local-hot review lint --changed-since origin/main")
         );
         assert!(!error.message.contains("--force-hot --allow-local-hot"));
     }

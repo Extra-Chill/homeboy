@@ -98,7 +98,7 @@ Components also define extension usage via `extensions`:
 homeboy component set <id> --json '{"extensions": {"github": {}, "rust": {}}}'
 ```
 
-`homeboy build`, `homeboy lint`, `homeboy test`, `homeboy bench`, and `homeboy trace` check component-owned `scripts.<capability>` first, then linked extensions. Components do not support a standalone `build_command` field; use `scripts.build` for component-owned shell builds.
+`homeboy review build`, `homeboy review lint`, `homeboy review test`, `homeboy bench`, and `homeboy trace` check component-owned `scripts.<capability>` first, then linked extensions. Components do not support a standalone `build_command` field; use `scripts.build` for component-owned shell builds.
 
 ```json
 {

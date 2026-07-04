@@ -541,6 +541,7 @@ mod tests {
     fn parses_ci_list_path_and_extension() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "list",
             "--path",
@@ -550,8 +551,11 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::List(args) = args.command else {
             panic!("expected ci list");
@@ -565,6 +569,7 @@ mod tests {
     fn parses_ci_run_job_path_and_extension() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "run",
             "--path",
@@ -576,8 +581,11 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::Run(args) = args.command else {
             panic!("expected ci run");
@@ -592,6 +600,7 @@ mod tests {
     fn parses_ci_plan_commands_and_context() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "plan",
             "--commands",
@@ -601,8 +610,11 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::Plan(args) = args.command else {
             panic!("expected ci plan");
@@ -616,6 +628,7 @@ mod tests {
     fn parses_ci_scope_github_actions_and_for() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "scope",
             "--github-actions",
@@ -630,8 +643,11 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::Scope(args) = args.command else {
             panic!("expected ci scope");
@@ -647,6 +663,7 @@ mod tests {
     fn parses_ci_differential_gate_evidence() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "differential-gate",
             "--baseline-command",
@@ -656,14 +673,17 @@ mod tests {
             "--baseline-evidence",
             "FMT SUMMARY: 7 files need formatting",
             "--head-command",
-            "homeboy test homeboy",
+            "homeboy review test homeboy",
             "--head-exit-code",
             "0",
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::DifferentialGate(args) = args.command else {
             panic!("expected ci differential-gate");
@@ -675,7 +695,7 @@ mod tests {
             args.baseline_evidence,
             vec!["FMT SUMMARY: 7 files need formatting"]
         );
-        assert_eq!(args.head_command, "homeboy test homeboy");
+        assert_eq!(args.head_command, "homeboy review test homeboy");
         assert_eq!(args.head_exit_code, 0);
     }
 
@@ -685,7 +705,7 @@ mod tests {
             baseline_command: "cargo fmt --check".to_string(),
             baseline_exit_code: 1,
             baseline_evidence: vec!["FMT SUMMARY: 7 files need formatting".to_string()],
-            head_command: "homeboy test homeboy".to_string(),
+            head_command: "homeboy review test homeboy".to_string(),
             head_exit_code: 0,
             head_evidence: Vec::new(),
         };
@@ -707,7 +727,7 @@ mod tests {
             baseline_command: "cargo fmt --check".to_string(),
             baseline_exit_code: 0,
             baseline_evidence: Vec::new(),
-            head_command: "homeboy test homeboy".to_string(),
+            head_command: "homeboy review test homeboy".to_string(),
             head_exit_code: 1,
             head_evidence: vec!["homeboy-ci-results/test.log".to_string()],
         };
@@ -764,6 +784,7 @@ mod tests {
     fn parses_ci_triage_pr_url() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
+            "review",
             "ci",
             "triage",
             "https://github.com/Extra-Chill/homeboy/pull/5808",
@@ -772,8 +793,11 @@ mod tests {
         ])
         .expect("parse cli");
 
-        let crate::cli_surface::Commands::Ci(args) = cli.command else {
-            panic!("expected ci command");
+        let crate::cli_surface::Commands::Review(review_args) = cli.command else {
+            panic!("expected review command");
+        };
+        let Some(crate::commands::review::ReviewCommand::Ci(args)) = review_args.command else {
+            panic!("expected review ci command");
         };
         let CiCommand::Triage(args) = args.command else {
             panic!("expected ci triage");

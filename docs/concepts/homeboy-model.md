@@ -15,9 +15,9 @@ Extensions provide ecosystem-specific behavior while Homeboy core stays generic.
 Homeboy exposes one operational surface for local developers, CI, scheduled jobs, and coding agents:
 
 ```bash
-homeboy audit
-homeboy lint
-homeboy test
+homeboy review audit
+homeboy review lint
+homeboy review test
 homeboy review
 homeboy bench
 homeboy trace

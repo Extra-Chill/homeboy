@@ -928,7 +928,7 @@ mod tests {
                 .start_run(
                     homeboy::core::observation::NewRunRecord::builder("test")
                         .component_id("homeboy")
-                        .command("homeboy test homeboy")
+                        .command("homeboy review test homeboy")
                         .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
                         .metadata(json!({ "exit_code": 1, "error": "fixture failure" }))
                         .build(),

@@ -29,7 +29,7 @@ impl PassthroughCommand {
     fn path(self) -> &'static [&'static str] {
         match self {
             PassthroughCommand::Bench => &["bench"],
-            PassthroughCommand::Test => &["test"],
+            PassthroughCommand::Test => &["review", "test"],
         }
     }
 }
@@ -91,7 +91,14 @@ pub(crate) fn filter_passthrough_args(command: PassthroughCommand, args: &[Strin
 
 /// Mark explicit passthrough arguments so Homeboy-owned flag filtering preserves them.
 pub(crate) fn mark_explicit_passthrough(args: Vec<String>) -> Vec<String> {
-    let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("test" | "bench"));
+    let explicit_passthrough = matches!(args.get(1).map(String::as_str), Some("bench"))
+        || matches!(
+            (
+                args.get(1).map(String::as_str),
+                args.get(2).map(String::as_str)
+            ),
+            (Some("review"), Some("test"))
+        );
     if !explicit_passthrough {
         return args;
     }
@@ -384,6 +391,7 @@ mod normalize_tests {
     fn test_owned_flag_after_component_and_explicit_passthrough_stay_distinct() {
         let input = argv(&[
             "homeboy",
+            "review",
             "test",
             "my-comp",
             "--changed-since",
@@ -393,6 +401,7 @@ mod normalize_tests {
         ]);
         let expected = argv(&[
             "homeboy",
+            "review",
             "test",
             "my-comp",
             "--changed-since",

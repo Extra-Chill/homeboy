@@ -120,7 +120,7 @@ fn run_add_from_audit(source: &str, write: bool) -> CmdResult<RefactorOutput> {
             e,
             Some("parse audit result for refactor add".to_string()),
             Some(
-                "Input must be output from `homeboy audit <component>`. \
+                "Input must be output from `homeboy review audit <component>`. \
                  Save it with: homeboy --format json audit <component> > audit.json"
                     .to_string(),
             ),

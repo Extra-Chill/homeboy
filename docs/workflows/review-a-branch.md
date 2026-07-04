@@ -54,9 +54,9 @@ homeboy review my-component \
 Treat `review` as the summary layer. When one stage fails, deep dive with the same scope:
 
 ```bash
-homeboy audit my-component --changed-since origin/main
-homeboy lint my-component --changed-since origin/main
-homeboy test my-component --changed-since origin/main
+homeboy review audit my-component --changed-since origin/main
+homeboy review lint my-component --changed-since origin/main
+homeboy review test my-component --changed-since origin/main
 ```
 
 The goal is to keep the final reviewer-facing proof as `homeboy review`, while using individual stages for diagnosis.

@@ -441,15 +441,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("ssh", CommandJsonFamily::Ops),
     command_spec("server", CommandJsonFamily::Ops),
     command_spec_with_representative_argv(
-        &["homeboy", "test"],
-        lab_command_spec_with_summary(
-            "test",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for test runs",
-            TEST_LAB_SUPPORT,
-        ),
-    ),
-    command_spec_with_representative_argv(
         &["homeboy", "bench"],
         lab_command_spec_with_summary(
             "bench",
@@ -484,22 +475,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         )
     },
     command_spec("observe", CommandJsonFamily::Quality),
-    CommandSpec {
-        safety: guarded_safety(LINT_DANGEROUS_FLAGS),
-        ..command_spec_with_representative_argv(
-            &["homeboy", "lint"],
-            lab_command_spec_with_output_notes_and_summary(
-                "lint",
-                CommandJsonFamily::Quality,
-                "portable Lab offload is available for changed-scope lint runs",
-                "runs lint workflows; pass --fix to apply auto-fixable findings in place",
-                LINT_LAB_SUPPORT,
-            ),
-        )
-    },
     command_spec("db", CommandJsonFamily::Ops),
     command_spec("deps", CommandJsonFamily::Ops),
-    command_spec("ci", CommandJsonFamily::Ops),
     command_spec("file", CommandJsonFamily::Ops),
     command_spec("fleet", CommandJsonFamily::Ops),
     command_spec("logs", CommandJsonFamily::Ops),
@@ -544,7 +521,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
     ),
     command_spec("git", CommandJsonFamily::Ops),
-    command_spec("build", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "release",
         CommandJsonFamily::Workspace,
@@ -561,16 +537,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             REVIEW_LAB_SUPPORT,
         ),
     ),
-    command_spec_with_representative_argv(
-        &["homeboy", "audit"],
-        lab_command_spec_with_summary(
-            "audit",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for audit source runs",
-            AUDIT_LAB_SUPPORT,
-        ),
-    ),
-    command_spec("audit-baseline", CommandJsonFamily::Quality),
     CommandSpec {
         safety: CommandSafetySpec {
             mutates: true,

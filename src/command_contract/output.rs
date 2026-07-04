@@ -144,7 +144,9 @@ impl Commands {
             CommandOutputFileMode::None
         } else {
             match self {
-                Commands::Review(_) => CommandOutputFileMode::ReviewStableArtifact,
+                Commands::Review(args) if args.command.is_none() => {
+                    CommandOutputFileMode::ReviewStableArtifact
+                }
                 Commands::Trace(args) if args.json_summary => {
                     CommandOutputFileMode::TraceJsonSummaryArtifact
                 }
@@ -207,15 +209,10 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Test(args) => args.output_descriptor(output_file_mode),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
-            Commands::Lint(args) => args.output_descriptor(output_file_mode),
-            Commands::Audit(args) => args.output_descriptor(output_file_mode),
             Commands::Observe(_) => observe::adapter(output_file_mode).output_descriptor(),
-            Commands::AuditBaseline(_) | Commands::Refactor(_) => {
-                registered_json_envelope_descriptor(self, output_file_mode)
-            }
+            Commands::Refactor(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Contract(_) => {
                 crate::commands::contract::adapter(output_file_mode).output_descriptor()
@@ -230,7 +227,6 @@ impl Commands {
             | Commands::Config(_)
             | Commands::Extension(_)
             | Commands::Cleanup(_)
-            | Commands::Build(_)
             | Commands::Report(_)
             | Commands::Runner(_)
             | Commands::Runtime(_)
@@ -239,7 +235,6 @@ impl Commands {
             | Commands::Stack(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Rig(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Status(_)
-            | Commands::Ci(_)
             | Commands::Server(_)
             | Commands::Db(_)
             | Commands::Deps(_)

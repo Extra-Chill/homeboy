@@ -294,7 +294,10 @@ fn build_finding_groups(result: &CodeAuditResult) -> Vec<AuditSummaryGroup> {
     let mut grouped: Vec<_> = groups
         .into_iter()
         .map(|(kind, group)| AuditSummaryGroup {
-            drilldown_command: format!("homeboy audit {} --only {}", result.component_id, kind),
+            drilldown_command: format!(
+                "homeboy review audit {} --only {}",
+                result.component_id, kind
+            ),
             confidence: group.kind.confidence(),
             kind,
             count: group.count,

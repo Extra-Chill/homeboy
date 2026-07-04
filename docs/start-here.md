@@ -15,10 +15,10 @@ homeboy review --changed-since origin/main
 `review` is the PR-shaped umbrella for scoped `audit`, `lint`, and `test` checks. Use individual commands when you need to focus on one stage:
 
 ```bash
-homeboy audit
-homeboy lint
-homeboy test
-homeboy build
+homeboy review audit
+homeboy review lint
+homeboy review test
+homeboy review build
 ```
 
 ## 2. Add Portable Repo Config

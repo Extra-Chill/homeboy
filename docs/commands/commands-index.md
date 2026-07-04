@@ -3,13 +3,9 @@
 - [api](api.md)
 - [activity](activity.md) — unified active and recently finished Homeboy work
 - [agent-task](agent-task.md)
-- [audit](audit.md) — code convention drift and structural analysis
-- [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [api](api.md)
 - [bench](bench.md) — performance benchmarks + p95 regression ratchet
-- [build](build.md) — local build quality gate
 - [cargo](cargo.md) — extension-provided Cargo routing when installed
-- [ci](ci.md) — CI reproduction profiles and shallow CI surface discovery
 - [cleanup](cleanup.md) — declared reconstructable artifact cleanup across managed worktrees
 - [component](component.md)
 - [config](config.md)
@@ -24,7 +20,6 @@
 - [fuzz](fuzz.md) — generic fuzz workload discovery, execution, and evidence
 - [git](git.md)
 - [http](http.md) — generic proxied authenticated HTTP requests
-- [lint](lint.md)
 - [logs](logs.md)
 - [observe](observe.md) — passive live observation into trace timeline evidence
 - [project](project.md)
@@ -41,7 +36,6 @@
 - [ssh](ssh.md)
 - [stack](stack.md) — combined-fixes branches from base refs plus cherry-picked PRs
 - [status](status.md) — actionable component overview
-- [test](test.md)
 - [trace](trace.md) — black-box behavioral trace and evidence capture
 - [triage](triage.md) — attention reports and watch utilities across components, projects, fleets, and rigs
 - [tunnel](tunnel.md) — private service tunnel declarations

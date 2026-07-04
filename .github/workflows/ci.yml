@@ -28,15 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - command: audit
+          - command: review audit
             title: Audit
             section_key: audit
             section_title: Audit
-          - command: lint
+          - command: review lint
             title: Lint
             section_key: lint
             section_title: Lint
-          - command: test
+          - command: review test
             title: Test
             section_key: test
             section_title: Test
@@ -65,7 +65,7 @@ jobs:
         with:
           component: homeboy
           commands: ${{ matrix.command }}
-          expected-commands: audit,lint,test
+          expected-commands: review audit,review lint,review test
           differential-gating: true
           # Autofix is explicitly disabled on PRs: an on-failure autofix push
           # lands a bot commit mid-review and supersedes in-flight CI runs,

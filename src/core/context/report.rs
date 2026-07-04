@@ -601,7 +601,7 @@ fn build_actionable_next_steps(
     if context_output.managed && !components.is_empty() {
         let comp_id = &components[0].component.id;
         next_steps.push(format!(
-            "You're in {}. Common: `homeboy build`, `homeboy deploy`, `homeboy release`.",
+            "You're in {}. Common: `homeboy review build`, `homeboy deploy`, `homeboy release`.",
             comp_id
         ));
     }

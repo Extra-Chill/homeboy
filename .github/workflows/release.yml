@@ -36,10 +36,10 @@ on:
       release_blocking_commands:
         description: 'Comma-separated quality commands that may block release preparation'
         type: string
-        default: 'lint,test'
+        default: 'review lint,review test'
 
 env:
-  RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}
+  RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'review lint,review test' }}
   HOMEBOY_NO_UPDATE_CHECK: '1'
   RELEASE_MIN_FREE_KB: '5242880'
 
@@ -99,7 +99,7 @@ jobs:
         uses: Extra-Chill/homeboy-action@v2
         with:
           commands: release
-          expected-commands: audit,lint,test
+          expected-commands: review audit,review lint,review test
           args: --skip-checks=audit,lint,test
           release-dry-run: 'true'
 
@@ -232,8 +232,8 @@ jobs:
         continue-on-error: true
         with:
           binary-path: .homeboy-bin/homeboy
-          commands: audit
-          expected-commands: audit,lint,test
+          commands: review audit
+          expected-commands: review audit,review lint,review test
           args: ${{ github.event.before && format('--profile=pr --changed-since {0}', github.event.before) || '--profile=pr' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -276,8 +276,8 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           binary-path: .homeboy-bin/homeboy
-          commands: lint
-          expected-commands: audit,lint,test
+          commands: review lint
+          expected-commands: review audit,review lint,review test
           args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -322,8 +322,8 @@ jobs:
           RELEASE_BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
         with:
           binary-path: .homeboy-bin/homeboy
-          commands: test
-          expected-commands: audit,lint,test
+          commands: review test
+          expected-commands: review audit,review lint,review test
           args: ${{ github.event.before && format('--skip-lint --changed-since {0}', github.event.before) || '--skip-lint' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -380,7 +380,7 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: ${{ env.RELEASE_BLOCKING_COMMANDS }}
-          expected-commands: audit,lint,test
+          expected-commands: review audit,review lint,review test
           autofix: 'true'
           autofix-mode: always
           autofix-open-pr: 'true'
@@ -505,7 +505,7 @@ jobs:
         with:
           source: '.'
           commands: release
-          expected-commands: audit,lint,test
+          expected-commands: review audit,review lint,review test
           args: --skip-checks=audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           release-skip-publish: 'true'

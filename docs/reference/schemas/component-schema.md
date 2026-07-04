@@ -82,7 +82,7 @@ Component configuration defines buildable and deployable units stored in `compon
 - **`env`** (object): Component-scoped environment variables applied to Homeboy-managed capability runs for the component
   - Applies to component scripts and extension runners for managed build/test/lint/bench/trace/deps-style capability execution.
   - Per-run environment variables supplied by command workflows are applied after component config and win on key conflicts.
-  - `homeboy build` reports configured keys as `active_env_keys` so cache/debug configuration is visible without exposing values.
+  - `homeboy review build` reports configured keys as `active_env_keys` so cache/debug configuration is visible without exposing values.
   - Example: set `"CARGO_TARGET_DIR": "/path/to/shared/rebuildable/cargo-target"` for a Rust component without adding Rust-specific Homeboy behavior.
 - **`artifact_inputs`** (array): Producer artifacts to resolve and compose into this component's build artifact after this component builds
   - **`component`** (string): Producer component ID to build before composition

@@ -53,25 +53,6 @@ pub fn run_command_output(
                 },
             )
         }
-        Commands::Ci(args) => {
-            let summarize = ci_triage_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Ci(args), global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(render_ci_triage_summary)
-                })
-                .flatten();
-
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
         Commands::Runner(args) => runner::run_command_output(args, global),
         Commands::Activity(args) => {
             let (stdout_result, exit_code) = dispatch(Commands::Activity(args), global);
