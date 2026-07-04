@@ -917,6 +917,7 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     if output.count == 0 {
         output.hints = bench_list_empty_hints(args, rig_spec, &output.component_id);
     }
+    run_dir.cleanup();
 
     Ok((BenchOutput::List(output), 0))
 }

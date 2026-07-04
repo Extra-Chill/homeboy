@@ -178,6 +178,8 @@ pub fn default_true() -> bool {
 pub struct LabConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_workspace_ttl: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
