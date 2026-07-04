@@ -21,7 +21,6 @@ pub(crate) fn run_runner_resident_lab_offload(
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
-    // Refreshing managed runner-resident source checkouts is workspace setup.
     let managed_sources_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
     let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
     managed_sources_timer.finish();
@@ -64,8 +63,6 @@ pub(crate) fn run_runner_resident_lab_offload(
     let remote_output_file = request
         .output_file_requested
         .then(|| remote_lab_output_file(runner_workspace_root));
-    // Structured output goes to a Homeboy-owned sibling artifact directory
-    // outside the resident checkout (#6219); create it before dispatch.
     if let Some(output_file) = remote_output_file.as_deref() {
         ensure_remote_lab_artifact_dir(runner_id, output_file)?;
     }
@@ -97,14 +94,12 @@ pub(crate) fn run_runner_resident_lab_offload(
         runner_resident_path_materialization_plan(runner_workspace_root, &source_syncs),
     );
 
-    if !request.read_only_polling {
-        eprintln!(
-            "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
-            redact_argv_display(&command),
-            runner_id,
-            runner_workspace_root
-        );
-    }
+    eprintln!(
+        "Lab offload: running `{}` on runner `{}` in `{}`.",
+        redact_argv_display(&command),
+        runner_id,
+        runner_workspace_root
+    );
     let mut lab_metadata = lab_offload_metadata(
         &plan,
         selection.source.metadata_value(),
@@ -149,128 +144,55 @@ pub(crate) fn run_runner_resident_lab_offload(
         runner_workload_agent_task_from_command(&remapped_args, agent_task_run_id.as_deref());
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
-    lab_metadata["runner_workload"] =
-        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
-    let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
-        LabEnvResolutionLayer {
-            source: "lab_metadata_and_passthroughs",
-            env: base_env,
-            secret_names: Vec::new(),
-        },
-        LabEnvResolutionLayer {
-            source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
-            env: secret_env_handoff.env_delta.clone(),
-            secret_names: secret_env_handoff.secret_env_names.clone(),
-        },
-        LabEnvResolutionLayer {
-            source: "job_override",
-            env: request.job_overrides.env.clone(),
-            secret_names: request.job_overrides.secret_env_names.clone(),
-        },
-    ]);
-    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    env.extend(secret_env_handoff.env_delta.clone());
-    for (name, value) in &request.job_overrides.env {
-        env.insert(name.clone(), value.clone());
-    }
-    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
-    secret_env_names.extend(request.job_overrides.secret_env_names.clone());
-    secret_env_names.sort();
-    secret_env_names.dedup();
-    preflight_lab_secret_env_handoff(runner_id, None, &env, &secret_env_handoff)?;
     let path_remaps =
         path_remaps_from_workspace_mapping(&[], Some(&source_path), Some(runner_workspace_root));
-    preflight_lab_offload_remote_dispatch_paths(
-        runner_id,
-        &command,
-        &env,
-        &source_path,
-        runner_workspace_root,
-        &path_remaps,
-    )?;
+    lab_metadata["runner_workload"] =
+        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
 
     let (mirror_evidence, print_handoff) =
         runner_resident_exec_noise_policy(request.read_only_polling);
-    let exec_timer = overhead.phase(LabOffloadPhase::RemoteExec);
-    let (exec_output, exit_code) = exec(
+    exec_lab_context(LabDispatchExecutionContext {
+        request: &request,
+        selection: &selection,
+        contract: &contract,
+        runner: None,
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(runner_workspace_root.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command,
-            env,
-            secret_env_names,
-            secret_env_plan: Some(secret_env_handoff.secret_env_plan.clone()),
-            env_materialization: None,
-            capture_patch: request.capture_patch,
-            raw_exec: false,
-            source_snapshot: None,
-            path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
-            capability_preflight: None,
-            required_extensions: contract.required_extensions.clone(),
-            require_paths: Vec::new(),
-            runner_workload: Some(runner_workload),
-            run_id: agent_task_run_id,
-            detach_after_handoff: false,
-            mirror_evidence,
-            print_handoff,
-        },
-    )?;
-    exec_timer.finish();
-    plan = with_step(
+        runner_status,
+        source_path,
+        remote_cwd: runner_workspace_root.to_string(),
+        command: command.clone(),
+        remote_command: command,
+        remapped_args: remapped_args.clone(),
+        secret_preflight_args: remapped_args,
+        agent_task_run_id,
+        runner_workload: Some(runner_workload),
+        lab_metadata,
+        env_resolution_layers: vec![LabEnvResolutionLayer {
+            source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
+            env: secret_env_handoff.env_delta.clone(),
+            secret_names: secret_env_handoff.secret_env_names.clone(),
+        }],
+        secret_env_handoff,
+        source_snapshot: None,
+        path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
+        capability_preflight: None,
+        provider_preflight: None,
+        path_remaps,
+        workspace_mapping_metadata: serde_json::json!({
+            "schema": "homeboy/lab-runner-resident-workspace/v1",
+            "mode": "runner_resident",
+            "runner_cwd": runner_workspace_root,
+        }),
+        materialized_workspace: None,
+        dependency_cache_saves: Vec::new(),
+        remote_output_file,
+        host_telemetry: None,
         plan,
-        PlanStep::builder(
-            "lab.exec",
-            "lab.exec",
-            if exit_code == 0 {
-                PlanStepStatus::Success
-            } else {
-                PlanStepStatus::Failed
-            },
-        )
-        .inputs(PlanValues::new().json("exit_code", exit_code))
-        .build(),
-    );
-    if !request.read_only_polling && !exec_output.stderr.is_empty() {
-        messages.push(format!(
-            "Lab offload: runner-resident command wrote {} stderr bytes.",
-            exec_output.stderr.len()
-        ));
-    }
-
-    let mut stderr = String::new();
-    if !request.read_only_polling {
-        for message in messages {
-            stderr.push_str(&message);
-            stderr.push('\n');
-        }
-    }
-    stderr.push_str(&exec_output.stderr);
-    if exit_code != 0 {
-        append_runner_component_registry_repair_hint(
-            &mut stderr,
-            &contract,
-            runner_id,
-            runner_workspace_root,
-            &exec_output.stdout,
-            &exec_output.stderr,
-        );
-        append_runner_failure_context_summary(&mut stderr, &exec_output);
-    }
-
-    let output_file_content = match remote_output_file.as_deref() {
-        Some(path) => Some(download_lab_output_file(runner_id, path)?),
-        None => None,
-    };
-
-    Ok(LabOffloadOutcome::Offloaded {
-        plan,
-        stdout: exec_output.stdout,
-        stderr,
-        exit_code,
-        output_file_content,
+        messages,
+        overhead,
+        mirror_evidence,
+        print_handoff,
+        detach_after_handoff: false,
     })
 }
 
@@ -301,16 +223,6 @@ pub(crate) fn runner_resident_path_materialization_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn read_only_polling_skips_runner_exec_mirror_and_handoff_output() {
-        assert_eq!(runner_resident_exec_noise_policy(true), (false, false));
-    }
-
-    #[test]
-    fn runner_resident_execution_preserves_runner_exec_evidence() {
-        assert_eq!(runner_resident_exec_noise_policy(false), (true, true));
-    }
 
     #[test]
     fn runner_resident_path_materialization_plan_marks_existing_remote_sources() {
