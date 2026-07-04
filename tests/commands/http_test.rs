@@ -9,7 +9,7 @@ fn http_request_mutating_methods_require_apply() {
         assert!(err.message.contains("requires explicit --apply"));
         assert!(err
             .message
-            .contains(&format!("homeboy http request {method} --apply")));
+            .contains(&format!("homeboy api http request {method} --apply")));
     }
 }
 

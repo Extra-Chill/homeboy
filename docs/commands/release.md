@@ -4,6 +4,9 @@
 
 ```sh
 homeboy release [OPTIONS] [COMPONENTS]...
+homeboy release version show [<component_id>] [--path <path>]
+homeboy release changes [<component_id>] [--path <path>] [--since <tag>] [--git-diffs]
+homeboy release changelog show [<component_id>]
 ```
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
@@ -44,7 +47,7 @@ When `--bump` requests a lower keyword bump than Homeboy detects from releasable
 
 ```sh
 # 1. Review changes since last release
-homeboy changes <component_id>
+homeboy release changes <component_id>
 
 # 2. Preview the release (validates configuration, shows plan)
 homeboy release <component_id> --dry-run
@@ -52,6 +55,20 @@ homeboy release <component_id> --dry-run
 # 3. Execute the release
 homeboy release <component_id>
 ```
+
+## Lifecycle Helpers
+
+### `version show`
+
+`homeboy release version show` reports the current version for a component discovered from the current directory, an explicit component ID, or an explicit `--path`. If no component can be discovered, it reports the Homeboy binary version.
+
+### `changes`
+
+`homeboy release changes` shows commits since the latest git tag for one component, multiple components, or all components attached to a project. It accepts the same modes as the former standalone changes command: `--json`, `--project`, `--path`, `--since`, and `--git-diffs`.
+
+### `changelog show`
+
+`homeboy release changelog show` prints Homeboy's embedded changelog, or a component changelog when a component ID is provided. The release pipeline owns changelog generation from conventional commits; feature PRs should describe changes in commit messages rather than editing `CHANGELOG.md` manually.
 
 ### Regenerate a package for an existing tag
 

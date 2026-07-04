@@ -6,7 +6,7 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
-use crate::commands::{contract, fleet, observe, version, GlobalArgs};
+use crate::commands::{contract, fleet, observe, GlobalArgs};
 
 pub(crate) type JsonCommandRun = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonCommandRun;
@@ -116,12 +116,6 @@ pub(crate) fn command_adapter(
                 .expect("fleet adapter supports JSON execution");
             Ok(BoundCommandAdapter::bind(args, executor))
         }
-        Commands::Version(args) => {
-            let executor = version::adapter(output_file_mode)
-                .execute_json
-                .expect("version adapter supports JSON execution");
-            Ok(BoundCommandAdapter::bind(args, executor))
-        }
         Commands::Observe(args) => {
             let executor = observe::adapter(output_file_mode)
                 .execute_json
@@ -176,11 +170,6 @@ mod tests {
     }
     #[test]
     fn command_adapter_recognizes_migrated_json_commands() {
-        assert!(command_adapter(
-            parsed_command(&["homeboy", "version", "show"]),
-            CommandOutputFileMode::None,
-        )
-        .is_ok());
         assert!(command_adapter(
             parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
             CommandOutputFileMode::None,

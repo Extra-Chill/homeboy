@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use homeboy::core::http_request::{self, HttpRequestInput, HttpRequestOutput};
 
-use super::{parse_key_val, CmdResult, GlobalArgs};
+use crate::commands::{parse_key_val, CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct HttpArgs {
@@ -11,7 +11,7 @@ pub struct HttpArgs {
 }
 
 #[derive(Subcommand)]
-enum HttpCommand {
+pub(crate) enum HttpCommand {
     /// Make a GET request to a full URL
     Get(RequestArgs),
     /// Make an arbitrary HTTP request to a full URL
@@ -29,7 +29,7 @@ enum HttpCommand {
 }
 
 #[derive(Args)]
-struct RequestArgs {
+pub(crate) struct RequestArgs {
     /// Full URL to request
     url: String,
 
@@ -37,7 +37,7 @@ struct RequestArgs {
     #[arg(long)]
     proxy: Option<String>,
 
-    /// Auth profile from `homeboy auth profile ...`
+    /// Auth profile from `homeboy api auth profile ...`
     #[arg(long)]
     auth_profile: Option<String>,
 
@@ -79,11 +79,11 @@ fn require_apply_for_request(method: &str, apply: bool, url: &str) -> homeboy::c
     Err(homeboy::core::Error::validation_invalid_argument(
         "apply",
         format!(
-            "homeboy http request {method} sends a mutating request and requires explicit --apply. Suggested command: homeboy http request {method} --apply {url}"
+            "homeboy api http request {method} sends a mutating request and requires explicit --apply. Suggested command: homeboy api http request {method} --apply {url}"
         ),
         None,
         Some(vec![format!(
-            "homeboy http request {method} --apply {url}"
+            "homeboy api http request {method} --apply {url}"
         )]),
     ))
 }
@@ -108,5 +108,5 @@ fn build_input(method: &str, args: RequestArgs) -> HttpRequestInput {
 }
 
 #[cfg(test)]
-#[path = "../../tests/commands/http_test.rs"]
+#[path = "../../../tests/commands/http_test.rs"]
 mod http_test;

@@ -2,8 +2,8 @@ use crate::cli_surface::Commands;
 
 use super::{map, JsonRun};
 use crate::commands::{
-    api, auth, ci, daemon, db, deploy, file, git, http, issues, logs, self_cmd, server, ssh,
-    status, triage, upgrade, GlobalArgs,
+    api, ci, daemon, db, deploy, file, git, issues, logs, self_cmd, server, ssh, status, triage,
+    upgrade, GlobalArgs,
 };
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
@@ -22,9 +22,7 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Git(args) => map(git::run(args, global)),
         Commands::Issues(args) => map(issues::run(args, global)),
         Commands::SelfCmd(args) => map(self_cmd::run(args, global)),
-        Commands::Auth(args) => map(auth::run(args, global)),
         Commands::Api(args) => map(api::run(args, global)),
-        Commands::Http(args) => map(http::run(args, global)),
         Commands::Upgrade(args) => map(upgrade::run(args, global)),
         _ => unreachable!("command routed to wrong JSON output family"),
     }

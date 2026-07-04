@@ -141,7 +141,7 @@ Use `-c, --component-id <id>` when running from outside the target checkout with
 homeboy git tag [component_id] [tag_name] [-m <message>] [--path <path>]
 ```
 
-If `tag_name` is omitted, Homeboy tags `v<component version>` from `homeboy version show`.
+If `tag_name` is omitted, Homeboy tags `v<component version>` from `homeboy release version show`.
 
 ## GitHub Issue Workflows
 
@@ -426,4 +426,4 @@ homeboy git pr comment homeboy --number 123 --key docs-check --body-file /tmp/co
 ## Related
 
 - [stack](stack.md)
-- [version](version.md)
+- [release](release.md)

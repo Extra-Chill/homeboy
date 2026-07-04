@@ -262,7 +262,7 @@ fn resolve_changelog_info(
     // No hint: homeboy auto-generates changelog entries from commits at
     // release time, so an empty `## Unreleased` section no longer implies
     // the user needs to do anything. The count itself is still useful
-    // context for `homeboy changes` output.
+    // context for `homeboy release changes` output.
     Some(ChangelogInfo {
         unreleased_entries,
         path: Some(changelog_path.to_string_lossy().to_string()),

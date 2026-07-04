@@ -2,9 +2,9 @@ use crate::cli_surface::Commands;
 
 use super::{map, JsonRun};
 use crate::commands::{
-    activity, agent_task, artifact_postprocess, build, changelog, changes, cleanup, component,
-    config, contract, docs, extension, manifest, project, refactor, refs, release, report, rig,
-    runner, runs, runtime, stack, tunnel, undo, worktree, GlobalArgs,
+    activity, agent_task, artifact_postprocess, build, cleanup, component, config, contract, docs,
+    extension, manifest, project, refactor, refs, release, report, rig, runner, runs, runtime,
+    stack, tunnel, undo, worktree, GlobalArgs,
 };
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
@@ -19,10 +19,8 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Extension(args) => map(extension::run(args, global)),
         Commands::Docs(args) => map(docs::run(args, global)),
         Commands::Manifest(args) => map(manifest::run(args, global)),
-        Commands::Changelog(args) => map(changelog::run(args, global)),
         Commands::Cleanup(args) => map(cleanup::run(args, global)),
         Commands::Build(args) => map(build::run(args, global)),
-        Commands::Changes(args) => map(changes::run(args, global)),
         Commands::Release(args) => map(release::run(args, global)),
         Commands::Report(args) => map(report::run(args, global)),
         Commands::Refactor(args) => map(refactor::run(args, global)),

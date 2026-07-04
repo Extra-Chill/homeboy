@@ -126,5 +126,5 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 ## Related
 
-- [version](version.md)
+- [release](release.md)
 - [extension](extension.md)

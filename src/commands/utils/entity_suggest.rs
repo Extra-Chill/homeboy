@@ -147,11 +147,11 @@ pub fn generate_entity_hints(
 
     match parent_command {
         "changelog" => hints.push(format!(
-            "'{}' matches {} '{}'. Try: homeboy changelog show {}",
+            "'{}' matches {} '{}'. Try: homeboy release changelog show {}",
             unrecognized, entity_label, id, id
         )),
         "version" => hints.push(format!(
-            "'{}' matches {} '{}'. Try: homeboy version show {}",
+            "'{}' matches {} '{}'. Try: homeboy release version show {}",
             unrecognized, entity_label, id, id
         )),
         "build" => hints.push(format!(
@@ -163,7 +163,7 @@ pub fn generate_entity_hints(
             unrecognized, entity_label, id, id
         )),
         "changes" => hints.push(format!(
-            "'{}' matches {} '{}'. Try: homeboy changes show {}",
+            "'{}' matches {} '{}'. Try: homeboy release changes {}",
             unrecognized, entity_label, id, id
         )),
         "git" => hints.push(format!(

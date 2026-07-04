@@ -202,5 +202,5 @@ All subcommands return JSON in the standard envelope format:
 ## Related
 
 - [upgrade](upgrade.md) - Uses install_methods configuration
-- [version](version.md) - Uses version_candidates configuration
+- [release](release.md) - Uses version_candidates configuration
 - [deploy](deploy.md) - Uses deploy and permissions configuration

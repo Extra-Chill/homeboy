@@ -540,7 +540,7 @@ fn build_actionable_next_steps(
             ));
         } else {
             next_steps.push(format!(
-                "{} components have uncommitted changes. Review with `homeboy changes <id>`.",
+                "{} components have uncommitted changes. Review with `homeboy release changes <id>`.",
                 count
             ));
         }

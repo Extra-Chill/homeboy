@@ -81,9 +81,9 @@ homeboy release <component_id>
 Useful companion commands:
 
 ```bash
-homeboy changes <component_id>
-homeboy version show <component_id>
-homeboy changelog show <component_id>
+homeboy release changes <component_id>
+homeboy release version show <component_id>
+homeboy release changelog show <component_id>
 ```
 
 ## Execution Behavior

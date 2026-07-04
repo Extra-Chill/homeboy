@@ -9,8 +9,8 @@ use homeboy::core::server::auth_profiles::{
     self, ProfileRemoveResult, ProfileSetResult, ProfileStatusResult,
 };
 
-use super::{CmdResult, GlobalArgs};
 use crate::commands::utils::tty::{prompt, prompt_password};
+use crate::commands::{CmdResult, GlobalArgs};
 
 #[derive(Args)]
 pub struct AuthArgs {
@@ -19,7 +19,7 @@ pub struct AuthArgs {
 }
 
 #[derive(Subcommand)]
-enum AuthCommand {
+pub(crate) enum AuthCommand {
     /// Authenticate with a project's API
     Login {
         /// Project ID
@@ -94,7 +94,7 @@ enum AuthCommand {
 }
 
 #[derive(Subcommand)]
-enum ProfileCommand {
+pub(crate) enum ProfileCommand {
     /// Store a Basic auth profile in the OS keychain
     SetBasic {
         /// Profile name

@@ -5,7 +5,7 @@ Homeboy prints JSON to stdout for most commands.
 Exceptions:
 
 - `homeboy docs` prints raw markdown (or newline-delimited topic names for `homeboy docs list`).
-- `homeboy changelog` (default show) prints raw markdown by default; in JSON mode it returns JSON with a `content` field containing the markdown.
+- `homeboy release changelog show` prints raw markdown by default; in JSON mode it returns JSON with a `content` field containing the markdown.
 - `homeboy review --report pr-comment` prints a raw markdown PR-comment report.
 - `homeboy trace --report markdown` prints a raw markdown trace report.
 - `homeboy runs compare` prints raw markdown unless `--output` is provided.
@@ -195,7 +195,7 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 ```json
 {
   "next_steps": [
-    "8 components have uncommitted changes. Review with `homeboy changes <id>`.",
+    "8 components have uncommitted changes. Review with `homeboy release changes <id>`.",
     "11 components have unreleased commits. Release with `homeboy release <id>`."
   ]
 }

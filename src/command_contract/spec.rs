@@ -546,7 +546,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("status", CommandJsonFamily::Ops),
     command_spec("docs", CommandJsonFamily::Workspace),
     manifest_command_spec(),
-    command_spec("changelog", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
@@ -561,9 +560,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     command_spec("git", CommandJsonFamily::Ops),
     command_spec("issues", CommandJsonFamily::Ops),
-    command_spec("version", CommandJsonFamily::Workspace),
     command_spec("build", CommandJsonFamily::Workspace),
-    command_spec("changes", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "release",
         CommandJsonFamily::Workspace,
@@ -671,9 +668,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "restores files from the latest or selected undo snapshot",
         mutating_safety(),
     ),
-    command_spec("auth", CommandJsonFamily::Ops),
     command_spec("api", CommandJsonFamily::Ops),
-    command_spec("http", CommandJsonFamily::Ops),
     command_spec_with_output_notes_and_safety(
         "upgrade",
         CommandJsonFamily::Ops,

@@ -557,7 +557,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages";
             metadata.dangerous_flags = vec!["--apply"];
         }
-        ["http", "request"] => {
+        ["api", "http", "request"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it";
@@ -657,13 +657,13 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.output_notes = "deletes an undo snapshot without restoring it";
         }
-        ["auth", "login"]
-        | ["auth", "set"]
-        | ["auth", "remove"]
-        | ["auth", "logout"]
-        | ["auth", "profile", "set-basic"]
-        | ["auth", "profile", "set-bearer"]
-        | ["auth", "profile", "remove"] => {
+        ["api", "auth", "login"]
+        | ["api", "auth", "set"]
+        | ["api", "auth", "remove"]
+        | ["api", "auth", "logout"]
+        | ["api", "auth", "profile", "set-basic"]
+        | ["api", "auth", "profile", "set-bearer"]
+        | ["api", "auth", "profile", "remove"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "mutates keychain-backed authentication state";

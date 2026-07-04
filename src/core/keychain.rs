@@ -113,7 +113,7 @@ pub fn missing_error(project_id: &str, variable_name: &str) -> Error {
         Value::Null,
     )
     .with_hint(format!(
-        "Run 'homeboy auth set --project {} {}' to store it locally",
+        "Run 'homeboy api auth set --project {} {}' to store it locally",
         project_id, variable_name
     ))
     .with_hint("Use source: \"env\" instead for CI/headless environments")

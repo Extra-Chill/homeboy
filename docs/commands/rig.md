@@ -36,6 +36,7 @@ rig package / local spec
 | `up <id>` | Run the rig's `up` pipeline and materialize the environment. |
 | `check <id>` | Run the rig's `check` pipeline and report all failures. |
 | `lint <target>` | Lint a rig ID, package path, or `rig.json` without touching the environment. |
+| `package <source>` | Inspect or render package-installed rig source metadata. |
 | `down <id>` | Run the rig's `down` pipeline and stop managed services. |
 | `repair <id>` | Repair safe declared drift without running the full `up` pipeline. |
 | `sync <id>` | Sync every stack declared by the rig's components. |
