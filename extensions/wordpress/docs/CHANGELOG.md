@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.25] - 2026-07-04
+
+### Fixed
+- Fix WP Codebox runtime freshness resolution
+
 ## [3.23.24] - 2026-07-03
 
 ### Changed
