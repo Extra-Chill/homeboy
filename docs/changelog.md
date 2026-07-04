@@ -4,6 +4,89 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.0] - 2026-07-04
+
+### Added
+- add disposable local db runtime helper
+- add v2 command result envelope
+- unify daemon lifecycle lease
+- model runner runtime materialization status
+- carry source materialization in lab route plans
+- index detached runner handoffs
+- harden resource lifecycle cleanup index
+- resolve agent-task prompt store references
+- load test settings from json files
+
+### Changed
+- Purge legacy test debt
+- Add typed actionable command envelopes
+- Add runner dev-sync extension overlays
+- Prune extension manifest contract metadata
+- delete tombstone, absence, and shape-matrix tests
+- Add unified activity surface
+- Add transport-neutral runner file transfer
+- Add runner dev-sync binary handoff
+- Honor GitHub host proxy env in deploy release-asset downloads
+- Keep fanout cook-batch dry-run local
+- bound slow rust suite
+- consolidate local exec and ssh transfer plumbing
+- make dependency tools declarative
+- extract provider config preflight
+- Add configurable agent-task provider rotation
+- remove WordPress assumptions from core fixtures
+- Clarify linked extension update repair path
+- Gate fuzz mutations on isolated runs
+- Add stable workload planning command
+- Add dependency adapter manifest boundary
+- Add env materialization plan contract
+- Route reverse workers through execution envelopes
+- Stabilize reverse worker cancellation test
+- Normalize remote runner secret plans
+- Record rig resources in lifecycle index
+- Remove product defaults from core bundle
+
+### Fixed
+- restore rust extension binding lost in test-suite bounding
+- Fix agent runtime manifest diagnostics
+- Fix hanging worker cancellation test
+- cover component-prefixed release gate tags
+- enforce resource lifecycle ttls
+- Fix multi-project deploy component resolution
+- preserve agent-task provider exit diagnostics
+- isolate agent task executor evidence by run
+- clarify cook-batch provider selection
+- normalize agent task provider invocations
+- compact runner exec output
+- expose rig workloads in bench list
+- accept json flag on structured commands
+- materialize rig settings env for resources
+- Fix shared-repo component tag resolution across deploy, changes, and status
+- lint only authored rig package files
+- resolve run labels in runs readers
+- fail bench gates for unrun fixtures
+- isolate agent task machine state tests
+- refresh runner mirrors before run listing
+- preserve runner daemon parse recovery context
+- clean terminal runner workspaces
+- report detached lab handoff as running
+- test homeboy-owned generated build dir instead of blessing bare build/
+- detect builtin Rust cleanup artifacts
+- preserve fuzz rig context in lab offloads
+- lock path materialization contract shape
+- preflight agent-task lab secrets
+- reconcile ownerless running records
+- preserve executor failure telemetry
+- persist detached lab agent-task records
+- normalize bare-directory local_path to absolute
+- normalize project attachment local_path so release and deploy agree (#7410)
+- require git checkout for implicit agent-task cwd
+- reduce rig portability lint false positives
+- scope run artifact listings
+- surface orphaned runner child runs
+- clarify runner evidence provenance
+- reconcile lab mutation output
+- preserve rig check stderr success
+
 ## [0.280.13] - 2026-07-03
 
 ### Fixed
