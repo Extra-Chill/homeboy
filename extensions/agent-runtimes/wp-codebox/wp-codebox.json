@@ -228,6 +228,18 @@
         ],
         "display": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs"
       },
+      "cli": {
+        "reserved_selector_hints": ["opencode", "codex", "claude-code"],
+        "profiles": [
+          {
+            "name": "opencode-codex-gpt55",
+            "backend": "opencode",
+            "model": "gpt-5.5",
+            "ai_disclosure": "OpenCode (GPT-5.5)"
+          }
+        ],
+        "default_ai_disclosure": "OpenCode (GPT-5.5)"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [
