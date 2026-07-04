@@ -7,6 +7,7 @@ pub use output::RigCommandOutput;
 
 use clap::{Args, Subcommand};
 
+use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::rig;
 
 use self::output::{
@@ -639,19 +640,9 @@ fn non_portable_up_error(rig_id: &str) -> homeboy::core::Error {
 
 fn shell_join(args: &[String]) -> String {
     args.iter()
-        .map(|arg| shell_quote(arg))
+        .map(|arg| quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn check(

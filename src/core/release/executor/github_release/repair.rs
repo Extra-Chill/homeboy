@@ -2,8 +2,9 @@
 
 use crate::core::component::GithubConfig;
 use crate::core::deploy::release_download::GitHubRepo;
+use crate::core::engine::shell::quote_arg;
 
-use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename, shell_quote};
+use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename};
 
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseRepairCommands {
@@ -90,21 +91,17 @@ fn github_release_repair_commands_with_env(
     let mut generate_notes = vec![
         format!("{}gh", env_prefix),
         "api".to_string(),
-        shell_quote(&endpoint),
+        quote_arg(&endpoint),
         "-f".to_string(),
-        shell_quote(&format!("tag_name={}", tag)),
+        quote_arg(&format!("tag_name={}", tag)),
     ];
     if let Some(previous) = previous_tag {
         generate_notes.push("-f".to_string());
-        generate_notes.push(shell_quote(&format!("previous_tag_name={}", previous)));
+        generate_notes.push(quote_arg(&format!("previous_tag_name={}", previous)));
     }
     generate_notes.push("--jq".to_string());
-    generate_notes.push(shell_quote(".body"));
-    let regenerate_command = format!(
-        "{} > {}",
-        generate_notes.join(" "),
-        shell_quote(&notes_file)
-    );
+    generate_notes.push(quote_arg(".body"));
+    let regenerate_command = format!("{} > {}", generate_notes.join(" "), quote_arg(&notes_file));
     // The notes-generation step is only meaningful when there is no persisted
     // exact body. With a persisted body, regenerating would risk a divergent
     // result, so the "generate" step becomes a no-op note that reuses the file.
@@ -121,23 +118,23 @@ fn github_release_repair_commands_with_env(
         format!("{}gh", env_prefix),
         "release".to_string(),
         "create".to_string(),
-        shell_quote(tag),
+        quote_arg(tag),
         "--title".to_string(),
-        shell_quote(tag),
+        quote_arg(tag),
         "--notes-file".to_string(),
-        shell_quote(&notes_file),
+        quote_arg(&notes_file),
     ];
     for path in artifact_paths {
-        create.push(shell_quote(path));
+        create.push(quote_arg(path));
     }
     create.push("-R".to_string());
-    create.push(shell_quote(&repo_flag));
+    create.push(quote_arg(&repo_flag));
 
     let view_command = format!(
         "{}gh release view {} -R {}",
         env_prefix,
-        shell_quote(tag),
-        shell_quote(&repo_flag)
+        quote_arg(tag),
+        quote_arg(&repo_flag)
     );
     let env_hint = gh_env_hint(github, &env);
 

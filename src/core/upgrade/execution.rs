@@ -1,5 +1,7 @@
 use crate::core::defaults;
+use crate::core::engine::shell::quote_path;
 use crate::core::error::{Error, Result};
+use crate::core::git::{run_git, run_git_output};
 use crate::core::stream_capture::StreamCaptureMetadata;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -368,15 +370,7 @@ fn display_path(path: &Path) -> String {
 }
 
 fn shell_quote_path(path: &Path) -> String {
-    shell_quote(&path.display().to_string())
-}
-
-fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
+    quote_path(&path.display().to_string())
 }
 
 /// Read back the active binary version after a successful swap, retrying while
@@ -605,20 +599,19 @@ fn origin_default_branch(workspace_root: &Path) -> Result<Option<String>> {
 }
 
 fn git_command_success(workspace_root: &Path, args: &[&str]) -> Result<bool> {
-    Ok(git_command_output(workspace_root, args)?.status.success())
+    Ok(
+        run_git_output(workspace_root, args, "prepare source checkout")?
+            .status
+            .success(),
+    )
 }
 
 fn git_command_stdout(workspace_root: &Path, args: &[&str]) -> Result<String> {
-    let output = git_command_output(workspace_root, args)?;
-    if !output.status.success() {
-        return Err(git_command_error(args, &output));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git(workspace_root, args, "prepare source checkout").map(|stdout| stdout.trim().to_string())
 }
 
 fn git_command_stdout_optional(workspace_root: &Path, args: &[&str]) -> Result<Option<String>> {
-    let output = git_command_output(workspace_root, args)?;
+    let output = run_git_output(workspace_root, args, "prepare source checkout")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -629,38 +622,7 @@ fn git_command_stdout_optional(workspace_root: &Path, args: &[&str]) -> Result<O
 }
 
 fn run_git_command(workspace_root: &Path, args: &[&str]) -> Result<()> {
-    let output = git_command_output(workspace_root, args)?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(git_command_error(args, &output))
-}
-
-fn git_command_output(workspace_root: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args(args)
-        .output()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("prepare source checkout".to_string())))
-}
-
-fn git_command_error(args: &[&str], output: &std::process::Output) -> Error {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("exit code {}", output.status.code().unwrap_or(1))
-    };
-
-    Error::internal_io(
-        format!("git {} failed: {detail}", args.join(" ")),
-        Some("prepare source checkout".to_string()),
-    )
+    run_git(workspace_root, args, "prepare source checkout").map(|_| ())
 }
 
 const DETACHED_SOURCE_GIT_PULL_GUARD: &str = r#"git() {
@@ -1462,10 +1424,7 @@ mod tests {
 
     #[test]
     fn shell_quote_handles_paths_with_single_quotes() {
-        assert_eq!(
-            shell_quote("/tmp/homeboy's/bin"),
-            "'/tmp/homeboy'\\''s/bin'"
-        );
+        assert_eq!(quote_path("/tmp/homeboy's/bin"), "'/tmp/homeboy'\\''s/bin'");
     }
 
     #[test]

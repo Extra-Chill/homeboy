@@ -4,6 +4,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::core::build_identity::BuildIdentity;
+use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::runner_execution_envelope::{
     RunnerExecutionArtifactDeclaration, RunnerExecutionArtifactRef, RunnerExecutionEnvelope,
     RunnerExecutionLifecyclePolicy, RunnerExecutionRecord, RunnerExecutionResultRefs,
@@ -806,27 +807,16 @@ fn next_commands(
 
 fn shell_join(args: &[&str]) -> String {
     args.iter()
-        .map(|arg| shell_quote(arg))
+        .map(|arg| quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 fn shell_join_owned(args: &[String]) -> String {
     args.iter()
-        .map(|arg| shell_quote(arg))
+        .map(|arg| quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -1202,8 +1192,8 @@ mod tests {
 
     #[test]
     fn shell_quote_handles_spaces_and_single_quotes() {
-        assert_eq!(shell_quote("simple/path"), "simple/path");
-        assert_eq!(shell_quote("two words"), "'two words'");
-        assert_eq!(shell_quote("it's ok"), "'it'\\''s ok'");
+        assert_eq!(quote_arg("simple/path"), "simple/path");
+        assert_eq!(quote_arg("two words"), "'two words'");
+        assert_eq!(quote_arg("it's ok"), "'it'\\''s ok'");
     }
 }

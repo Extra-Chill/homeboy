@@ -4,7 +4,6 @@ use crate::core::Error;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 pub(super) struct ReleaseOwnedFileSnapshot {
     relative: String,
@@ -205,14 +204,9 @@ pub(super) fn reject_unsafe_lint_autofix_changes(
 }
 
 fn lint_autofix_diff(root: &Path, changed_files: &[String]) -> crate::core::Result<String> {
-    let output = Command::new("git")
-        .arg("diff")
-        .arg("--unified=0")
-        .arg("--")
-        .args(changed_files)
-        .current_dir(root)
-        .output()
-        .map_err(|error| Error::internal_io(error.to_string(), Some("run git diff".to_string())))?;
+    let mut args = vec!["diff", "--unified=0", "--"];
+    args.extend(changed_files.iter().map(String::as_str));
+    let output = git::run_git_output(root, &args, "git diff")?;
 
     if !output.status.success() {
         return Err(Error::git_command_failed(format!(

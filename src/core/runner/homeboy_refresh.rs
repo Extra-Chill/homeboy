@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::core::engine::shell::{quote_arg, quote_path};
 use crate::core::error::{Error, Result};
+use crate::core::git::{run_git, run_git_output};
 use crate::core::output::MergeOutput;
 
 use super::{
@@ -386,7 +388,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     transfer.ensure_directory(remote_parent)?;
     transfer.upload_file(&local_binary.display().to_string(), &remote_binary)?;
 
-    let chmod_script = format!("chmod 0755 {}", sq(&remote_binary));
+    let chmod_script = format!("chmod 0755 {}", quote_path(&remote_binary));
     let (_chmod, chmod_exit) = exec(
         &options.runner_id,
         RunnerExecOptions {
@@ -545,17 +547,17 @@ fn sync_extension_overlays(
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
     format!(
         "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
-        sq(source),
-        sq(git_ref),
-        sq(target_dir),
-        sq(binary_path),
+        quote_path(source),
+        quote_path(git_ref),
+        quote_path(target_dir),
+        quote_path(binary_path),
     )
 }
 
 fn identity_probe_script(binary_path: &str) -> String {
     format!(
         "set -e\nbinary={}\n\"$binary\" self identity\n",
-        sq(binary_path)
+        quote_path(binary_path)
     )
 }
 
@@ -668,20 +670,13 @@ fn expand_path(path: &str) -> PathBuf {
 }
 
 fn git_revision(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["-C", &path.display().to_string(), "rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git(path, &["rev-parse", "HEAD"], "git rev-parse")
+        .ok()
+        .map(|stdout| stdout.trim().to_string())
 }
 
 fn git_dirty(path: &Path) -> bool {
-    Command::new("git")
-        .args(["-C", &path.display().to_string(), "status", "--porcelain"])
-        .output()
+    run_git_output(path, &["status", "--porcelain"], "git status --porcelain")
         .ok()
         .is_some_and(|output| !output.stdout.is_empty())
 }
@@ -783,22 +778,8 @@ impl IfEmpty for String {
     }
 }
 
-fn sq(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 fn shell_arg(value: &str) -> String {
-    sq(value)
+    quote_arg(value)
 }
 
 #[cfg(test)]

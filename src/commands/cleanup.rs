@@ -6,6 +6,7 @@ use homeboy::core::cleanup::{
 };
 use homeboy::core::defaults;
 use homeboy::core::engine;
+use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
@@ -458,7 +459,7 @@ fn remote_lab_workspace_categories(
                 category: "remote_lab_workspaces",
                 specialist_command: format!(
                     "homeboy runner workspace prune {}",
-                    shell_quote(&status.runner_id)
+                    quote_arg(&status.runner_id)
                 ),
                 included: true,
                 skipped: true,
@@ -487,7 +488,7 @@ fn remote_lab_workspace_categories(
                     category: "remote_lab_workspaces",
                     specialist_command: format!(
                         "homeboy runner workspace prune {}",
-                        shell_quote(&status.runner_id)
+                        quote_arg(&status.runner_id)
                     ),
                     included: true,
                     skipped: true,
@@ -514,12 +515,12 @@ fn remote_workspace_category(
     let command = if apply {
         format!(
             "homeboy runner workspace prune {} --apply --passes 10",
-            shell_quote(&output.runner_id)
+            quote_arg(&output.runner_id)
         )
     } else {
         format!(
             "homeboy runner workspace prune {}",
-            shell_quote(&output.runner_id)
+            quote_arg(&output.runner_id)
         )
     };
     category_from_output(
@@ -641,11 +642,11 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
     }
 
     let next = if mode == "apply" {
-        format!("homeboy cleanup artifacts --path {}", shell_quote(root))
+        format!("homeboy cleanup artifacts --path {}", quote_arg(root))
     } else {
         format!(
             "homeboy cleanup artifacts --path {} --apply",
-            shell_quote(root)
+            quote_arg(root)
         )
     };
     lines.push(format!("Next safe command: {next}"));
@@ -750,7 +751,7 @@ fn provider_command(provider: &Value) -> Option<String> {
     let parts: Vec<String> = argv
         .iter()
         .filter_map(Value::as_str)
-        .map(shell_quote)
+        .map(quote_arg)
         .collect();
     (!parts.is_empty()).then(|| parts.join(" "))
 }
@@ -792,17 +793,6 @@ fn format_bytes(bytes: u64) -> String {
         _ if (bytes as f64) < MIB => format!("{:.1} KiB", bytes as f64 / KIB),
         _ if (bytes as f64) < GIB => format!("{:.1} MiB", bytes as f64 / MIB),
         _ => format!("{:.1} GiB", bytes as f64 / GIB),
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
