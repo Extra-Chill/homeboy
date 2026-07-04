@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.2] - 2026-07-04
+
+### Changed
+- Consolidate runtime helper smoke coverage
+
 ## [1.23.1] - 2026-07-01
 
 ### Changed
