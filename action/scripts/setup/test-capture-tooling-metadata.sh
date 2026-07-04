@@ -41,7 +41,7 @@ export ACTION_REPOSITORY="Extra-Chill/homeboy-action"
 export GITHUB_ENV="${TMP_DIR}/github-env"
 export GITHUB_OUTPUT="${TMP_DIR}/github-output"
 
-bash "${ROOT_DIR}/scripts/setup/capture-tooling-metadata.sh" > "${TMP_DIR}/metadata.log"
+( cd "${TMP_DIR}" && bash "${ROOT_DIR}/scripts/setup/capture-tooling-metadata.sh" ) > "${TMP_DIR}/metadata.log"
 
 assert_contains "HOMEBOY_EXTENSION_REVISION=abc1234" "${GITHUB_ENV}" "source revision file is exported"
 assert_contains "- Extension revision: abc1234" "${TMP_DIR}/metadata.log" "source revision file is logged"

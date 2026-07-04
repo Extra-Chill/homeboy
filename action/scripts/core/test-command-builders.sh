@@ -67,6 +67,11 @@ assert_equals \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "lint includes structured output path"
 
+assert_equals \
+  "homeboy review lint data-machine --path /tmp/workspace" \
+  "$(build_run_command "review lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "review lint includes workspace path"
+
 # ── Scoped (changed mode) ──
 SCOPE_MODE="changed"
 SCOPE_BASE_REF="origin/main"
@@ -104,6 +109,11 @@ assert_equals \
   "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
   "audit keeps path with changed-since"
 
+assert_equals \
+  "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "review audit keeps path with changed-since"
+
 HOMEBOY_DIFFERENTIAL_GATING="true"
 assert_equals \
   "homeboy audit data-machine --path /tmp/workspace" \
@@ -136,6 +146,16 @@ assert_equals \
   "audit" \
   "$(resolve_baseline_commands "audit,lint,test" "audit")" \
   "baseline subset keeps only requested baseline command"
+
+assert_equals \
+  "review audit,review lint,review test" \
+  "$(resolve_baseline_commands "review audit,review lint,review test" "auto")" \
+  "baseline auto keeps requested review audit/lint/test commands"
+
+assert_equals \
+  "review audit" \
+  "$(resolve_baseline_commands "review audit,review lint,review test" "audit")" \
+  "baseline subset uses requested review command shape"
 
 assert_equals \
   "" \
@@ -301,6 +321,11 @@ assert_equals \
   "audit,lint,test,refactor --all,bench" \
   "$(canonicalize_commands "bench,audit,lint,test,refactor --all")" \
   "canonicalize places bench after quality commands"
+
+assert_equals \
+  "review audit,review lint,review test" \
+  "$(canonicalize_commands "review test,review audit,review lint")" \
+  "canonicalize orders review quality commands"
 
 assert_equals \
   "" \

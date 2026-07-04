@@ -242,6 +242,15 @@ jobs:
             command="$(echo "${raw_command}" | xargs)"
             [ -n "${command}" ] || continue
             base="${command%% *}"
+            if [ "${base}" = "review" ]; then
+              rest="$(printf '%s' "${command#review}" | xargs)"
+              review_base="${rest%% *}"
+              case "${review_base}" in
+                audit|lint|test)
+                  base="${review_base}"
+                  ;;
+              esac
+            fi
             case "${base}" in
               audit|lint|test|refactor|bench)
                 if [ -z "${selected_commands[${base}]:-}" ]; then

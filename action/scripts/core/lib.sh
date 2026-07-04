@@ -694,23 +694,37 @@ resolve_push_target() {
   fi
 }
 
+quality_base_command() {
+  local cmd="$1"
+  cmd="$(printf '%s' "${cmd}" | xargs)"
+  case "${cmd}" in
+    "review audit"*) printf '%s\n' "audit" ;;
+    "review lint"*) printf '%s\n' "lint" ;;
+    "review test"*) printf '%s\n' "test" ;;
+    "review build"*) printf '%s\n' "build" ;;
+    "review ci"*) printf '%s\n' "ci" ;;
+    *) printf '%s\n' "$(printf '%s' "${cmd}" | awk '{print $1}')" ;;
+  esac
+}
+
 # Sort commands into canonical order: audit → lint → test → refactor → bench.
 # Audit/lint/test are the core quality gates; real refactor and bench commands
 # run after them when explicitly requested. Release and operations commands are
 # handled by dedicated steps and are filtered out here defensively.
 canonicalize_commands() {
   local commands="$1"
-  local audit="" lint="" test="" refactor="" bench="" others=()
+  local audit="" lint="" test="" build="" refactor="" bench="" others=()
   local cmd base_cmd
 
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
   for cmd in "${CMD_ARRAY[@]}"; do
-    cmd=$(echo "${cmd}" | xargs)
-    base_cmd=$(printf '%s' "${cmd}" | awk '{print $1}')
+    cmd="$(printf '%s' "${cmd}" | xargs)"
+    base_cmd="$(quality_base_command "${cmd}")"
     case "${base_cmd}" in
-      audit)   audit="audit" ;;
-      lint)    lint="lint" ;;
-      test)    test="test" ;;
+      audit)   audit="${cmd}" ;;
+      lint)    lint="${cmd}" ;;
+      test)    test="${cmd}" ;;
+      build)   build="${cmd}" ;;
       refactor) refactor="${cmd}" ;;
       bench) bench="${cmd}" ;;
       release|fleet|deploy) ;;
@@ -722,6 +736,7 @@ canonicalize_commands() {
   [ -n "${audit}" ] && result+=("${audit}")
   [ -n "${lint}" ]  && result+=("${lint}")
   [ -n "${test}" ]  && result+=("${test}")
+  [ -n "${build}" ] && result+=("${build}")
   [ -n "${refactor}" ] && result+=("${refactor}")
   [ -n "${bench}" ] && result+=("${bench}")
   result+=("${others[@]+"${others[@]}"}")
@@ -736,7 +751,7 @@ has_lint_command() {
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
 
   for cmd in "${CMD_ARRAY[@]}"; do
-    if [ "$(echo "${cmd}" | xargs)" = "lint" ]; then
+    if [ "$(quality_base_command "${cmd}")" = "lint" ]; then
       printf '%s\n' "true"
       return 0
     fi
@@ -748,7 +763,7 @@ has_lint_command() {
 resolve_baseline_commands() {
   local requested_commands="$1"
   local baseline_input="${2:-auto}"
-  local source_commands cmd base_cmd requested_cmd requested_base found result=()
+  local source_commands cmd base_cmd requested_cmd requested_base found found_cmd result=()
 
   baseline_input="$(printf '%s' "${baseline_input}" | xargs)"
   case "${baseline_input}" in
@@ -767,25 +782,27 @@ resolve_baseline_commands() {
   IFS=',' read -ra CMD_ARRAY <<< "$(canonicalize_commands "${source_commands}")"
   for cmd in "${CMD_ARRAY[@]}"; do
     cmd="$(echo "${cmd}" | xargs)"
-    base_cmd="$(printf '%s' "${cmd}" | awk '{print $1}')"
+    base_cmd="$(quality_base_command "${cmd}")"
     case "${base_cmd}" in
       audit|lint|test) ;;
       *) continue ;;
     esac
 
     found=false
+    found_cmd=""
     IFS=',' read -ra REQUESTED_ARRAY <<< "${requested_commands}"
     for requested_cmd in "${REQUESTED_ARRAY[@]}"; do
       requested_cmd="$(echo "${requested_cmd}" | xargs)"
-      requested_base="$(printf '%s' "${requested_cmd}" | awk '{print $1}')"
+      requested_base="$(quality_base_command "${requested_cmd}")"
       if [ "${requested_base}" = "${base_cmd}" ]; then
         found=true
+        found_cmd="${requested_cmd}"
         break
       fi
     done
 
     if [ "${found}" = true ]; then
-      result+=("${base_cmd}")
+      result+=("${found_cmd}")
     fi
   done
 
@@ -832,7 +849,8 @@ homeboy_global_flags() {
 }
 
 build_run_command() {
-  local cmd="$1"
+  local cmd
+  cmd="$(printf '%s' "$1" | xargs)"
   local component_id="$2"
   local workspace="$3"
   local output_file="${4:-}"
@@ -848,6 +866,8 @@ build_run_command() {
     full_cmd="homeboy ${global_flags}bench ${component_id}"
     [ -n "${bench_args}" ] && full_cmd="${full_cmd} ${bench_args}"
     full_cmd="${full_cmd} --path ${workspace}"
+  elif [[ "${cmd}" == "review ci"* ]]; then
+    full_cmd="homeboy ${global_flags}${cmd}"
   else
     full_cmd="homeboy ${global_flags}${cmd} ${component_id} --path ${workspace}"
   fi
@@ -922,7 +942,8 @@ command_output_stem() {
 }
 
 build_autofix_command() {
-  local fix_cmd="$1"
+  local fix_cmd
+  fix_cmd="$(printf '%s' "$1" | xargs)"
   local component_id="$2"
   local workspace="$3"
   local output_file="${4:-}"
@@ -932,6 +953,8 @@ build_autofix_command() {
 
   if [[ "${fix_cmd}" == refactor* ]]; then
     full_cmd="homeboy ${global_flags}refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
+  elif [[ "${fix_cmd}" == "review ci"* ]]; then
+    full_cmd="homeboy ${global_flags}${fix_cmd}"
   else
     full_cmd="homeboy ${global_flags}${fix_cmd} ${component_id} --path ${workspace}"
   fi
