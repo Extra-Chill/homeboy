@@ -83,6 +83,55 @@ fn provider_manifest_accepts_command_invocation_contract() {
 }
 
 #[test]
+fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
+    crate::test_support::with_isolated_home(|home| {
+        let runtime_dir = home.path().join(".config/homeboy/agent-runtimes/codex");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::write(
+            runtime_dir.join("codex.json"),
+            json!({
+                "schema": crate::core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+                "id": "codex",
+                "agent_task_executors": [{
+                    "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                    "id": "codex.agent-task-executor",
+                    "backend": "codex",
+                    "command": "codex-agent-task-executor --json"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("runtime manifest");
+
+        let catalog = AgentTaskProviderCatalog::discover();
+        let provider = catalog
+            .providers()
+            .iter()
+            .find(|provider| provider.id == "codex.agent-task-executor")
+            .expect("codex provider discovered");
+
+        assert!(provider.command_argv.is_empty());
+        assert_eq!(provider.command, "codex-agent-task-executor --json");
+        assert_eq!(
+            provider.invocation.schema.as_deref(),
+            Some(crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA)
+        );
+        assert_eq!(
+            provider.invocation.argv,
+            vec![
+                "codex-agent-task-executor".to_string(),
+                "--json".to_string()
+            ]
+        );
+
+        let (program, args, cwd) = provider_command_parts(provider).expect("command parts");
+        assert_eq!(program, "codex-agent-task-executor");
+        assert_eq!(args, vec!["--json"]);
+        assert_eq!(cwd, None);
+    });
+}
+
+#[test]
 fn provider_command_parts_warns_for_legacy_string_command() {
     let (_request, provider) = request("task-legacy-command", "legacy-provider --flag".to_string());
 
