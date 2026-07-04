@@ -597,6 +597,7 @@ pub(super) fn run_single_rig(
             persisted_run: outputs
                 .iter()
                 .find_map(|output| output.persisted_run.clone()),
+            actionable: None,
         },
         exit_code,
     ))
@@ -1556,6 +1557,7 @@ mod tests {
             diagnostics: Vec::new(),
             ci_context: None,
             persisted_run: None,
+            actionable: None,
         }
     }
 

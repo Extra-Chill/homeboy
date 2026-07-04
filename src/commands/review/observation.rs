@@ -291,6 +291,7 @@ mod tests {
             lint,
             test,
             ci_profile: None,
+            actionable: None,
         };
 
         let metadata = review_observation_finish_metadata(initial, &output, 1, None);

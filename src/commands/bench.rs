@@ -19,6 +19,7 @@ use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
     PositionalComponentArgs, SettingArgs,
 };
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
@@ -489,6 +490,18 @@ pub(crate) fn run_rig_profile(options: RigRunBenchOptions) -> CmdResult<BenchOut
     run(options.into_bench_args(), &GlobalArgs {})
 }
 
+fn attach_bench_actionable(output: &mut BenchOutput) {
+    if let BenchOutput::Single(output) = output {
+        if let Some(persisted_run) = &output.persisted_run {
+            output.actionable = Some(actionable_metadata_value_for_run_ref(
+                persisted_run.run_id.clone(),
+                "bench",
+                "homeboy-bench",
+            ));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum BenchRigOrder {
     Input,
@@ -620,7 +633,9 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
         validate_report_selection_for_single_run(&args.run)?;
         let passthrough_args = filter_homeboy_flags(&args.run.args);
         let (output, exit) = matrix::run_single(&args.run, &passthrough_args, None)?;
-        return Ok((BenchOutput::Single(output), exit));
+        let mut output = BenchOutput::Single(output);
+        attach_bench_actionable(&mut output);
+        return Ok((output, exit));
     }
 
     // Single --rig <candidate> + spec declares default_baseline_rig +
@@ -648,7 +663,9 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
         validate_report_selection_for_single_run(run_args)?;
         let rig_id = run_args.rig[0].clone();
         let (output, exit) = matrix::run_single_rig(run_args, &passthrough_args, rig_id)?;
-        return Ok((BenchOutput::Single(output), exit));
+        let mut output = BenchOutput::Single(output);
+        attach_bench_actionable(&mut output);
+        return Ok((output, exit));
     }
 
     // --rig with two or more values: cross-rig comparison. Run each rig

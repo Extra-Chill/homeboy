@@ -223,6 +223,57 @@ fn routes_job_inspection_endpoints() {
 }
 
 #[test]
+fn routes_activity_endpoints() {
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/activity?limit=5").expect("route"),
+        HttpEndpoint::Activity
+    );
+    assert_eq!(
+        http_api::route(HttpMethod::Get, "/activity/run-123").expect("route"),
+        HttpEndpoint::ActivityItem {
+            id: "run-123".to_string()
+        }
+    );
+}
+
+#[test]
+fn activity_endpoint_exposes_activity_report_and_show() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("test", "homeboy", "studio"))
+            .expect("start run");
+        store
+            .finish_run(&run.id, RunStatus::Fail, Some(serde_json::json!({ "exit_code": 1 })))
+            .expect("finish run");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/activity?all=1&limit=10".to_string(),
+            body: None,
+        })
+        .expect("activity list");
+        assert_eq!(response.endpoint, "activity.list");
+        assert_eq!(response.body["activity"]["command"], "activity");
+        assert!(response.body["activity"]["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["refs"]["run_id"] == run.id));
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/activity/{}", run.id),
+            body: None,
+        })
+        .expect("activity show");
+        assert_eq!(response.endpoint, "activity.show");
+        assert_eq!(response.body["activity"]["items"][0]["refs"]["run_id"], run.id);
+    });
+}
+
+#[test]
 fn test_handle_with_jobs() {
     let store = JobStore::default();
     let job = store.create("audit");

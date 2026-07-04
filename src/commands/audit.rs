@@ -7,16 +7,15 @@ use homeboy::core::code_audit::{
 use homeboy::core::engine::execution_context::ExecutionContext;
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
-    finding_records_from_audit, NewFindingRecord, NewRunRecord, RunStatus,
+    finding_records_from_audit, ActiveObservation, NewFindingRecord, NewRunRecord, RunStatus,
 };
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{
-    finish_adapted_observed_workflow, WorkflowObservationAdapter,
-};
+use super::utils::observed_workflow::WorkflowObservationAdapter;
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
@@ -139,6 +138,10 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
     let resolved_path = source_ctx.source_path.to_string_lossy().to_string();
 
     let observation = AuditObservationAdapter::new(&resolved_id, &resolved_path, &args);
+    let active_observation = ActiveObservation::start_best_effort(observation.start_record());
+    let run_id = active_observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
     let workflow = run_main_audit_workflow(AuditRunWorkflowArgs {
         component_id: resolved_id.clone(),
         source_path: resolved_path.clone(),
@@ -161,9 +164,48 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         include_fixability: args.fixability,
     });
 
-    let workflow = finish_adapted_observed_workflow(observation, workflow)?;
+    let workflow = match workflow {
+        Ok(workflow) => {
+            if let Some(active) = active_observation {
+                let findings = observation.success_findings(active.run_id(), &workflow);
+                active.record_findings(&findings);
+                active.finish(
+                    observation.success_status(&workflow),
+                    Some(homeboy::core::observation::merge_metadata(
+                        active.initial_metadata().clone(),
+                        observation.success_metadata(&workflow),
+                    )),
+                );
+            }
+            workflow
+        }
+        Err(error) => {
+            if let Some(active) = active_observation {
+                active.finish_error(observation.error_metadata(&error));
+            }
+            return Err(error);
+        }
+    };
 
-    Ok(report::from_main_workflow(workflow))
+    let (mut output, exit_code) = report::from_main_workflow(workflow);
+    attach_audit_actionable(&mut output, run_id);
+    Ok((output, exit_code))
+}
+
+fn attach_audit_actionable(output: &mut AuditCommandOutput, run_id: Option<String>) {
+    let Some(run_id) = run_id else { return; };
+    let actionable = Some(actionable_metadata_value_for_run_ref(
+        run_id,
+        "audit",
+        "homeboy-audit",
+    ));
+    match output {
+        AuditCommandOutput::Full { actionable: slot, .. }
+        | AuditCommandOutput::Compared { actionable: slot, .. } => *slot = actionable,
+        AuditCommandOutput::Conventions { .. }
+        | AuditCommandOutput::BaselineSaved { .. }
+        | AuditCommandOutput::Summary(_) => {}
+    }
 }
 
 struct AuditObservationAdapter {
@@ -455,6 +497,7 @@ mod tests {
         with_isolated_audit_home, with_isolated_home, write_source_extension,
     };
     use clap::Parser;
+    use homeboy::core::observation::finish_adapted_observed_workflow;
     use homeboy::core::observation::{ObservationStore, RunListFilter};
     use std::fs;
     use std::path::PathBuf;
@@ -559,6 +602,7 @@ mod tests {
                 },
                 fixability: None,
                 extension_phase_timings: Vec::new(),
+                actionable: None,
             },
             exit_code: 1,
             findings: vec![finding],

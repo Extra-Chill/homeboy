@@ -61,6 +61,7 @@ mod tests {
             result: audit_result(vec![audit_finding("src/lib.rs", "missing method")]),
             fixability: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         };
 
         let findings = output.review_artifact_findings();
@@ -87,6 +88,7 @@ mod tests {
             summary: None,
             fixability: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         };
 
         let findings = output.review_artifact_findings();

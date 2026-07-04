@@ -84,6 +84,42 @@ impl CommandActionableMetadata {
     }
 }
 
+pub fn actionable_metadata_for_run_ref(
+    run_id: impl Into<String>,
+    kind: impl Into<String>,
+    source: impl Into<String>,
+) -> CommandActionableMetadata {
+    let run_id = run_id.into();
+    CommandActionableMetadata::for_run(CommandRunRef {
+        id: run_id.clone(),
+        kind: kind.into(),
+        source: source.into(),
+        location: None,
+        started_at: None,
+        updated_at: None,
+        finished_at: None,
+        status_command: format!("homeboy runs show {run_id}"),
+        watch_command: format!("homeboy runs watch {run_id}"),
+    })
+    .with_next_action(
+        CommandNextAction::new("show evidence", format!("homeboy runs evidence {run_id}"))
+            .with_kind(CommandNextActionKind::Show),
+    )
+    .with_next_action(
+        CommandNextAction::new("show activity", format!("homeboy activity show {run_id}"))
+            .with_kind(CommandNextActionKind::Show),
+    )
+}
+
+pub fn actionable_metadata_value_for_run_ref(
+    run_id: impl Into<String>,
+    kind: impl Into<String>,
+    source: impl Into<String>,
+) -> serde_json::Value {
+    serde_json::to_value(actionable_metadata_for_run_ref(run_id, kind, source))
+        .unwrap_or(serde_json::Value::Null)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandResultRefs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -196,6 +232,23 @@ pub struct CommandDiagnostics {
     pub hints: Option<Vec<Hint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_digest: Option<CommandFailureDigest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandFailureDigest {
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_tail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<CommandArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<CommandNextAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -257,6 +310,7 @@ impl CommandResultEnvelope<()> {
                     Some(err.hints.clone())
                 },
                 retryable: err.retryable,
+                failure_digest: failure_digest_for_error(err),
             }),
             data: None,
             presentation: None,
@@ -459,6 +513,8 @@ fn envelope_for_data(
         }
     }
 
+    let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts);
+
     CommandResultEnvelope {
         schema: COMMAND_RESULT_SCHEMA,
         command: command.to_string(),
@@ -471,10 +527,113 @@ fn envelope_for_data(
         next_actions: actionable.next_actions,
         artifacts,
         evidence,
-        diagnostics: None,
+        diagnostics,
         data: Some(data),
         presentation,
     }
+}
+
+fn failure_diagnostics_for_data(
+    exit_code: i32,
+    run: &Option<CommandRunRef>,
+    artifacts: &[CommandArtifactRef],
+) -> Option<CommandDiagnostics> {
+    if exit_code == 0 {
+        return None;
+    }
+    let failure_digest = run
+        .as_ref()
+        .and_then(|run| failure_digest_for_run(&run.id, artifacts));
+    failure_digest.map(|failure_digest| CommandDiagnostics {
+        code: "command.failed".to_string(),
+        message: failure_digest.summary.clone(),
+        details: serde_json::json!({ "exit_code": exit_code }),
+        hints: None,
+        retryable: failure_digest.retryable,
+        failure_digest: Some(failure_digest),
+    })
+}
+
+fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
+    match err.code {
+        ErrorCode::RemoteCommandFailed => Some(CommandFailureDigest {
+            summary: remote_failure_summary(&err.details),
+            stdout_tail: string_at(&err.details, &["stdout"]).map(tail_text),
+            stderr_tail: string_at(&err.details, &["stderr"]).map(tail_text),
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+            retryable: err.retryable,
+        }),
+        _ => None,
+    }
+}
+
+fn failure_digest_for_run(
+    run_id: &str,
+    artifacts: &[CommandArtifactRef],
+) -> Option<CommandFailureDigest> {
+    let store = homeboy::core::observation::ObservationStore::open_initialized().ok()?;
+    let run = store.get_run(run_id).ok().flatten()?;
+    let failure = homeboy::core::observation::evidence_report::evidence_failure_summary(&run);
+    if !failure.failed {
+        return None;
+    }
+    let mut summary = failure
+        .error
+        .clone()
+        .or_else(|| failure.gate_failures.first().cloned())
+        .unwrap_or_else(|| format!("{} run {} failed", run.kind, run.id));
+    if let Some(exit_code) = failure.exit_code {
+        summary = format!("{summary} (exit {exit_code})");
+    }
+    let artifact_refs = if artifacts.is_empty() {
+        store
+            .list_artifacts(run_id)
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .take(10)
+            .map(|artifact| CommandArtifactRef {
+                id: artifact.id.clone(),
+                kind: artifact.artifact_type,
+                uri: artifact.path,
+                semantic_key: Some(artifact.kind),
+            })
+            .collect()
+    } else {
+        artifacts.to_vec()
+    };
+    Some(CommandFailureDigest {
+        summary,
+        stdout_tail: None,
+        stderr_tail: None,
+        artifact_refs,
+        next_actions: vec![
+            CommandNextAction::new("show evidence", format!("homeboy runs evidence {run_id}"))
+                .with_kind(CommandNextActionKind::Show),
+            CommandNextAction::new("show activity", format!("homeboy activity show {run_id}"))
+                .with_kind(CommandNextActionKind::Show),
+        ],
+        retryable: None,
+    })
+}
+
+fn remote_failure_summary(details: &Value) -> String {
+    let command = string_at(details, &["command"]).unwrap_or_else(|| "remote command".to_string());
+    let exit_code = details.get("exit_code").and_then(Value::as_i64);
+    match exit_code {
+        Some(code) => format!("{command} failed with exit code {code}"),
+        None => format!("{command} failed"),
+    }
+}
+
+fn tail_text(value: String) -> String {
+    const MAX_CHARS: usize = 4000;
+    let chars = value.chars().count();
+    if chars <= MAX_CHARS {
+        return value;
+    }
+    value.chars().skip(chars - MAX_CHARS).collect()
 }
 
 fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
@@ -728,5 +887,86 @@ mod tests {
         assert!(value.get("next_actions").is_none());
         assert!(value.get("artifacts").is_none());
         assert!(value.get("evidence").is_none());
+    }
+
+    #[test]
+    fn remote_command_failures_include_typed_failure_digest() {
+        let err = Error::remote_command_failed(homeboy::core::error::RemoteCommandFailedDetails {
+            command: "ssh host false".to_string(),
+            exit_code: 23,
+            stdout: "before\nstdout tail".to_string(),
+            stderr: "before\nstderr tail".to_string(),
+            target: homeboy::core::error::TargetDetails {
+                project_id: None,
+                server_id: Some("prod".to_string()),
+                host: Some("example.test".to_string()),
+            },
+        });
+        let response = cli_response_for_json_result_for_command(
+            &Err(err),
+            20,
+            "deploy",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["summary"],
+            "ssh host false failed with exit code 23"
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["stdout_tail"],
+            "before\nstdout tail"
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["stderr_tail"],
+            "before\nstderr tail"
+        );
+    }
+
+    #[test]
+    fn failed_run_payload_includes_evidence_failure_digest() {
+        crate::test_support::with_isolated_home(|_home| {
+            let store = homeboy::core::observation::ObservationStore::open_initialized()
+                .expect("store");
+            let run = store
+                .start_run(
+                    homeboy::core::observation::NewRunRecord::builder("test")
+                        .component_id("homeboy")
+                        .command("homeboy test homeboy")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                        .metadata(json!({ "exit_code": 1, "error": "fixture failure" }))
+                        .build(),
+                )
+                .expect("start run");
+            store
+                .finish_run(
+                    &run.id,
+                    homeboy::core::observation::RunStatus::Fail,
+                    Some(json!({ "exit_code": 1, "error": "fixture failure" })),
+                )
+                .expect("finish run");
+
+            let response = cli_response_for_json_result_for_command(
+                &Ok(json!({
+                    ACTIONABLE_METADATA_KEY: actionable_metadata_value_for_run_ref(
+                        run.id.clone(),
+                        "test",
+                        "test-fixture",
+                    )
+                })),
+                1,
+                "test",
+                None,
+            );
+            let value = serde_json::to_value(response).expect("response json");
+
+            assert_eq!(value["diagnostics"]["failure_digest"]["summary"], "fixture failure (exit 1)");
+            assert_eq!(
+                value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+                format!("homeboy runs evidence {}", run.id)
+            );
+            assert_eq!(value["run"]["id"], run.id);
+        });
     }
 }

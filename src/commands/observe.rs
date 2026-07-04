@@ -22,6 +22,7 @@ use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::Error;
 
 use super::utils::args::PositionalComponentArgs;
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{adapter, CmdResult, GlobalArgs};
 
 const DEFAULT_DURATION: &str = "30s";
@@ -74,6 +75,8 @@ pub struct ObserveOutput {
     pub event_count: usize,
     pub artifact_path: String,
     pub hints: Vec<String>,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<serde_json::Value>,
 }
 
 pub(crate) fn adapter(
@@ -220,6 +223,11 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
                 format!("View this run: homeboy runs show {}", finished.id),
                 "List observe runs: homeboy runs list --kind observe".to_string(),
             ],
+            actionable: Some(actionable_metadata_value_for_run_ref(
+                observation.run_id().to_string(),
+                "observe",
+                "homeboy-observe",
+            )),
         },
         if status == RunStatus::Pass { 0 } else { 1 },
     ))

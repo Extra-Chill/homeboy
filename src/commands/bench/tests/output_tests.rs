@@ -20,6 +20,7 @@ fn bench_output_single_serializes_with_tagged_payload() {
         diagnostics: Vec::new(),
         ci_context: None,
         persisted_run: None,
+        actionable: None,
     };
     let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
     assert_eq!(

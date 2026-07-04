@@ -14,6 +14,7 @@ use crate::core::finding::{FindingProducerSummary, HomeboyFinding};
 use crate::core::refactor::plan::RefactorSourceRun;
 use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::run::{LintRunWorkflowResult, LintSummaryOutput};
 
@@ -50,6 +51,8 @@ pub struct LintCommandOutput {
     pub ci_context: Option<CiContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_phase_timings: Vec<crate::core::extension::ExtensionPhaseTiming>,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<Value>,
 }
 
 /// Build output from a main lint workflow result.
@@ -105,6 +108,7 @@ pub fn from_main_workflow_with_ci_context(
             self_check_capture: result.self_check_capture,
             ci_context,
             extension_phase_timings: result.extension_phase_timings,
+            actionable: None,
         },
         exit_code,
     )
@@ -216,6 +220,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             self_check_capture: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         },
         exit_code,
     )
