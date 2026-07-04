@@ -419,13 +419,20 @@ pub(super) fn daemon_exec_request_failed_error(
     }
 }
 
-pub(super) fn daemon_exec_loopback_transport_error(runner_id: &str, err: std::io::Error) -> Error {
-    Error::internal_unexpected(format!(
-        "could not reach runner `{runner_id}` daemon to submit the exec request over loopback HTTP: {err}"
-    ))
+pub(super) fn daemon_exec_loopback_transport_error(runner_id: &str, err: Error) -> Error {
+    let mut wrapped = Error::new(
+        err.code,
+        format!(
+            "could not reach runner `{runner_id}` daemon to submit the exec request over loopback HTTP: {}",
+            err.message
+        ),
+        err.details,
+    )
     .with_hint(format!(
         "The daemon tunnel may be stale or the daemon may have restarted. Reconnect with `homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}` and retry."
-    ))
+    ));
+    wrapped.retryable = err.retryable;
+    wrapped
 }
 
 /// The exec response body could not be parsed as a daemon envelope — typically a

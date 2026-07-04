@@ -886,10 +886,14 @@ fn allow_unauthenticated_loopback_broker() {
 fn daemon_exec_failure_without_error_field_is_actionable() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
         let mut buffer = [0; 4096];
-        let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+        let bytes = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+        request_tx
+            .send(String::from_utf8_lossy(&buffer[..bytes]).to_string())
+            .expect("send request");
         let body = serde_json::json!({
             "success": false,
             "data": {
@@ -929,6 +933,9 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
     assert!(err.message.contains("validation.invalid_argument"));
     assert!(err.message.contains("runner exec requires an absolute cwd"));
     assert!(!err.message.contains(": null"));
+    let request = request_rx.recv().expect("request capture");
+    assert!(request.starts_with("POST /exec HTTP/1.1"));
+    assert!(request.to_ascii_lowercase().contains("connection: close"));
 }
 
 #[test]
