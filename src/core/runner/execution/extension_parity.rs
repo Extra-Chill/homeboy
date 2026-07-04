@@ -114,6 +114,7 @@ fn validate_runner_extension(
         )?;
         if let Err(err) = validate_runner_extension_revision(
             runner_id,
+            runner,
             homeboy_path,
             extension_id,
             &output.stdout,
@@ -177,7 +178,14 @@ fn validate_runner_extension_parity_status(
     remote_stdout: &str,
 ) -> Result<()> {
     validate_runner_extension_ready(runner_id, homeboy_path, extension_id, remote_stdout)?;
-    validate_runner_extension_revision(runner_id, homeboy_path, extension_id, remote_stdout)
+    let runner = super::super::load(runner_id)?;
+    validate_runner_extension_revision(
+        runner_id,
+        &runner,
+        homeboy_path,
+        extension_id,
+        remote_stdout,
+    )
 }
 
 fn validate_runner_extension_settings(
@@ -224,6 +232,28 @@ fn runner_extension_setting_declared(declared: &BTreeMap<String, String>, key: &
 struct RemoteExtensionMetadata {
     path: Option<String>,
     source_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DevSyncExtensionOverlay {
+    id: String,
+    source_path: String,
+    content_hash: String,
+}
+
+fn dev_sync_extension_overlay(
+    runner: &Runner,
+    extension_id: &str,
+) -> Option<DevSyncExtensionOverlay> {
+    let extensions = runner
+        .resources
+        .get("dev_sync")?
+        .get("extensions")?
+        .as_array()?;
+    extensions.iter().find_map(|value| {
+        let overlay: DevSyncExtensionOverlay = serde_json::from_value(value.clone()).ok()?;
+        (overlay.id == extension_id).then_some(overlay)
+    })
 }
 
 fn unsupported_runner_extension_setting_error(
@@ -568,10 +598,20 @@ fn remote_extension_ready_status(stdout: &str) -> Option<RemoteExtensionReadySta
 
 fn validate_runner_extension_revision(
     runner_id: &str,
+    runner: &Runner,
     homeboy_path: &str,
     extension_id: &str,
     remote_stdout: &str,
 ) -> Result<()> {
+    if let Some(overlay) = dev_sync_extension_overlay(runner, extension_id) {
+        return validate_dev_overlay_extension_revision(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            remote_stdout,
+            &overlay,
+        );
+    }
     let local_revision = extension::read_source_revision(extension_id);
     let remote_revision = remote_extension_source_revision(remote_stdout);
     let Some(local_revision) = local_revision.filter(|revision| !revision.trim().is_empty()) else {
@@ -613,6 +653,84 @@ fn validate_runner_extension_revision(
             ),
         ]),
     ))
+}
+
+fn validate_dev_overlay_extension_revision(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+    overlay: &DevSyncExtensionOverlay,
+) -> Result<()> {
+    let current_hash =
+        super::super::extension_source_content_hash(Path::new(&overlay.source_path))?;
+    if current_hash != overlay.content_hash {
+        return Err(dev_overlay_mismatch_error(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            overlay,
+            &current_hash,
+            remote_extension_source_revision(remote_stdout).as_deref(),
+        ));
+    }
+
+    let remote_revision = remote_extension_source_revision(remote_stdout);
+    if remote_revision.as_deref() == Some(overlay.content_hash.as_str()) {
+        return Ok(());
+    }
+
+    Err(dev_overlay_mismatch_error(
+        runner_id,
+        homeboy_path,
+        extension_id,
+        overlay,
+        &current_hash,
+        remote_revision.as_deref(),
+    ))
+}
+
+fn dev_overlay_mismatch_error(
+    runner_id: &str,
+    _homeboy_path: &str,
+    extension_id: &str,
+    overlay: &DevSyncExtensionOverlay,
+    current_hash: &str,
+    remote_revision: Option<&str>,
+) -> Error {
+    let command = format!(
+        "homeboy runner dev-sync {} --extensions {}={}",
+        shell::quote_arg(runner_id),
+        shell::quote_arg(extension_id),
+        shell::quote_arg(&overlay.source_path)
+    );
+    Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument 'runner_extension': Runner '{runner_id}' has stale dev-overlay extension parity for '{extension_id}' before command execution"
+        ),
+        serde_json::json!({
+            "field": "runner_extension",
+            "problem": "dev_overlay_content_hash_mismatch",
+            "id": extension_id,
+            "diagnostic": {
+                "code": "runner_extension.dev_overlay_content_hash_mismatch",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "recorded_content_hash": overlay.content_hash,
+                "current_content_hash": current_hash,
+                "runner_extension_source_revision": remote_revision.unwrap_or("<missing>"),
+                "source_path": overlay.source_path,
+                "remediation_command": command,
+            },
+            "tried": [
+                format!("Recorded dev overlay content_hash: {}", overlay.content_hash),
+                format!("Current local extension content_hash: {current_hash}"),
+                format!("Runner extension source_revision: {}", remote_revision.unwrap_or("<missing>")),
+                format!("Re-sync the dev overlay before dispatch: {command}"),
+            ]
+        }),
+    )
 }
 
 fn remote_extension_source_revision(stdout: &str) -> Option<String> {
@@ -736,7 +854,35 @@ mod tests {
     };
     use crate::test_support::with_isolated_home;
 
+    use crate::core::runner::{Runner, RunnerKind};
+    use std::collections::HashMap;
     use std::fs;
+
+    fn runner_with_overlay(extension_id: &str, source_path: &str, content_hash: &str) -> Runner {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "dev_sync".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/runner-dev-sync/v1",
+                "extensions": [{
+                    "id": extension_id,
+                    "source_path": source_path,
+                    "content_hash": content_hash,
+                }]
+            }),
+        );
+        Runner {
+            id: "homeboy-lab".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some("/runner/ws".to_string()),
+            settings: Default::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources,
+            policy: Default::default(),
+        }
+    }
 
     #[test]
     fn remote_extension_source_revision_reads_extension_show_output() {
@@ -968,9 +1114,11 @@ mod tests {
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
             let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"remote456"}}}"#;
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
 
             let err = validate_runner_extension_revision(
                 "homeboy-lab",
+                &runner,
                 "homeboy",
                 "wordpress",
                 remote_stdout,
@@ -990,9 +1138,11 @@ mod tests {
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
             let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress"}}}"#;
+            let runner = runner_with_overlay("other", "/tmp/other", "unused");
 
             let err = validate_runner_extension_revision(
                 "homeboy-lab",
+                &runner,
                 "homeboy",
                 "wordpress",
                 remote_stdout,
@@ -1003,6 +1153,60 @@ mod tests {
             assert!(err.details["tried"].to_string().contains("local123"));
             assert!(err.details["tried"].to_string().contains("<missing>"));
         });
+    }
+
+    #[test]
+    fn revision_parity_accepts_matching_dev_overlay_content_hash() {
+        let tempdir = tempfile::tempdir().expect("source dir");
+        fs::write(tempdir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
+        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
+        let hash = crate::core::runner::extension_source_content_hash(tempdir.path())
+            .expect("content hash");
+        let runner = runner_with_overlay("rust", &tempdir.path().display().to_string(), &hash);
+        let remote_stdout = format!(
+            r#"{{"success":true,"data":{{"extension":{{"id":"rust","source_revision":"{hash}"}}}}}}"#
+        );
+
+        validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "rust",
+            &remote_stdout,
+        )
+        .expect("matching dev overlay hash should pass parity");
+    }
+
+    #[test]
+    fn revision_parity_rejects_changed_dev_overlay_with_resync_command() {
+        let tempdir = tempfile::tempdir().expect("source dir");
+        fs::write(tempdir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
+        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
+        let hash = crate::core::runner::extension_source_content_hash(tempdir.path())
+            .expect("content hash");
+        fs::write(tempdir.path().join("run.sh"), "echo changed\n").expect("mutate source");
+        let runner = runner_with_overlay("rust", &tempdir.path().display().to_string(), &hash);
+        let remote_stdout = format!(
+            r#"{{"success":true,"data":{{"extension":{{"id":"rust","source_revision":"{hash}"}}}}}}"#
+        );
+
+        let err = validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "rust",
+            &remote_stdout,
+        )
+        .expect_err("changed dev overlay source should fail parity");
+
+        assert_eq!(
+            err.details["diagnostic"]["code"].as_str(),
+            Some("runner_extension.dev_overlay_content_hash_mismatch")
+        );
+        assert!(err.details["diagnostic"]["remediation_command"]
+            .as_str()
+            .expect("command")
+            .contains("homeboy runner dev-sync homeboy-lab --extensions rust="));
     }
 
     #[test]
