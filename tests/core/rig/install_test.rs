@@ -788,151 +788,90 @@ mod install_flows {
     }
 
     #[test]
-    fn install_appends_pipeline_steps_for_extends_with_merge_directive() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
-        fs::write(
-            package.path().join("templates/base.json"),
-            r#"{
-            "description": "base rig",
-            "pipeline": {
-                "check": [
-                    { "kind": "check", "label": "npm available", "command": "npm --version" }
-                ]
+    fn install_supports_extends_array_merge_directives() {
+        let cases = [
+            (
+                "appender",
+                r#"{
+                    "$append": [
+                        { "kind": "check", "label": "sample runtime cli exists", "command": "sample-runtime --version" }
+                    ]
+                }"#,
+                vec!["npm available", "build", "sample runtime cli exists"],
+                None,
+            ),
+            (
+                "keyed",
+                r#"{
+                    "$merge_by": "label",
+                    "entries": [
+                        { "kind": "check", "label": "build", "command": "make build --fast", "metadata": { "timeout": 60 } },
+                        { "kind": "check", "label": "lint", "command": "make lint" }
+                    ]
+                }"#,
+                vec!["npm available", "build", "lint"],
+                Some(("make build --fast", 60)),
+            ),
+        ];
+
+        for (id, check_overlay, expected_labels, expected_build) in cases {
+            let _home = HomeGuard::new();
+            let package = tempfile::tempdir().expect("package");
+            fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+            fs::write(
+                package.path().join("templates/base.json"),
+                r#"{
+                "description": "base rig",
+                "pipeline": {
+                    "check": [
+                        { "kind": "check", "label": "npm available", "command": "npm --version" },
+                        { "kind": "check", "label": "build", "command": "make build", "metadata": { "retries": 1 } }
+                    ]
+                }
+            }"#,
+            )
+            .expect("base template");
+            write_rig(
+                package.path(),
+                id,
+                &format!(
+                    r#"{{
+                    "extends": "../../templates/base.json",
+                    "id": "{id}",
+                    "pipeline": {{
+                        "check": {check_overlay}
+                    }}
+                }}"#
+                ),
+            );
+
+            install(package.path().to_str().unwrap(), None, false).expect("install");
+
+            let installed_path = crate::core::paths::rig_config(id).expect("rig config");
+            let installed = fs::read_to_string(&installed_path).expect("installed rig");
+            assert!(!installed.contains("$append"));
+            assert!(!installed.contains("$merge_by"));
+            let value: serde_json::Value =
+                serde_json::from_str(&installed).expect("materialized json");
+            let checks = value["pipeline"]["check"].as_array().expect("check array");
+            let labels: Vec<&str> = checks
+                .iter()
+                .map(|step| step["label"].as_str().expect("label"))
+                .collect();
+            assert_eq!(labels, expected_labels);
+
+            if let Some((expected_command, expected_timeout)) = expected_build {
+                let build = checks
+                    .iter()
+                    .find(|step| step["label"] == "build")
+                    .expect("build step");
+                assert_eq!(build["command"], expected_command);
+                assert_eq!(build["metadata"]["retries"], 1);
+                assert_eq!(build["metadata"]["timeout"], expected_timeout);
             }
-        }"#,
-        )
-        .expect("base template");
-        write_rig(
-            package.path(),
-            "appender",
-            r#"{
-            "extends": "../../templates/base.json",
-            "id": "appender",
-            "pipeline": {
-                "check": [
-                    { "$merge": "append" },
-                    { "kind": "check", "label": "sample runtime cli exists", "command": "sample-runtime --version" }
-                ]
-            }
-        }"#,
-        );
 
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-
-        let installed_path = crate::core::paths::rig_config("appender").expect("rig config");
-        let installed = fs::read_to_string(&installed_path).expect("installed rig");
-        assert!(
-            !installed.contains("$merge"),
-            "merge directive must be stripped from the materialized spec"
-        );
-        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
-        let labels: Vec<&str> = value["pipeline"]["check"]
-            .as_array()
-            .expect("check array")
-            .iter()
-            .map(|step| step["label"].as_str().expect("label"))
-            .collect();
-        assert_eq!(labels, vec!["npm available", "sample runtime cli exists"]);
-
-        // The materialized spec still parses as a rig (directive fully removed).
-        load("appender").expect("load appended rig");
-    }
-
-    #[test]
-    fn install_prepends_pipeline_steps_for_extends_with_merge_directive() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
-        fs::write(
-            package.path().join("templates/base.json"),
-            r#"{
-            "pipeline": {
-                "check": [
-                    { "kind": "check", "label": "base last", "command": "echo base" }
-                ]
-            }
-        }"#,
-        )
-        .expect("base template");
-        write_rig(
-            package.path(),
-            "prepender",
-            r#"{
-            "extends": "../../templates/base.json",
-            "id": "prepender",
-            "pipeline": {
-                "check": [
-                    { "$merge": "prepend" },
-                    { "kind": "check", "label": "child first", "command": "echo child" }
-                ]
-            }
-        }"#,
-        );
-
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let installed_path = crate::core::paths::rig_config("prepender").expect("rig config");
-        let installed = fs::read_to_string(&installed_path).expect("installed rig");
-        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
-        let labels: Vec<&str> = value["pipeline"]["check"]
-            .as_array()
-            .expect("check array")
-            .iter()
-            .map(|step| step["label"].as_str().expect("label"))
-            .collect();
-        assert_eq!(labels, vec!["child first", "base last"]);
-    }
-
-    #[test]
-    fn install_merges_pipeline_steps_by_label_for_extends() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        fs::create_dir_all(package.path().join("templates")).expect("templates dir");
-        fs::write(
-            package.path().join("templates/base.json"),
-            r#"{
-            "pipeline": {
-                "check": [
-                    { "kind": "check", "label": "npm available", "command": "npm --version" },
-                    { "kind": "check", "label": "build", "command": "make build" }
-                ]
-            }
-        }"#,
-        )
-        .expect("base template");
-        write_rig(
-            package.path(),
-            "keyed",
-            r#"{
-            "extends": "../../templates/base.json",
-            "id": "keyed",
-            "pipeline": {
-                "check": [
-                    { "$merge": "by_label" },
-                    { "kind": "check", "label": "build", "command": "make build --fast" },
-                    { "kind": "check", "label": "lint", "command": "make lint" }
-                ]
-            }
-        }"#,
-        );
-
-        install(package.path().to_str().unwrap(), None, false).expect("install");
-        let installed_path = crate::core::paths::rig_config("keyed").expect("rig config");
-        let installed = fs::read_to_string(&installed_path).expect("installed rig");
-        let value: serde_json::Value = serde_json::from_str(&installed).expect("materialized json");
-        let checks = value["pipeline"]["check"].as_array().expect("check array");
-        let labels: Vec<&str> = checks
-            .iter()
-            .map(|step| step["label"].as_str().expect("label"))
-            .collect();
-        // Base order preserved, the overridden "build" stays in place, "lint" appended.
-        assert_eq!(labels, vec!["npm available", "build", "lint"]);
-        let build = checks
-            .iter()
-            .find(|step| step["label"] == "build")
-            .expect("build step");
-        assert_eq!(build["command"], "make build --fast");
+            load(id).expect("load materialized rig");
+        }
     }
 
     #[test]
@@ -977,6 +916,70 @@ mod install_flows {
             .collect();
         // Default behavior unchanged: no directive means the child array wins wholesale.
         assert_eq!(labels, vec!["child only"]);
+    }
+
+    #[test]
+    fn install_rejects_invalid_extends_array_merge_directives() {
+        let cases = [
+            (
+                "bad-directive",
+                r#"{ "$prepend": [{ "kind": "check", "label": "child", "command": "echo child" }] }"#,
+                "$prepend",
+                "pipeline.check",
+            ),
+            (
+                "missing-key",
+                r#"{ "$merge_by": "label", "entries": [{ "kind": "check", "command": "echo child" }] }"#,
+                "missing key field 'label'",
+                "pipeline.check",
+            ),
+        ];
+
+        for (id, check_overlay, expected_message, expected_field) in cases {
+            let _home = HomeGuard::new();
+            let package = tempfile::tempdir().expect("package");
+            fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+            fs::write(
+                package.path().join("templates/base.json"),
+                r#"{
+                "pipeline": {
+                    "check": [
+                        { "kind": "check", "label": "base", "command": "echo base" }
+                    ]
+                }
+            }"#,
+            )
+            .expect("base template");
+            let rig_path = write_rig(
+                package.path(),
+                id,
+                &format!(
+                    r#"{{
+                    "extends": "../../templates/base.json",
+                    "id": "{id}",
+                    "pipeline": {{
+                        "check": {check_overlay}
+                    }}
+                }}"#
+                ),
+            );
+
+            let err = install(package.path().to_str().unwrap(), None, false)
+                .expect_err("invalid directive should fail");
+
+            assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+            assert_eq!(err.details["field"], expected_field);
+            assert_eq!(
+                err.details["id"].as_str(),
+                Some(rig_path.to_string_lossy().as_ref())
+            );
+            assert!(
+                err.message.contains(expected_message),
+                "{} did not contain {}",
+                err.message,
+                expected_message
+            );
+        }
     }
 }
 
