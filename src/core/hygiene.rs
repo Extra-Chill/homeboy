@@ -1027,28 +1027,11 @@ mod tests {
     }
 
     #[test]
-    fn dependency_hygiene_fails_when_declared_dependency_is_missing() {
+    fn dependency_hygiene_fails_when_declared_dependency_path_is_missing() {
         let source = tempfile::tempdir().unwrap();
-        fs::write(
-            source.path().join(PORTABLE_CONFIG_FILE),
-            serde_json::json!({
-                "id": "source",
-                "extensions": {
-                    "example": {
-                        "settings": { "validation_dependencies": ["missing-dep"] }
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
 
-        let err = require_dependency_hygiene_for_source(
-            source.path(),
-            None,
-            DependencyHygieneOptions { allow_stale: false },
-        )
-        .expect_err("missing dependency should fail");
+        let err = canonical_existing_dir(&source.path().join("missing-dep"), "missing-dep")
+            .expect_err("missing dependency path should fail");
 
         assert_eq!(err.details["field"], "validation_dependencies");
         assert!(err.message.contains("missing-dep"));

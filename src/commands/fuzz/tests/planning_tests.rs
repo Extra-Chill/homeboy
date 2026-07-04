@@ -451,40 +451,72 @@ fn fuzz_run_campaign_cli_parses_as_campaign_command() {
 
 #[test]
 fn fuzz_run_campaign_dry_run_emits_structured_dispatch_records() {
-    let mut args = planner_args();
-    args.request_id = Some("campaign-1".to_string());
-    args.campaign_workloads = vec!["api-fuzz".to_string(), "db-fuzz".to_string()];
-    args.dry_run = true;
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/generic");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("generic.json"),
+            serde_json::json!({
+                "name": "generic",
+                "version": "0.0.0",
+                "fuzz": {
+                    "workloads": [
+                        { "id": "api-fuzz" },
+                        { "id": "db-fuzz" }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component = tempfile::tempdir().expect("component dir");
+        fs::write(
+            component.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": "component-a",
+                "extensions": { "generic": { "settings": {} } }
+            })
+            .to_string(),
+        )
+        .expect("component config");
 
-    let (output, exit_code) = run_campaign(args).expect("dry-run campaign");
+        let mut args = planner_args();
+        args.run.comp.component = None;
+        args.run.comp.path = Some(component.path().to_string_lossy().to_string());
+        args.request_id = Some("campaign-1".to_string());
+        args.campaign_workloads = vec!["api-fuzz".to_string(), "db-fuzz".to_string()];
+        args.dry_run = true;
 
-    assert_eq!(exit_code, 0);
-    assert_eq!(output.status, "planned");
-    assert!(!output.execute);
-    assert!(output.dry_run);
-    assert_eq!(output.dispatch_records.len(), 2);
-    assert_eq!(output.dispatch_records[0].status, "planned");
-    assert_eq!(output.dispatch_records[0].run_id, "campaign-1-api-fuzz");
-    assert_eq!(output.dispatch_records[1].run_id, "campaign-1-db-fuzz");
-    assert_eq!(
-        output.dispatch_records[0]
-            .command
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec![
-            "homeboy",
-            "fuzz",
-            "run",
-            "component-a",
-            "--workload",
-            "api-fuzz",
-            "--run-id",
-            "campaign-1-api-fuzz",
-            "--gate-profile",
-            "measurement",
-        ]
-    );
+        let (output, exit_code) = run_campaign(args).expect("dry-run campaign");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.status, "planned");
+        assert!(!output.execute);
+        assert!(output.dry_run);
+        assert_eq!(output.dispatch_records.len(), 2);
+        assert_eq!(output.dispatch_records[0].status, "planned");
+        assert_eq!(output.dispatch_records[0].run_id, "campaign-1-api-fuzz");
+        assert_eq!(output.dispatch_records[1].run_id, "campaign-1-db-fuzz");
+        assert_eq!(
+            output.dispatch_records[0]
+                .command
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "homeboy",
+                "fuzz",
+                "run",
+                "component-a",
+                "--workload",
+                "api-fuzz",
+                "--run-id",
+                "campaign-1-api-fuzz",
+                "--gate-profile",
+                "measurement",
+            ]
+        );
+    });
 }
 
 #[test]

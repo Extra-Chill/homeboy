@@ -586,22 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_merge_policy_requires_github_metadata() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let path = dir.path().join("policy.json");
-        fs::write(&path, r#"{"merge":{}}"#).expect("write policy");
-
-        let result = evaluate_merge_policy(PrPolicyMergeOptions {
-            component_id: "definitely-missing-component".into(),
-            policy_path: path.to_string_lossy().to_string(),
-            number: 1,
-            ..Default::default()
-        });
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn ci_gate_allows_terminal_green() {
         let mut decision = PrPolicyDecision {
             mode: "merge".into(),

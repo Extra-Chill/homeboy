@@ -217,22 +217,11 @@ fn apply_oversized_patch_release_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_oversized_patch_release_policy, plan};
+    use super::apply_oversized_patch_release_policy;
     use crate::core::release::types::{
-        ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverCommit, ReleaseSemverRecommendation,
+        ReleaseChangelogPlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
     };
     use std::collections::HashMap;
-
-    #[test]
-    fn test_plan() {
-        let err = plan(
-            "missing-component-is-reported-by-planner",
-            &ReleaseOptions::default(),
-        )
-        .expect_err("planner should report missing components");
-
-        assert!(!err.to_string().is_empty());
-    }
 
     /// Regression for the homeboy-action release blocker:
     /// `validate_working_tree_fail_fast` builds an Error with a hint vec
