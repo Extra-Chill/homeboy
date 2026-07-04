@@ -4,8 +4,8 @@ use crate::core::error::{Error, Result};
 use serde::Serialize;
 
 use super::casing::{
-    join_camel, join_display, join_kebab, join_pascal, join_snake, join_upper_snake, pluralize,
-    split_words,
+    join_camel, join_display, join_kebab, join_pascal, join_snake, join_title_snake,
+    join_upper_snake, pluralize, split_words,
 };
 
 // ============================================================================
@@ -242,6 +242,7 @@ impl RenameSpec {
     /// - `kebab-case` (e.g., `sample-plugin-agent`)
     /// - `snake_case` (e.g., `sample_plugin_agent`)
     /// - `UPPER_SNAKE` (e.g., `SAMPLE_PLUGIN_AGENT`)
+    /// - `Title_Snake_Case` (e.g., `Sample_Plugin_Agent`)
     /// - `PascalCase` (e.g., `SamplePluginAgent`)
     /// - `camelCase` (e.g., `samplePluginAgent`)
     /// - `Display Name` (e.g., `Sample Plugin Agent`)
@@ -267,10 +268,11 @@ impl RenameSpec {
         // to the same thing, and dedup handles it naturally.
         if !from_words.is_empty() && !to_words.is_empty() {
             // Singular forms — all naming conventions
-            let join_fns: [fn(&[String]) -> String; 6] = [
+            let join_fns: [fn(&[String]) -> String; 7] = [
                 join_kebab,
                 join_snake,
                 join_upper_snake,
+                join_title_snake,
                 join_pascal,
                 join_camel,
                 join_display,
@@ -279,6 +281,7 @@ impl RenameSpec {
                 "kebab",
                 "snake_case",
                 "UPPER_SNAKE",
+                "Title_Snake_Case",
                 "PascalCase",
                 "camelCase",
                 "Display Name",

@@ -107,6 +107,15 @@ pub(super) fn join_upper_snake(words: &[String]) -> String {
         .join("_")
 }
 
+/// Join words as Title_Snake_Case: `["sample", "plugin", "agent"]` → `"Sample_Plugin_Agent"`
+pub(super) fn join_title_snake(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| capitalize(w))
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 /// Join words as PascalCase: `["sample", "plugin", "agent"]` → `"SamplePluginAgent"`
 pub(super) fn join_pascal(words: &[String]) -> String {
     words
