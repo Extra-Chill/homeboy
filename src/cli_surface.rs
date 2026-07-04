@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, artifact_postprocess, audit, audit_baseline, auth, bench, build,
-    changelog, changes, ci, cleanup, component, config, contract, daemon, db, deploy, extension,
-    file, fleet, fuzz, git, http, issues, lint, logs, manifest, observe, project, refactor, refs,
-    release, report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status,
-    test, trace, triage, tunnel, undo, upgrade, version, worktree,
+    activity, agent_task, api, artifact_postprocess, audit, audit_baseline, bench, build, ci,
+    cleanup, component, config, contract, daemon, db, deploy, extension, file, fleet, fuzz, git,
+    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
+    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
+    upgrade, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -144,20 +144,14 @@ pub enum Commands {
     Docs(crate::commands::docs::DocsArgs),
     /// Print the recursive command safety, docs, and output manifest
     Manifest(manifest::ManifestArgs),
-    /// Changelog operations
-    Changelog(changelog::ChangelogArgs),
     /// Remove declared reconstructable artifacts from managed worktrees
     Cleanup(cleanup::CleanupArgs),
     /// Git operations for components
     Git(git::GitArgs),
     /// Reconcile findings against an issue tracker
     Issues(issues::IssuesArgs),
-    /// Version management for components
-    Version(version::VersionArgs),
     /// Run a local build quality gate for a component
     Build(build::BuildArgs),
-    /// Show changes since last version tag
-    Changes(changes::ChangesArgs),
     /// Plan release workflows
     Release(release::ReleaseArgs),
     /// Render reports from Homeboy structured output artifacts
@@ -192,12 +186,8 @@ pub enum Commands {
     Stack(stack::StackArgs),
     /// Undo the last write operation (audit fix, refactor, etc.)
     Undo(undo::UndoArgs),
-    /// Authenticate with a project's API
-    Auth(auth::AuthArgs),
     /// Make API requests to a project
     Api(api::ApiArgs),
-    /// Make generic HTTP requests
-    Http(http::HttpArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
 }
@@ -589,13 +579,10 @@ mod entry_command_impls {
                 Commands::Status(_) => "status",
                 Commands::Docs(_) => "docs",
                 Commands::Manifest(_) => "manifest",
-                Commands::Changelog(_) => "changelog",
                 Commands::Cleanup(_) => "cleanup",
                 Commands::Git(_) => "git",
                 Commands::Issues(_) => "issues",
-                Commands::Version(_) => "version",
                 Commands::Build(_) => "build",
-                Commands::Changes(_) => "changes",
                 Commands::Release(_) => "release",
                 Commands::Report(_) => "report",
                 Commands::Review(_) => "review",
@@ -612,9 +599,7 @@ mod entry_command_impls {
                 Commands::SelfCmd(_) => "self",
                 Commands::Stack(_) => "stack",
                 Commands::Undo(_) => "undo",
-                Commands::Auth(_) => "auth",
                 Commands::Api(_) => "api",
-                Commands::Http(_) => "http",
                 Commands::Upgrade(_) => "upgrade",
             }
         }
@@ -1163,14 +1148,15 @@ mod tests {
             [
                 "homeboy",
                 "api",
-                "mysite",
                 "post",
+                "mysite",
                 "/wp/v2/posts",
                 "--apply",
             ]
             .as_slice(),
             [
                 "homeboy",
+                "api",
                 "http",
                 "request",
                 "POST",

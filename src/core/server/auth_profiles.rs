@@ -130,7 +130,7 @@ fn missing_profile_error(profile: &str) -> Error {
         serde_json::Value::Null,
     )
     .with_hint(format!(
-        "Run 'homeboy auth profile set-basic {} --username <user>' or 'homeboy auth profile set-bearer {}'",
+        "Run 'homeboy api auth profile set-basic {} --username <user>' or 'homeboy api auth profile set-bearer {}'",
         profile, profile
     ))
 }

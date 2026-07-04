@@ -6,12 +6,10 @@
 - [artifact-postprocess](artifact-postprocess.md) — generic helper-driven postprocessing for persisted artifact roots
 - [audit](audit.md) — code convention drift and structural analysis
 - [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
-- [auth](auth.md)
+- [api](api.md)
 - [bench](bench.md) — performance benchmarks + p95 regression ratchet
 - [build](build.md) — local build quality gate
 - [cargo](cargo.md) — extension-provided Cargo routing when installed
-- [changelog](changelog.md)
-- [changes](changes.md)
 - [ci](ci.md) — CI reproduction profiles and shallow CI surface discovery
 - [cleanup](cleanup.md) — declared reconstructable artifact cleanup across managed worktrees
 - [component](component.md)
@@ -27,7 +25,6 @@
 - [fleet](fleet.md)
 - [fuzz](fuzz.md) — generic fuzz workload discovery, execution, and evidence
 - [git](git.md)
-- [http](http.md) — generic proxied authenticated HTTP requests
 - [issues](issues.md) — reconcile findings against issue trackers
 - [lint](lint.md)
 - [logs](logs.md)
@@ -54,7 +51,6 @@
 - [tunnel](tunnel.md) — private service tunnel declarations
 - [undo](undo.md) — restore or manage write-operation snapshots
 - [upgrade](upgrade.md)
-- [version](version.md)
 - [worktree](worktree.md) — component-backed task worktree lifecycle
 
 This list covers the top-level core CLI commands currently surfaced by `homeboy

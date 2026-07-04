@@ -1095,7 +1095,7 @@ fn invalid_body_type(key: &str, expected: &str, value: &Value) -> Error {
 }
 
 fn run_summary(run: RunRecord) -> RunSummary {
-    let status_note = running_status_note(&run);
+    let status_note = running_status_note(&run).or_else(|| reconciled_stale_status_note(&run));
     RunSummary {
         id: run.id,
         kind: run.kind,
@@ -1108,6 +1108,30 @@ fn run_summary(run: RunRecord) -> RunSummary {
         command: run.command,
         cwd: run.cwd,
         status_note,
+    }
+}
+
+fn reconciled_stale_status_note(run: &RunRecord) -> Option<String> {
+    if run.status != RunStatus::Stale.as_str() {
+        return None;
+    }
+
+    let reason = run
+        .metadata_json
+        .get("homeboy_reconciled")?
+        .get("reason")?
+        .as_str()?;
+
+    match reason {
+        "owner_process_not_running" => Some(
+            "owner process is not running; run was marked stale during read reconciliation"
+                .to_string(),
+        ),
+        "owner_metadata_missing" => Some(
+            "running status had no owner metadata; run was marked stale during read reconciliation"
+                .to_string(),
+        ),
+        _ => None,
     }
 }
 

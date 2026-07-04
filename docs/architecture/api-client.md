@@ -32,7 +32,7 @@ API client configuration lives in `projects/<project_id>.json`:
 
 ## Authentication
 
-Authentication credentials are stored securely in the OS keychain using `homeboy auth`.
+Authentication credentials are stored securely in the OS keychain using `homeboy api auth`.
 
 Project auth variables choose their source in `api.auth.variables`:
 
@@ -56,7 +56,7 @@ Project auth variables choose their source in `api.auth.variables`:
 ### Store Credentials
 
 ```bash
-homeboy auth set --project <project_id> token
+homeboy api auth set --project <project_id> token
 ```
 
 This prompts for the token and stores it in the keychain for the configured project variable.
@@ -105,13 +105,13 @@ homeboy api <project_id> <command> <endpoint> [options]
 
 ```bash
 # GET request
-homeboy api myproject get /posts
+homeboy api get myproject /posts
 
 # POST with JSON body
-homeboy api myproject post /posts --body '{"title": "Hello", "content": "World"}'
+homeboy api post myproject /posts --body '{"title": "Hello", "content": "World"}'
 
 # POST with form fields
-homeboy api myproject post /posts --form title=Hello --form status=draft
+homeboy api post myproject /posts --form title=Hello --form status=draft
 
 # Write structured response to a file
 homeboy --output /tmp/posts.json api myproject get /posts
@@ -202,10 +202,10 @@ All API commands return responses wrapped in the global JSON envelope:
 
 ```bash
 # List posts
-homeboy api myproject get /wp/v2/posts
+homeboy api get myproject /wp/v2/posts
 
 # Create post
-homeboy api myproject post /wp/v2/posts --body '{"title": "New Post"}'
+homeboy api post myproject /wp/v2/posts --body '{"title": "New Post"}'
 ```
 
 ### Custom API
@@ -226,10 +226,10 @@ homeboy api myproject get /users
 
 ## Security Considerations
 
-1. **Never store tokens in project JSON**: Use `source: "keychain"` locally and `homeboy auth set`, or use `source: "env"` in CI/headless environments
+1. **Never store tokens in project JSON**: Use `source: "keychain"` locally and `homeboy api auth set`, or use `source: "env"` in CI/headless environments
 2. **Use HTTPS**: API base URLs should use HTTPS for secure communication
 3. **Keychain storage**: Tokens are encrypted in OS keychain
-4. **Token rotation**: Use `homeboy auth` to update tokens when they change
+4. **Token rotation**: Use `homeboy api auth` to update tokens when they change
 
 ## Related
 

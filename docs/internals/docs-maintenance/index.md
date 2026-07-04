@@ -48,7 +48,7 @@ homeboy docs internals/docs-maintenance/structure
 ```
 
 ### Change Detection
-Use `homeboy changes` to identify what code has changed, informing which documentation may be stale.
+Use `homeboy release changes` to identify what code has changed, informing which documentation may be stale.
 
 ## Integration with Agent Context Files
 

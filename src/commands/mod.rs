@@ -189,12 +189,9 @@ pub mod api;
 pub mod artifact_postprocess;
 pub mod audit;
 pub mod audit_baseline;
-pub mod auth;
 pub mod bench;
 pub(crate) mod bench_summary;
 pub mod build;
-pub mod changelog;
-pub mod changes;
 pub mod ci;
 pub mod cleanup;
 pub mod component;
@@ -209,7 +206,6 @@ pub mod file;
 pub mod fleet;
 pub mod fuzz;
 pub mod git;
-pub mod http;
 pub mod issues;
 pub mod json_output;
 pub mod lint;
@@ -240,7 +236,6 @@ pub mod tunnel;
 pub mod undo;
 pub mod upgrade;
 pub mod utils;
-pub mod version;
 pub mod worktree;
 
 // Command-runtime infrastructure: the routing, adapter, output/response,

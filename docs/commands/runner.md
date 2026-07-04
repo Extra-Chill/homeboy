@@ -16,6 +16,10 @@ Runner configuration separates printable environment from secrets:
 
 ## Subcommands
 
+### `lifecycle`
+
+Inspect runner workspace lifecycle and finalization readiness.
+
 ### `add`
 
 ```sh

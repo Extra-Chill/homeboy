@@ -14,9 +14,9 @@ Homeboy release workflows turn conventional commits and component metadata into 
 Start with read-only commands:
 
 ```bash
-homeboy changes <component-id>
-homeboy version show <component-id>
-homeboy changelog show <component-id>
+homeboy release changes <component-id>
+homeboy release version show <component-id>
+homeboy release changelog show <component-id>
 ```
 
 These commands tell you whether the commit history, configured version targets, and changelog state line up before the release planner mutates anything.

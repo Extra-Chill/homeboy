@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use homeboy::core::git::{self, CherryPickOptions, PushOptions, RebaseOptions};
 
-use crate::commands::version;
+use crate::commands::release::version;
 
 use super::CmdResult;
 

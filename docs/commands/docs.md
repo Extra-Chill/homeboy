@@ -117,5 +117,5 @@ If a component does not exist for `map`, the command fails with a component not 
 
 - [audit](audit.md) — code-level convention auditing, including documentation-reference findings when enabled by the audit implementation
 - [commands index](commands-index.md)
-- [changelog](changelog.md)
+- [release](release.md)
 - [JSON output contract](../architecture/output-system.md)

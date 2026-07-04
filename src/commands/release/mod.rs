@@ -1,4 +1,4 @@
-use clap::Args;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::{fs, path::Path};
 
@@ -13,8 +13,55 @@ use homeboy::core::scope::{self, Scope};
 use super::utils::args::DryRunArgs;
 use super::CmdResult;
 
+pub mod changelog;
+pub mod changes;
+pub mod version;
+
 #[derive(Args)]
 pub struct ReleaseArgs {
+    #[command(subcommand)]
+    command: Option<ReleaseSubcommand>,
+
+    #[command(flatten)]
+    execute: ReleaseExecuteArgs,
+}
+
+impl ReleaseArgs {
+    pub(crate) fn is_changelog_markdown(&self) -> bool {
+        matches!(
+            &self.command,
+            Some(ReleaseSubcommand::Changelog(args)) if changelog::is_show_markdown(args)
+        )
+    }
+
+    pub(crate) fn markdown_changelog_args(self) -> Option<changelog::ChangelogArgs> {
+        match self.command {
+            Some(ReleaseSubcommand::Changelog(args)) if changelog::is_show_markdown(&args) => {
+                Some(args)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ReleaseSubcommand {
+    /// Show changes since the last version tag
+    Changes(changes::ChangesArgs),
+    /// Show generated changelog content
+    Changelog(changelog::ChangelogArgs),
+    /// Version inspection helpers
+    Version(ReleaseVersionArgs),
+}
+
+#[derive(Args)]
+struct ReleaseVersionArgs {
+    #[command(subcommand)]
+    command: version::VersionCommand,
+}
+
+#[derive(Args)]
+pub struct ReleaseExecuteArgs {
     /// Component ID(s) to release
     pub components: Vec<String>,
 
@@ -178,9 +225,19 @@ pub enum ReleaseCommandOutput {
     Single(ReleaseOutput),
     Batch(BatchReleaseOutput),
     Package(ReleasePackageOutput),
+    Changes(changes::ChangesCommandOutput),
+    Changelog(changelog::ChangelogOutput),
+    Version(version::VersionOutput),
 }
 
-impl ReleaseArgs {
+fn map_nested<T>(
+    result: CmdResult<T>,
+    wrap: impl FnOnce(T) -> ReleaseCommandOutput,
+) -> CmdResult<ReleaseCommandOutput> {
+    result.map(|(output, code)| (wrap(output), code))
+}
+
+impl ReleaseExecuteArgs {
     fn pipeline_options(&self) -> ReleasePipelineOptions {
         ReleasePipelineOptions {
             deploy: self.deploy,
@@ -269,8 +326,8 @@ impl ReleaseArgs {
 }
 
 #[cfg(test)]
-impl ReleaseArgs {
-    /// Construct ReleaseArgs programmatically for tests and internal callers.
+impl ReleaseExecuteArgs {
+    /// Construct ReleaseExecuteArgs programmatically for tests and internal callers.
     fn from_parts(
         components: Vec<String>,
         project: Option<String>,
@@ -315,8 +372,31 @@ impl ReleaseArgs {
 
 pub fn run(
     args: ReleaseArgs,
-    _global: &crate::commands::GlobalArgs,
+    global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
+    match args.command {
+        Some(ReleaseSubcommand::Changes(args)) => {
+            return map_nested(changes::run(args, global), ReleaseCommandOutput::Changes);
+        }
+        Some(ReleaseSubcommand::Changelog(args)) => {
+            return map_nested(
+                changelog::run(args, global),
+                ReleaseCommandOutput::Changelog,
+            );
+        }
+        Some(ReleaseSubcommand::Version(args)) => {
+            return map_nested(
+                version::run_command(args.command, global),
+                ReleaseCommandOutput::Version,
+            );
+        }
+        None => {}
+    }
+
+    run_execute(args.execute)
+}
+
+fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
     let execution = args.execution_plan(skip_checks);
     validate_apply_boundary(&execution)?;
@@ -452,7 +532,7 @@ pub fn run(
 /// Run the dependency-aware cascade after a single-component release, when
 /// `--cascade` was requested and the component actually released.
 fn run_cascade_if_requested(
-    args: &ReleaseArgs,
+    args: &ReleaseExecuteArgs,
     component_id: &str,
     result: &ReleaseCommandResult,
     input: &ReleaseCommandInput,
@@ -489,7 +569,7 @@ fn run_cascade_if_requested(
 }
 
 fn run_package_only(
-    args: ReleaseArgs,
+    args: ReleaseExecuteArgs,
     component_ids: &[String],
 ) -> CmdResult<ReleaseCommandOutput> {
     if component_ids.len() != 1 {
@@ -580,7 +660,7 @@ fn run_package_only(
 /// `--dry-run` is exempt: previewing a plan with `--no-github-release` should
 /// never be blocked, and the dry-run hints already explain the tag-only outcome.
 fn guard_no_github_release(
-    args: &ReleaseArgs,
+    args: &ReleaseExecuteArgs,
     component_ids: &[String],
 ) -> homeboy::core::Result<()> {
     if !args.no_github_release {
@@ -608,7 +688,7 @@ fn guard_no_github_release(
 }
 
 fn no_github_release_guard_for_components(
-    args: &ReleaseArgs,
+    args: &ReleaseExecuteArgs,
     gated: Vec<(&str, component::Component)>,
 ) -> homeboy::core::Result<()> {
     if !args.no_github_release || args.dry_run_args.dry_run {
@@ -759,7 +839,7 @@ fn validate_apply_boundary(execution: &ReleaseExecutionPlan) -> homeboy::core::R
 /// 2. `--project <id>` — all components in the project that need a release
 /// 3. Positional component IDs
 fn resolve_component_ids(
-    args: &ReleaseArgs,
+    args: &ReleaseExecuteArgs,
     components: &[String],
 ) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref project_id) = args.project {
@@ -851,8 +931,8 @@ fn resolve_component_ids(
 mod tests {
     use super::*;
 
-    fn args(components: &[&str]) -> ReleaseArgs {
-        ReleaseArgs::from_parts(
+    fn args(components: &[&str]) -> ReleaseExecuteArgs {
+        ReleaseExecuteArgs::from_parts(
             components.iter().map(|value| value.to_string()).collect(),
             None,
             false,
@@ -895,8 +975,8 @@ mod tests {
         assert_eq!(release_args.bump.as_deref(), Some("minor"));
     }
 
-    fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseArgs {
-        ReleaseArgs {
+    fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseExecuteArgs {
+        ReleaseExecuteArgs {
             components: vec!["fixture".to_string()],
             project: None,
             outdated: false,

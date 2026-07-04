@@ -6,8 +6,8 @@ use homeboy::core::git::{self, ChangesOutput};
 use homeboy::core::project;
 use homeboy::core::BulkResult;
 
-use super::utils::resolve::resolve_project_components;
-use super::CmdResult;
+use crate::commands::utils::resolve::resolve_project_components;
+use crate::commands::CmdResult;
 
 #[derive(Args)]
 pub struct ChangesArgs {
@@ -143,7 +143,7 @@ pub fn run(
             "Run 'homeboy status --full' to see available components, or specify one explicitly:",
         );
     }
-    err = err.with_hint("  homeboy changes <component-id>");
+    err = err.with_hint("  homeboy release changes <component-id>");
 
     Err(err)
 }

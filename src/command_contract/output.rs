@@ -12,9 +12,7 @@
 //! returned from [`Commands::descriptor`].
 
 use crate::cli_surface::Commands;
-use crate::commands::{
-    changelog, file, fleet, logs, observe, report, review, runner, runtime, trace, version,
-};
+use crate::commands::{file, fleet, logs, observe, report, review, runner, runtime, trace};
 
 use super::lab::apply_lab_contract_to_descriptor;
 use super::spec::registered_command;
@@ -177,7 +175,7 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Changelog(args) if changelog::is_show_markdown(args) => workspace_descriptor(
+            Commands::Release(args) if args.is_changelog_markdown() => workspace_descriptor(
                 CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
@@ -225,7 +223,7 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
+            Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Contract(_) => {
                 crate::commands::contract::adapter(output_file_mode).output_descriptor()
             }
@@ -240,11 +238,8 @@ impl Commands {
             | Commands::ArtifactPostprocess(_)
             | Commands::Extension(_)
             | Commands::Manifest(_)
-            | Commands::Changelog(_)
             | Commands::Cleanup(_)
             | Commands::Build(_)
-            | Commands::Changes(_)
-            | Commands::Release(_)
             | Commands::Report(_)
             | Commands::Runner(_)
             | Commands::Runtime(_)
@@ -265,9 +260,7 @@ impl Commands {
             | Commands::Git(_)
             | Commands::Issues(_)
             | Commands::SelfCmd(_)
-            | Commands::Auth(_)
             | Commands::Api(_)
-            | Commands::Http(_)
             | Commands::Upgrade(_)
             | Commands::Ssh(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Fleet(_) => fleet::adapter(output_file_mode).output_descriptor(),

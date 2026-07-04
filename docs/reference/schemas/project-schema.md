@@ -57,7 +57,7 @@ matter when the workflow needs environment context.
   - **`enabled`** (boolean): Whether API client is enabled
   - **`proxy_url`** (string): Optional HTTP/SOCKS proxy URL for API requests, e.g. `socks5://127.0.0.1:8080`
   - **`auth`** (object): Optional API auth configuration with a header template and variables sourced from `keychain`, `env`, or `config`
-  - API POST/PUT/PATCH calls can send form data with `homeboy api <project> post <endpoint> --form key=value`.
+  - API POST/PUT/PATCH calls can send form data with `homeboy api post <project> <endpoint> --form key=value`.
 - **`database`** (object): Database connection settings
   - **`host`** (string): Database host
   - **`port`** (number): Database port (default: 3306)
@@ -162,7 +162,7 @@ Projects are stored as individual JSON files under the OS config directory:
 
 ## Security Notes
 
-Database passwords should not be stored directly in project JSON files. Use the `homeboy auth` command to store credentials securely in the OS keychain. Homeboy automatically retrieves credentials during database operations.
+Database passwords should not be stored directly in project JSON files. Use the `homeboy api auth` command to store credentials securely in the OS keychain. Homeboy automatically retrieves credentials during database operations.
 
 ## Related
 

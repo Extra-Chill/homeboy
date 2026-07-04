@@ -273,18 +273,18 @@ mod normalize_tests {
     }
 
     #[test]
-    fn version_show_shorthand_is_not_rewritten() {
-        let input = argv(&["homeboy", "version", "my-comp"]);
+    fn release_version_show_shorthand_is_not_rewritten() {
+        let input = argv(&["homeboy", "release", "version", "my-comp"]);
         let expected = input.clone();
         assert_eq!(normalize(input), expected);
     }
 
     #[test]
-    fn version_show_requires_canonical_subcommand() {
-        let shorthand = normalize(argv(&["homeboy", "version", "my-comp"]));
+    fn release_version_show_requires_canonical_subcommand() {
+        let shorthand = normalize(argv(&["homeboy", "release", "version", "my-comp"]));
         assert!(Cli::try_parse_from(shorthand).is_err());
 
-        let canonical = normalize(argv(&["homeboy", "version", "show", "my-comp"]));
+        let canonical = normalize(argv(&["homeboy", "release", "version", "show", "my-comp"]));
         assert!(Cli::try_parse_from(canonical).is_ok());
     }
 

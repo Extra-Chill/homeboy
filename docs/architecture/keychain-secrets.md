@@ -44,10 +44,10 @@ Stored for project API authentication.
 **Usage:**
 ```bash
 # Store API token
-homeboy auth set --project <project_id> token
+homeboy api auth set --project <project_id> token
 
 # Token is automatically retrieved during API requests
-homeboy api <project_id> get /posts
+homeboy api get <project_id> /posts
 ```
 
 ### Database Passwords
@@ -80,7 +80,7 @@ Stored for encrypted SSH private keys.
 ### API Tokens
 
 ```bash
-homeboy auth set --project <project_id> token
+homeboy api auth set --project <project_id> token
 ```
 
 Prompts for authentication token which is stored securely.
@@ -114,7 +114,7 @@ No manual retrieval is required.
 ### Update API Token
 
 ```bash
-homeboy auth set --project <project_id> token
+homeboy api auth set --project <project_id> token
 ```
 
 Re-running the auth command prompts for new token and updates the keychain entry.

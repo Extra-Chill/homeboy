@@ -4,8 +4,7 @@ use serde::Serialize;
 use homeboy::core::component;
 use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
 
-use super::{adapter, CmdResult};
-use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode};
+use crate::commands::CmdResult;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -20,7 +19,7 @@ pub struct VersionArgs {
 }
 
 #[derive(Subcommand)]
-enum VersionCommand {
+pub enum VersionCommand {
     /// Show current version (default: discovered component, fallback: homeboy binary)
     Show {
         /// Component ID (optional - shows discovered component version, or homeboy binary version)
@@ -49,23 +48,20 @@ pub struct VersionShowOutput {
     targets: Vec<VersionTargetInfo>,
 }
 
-pub fn run(args: VersionArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<VersionOutput> {
+pub fn run(
+    args: VersionArgs,
+    _global: &crate::commands::GlobalArgs,
+) -> crate::commands::CmdResult<VersionOutput> {
     let VersionCommand::Show { component_id, path } = args.command;
     show(VersionShowArgs { component_id, path })
 }
 
-pub(crate) fn adapter(
-    output_file_mode: CommandOutputFileMode,
-) -> adapter::TypedCommandAdapter<VersionArgs> {
-    adapter::TypedCommandAdapter::json_only(
-        CommandJsonFamily::Workspace,
-        output_file_mode,
-        run_json,
-    )
-}
-
-fn run_json(args: VersionArgs, global: &crate::commands::GlobalArgs) -> adapter::JsonCommandRun {
-    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+pub fn run_command(
+    command: VersionCommand,
+    _global: &crate::commands::GlobalArgs,
+) -> CmdResult<VersionOutput> {
+    let VersionCommand::Show { component_id, path } = command;
+    show(VersionShowArgs { component_id, path })
 }
 
 fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
@@ -101,7 +97,7 @@ fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
 
     Ok((
         VersionOutput::Show(VersionShowOutput {
-            command: "version.show".to_string(),
+            command: "release.version.show".to_string(),
             component_id: display_id,
             version: info.version,
             targets: info.targets,
@@ -115,7 +111,7 @@ pub fn show_version_output(component_id: &str) -> CmdResult<VersionShowOutput> {
 
     Ok((
         VersionShowOutput {
-            command: "version.show".to_string(),
+            command: "release.version.show".to_string(),
             component_id: Some(component_id.to_string()),
             version: info.version,
             targets: info.targets,

@@ -78,7 +78,7 @@ pub(crate) fn execute_action(
                     "auth",
                     "Not authenticated",
                     None,
-                    Some(vec!["Run 'homeboy auth login --project <id>' first.".to_string()]),
+                    Some(vec!["Run 'homeboy api auth login --project <id>' first.".to_string()]),
                 ));
             }
 

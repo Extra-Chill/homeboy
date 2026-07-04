@@ -265,10 +265,10 @@ To see detailed git changes (commits, diffs) before deploying, use the `changes`
 
 ```sh
 # Show changes for all project components
-homeboy changes --project myproject
+homeboy release changes --project myproject
 
 # Show changes with git diffs included
-homeboy changes --project myproject --git-diffs
+homeboy release changes --project myproject --git-diffs
 ```
 
 ## Post-Deploy Hooks
@@ -315,7 +315,7 @@ Extension hooks run first, then component hooks. All `post:deploy` hooks are non
 ## Related
 
 - [build](build.md)
-- [changes](changes.md)
+- [release](release.md)
 - [component](component.md)
 - [fleet](fleet.md)
 - [hooks](../architecture/hooks.md)

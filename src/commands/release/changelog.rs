@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::CmdResult;
+use crate::commands::CmdResult;
 use homeboy::core::release::changelog::{self, ShowOutput};
 
 #[derive(Args)]
@@ -74,8 +74,8 @@ pub fn run(
 }
 
 // Homeboy's own changelog is embedded separately from the docs system
-// to avoid collision with docs/commands/changelog.md command docs.
-const HOMEBOY_CHANGELOG: &str = include_str!("../../docs/changelog.md");
+// to avoid collision with command docs.
+const HOMEBOY_CHANGELOG: &str = include_str!("../../../docs/changelog.md");
 
 fn show_homeboy_markdown() -> CmdResult<String> {
     Ok((HOMEBOY_CHANGELOG.to_string(), 0))
