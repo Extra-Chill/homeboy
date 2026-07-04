@@ -511,7 +511,7 @@ fn run_result_ref_uri(entry: &Value) -> Option<String> {
 }
 
 /// Push a diagnostic unless an identical (class, message) is already present.
-fn push_unique_diagnostic(
+pub(super) fn push_unique_diagnostic(
     diagnostics: &mut Vec<AgentTaskDiagnostic>,
     class: String,
     message: String,

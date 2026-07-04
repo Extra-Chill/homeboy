@@ -1,4 +1,4 @@
-use super::outcome_normalization::normalize_provider_outcome_roles;
+use super::outcome_normalization::{normalize_provider_outcome_roles, push_unique_diagnostic};
 use super::runner_readiness::{
     executable_file, provider_executable_env, resolve_executable_candidate,
 };
@@ -7,6 +7,7 @@ use super::*;
 use crate::core::agent_task_executor_evidence::link_latest_executor_evidence;
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
+const REDACTED_VALUE: &str = "[redacted]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
@@ -343,10 +344,12 @@ pub(super) fn run_provider_command_once(
             format!("provider '{}' produced no JSON outcome", provider.id),
             executor_process_diagnostic_data(
                 &provider.id,
+                &provider.backend,
                 &command,
                 &output.status,
                 &stdout,
                 &stderr,
+                &provider_output_redactions(request, provider),
             ),
         );
     }
@@ -358,6 +361,15 @@ pub(super) fn run_provider_command_once(
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
             normalize_provider_outcome_roles(&mut outcome, provider);
+            surface_provider_process_failure(
+                &mut outcome,
+                request,
+                provider,
+                &command,
+                &output.status,
+                &stdout,
+                &stderr,
+            );
             outcome
         }
         Err(error) => failure_outcome(
@@ -371,10 +383,12 @@ pub(super) fn run_provider_command_once(
             ),
             executor_process_diagnostic_data(
                 &provider.id,
+                &provider.backend,
                 &command,
                 &output.status,
                 &stdout,
                 &stderr,
+                &provider_output_redactions(request, provider),
             ),
         ),
     }
@@ -382,23 +396,87 @@ pub(super) fn run_provider_command_once(
 
 fn executor_process_diagnostic_data(
     provider_id: &str,
+    provider_backend: &str,
     command: &str,
     status: &std::process::ExitStatus,
     stdout: &str,
     stderr: &str,
+    redactions: &[String],
 ) -> Value {
+    let command = redact_sensitive_text(command, redactions);
+    let stdout = redact_sensitive_text(stdout, redactions);
+    let stderr = redact_sensitive_text(stderr, redactions);
     json!({
         "provider": provider_id,
+        "provider_backend": provider_backend,
         "command": command,
         "exit_code": status.code(),
         "signal": exit_signal(status),
-        "stdout": bounded_executor_output(stdout),
+        "stdout": bounded_executor_output(&stdout),
         "stdout_bytes": stdout.len(),
         "stdout_truncated": stdout.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
-        "stderr": bounded_executor_output(stderr),
+        "stderr": bounded_executor_output(&stderr),
         "stderr_bytes": stderr.len(),
         "stderr_truncated": stderr.len() > EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES,
+        "remediation_hints": provider_process_remediation_hints(&stdout, &stderr),
     })
+}
+
+fn surface_provider_process_failure(
+    outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    command: &str,
+    status: &std::process::ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) {
+    if status.success() {
+        return;
+    }
+
+    if outcome.status == AgentTaskOutcomeStatus::Succeeded {
+        outcome.status = AgentTaskOutcomeStatus::ProviderError;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+    }
+
+    let redactions = provider_output_redactions(request, provider);
+    let data = executor_process_diagnostic_data(
+        &provider.id,
+        &provider.backend,
+        command,
+        status,
+        stdout,
+        stderr,
+        &redactions,
+    );
+    let exit_description = status
+        .code()
+        .map(|code| format!("status {code}"))
+        .or_else(|| exit_signal(status).map(|signal| format!("signal {signal}")))
+        .unwrap_or_else(|| "unknown status".to_string());
+    let stderr_tail = data
+        .get("stderr")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let message = match stderr_tail {
+        Some(stderr_tail) => format!(
+            "provider '{}' ({}) exited with {exit_description}: {stderr_tail}",
+            provider.id, provider.backend
+        ),
+        None => format!(
+            "provider '{}' ({}) exited with {exit_description}; inspect stdout/stderr diagnostics",
+            provider.id, provider.backend
+        ),
+    };
+
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        "agent_task.provider_process_failed".to_string(),
+        message,
+        data,
+    );
 }
 
 fn bounded_executor_output(output: &str) -> String {
@@ -411,6 +489,77 @@ fn bounded_executor_output(output: &str) -> String {
         start += 1;
     }
     output[start..].to_string()
+}
+
+fn provider_output_redactions(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    names.extend(request.executor.secret_env.iter().cloned());
+    names.extend(provider.invocation.redaction.env.iter().cloned());
+    for env_ref in &provider.invocation.env {
+        if env_ref.redacted.unwrap_or(false) {
+            names.insert(env_ref.name.clone());
+        }
+    }
+    for requirement in &provider.secret_requirements {
+        names.extend(requirement.env.iter().cloned());
+    }
+    for requirement in &provider.secret_env_requirements {
+        names.extend(requirement.env.iter().cloned());
+    }
+    for readiness in &provider.runner_readiness {
+        names.extend(readiness.secret_env.iter().cloned());
+        if let Some(executable) = &readiness.executable {
+            names.extend(executable.env.iter().cloned());
+        }
+    }
+
+    names
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| value.len() >= 4)
+        .collect()
+}
+
+fn redact_sensitive_text<'a>(text: &'a str, redactions: &[String]) -> std::borrow::Cow<'a, str> {
+    let mut redacted = std::borrow::Cow::Borrowed(text);
+    for value in redactions {
+        if value.is_empty() || !redacted.contains(value) {
+            continue;
+        }
+        redacted = std::borrow::Cow::Owned(redacted.replace(value, REDACTED_VALUE));
+    }
+    redacted
+}
+
+fn provider_process_remediation_hints(stdout: &str, stderr: &str) -> Vec<String> {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    let mut hints = Vec::new();
+    if combined.contains("auth")
+        || combined.contains("unauthorized")
+        || combined.contains("permission denied")
+        || combined.contains("forbidden")
+        || combined.contains("api key")
+        || combined.contains("token")
+    {
+        hints.push(
+            "Check provider authentication and required secret_env values on the runner."
+                .to_string(),
+        );
+    }
+    if combined.contains("timeout") || combined.contains("timed out") {
+        hints.push("Retry after the provider is reachable, or increase the task timeout when the operation is expected to run longer.".to_string());
+    }
+    if combined.contains("not found") || combined.contains("no such file") {
+        hints.push(
+            "Verify the provider executable, runtime path, and working directory on the runner."
+                .to_string(),
+        );
+    }
+    hints.push("Inspect the bounded stdout/stderr tails in this diagnostic before retrying the agent-task run.".to_string());
+    hints
 }
 
 #[cfg(unix)]
