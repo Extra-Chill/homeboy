@@ -826,6 +826,15 @@ fn resolve_component_ids(
 
     // Positional component IDs
     if components.is_empty() {
+        if let Some(path) = args.path.as_deref() {
+            return match component::resolve_effective(None, Some(path), None) {
+                Ok(comp) => Ok(vec![comp.id]),
+                Err(_) => Err(homeboy::core::Error::validation_missing_argument(vec![
+                    "component ID(s), or --project <project-id>".to_string(),
+                ])),
+            };
+        }
+
         // Try CWD-based component detection
         match component::resolve_effective(None, None, None) {
             Ok(comp) => Ok(vec![comp.id]),
