@@ -63,6 +63,7 @@ jobs:
 
       - uses: ./.homeboy-action
         with:
+          source: .
           component: homeboy
           commands: ${{ matrix.command }}
           expected-commands: review audit,review lint,review test
