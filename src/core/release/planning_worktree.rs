@@ -3,6 +3,7 @@ use crate::core::error::{Error, Result};
 use crate::core::git::UncommittedChanges;
 use crate::core::release::changelog;
 use crate::core::release::version::ComponentVersionInfo;
+use std::path::{Path, PathBuf};
 
 use super::types::ReleaseOptions;
 
@@ -32,9 +33,10 @@ pub(super) fn validate_release_worktree(
     let allowed = get_release_allowed_files(
         &changelog_path,
         &version_targets,
-        std::path::Path::new(&component.local_path),
+        Path::new(&component.local_path),
     );
-    let unexpected = get_unexpected_uncommitted_files(&uncommitted, &allowed);
+    let build_artifacts = declared_build_artifact_paths(component);
+    let unexpected = get_unexpected_uncommitted_files(&uncommitted, &allowed, &build_artifacts);
 
     if !unexpected.is_empty() {
         return Ok(Some(serde_json::json!({
@@ -83,7 +85,8 @@ pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<(
         .cloned()
         .collect();
 
-    let unexpected = filter_homeboy_managed(all_files);
+    let build_artifacts = declared_build_artifact_paths(component);
+    let unexpected = filter_homeboy_managed_and_declared_artifacts(all_files, &build_artifacts);
     if unexpected.is_empty() {
         return Ok(());
     }
@@ -128,6 +131,21 @@ pub(super) fn filter_homeboy_managed(files: Vec<String>) -> Vec<String> {
     files
         .into_iter()
         .filter(|f| !is_homeboy_managed_path(f))
+        .collect()
+}
+
+fn filter_homeboy_managed_and_declared_artifacts(
+    files: Vec<String>,
+    declared_artifacts: &[String],
+) -> Vec<String> {
+    files
+        .into_iter()
+        .filter(|f| !is_homeboy_managed_path(f))
+        .filter(|f| {
+            !declared_artifacts
+                .iter()
+                .any(|artifact| paths_match(f, artifact))
+        })
         .collect()
 }
 
@@ -182,6 +200,7 @@ fn derived_release_lockfiles(version_target: &str) -> Vec<String> {
 fn get_unexpected_uncommitted_files(
     uncommitted: &UncommittedChanges,
     allowed: &[String],
+    declared_artifacts: &[String],
 ) -> Vec<String> {
     let all_uncommitted: Vec<&String> = uncommitted
         .staged
@@ -194,15 +213,98 @@ fn get_unexpected_uncommitted_files(
         .into_iter()
         .filter(|f| !is_homeboy_managed_path(f))
         .filter(|f| !allowed.iter().any(|a| f.ends_with(a) || a.ends_with(*f)))
+        .filter(|f| {
+            !declared_artifacts
+                .iter()
+                .any(|artifact| paths_match(f, artifact))
+        })
         .cloned()
         .collect()
+}
+
+fn paths_match(file: &str, allowed: &str) -> bool {
+    file == allowed || file.ends_with(allowed) || allowed.ends_with(file)
+}
+
+fn declared_build_artifact_paths(component: &Component) -> Vec<String> {
+    let status_root = Path::new(&component.local_path);
+    let scan_root = crate::core::component::resolution::detect_git_root(status_root)
+        .unwrap_or_else(|| status_root.to_path_buf());
+    let mut artifacts = Vec::new();
+    collect_declared_build_artifact_paths(&scan_root, status_root, &mut artifacts);
+    artifacts.sort();
+    artifacts.dedup();
+    artifacts
+}
+
+fn collect_declared_build_artifact_paths(
+    dir: &Path,
+    status_root: &Path,
+    artifacts: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let config_path = dir.join("homeboy.json");
+    if let Some(artifact) = read_declared_build_artifact(&config_path) {
+        let artifact_path = Path::new(&artifact);
+        let absolute = if artifact_path.is_absolute() {
+            artifact_path.to_path_buf()
+        } else {
+            dir.join(artifact_path)
+        };
+        if let Some(relative) = relative_path_string(&absolute, status_root) {
+            artifacts.push(relative);
+        }
+    }
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || should_skip_artifact_scan_dir(&path) {
+            continue;
+        }
+        collect_declared_build_artifact_paths(&path, status_root, artifacts);
+    }
+}
+
+fn read_declared_build_artifact(config_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("build_artifact")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn relative_path_string(path: &Path, root: &Path) -> Option<String> {
+    let path = normalize_path(path);
+    let root = normalize_path(root);
+    path.strip_prefix(&root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| !relative.is_empty())
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| crate::core::paths::normalize_local_path(path))
+}
+
+fn should_skip_artifact_scan_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | ".homeboy" | "target" | "node_modules" | "vendor")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_homeboy_managed, get_release_allowed_files, get_unexpected_uncommitted_files,
-        is_homeboy_managed_path, validate_release_worktree, validate_working_tree_fail_fast,
+        declared_build_artifact_paths, filter_homeboy_managed, get_release_allowed_files,
+        get_unexpected_uncommitted_files, is_homeboy_managed_path, validate_release_worktree,
+        validate_working_tree_fail_fast,
     };
     use crate::core::component::Component;
     use crate::core::git::UncommittedChanges;
@@ -377,7 +479,7 @@ mod tests {
     #[test]
     fn unexpected_files_skip_homeboy_build_dir() {
         let changes = uncommitted(&[], &[], &[".homeboy-build/sample-plugin-0.70.1.zip"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &[]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &[]);
         assert!(
             unexpected.is_empty(),
             "homeboy-managed scratch should never trigger working_tree error, got: {:?}",
@@ -388,8 +490,34 @@ mod tests {
     #[test]
     fn unexpected_files_still_catch_user_changes() {
         let changes = uncommitted(&["src/lib.rs"], &[], &[".homeboy-build/foo"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &[]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &[]);
         assert_eq!(unexpected, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn unexpected_files_skip_declared_build_artifacts() {
+        let changes = uncommitted(&[], &[], &["plugins/a/build/a.zip", "src/lib.rs"]);
+        let declared = vec!["plugins/a/build/a.zip".to_string()];
+        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &declared);
+
+        assert_eq!(unexpected, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn declared_build_artifacts_include_sibling_component_configs() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("homeboy.json"), r#"{"id":"root"}"#).unwrap();
+        std::fs::create_dir_all(dir.join("plugins/a")).unwrap();
+        std::fs::write(
+            dir.join("plugins/a/homeboy.json"),
+            r#"{"id":"a","build_artifact":"build/a.zip"}"#,
+        )
+        .unwrap();
+
+        let artifacts = declared_build_artifact_paths(&git_component(dir));
+
+        assert_eq!(artifacts, vec!["plugins/a/build/a.zip"]);
     }
 
     #[test]
@@ -400,7 +528,7 @@ mod tests {
             &[".homeboy-build/foo"],
         );
         let allowed = vec!["docs/changelog.md".to_string(), "manifest.toml".to_string()];
-        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
         assert!(
             unexpected.is_empty(),
             "allowed files + homeboy scratch should yield clean result, got: {:?}",
