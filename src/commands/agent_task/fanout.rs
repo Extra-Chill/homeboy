@@ -24,7 +24,7 @@ use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
     AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
+    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs, AgentTaskProviderProfile,
 };
 use super::command_json_value;
 
@@ -162,12 +162,13 @@ fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
     ))
 }
 
-fn cook_batch(args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
+fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
     if !args.gates.has_deterministic_gate() {
         return Err(invalid_fanout(
             "agent-task fanout cook-batch requires --verify or --private-verify",
         ));
     }
+    apply_provider_profile(&mut args);
     let plan = build_cook_batch_plan(&args)?;
     let branches = plan
         .cooks
@@ -228,6 +229,7 @@ fn cook_batch(args: AgentTaskFanoutCookBatchArgs) -> CmdResult<Value> {
             },
             "preflight": {
                 "provider_readiness_command": provider_readiness_command(&args),
+                "provider_selection": provider_selection_preflight(&args),
                 "deterministic_gates": {
                     "verify": args.gates.verify,
                     "private_verify": args.gates.private_verify,
@@ -692,6 +694,53 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
     })
 }
 
+fn apply_provider_profile(args: &mut AgentTaskFanoutCookBatchArgs) {
+    match args.provider_profile {
+        Some(AgentTaskProviderProfile::OpencodeCodexGpt55) => {
+            if args.backend.is_none() {
+                args.backend = Some("opencode".to_string());
+            }
+            if args.model.is_none() {
+                args.model = Some("gpt-5.5".to_string());
+            }
+        }
+        None => {}
+    }
+}
+
+fn provider_selection_preflight(args: &AgentTaskFanoutCookBatchArgs) -> Value {
+    let warnings = provider_selection_warnings(args);
+    serde_json::json!({
+        "profile": args.provider_profile.map(provider_profile_name),
+        "executor": {
+            "backend": args.backend,
+            "selector": args.selector,
+        },
+        "model": args.model,
+        "provider_config": args.provider_config.as_ref().map(|_| "provided"),
+        "warnings": warnings,
+    })
+}
+
+fn provider_selection_warnings(args: &AgentTaskFanoutCookBatchArgs) -> Vec<String> {
+    let Some(backend) = args.backend.as_deref() else {
+        return Vec::new();
+    };
+    if backend.eq_ignore_ascii_case("codex") {
+        return vec![
+            "--backend codex selects the Codex CLI executor backend. For opencode-native execution with Codex/GPT-5.5, use --provider-profile opencode-codex-gpt55 or --backend opencode --model gpt-5.5."
+                .to_string(),
+        ];
+    }
+    Vec::new()
+}
+
+fn provider_profile_name(profile: AgentTaskProviderProfile) -> &'static str {
+    match profile {
+        AgentTaskProviderProfile::OpencodeCodexGpt55 => "opencode-codex-gpt55",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueRef {
     url: String,
@@ -1028,6 +1077,7 @@ mod tests {
             backend: Some("sandbox".to_string()),
             selector: Some("sample.executor-provider".to_string()),
             model: Some("gpt-5.5".to_string()),
+            provider_profile: None,
             secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_TOKEN".to_string()],
             provider_config: Some(r#"{"runtime":"opencode"}"#.to_string()),
             gates: super::super::args::VerifyGateArgs {
@@ -1108,12 +1158,60 @@ mod tests {
         assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
         assert_eq!(value["status"], "planned");
         assert_eq!(value["summary"]["issues"], 2);
+        assert_eq!(
+            value["preflight"]["provider_selection"]["executor"]["backend"],
+            "sandbox"
+        );
+        assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
+        assert_eq!(
+            value["preflight"]["provider_selection"]["provider_config"],
+            "provided"
+        );
         assert_eq!(value["worktrees"]["dry_run"], true);
         assert_eq!(value["worktrees"]["rows"][0]["status"], "queued");
         assert!(value["commands"]["resume_from_plan"]
             .as_str()
             .expect("resume command")
             .contains("fanout run-plan"));
+    }
+
+    #[test]
+    fn cook_batch_provider_profile_sets_opencode_codex_defaults() {
+        let mut args = cook_batch_args();
+        args.backend = None;
+        args.model = None;
+        args.provider_profile = Some(AgentTaskProviderProfile::OpencodeCodexGpt55);
+
+        let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["preflight"]["provider_selection"]["profile"],
+            "opencode-codex-gpt55"
+        );
+        assert_eq!(
+            value["preflight"]["provider_selection"]["executor"]["backend"],
+            "opencode"
+        );
+        assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
+        assert_eq!(value["plan"]["cooks"][0]["backend"], "opencode");
+        assert_eq!(value["plan"]["cooks"][0]["model"], "gpt-5.5");
+    }
+
+    #[test]
+    fn cook_batch_warns_when_codex_backend_selects_codex_cli_executor() {
+        let mut args = cook_batch_args();
+        args.backend = Some("codex".to_string());
+        args.provider_config = None;
+
+        let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
+
+        assert_eq!(exit_code, 0);
+        let warning = value["preflight"]["provider_selection"]["warnings"][0]
+            .as_str()
+            .expect("warning");
+        assert!(warning.contains("Codex CLI executor backend"));
+        assert!(warning.contains("--provider-profile opencode-codex-gpt55"));
     }
 
     #[test]
@@ -1125,6 +1223,8 @@ mod tests {
             "cook-batch",
             "--repo",
             "homeboy",
+            "--provider-profile",
+            "opencode-codex-gpt55",
             "--verify",
             "cargo test --lib",
             "https://github.com/Extra-Chill/homeboy/issues/6453",
@@ -1144,5 +1244,9 @@ mod tests {
         assert_eq!(args.issues.len(), 2);
         assert_eq!(args.gates.verify, vec!["cargo test --lib"]);
         assert_eq!(args.from, "origin/main");
+        assert_eq!(
+            args.provider_profile,
+            Some(AgentTaskProviderProfile::OpencodeCodexGpt55)
+        );
     }
 }

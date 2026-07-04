@@ -96,6 +96,10 @@ pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
 
+    /// Named provider profile for common executor/model pairings. Explicit --backend/--model values win.
+    #[arg(long = "provider-profile", value_enum, value_name = "PROFILE")]
+    pub provider_profile: Option<AgentTaskProviderProfile>,
+
     /// Secret environment variable name to hydrate for the provider. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
@@ -114,6 +118,12 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// Run the generated batch-cook plan immediately after worktree creation succeeds.
     #[arg(long = "run-plan")]
     pub run_plan: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentTaskProviderProfile {
+    /// Run through the opencode executor and request GPT-5.5/Codex model configuration.
+    OpencodeCodexGpt55,
 }
 
 #[derive(Args, Debug, Clone)]
