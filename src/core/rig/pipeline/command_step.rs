@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::super::expand::expand_vars;
+use super::super::expand::{expand_vars_with_settings, settings_env};
 use super::super::spec::{PipelineStep, RigSpec};
 use super::super::toolchain;
 use crate::core::error::{Error, Result};
@@ -16,12 +16,12 @@ pub(in crate::core::rig) fn run_command_step(
     env: &HashMap<String, String>,
     settings: &[(String, String)],
 ) -> Result<()> {
-    let expanded = expand_vars(rig, cmd);
+    let expanded = expand_vars_with_settings(rig, cmd, settings);
     let mut command = Command::new(command_step_shell());
     command.arg("-c").arg(&expanded);
 
     if let Some(cwd) = cwd {
-        let resolved = expand_vars(rig, cwd);
+        let resolved = expand_vars_with_settings(rig, cwd, settings);
         command.current_dir(PathBuf::from(resolved));
     }
 
@@ -32,7 +32,7 @@ pub(in crate::core::rig) fn run_command_step(
     }
 
     for (k, v) in env {
-        command.env(k, expand_vars(rig, v));
+        command.env(k, expand_vars_with_settings(rig, v, settings));
     }
 
     for (k, v) in settings_env(settings) {
@@ -63,36 +63,6 @@ pub(in crate::core::rig) fn run_command_step(
     Ok(())
 }
 
-fn settings_env(settings: &[(String, String)]) -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    for (key, value) in settings {
-        env.push((
-            format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
-            value.clone(),
-        ));
-        let sanitized = shell_safe_setting_env_key(key);
-        let raw = format!("HOMEBOY_SETTINGS_{}", key.to_uppercase());
-        if sanitized != raw {
-            env.push((sanitized, value.clone()));
-        }
-    }
-    env
-}
-
-fn shell_safe_setting_env_key(key: &str) -> String {
-    let normalized = key
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("HOMEBOY_SETTINGS_{normalized}")
-}
-
 pub(super) fn run_command_pipeline_step(
     rig: &RigSpec,
     step: &PipelineStep,
@@ -121,12 +91,12 @@ fn run_command_if_missing_step(
     env: &HashMap<String, String>,
     settings: &[(String, String)],
 ) -> Result<()> {
-    let expanded_missing = expand_vars(rig, missing);
+    let expanded_missing = expand_vars_with_settings(rig, missing, settings);
     let missing_path = PathBuf::from(&expanded_missing);
     let resolved_missing = if missing_path.is_absolute() {
         missing_path
     } else if let Some(cwd) = cwd {
-        PathBuf::from(expand_vars(rig, cwd)).join(missing_path)
+        PathBuf::from(expand_vars_with_settings(rig, cwd, settings)).join(missing_path)
     } else {
         missing_path
     };

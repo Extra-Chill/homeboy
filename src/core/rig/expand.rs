@@ -13,18 +13,38 @@
 
 use super::spec::{RigResourcesSpec, RigSpec};
 use crate::core::expand;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Expand variables + tilde in a string.
 pub fn expand_vars(rig: &RigSpec, input: &str) -> String {
-    expand::expand_with_tilde(input, |token| resolve_token(rig, token))
+    expand_vars_with_settings(rig, input, &[])
+}
+
+/// Expand variables + tilde in a string, with rig settings materialized as
+/// `HOMEBOY_SETTINGS_<KEY>` values for `${env.*}` lookups.
+pub fn expand_vars_with_settings(
+    rig: &RigSpec,
+    input: &str,
+    settings: &[(String, String)],
+) -> String {
+    let env = settings_env(settings);
+    expand::expand_with_tilde(input, |token| resolve_token(rig, token, &env))
 }
 
 /// Return a copy of the rig resource declarations with expandable string entries expanded.
 pub fn expand_resources(rig: &RigSpec) -> RigResourcesSpec {
+    expand_resources_with_settings(rig, &[])
+}
+
+/// Return a copy of the rig resource declarations with expandable string entries expanded.
+pub fn expand_resources_with_settings(
+    rig: &RigSpec,
+    settings: &[(String, String)],
+) -> RigResourcesSpec {
     let mut resources = rig.resources.clone();
     resources.exclusive = merge_expanded_strings(
         rig,
+        settings,
         resources.exclusive.iter().map(String::as_str),
         std::iter::empty(),
     )
@@ -35,6 +55,7 @@ pub fn expand_resources(rig: &RigSpec) -> RigResourcesSpec {
     let derived_paths = rig.symlinks.iter().map(|symlink| symlink.link.as_str());
     resources.paths = merge_expanded_strings(
         rig,
+        settings,
         resources.paths.iter().map(String::as_str),
         derived_paths,
     );
@@ -56,12 +77,13 @@ pub fn expand_resources(rig: &RigSpec) -> RigResourcesSpec {
 
 fn merge_expanded_strings<'a>(
     rig: &RigSpec,
+    settings: &[(String, String)],
     explicit: impl Iterator<Item = &'a str>,
     derived: impl Iterator<Item = &'a str>,
 ) -> Vec<String> {
     merge_strings(
-        explicit.map(|value| expand_vars(rig, value)),
-        derived.map(|value| expand_vars(rig, value)),
+        explicit.map(|value| expand_vars_with_settings(rig, value, settings)),
+        derived.map(|value| expand_vars_with_settings(rig, value, settings)),
     )
 }
 
@@ -96,7 +118,7 @@ fn normalize_exclusive_resource(resource: String) -> String {
     resource
 }
 
-fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
+fn resolve_token(rig: &RigSpec, token: &str, env: &BTreeMap<String, String>) -> Option<String> {
     if token == "package.root" {
         if let Some(package_root) = super::local_package_root(&rig.id) {
             return Some(package_root.to_string_lossy().to_string());
@@ -123,16 +145,54 @@ fn resolve_token(rig: &RigSpec, token: &str) -> Option<String> {
             return Some(override_path);
         }
         let expanded = expand::expand_with_tilde(&component.path, |token| match token {
-            "package.root" => resolve_token(rig, token),
-            token if token.starts_with("env.") => resolve_token(rig, token),
+            "package.root" => resolve_token(rig, token, env),
+            token if token.starts_with("env.") => resolve_token(rig, token, env),
             _ => None,
         });
         return Some(expanded);
     }
     if let Some(name) = token.strip_prefix("env.") {
+        if let Some(value) = env.get(name) {
+            return Some(value.clone());
+        }
         return Some(std::env::var(name).unwrap_or_default());
     }
     None
+}
+
+/// Materialize rig settings as environment variables.
+///
+/// Settings override inherited process env for their own `HOMEBOY_SETTINGS_*`
+/// names. That matches bench setting semantics: an explicit CLI setting is the
+/// effective value for this invocation.
+pub fn settings_env(settings: &[(String, String)]) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    for (key, value) in settings {
+        env.insert(
+            format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
+            value.clone(),
+        );
+        let sanitized = shell_safe_setting_env_key(key);
+        let raw = format!("HOMEBOY_SETTINGS_{}", key.to_uppercase());
+        if sanitized != raw {
+            env.insert(sanitized, value.clone());
+        }
+    }
+    env
+}
+
+fn shell_safe_setting_env_key(key: &str) -> String {
+    let normalized = key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("HOMEBOY_SETTINGS_{normalized}")
 }
 
 /// Read a per-component effective-path override from the environment.

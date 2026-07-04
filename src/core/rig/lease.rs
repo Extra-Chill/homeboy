@@ -20,7 +20,7 @@ mod lock;
 /// holder is never reclaimed automatically.
 pub const RIG_LEASE_TTL_ENV: &str = "HOMEBOY_RIG_LEASE_TTL_SECS";
 
-use super::expand::expand_resources;
+use super::expand::expand_resources_with_settings;
 use super::spec::{RigResourcesSpec, RigSpec};
 use super::state::now_rfc3339;
 use crate::core::error::{Error, Result, RigResourceConflictInfo};
@@ -68,7 +68,17 @@ impl Drop for ActiveRigRunLease {
 
 /// Acquire an active-run lease for a mutating rig command.
 pub fn acquire_active_run_lease(rig: &RigSpec, command: &str) -> Result<Option<ActiveRigRunLease>> {
-    let resources = expand_resources(rig);
+    acquire_active_run_lease_with_settings(rig, command, &[])
+}
+
+/// Acquire an active-run lease after materializing rig settings as env values
+/// for resource interpolation.
+pub fn acquire_active_run_lease_with_settings(
+    rig: &RigSpec,
+    command: &str,
+    settings: &[(String, String)],
+) -> Result<Option<ActiveRigRunLease>> {
+    let resources = expand_resources_with_settings(rig, settings);
     if resources.is_empty() {
         return Ok(None);
     }

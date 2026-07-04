@@ -47,6 +47,7 @@ pub fn run_pipeline_check_groups(
     rig: &RigSpec,
     groups: &[String],
     fail_fast: bool,
+    settings: &[(String, String)],
 ) -> Result<PipelineOutcome> {
     let wanted: BTreeSet<&str> = groups.iter().map(String::as_str).collect();
     let steps = rig
@@ -58,7 +59,7 @@ pub fn run_pipeline_check_groups(
         .filter(|step| ordering::step_matches_groups(step, &wanted))
         .collect::<Vec<_>>();
     let ordered_indices = ordering::order_pipeline_steps(rig, "check", &steps)?;
-    run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast, &[])
+    run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast, settings)
 }
 
 pub fn run_prepare_requirement_steps(

@@ -17,9 +17,9 @@ use std::collections::HashMap;
 
 use crate::core::rig::pipeline::PipelineOutcome;
 use crate::core::rig::runner::{
-    head_sha_and_branch, run_check, run_check_groups, run_down, run_repair, run_status, run_up,
-    snapshot_state, CheckReport, RigStatusReport, ServiceStatusReport, SymlinkStatusState,
-    UpReport,
+    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings, run_repair,
+    run_status, run_up, snapshot_state, CheckReport, RigStatusReport, ServiceStatusReport,
+    SymlinkStatusState, UpReport,
 };
 use crate::core::rig::spec::{
     ComponentSpec, ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec,
@@ -381,6 +381,45 @@ fn test_run_down() {
                 .is_none(),
             "down clears materialized ownership"
         );
+    });
+}
+
+#[test]
+fn test_run_down_with_settings_exposes_env_to_pipeline() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let marker = tmp.path().join("down-setting.txt");
+        let marker_arg = marker.to_string_lossy();
+        let mut rig = minimal_spec("run-down-settings-fixture");
+        let mut pipeline = HashMap::new();
+        pipeline.insert(
+            "down".to_string(),
+            vec![PipelineStep::Command {
+                step_id: None,
+                depends_on: Vec::new(),
+                cmd: format!(
+                    "printf '%s' '${{env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}}' > {}",
+                    marker_arg
+                ),
+                cwd: None,
+                env: HashMap::new(),
+                requires_capabilities: Vec::new(),
+                requires_providers: Vec::new(),
+                provides_capabilities: Vec::new(),
+                provides_providers: Vec::new(),
+                label: Some("write down namespace".to_string()),
+            }],
+        );
+        rig.pipeline = pipeline;
+
+        let report = run_down_with_settings(
+            &rig,
+            &[("fixture_namespace".to_string(), "bench-a".to_string())],
+        )
+        .expect("run_down succeeds");
+
+        assert!(report.success, "outcome: {:?}", report.pipeline);
+        assert_eq!(std::fs::read_to_string(marker).expect("marker"), "bench-a");
     });
 }
 
