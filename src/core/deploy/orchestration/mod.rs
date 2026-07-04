@@ -435,6 +435,21 @@ mod tests {
             .success());
     }
 
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn git_stdout(path: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .args(args)
@@ -827,6 +842,78 @@ mod tests {
         assert!(
             err.message.contains("HEAD has unreleased commits"),
             "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn default_release_guard_accepts_component_prefixed_tag_at_head() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let plugin_path = root.join("plugins/host/studio-native");
+        let theme_path = root.join("themes/host/studio-native");
+
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(&plugin_path).expect("plugin path");
+        std::fs::create_dir_all(&theme_path).expect("theme path");
+        std::fs::write(plugin_path.join("package.json"), r#"{"version":"0.13.3"}"#)
+            .expect("plugin file");
+        std::fs::write(theme_path.join("style.css"), "Version: 0.1.3\n").expect("theme file");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "release components"]);
+        run_git(root, &["tag", "studio-native-v0.13.3"]);
+        run_git(root, &["tag", "studio-native-theme-v0.1.3"]);
+        run_git(root, &["tag", "v0.13.2"]);
+
+        let components = vec![
+            make_component("studio-native", &plugin_path.to_string_lossy()),
+            make_component("studio-native-theme", &theme_path.to_string_lossy()),
+        ];
+
+        check_unreleased_commits(&components, &base_deploy_config())
+            .expect("freshly released nested components must pass the default deploy gate");
+    }
+
+    #[test]
+    fn default_release_guard_rejects_commits_after_component_prefixed_tag() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let plugin_path = root.join("plugins/host/studio-native");
+
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(&plugin_path).expect("plugin path");
+        std::fs::write(plugin_path.join("package.json"), r#"{"version":"0.13.3"}"#)
+            .expect("plugin file");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "release studio native"]);
+        run_git(root, &["tag", "studio-native-v0.13.3"]);
+        run_git(root, &["tag", "v0.13.2"]);
+
+        std::fs::write(plugin_path.join("package.json"), r#"{"version":"0.13.4"}"#)
+            .expect("plugin file update");
+        run_git(root, &["add", "."]);
+        run_git(
+            root,
+            &["commit", "-q", "-m", "fix: unreleased plugin change"],
+        );
+
+        let component = make_component("studio-native", &plugin_path.to_string_lossy());
+        let err = check_unreleased_commits(&[component], &base_deploy_config())
+            .expect_err("component commits after the prefixed release tag must still be refused");
+
+        assert!(
+            err.message
+                .contains("studio-native (1 commits ahead of studio-native-v0.13.3)"),
+            "unexpected error: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("v0.13.2"),
+            "deploy gate must not fall back to the stale plain tag: {}",
             err.message
         );
     }
