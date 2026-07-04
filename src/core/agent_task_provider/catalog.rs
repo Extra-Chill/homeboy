@@ -1,5 +1,5 @@
 use super::resolution::{
-    discover_agent_task_executor_providers, lab_runtime_component_ids_for_plan_with_providers,
+    lab_runtime_component_ids_for_plan_with_providers,
     provider_requires_cwd_git_checkout_with_providers,
     required_extension_ids_for_plan_with_providers, select_provider,
 };
@@ -188,26 +188,62 @@ pub fn validate_provider_runner_readiness_for_backend(
     backend: &str,
     selector: Option<&str>,
 ) -> crate::core::Result<()> {
-    let providers = discover_agent_task_executor_providers();
-    validate_provider_runner_readiness_for_backend_with_providers(&providers, backend, selector)
+    let catalog = AgentTaskProviderCatalog::discover();
+    validate_provider_runner_readiness_for_backend_with_catalog(&catalog, backend, selector)
 }
 
+fn validate_provider_runner_readiness_for_backend_with_catalog(
+    catalog: &AgentTaskProviderCatalog,
+    backend: &str,
+    selector: Option<&str>,
+) -> crate::core::Result<()> {
+    validate_provider_runner_readiness_for_backend_with_diagnostics(
+        catalog.providers(),
+        catalog.diagnostics(),
+        backend,
+        selector,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn validate_provider_runner_readiness_for_backend_with_providers(
     providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> crate::core::Result<()> {
+    validate_provider_runner_readiness_for_backend_with_diagnostics(
+        providers,
+        &[],
+        backend,
+        selector,
+    )
+}
+
+fn validate_provider_runner_readiness_for_backend_with_diagnostics(
+    providers: &[AgentTaskExecutorProvider],
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
     backend: &str,
     selector: Option<&str>,
 ) -> crate::core::Result<()> {
     let provider = match resolve_provider_for_backend(providers, backend, selector) {
         ProviderResolution::Resolved(provider) => provider,
         ProviderResolution::NotFound => {
+            let matching_diagnostics =
+                runtime_discovery_diagnostics_for_backend(diagnostics, backend);
+            let mut suggestions = vec![
+                "Run `homeboy agent-task providers` on the same machine/runner to inspect registered providers.".to_string(),
+                "Install or sync the extension/runtime that declares the requested backend, or pass --backend with a registered backend.".to_string(),
+            ];
+            suggestions.extend(
+                matching_diagnostics
+                    .iter()
+                    .map(format_runtime_discovery_diagnostic),
+            );
             return Err(Error::validation_invalid_argument(
                 "backend",
-                format!("no extension agent-task provider found for backend '{backend}'"),
+                provider_not_found_message(backend, &matching_diagnostics),
                 Some(backend.to_string()),
-                Some(vec![
-                    "Run `homeboy agent-task providers` on the same machine/runner to inspect registered providers.".to_string(),
-                    "Install or sync the extension/runtime that declares the requested backend, or pass --backend with a registered backend.".to_string(),
-                ]),
+                Some(suggestions),
             ));
         }
         ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
@@ -265,6 +301,42 @@ pub(super) fn validate_provider_runner_readiness_for_backend_with_providers(
     })?;
 
     Ok(())
+}
+
+pub(super) fn runtime_discovery_diagnostics_for_backend(
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
+    backend: &str,
+) -> Vec<AgentRuntimeDiscoveryDiagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.runtime_id.as_deref() == Some(backend))
+        .cloned()
+        .collect()
+}
+
+pub(super) fn provider_not_found_message(
+    backend: &str,
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
+) -> String {
+    let base = format!("no extension agent-task provider found for backend '{backend}'");
+    if diagnostics.is_empty() {
+        return base;
+    }
+    let details = diagnostics
+        .iter()
+        .map(format_runtime_discovery_diagnostic)
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("{base}; runtime discovery diagnostics: {details}")
+}
+
+pub(super) fn format_runtime_discovery_diagnostic(
+    diagnostic: &AgentRuntimeDiscoveryDiagnostic,
+) -> String {
+    match diagnostic.path.as_deref() {
+        Some(path) => format!("{} at {}: {}", diagnostic.class, path, diagnostic.message),
+        None => format!("{}: {}", diagnostic.class, diagnostic.message),
+    }
 }
 
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {

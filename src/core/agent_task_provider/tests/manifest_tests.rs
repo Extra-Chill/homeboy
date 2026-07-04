@@ -132,6 +132,43 @@ fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
 }
 
 #[test]
+fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
+    let (mut request, _provider) = request("missing-opencode", "unused".to_string());
+    request.executor.backend = "opencode".to_string();
+    let executor = ExtensionProviderAgentTaskExecutor::from_catalog(AgentTaskProviderCatalog {
+        providers: Vec::new(),
+        diagnostics: vec![AgentRuntimeDiscoveryDiagnostic {
+            class: "agent_runtime_manifest.schema_mismatch".to_string(),
+            message: "invalid type: map, expected string at line 12 column 18".to_string(),
+            runtime_id: Some("opencode".to_string()),
+            extension_id: None,
+            path: Some("/tmp/opencode/opencode.json".to_string()),
+        }],
+        version: None,
+    });
+
+    let outcome = executor.execute(
+        request,
+        AgentTaskExecutionContext {
+            plan_id: "test-plan".to_string(),
+            run_id: None,
+            attempt: 1,
+            cancellation: AgentTaskCancellationToken::default(),
+        },
+    );
+
+    let summary = outcome.summary.as_deref().expect("summary");
+    assert!(summary.contains("no extension agent-task provider found for backend 'opencode'"));
+    assert!(summary.contains("agent_runtime_manifest.schema_mismatch"));
+    assert!(summary.contains("invalid type: map, expected string at line 12 column 18"));
+    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_missing");
+    assert_eq!(
+        outcome.diagnostics[0].data["runtime_discovery_diagnostics"][0]["class"],
+        "agent_runtime_manifest.schema_mismatch"
+    );
+}
+
+#[test]
 fn provider_command_parts_warns_for_legacy_string_command() {
     let (_request, provider) = request("task-legacy-command", "legacy-provider --flag".to_string());
 
