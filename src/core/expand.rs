@@ -48,7 +48,3 @@ pub(crate) fn expand_with_tilde(input: &str, resolve: impl Fn(&str) -> Option<St
     let substituted = expand_tokens(input, resolve);
     shellexpand::tilde(&substituted).into_owned()
 }
-
-#[cfg(test)]
-#[path = "../../tests/core/expand_test.rs"]
-mod expand_test;

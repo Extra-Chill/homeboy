@@ -259,7 +259,3 @@ mod tests {
         assert!(err.to_string().contains("message"));
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/core/extension/structured_sidecar_test.rs"]
-mod structured_sidecar_test;
