@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::engine::local_files;
 use crate::core::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
 use crate::core::error::Result;
-use crate::core::extension::test::analyze::{TestAnalysis, TestAnalysisInput};
+use crate::core::extension::test::analyze::{TestAnalysis, TestAnalysisInput, TestFailure};
 use crate::core::extension::test::TestCounts;
 use crate::core::structured_sidecar;
 
@@ -42,6 +42,35 @@ pub struct TestSummaryOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailureSummaryItem>,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTestFailure {
+    #[serde(alias = "test_id", default)]
+    test_name: String,
+    #[serde(alias = "file", default)]
+    test_file: String,
+    #[serde(alias = "failure_type", default)]
+    error_type: String,
+    #[serde(default)]
+    message: String,
+    #[serde(alias = "source", default)]
+    source_file: String,
+    #[serde(alias = "source_line", alias = "line", default)]
+    source_line: u32,
+}
+
+impl From<RawTestFailure> for TestFailure {
+    fn from(raw: RawTestFailure) -> Self {
+        Self {
+            test_name: raw.test_name,
+            test_file: raw.test_file,
+            error_type: raw.error_type,
+            message: raw.message,
+            source_file: raw.source_file,
+            source_line: raw.source_line,
+        }
+    }
 }
 
 pub fn build_test_summary(
@@ -104,13 +133,7 @@ pub fn parse_failures_file(path: &std::path::Path) -> Result<Option<TestAnalysis
             Some("test.failures.parse".to_string()),
         )
     })?;
-    structured_sidecar::validate_payload("test.failures", &payload)?;
-    let mut parsed: TestAnalysisInput = serde_json::from_value(payload).map_err(|e| {
-        crate::core::Error::internal_json(
-            format!("Malformed test failures JSON in {}: {}", path.display(), e),
-            Some("test.failures.parse".to_string()),
-        )
-    })?;
+    let mut parsed = parse_failures_payload(payload, path)?;
 
     if parsed.total == 0 && !parsed.failures.is_empty() {
         parsed.total = parsed.failures.len() as u64;
@@ -121,6 +144,92 @@ pub fn parse_failures_file(path: &std::path::Path) -> Result<Option<TestAnalysis
     }
 
     Ok(Some(parsed))
+}
+
+fn parse_failures_payload(
+    payload: serde_json::Value,
+    path: &std::path::Path,
+) -> Result<TestAnalysisInput> {
+    match payload {
+        serde_json::Value::Array(items) => {
+            let payload = serde_json::Value::Array(items);
+            structured_sidecar::validate_payload("test.failures", &payload)?;
+            Ok(TestAnalysisInput {
+                failures: parse_failure_items(payload, path)?,
+                total: 0,
+                passed: 0,
+            })
+        }
+        serde_json::Value::Object(mut object) => {
+            let failures = object
+                .remove("failures")
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            let failures = match failures {
+                serde_json::Value::Array(items) => {
+                    let payload = serde_json::Value::Array(items);
+                    structured_sidecar::validate_payload("test.failures", &payload)?;
+                    parse_failure_items(payload, path)?
+                }
+                other => {
+                    return Err(crate::core::Error::internal_json(
+                        format!(
+                            "Malformed test failures JSON in {}: failures must be an array, got {}",
+                            path.display(),
+                            json_type_name(&other)
+                        ),
+                        Some("test.failures.parse".to_string()),
+                    ));
+                }
+            };
+            let total = object
+                .get("total")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let passed = object
+                .get("passed")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+
+            Ok(TestAnalysisInput {
+                failures,
+                total,
+                passed,
+            })
+        }
+        other => Err(crate::core::Error::internal_json(
+            format!(
+                "Malformed test failures JSON in {}: expected array or object, got {}",
+                path.display(),
+                json_type_name(&other)
+            ),
+            Some("test.failures.parse".to_string()),
+        )),
+    }
+}
+
+fn parse_failure_items(
+    payload: serde_json::Value,
+    path: &std::path::Path,
+) -> Result<Vec<TestFailure>> {
+    serde_json::from_value::<Vec<RawTestFailure>>(payload)
+        .map(|items| items.into_iter().map(TestFailure::from).collect())
+        .map_err(|e| {
+            crate::core::Error::internal_json(
+                format!("Malformed test failures JSON in {}: {}", path.display(), e),
+                Some("test.failures.parse".to_string()),
+            )
+        })
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 pub fn parse_test_results_file(path: &std::path::Path) -> Result<Option<TestCounts>> {
@@ -502,5 +611,60 @@ mod tests {
         let counts = counts.expect("schema JSON should parse");
 
         assert!(counts.is_none());
+    }
+
+    #[test]
+    fn failures_file_parser_accepts_empty_object_payload() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let failures_file = temp_dir.path().join("test-failures.json");
+        std::fs::write(
+            &failures_file,
+            r#"{
+                "failures": [],
+                "total": 10,
+                "passed": 10
+            }"#,
+        )
+        .expect("write test failures");
+
+        let parsed = parse_failures_file(&failures_file)
+            .expect("object-form test failures should parse")
+            .expect("test failures payload should be present");
+
+        assert!(parsed.failures.is_empty());
+        assert_eq!(parsed.total, 10);
+        assert_eq!(parsed.passed, 10);
+    }
+
+    #[test]
+    fn failures_file_parser_accepts_runtime_helper_array_payload() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let failures_file = temp_dir.path().join("test-failures.json");
+        std::fs::write(
+            &failures_file,
+            r#"[
+                {
+                    "test_id": "suite::case",
+                    "file": "tests/suite.rs",
+                    "line": 42,
+                    "failure_type": "assertion",
+                    "message": "failed assertion"
+                }
+            ]"#,
+        )
+        .expect("write test failures");
+
+        let parsed = parse_failures_file(&failures_file)
+            .expect("array-form test failures should parse")
+            .expect("test failures payload should be present");
+
+        assert_eq!(parsed.total, 1);
+        assert_eq!(parsed.passed, 0);
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.failures[0].test_name, "suite::case");
+        assert_eq!(parsed.failures[0].test_file, "tests/suite.rs");
+        assert_eq!(parsed.failures[0].source_line, 42);
+        assert_eq!(parsed.failures[0].error_type, "assertion");
+        assert_eq!(parsed.failures[0].message, "failed assertion");
     }
 }
