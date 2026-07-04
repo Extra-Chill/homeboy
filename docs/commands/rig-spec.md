@@ -66,7 +66,10 @@ Merge rules are intentionally generic:
 
 - Parent files are applied in order; the declaring rig is applied last.
 - Objects merge recursively.
-- Arrays and scalar values replace the inherited value.
+- Plain arrays and scalar values replace the inherited value.
+- A child field whose inherited value is an array can opt into array merge semantics by using an object directive instead of a plain array:
+  - `{ "$append": [...] }` appends entries after the inherited array.
+  - `{ "$merge_by": "<key>", "entries": [...] }` merges array objects by a key field such as `id` or `label`; matching entries deep-merge with the same object rules, and new keyed entries append.
 - `extends` paths must be non-empty relative paths that stay inside the rig package source root.
 
 Example:
@@ -97,6 +100,47 @@ Example:
 ```
 
 The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
+
+Array merge example:
+
+```jsonc
+// templates/base.json
+{
+  "pipeline": {
+    "up": [
+      { "kind": "check", "label": "base setup complete", "command": "./scripts/base-setup.sh" }
+    ],
+    "check": [
+      { "kind": "check", "label": "npm available", "command": "npm --version" },
+      { "kind": "check", "label": "build", "command": "npm run build", "metadata": { "retries": 1 } }
+    ]
+  }
+}
+```
+
+```jsonc
+// rigs/app/rig.json
+{
+  "extends": "../../templates/base.json",
+  "id": "app",
+  "pipeline": {
+    "check": {
+      "$merge_by": "label",
+      "entries": [
+        { "kind": "check", "label": "build", "command": "npm run build -- --fast", "metadata": { "timeout": 60 } },
+        { "kind": "check", "label": "app checkout exists", "file": "${components.app.path}" }
+      ]
+    },
+    "up": {
+      "$append": [
+        { "kind": "check", "label": "local setup complete", "command": "./scripts/setup.sh" }
+      ]
+    }
+  }
+}
+```
+
+The materialized `pipeline.check` keeps `npm available`, deep-merges the `build` step so `metadata.retries` and `metadata.timeout` both survive, and appends `app checkout exists`. Plain array fields still replace inherited arrays unless one of these directives is used.
 
 ## Package Dependencies
 

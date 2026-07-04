@@ -197,12 +197,13 @@ fn discovered_from_path(
 ///
 /// `extends` children are partial specs by design — they may legitimately omit
 /// required fields that a base template supplies, and they may carry
-/// post-materialization-only constructs such as the array-merge directive
-/// (`{ "$merge": "append" }`). Validating the raw child against the full schema
-/// would reject those, so when a spec declares `extends` we materialize it
-/// first (merging templates and stripping directives) and validate the
-/// resolved spec. Specs without `extends` keep the identical raw-parse schema
-/// gate so malformed specs still fail discovery with the same error shape.
+/// post-materialization-only constructs such as the array-merge directives
+/// (`{ "$append": [...] }` / `{ "$merge_by": "label", "entries": [...] }`).
+/// Validating the raw child against the full schema would reject those, so when
+/// a spec declares `extends` we materialize it first (merging templates and
+/// stripping directives) and validate the resolved spec. Specs without
+/// `extends` keep the identical raw-parse schema gate so malformed specs still
+/// fail discovery with the same error shape.
 fn parse_discovered_rig_spec(path: &Path, source_root: &Path) -> Result<super::RigSpec> {
     let value = match super::install::materialize_rig_spec(path, source_root)? {
         Some(materialized) => materialized,
