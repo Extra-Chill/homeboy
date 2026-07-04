@@ -32,8 +32,9 @@ fs.writeFileSync(fakeBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const input = JSON.parse(fs.readFileSync(inputArg.slice('--input-file='.length), 'utf8'));
-const callbackPath = input.runtime_env.HOMEBOY_CALLBACK_DATA_PATH;
-const helper = input.extra_plugins.find((plugin) => plugin.metadata?.source === 'homeboy-runtime-callback-data');
+const taskInput = input.task_input;
+const callbackPath = taskInput.runtime_env.HOMEBOY_CALLBACK_DATA_PATH;
+const helper = taskInput.extra_plugins.find((plugin) => plugin.metadata?.source === 'homeboy-runtime-callback-data');
 if (!callbackPath || !helper || !fs.existsSync(callbackPath)) {
   throw new Error('callback data helper was not injected');
 }
