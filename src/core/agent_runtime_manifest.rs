@@ -9,6 +9,7 @@ use crate::core::agent_task_provider::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
     AgentTaskProviderWorkspaceMaterialization,
 };
+use crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use crate::core::extension::{load_all_extensions, load_extension, ExtensionManifest};
 use crate::core::{config, paths, Error, Result};
 
@@ -470,6 +471,7 @@ fn agent_task_executor_providers_from_runtime_manifests(
     for runtime_manifest in runtime_manifests {
         let materialization_plan = runtime_materialization_plan(&runtime_manifest);
         for mut provider in runtime_manifest.agent_task_executors {
+            normalize_agent_task_executor_provider_invocation(&mut provider);
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
             if provider.runtime_package_source.is_none() {
@@ -486,6 +488,22 @@ fn agent_task_executor_providers_from_runtime_manifests(
         }
     }
     providers
+}
+
+fn normalize_agent_task_executor_provider_invocation(provider: &mut AgentTaskExecutorProvider) {
+    if !provider.invocation.argv.is_empty()
+        || !provider.command_argv.is_empty()
+        || provider.command.trim().is_empty()
+    {
+        return;
+    }
+
+    provider.invocation.schema = Some(COMMAND_INVOCATION_SCHEMA.to_string());
+    provider.invocation.argv = provider
+        .command
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
 }
 
 pub(crate) fn validate_installed_extension_agent_runtime_provider_discovery(
