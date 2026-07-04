@@ -20,9 +20,10 @@ use homeboy::core::{api_jobs, runners as runner};
 use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
-    RunDetail, RunsArtifactArgs, RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput,
-    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
+    RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput, RunsArtifactPathGuide,
+    RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs, RunsArtifactsOutput,
+    RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
     RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
     RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
 };
@@ -65,7 +66,15 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         runs.extend(active_runner_job_summaries(status_filter.as_deref()));
     }
 
-    Ok((RunsOutput::List(RunsListOutput { command, runs }), 0))
+    let actionable = actionable_for_run_list(&runs);
+    Ok((
+        RunsOutput::List(RunsListOutput {
+            command,
+            runs,
+            actionable,
+        }),
+        0,
+    ))
 }
 
 fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
@@ -106,10 +115,13 @@ pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let run = runs_service::require_run(&store, run_id)?;
     runs_service::refresh_mirrored_daemon_evidence_best_effort(&run.id);
     let run = runs_service::require_run(&store, &run.id)?;
+    let run = run_detail(&store, run)?;
+    let actionable = actionable_for_run_detail(&run);
     Ok((
         RunsOutput::Show(RunsShowOutput {
             command: "runs.show",
-            run: run_detail(&store, run)?,
+            run,
+            actionable,
         }),
         0,
     ))

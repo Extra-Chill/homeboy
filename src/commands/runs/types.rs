@@ -41,6 +41,10 @@ use super::refs::{RunsRefsArgs, RunsRefsOutput};
 use super::resources::{RunsResourcesArgs, RunsResourcesOutput};
 use super::watch::{RunsWatchArgs, RunsWatchOutput};
 use crate::commands::fuzz::FuzzCompareOutput;
+use crate::commands::utils::response::{
+    CommandActionableMetadata, CommandArtifactRef, CommandNextAction, CommandNextActionKind,
+    CommandResultRefs, CommandRunRef,
+};
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
@@ -224,12 +228,22 @@ pub enum RunsOutput {
 pub struct RunsListOutput {
     pub command: &'static str,
     pub runs: Vec<RunSummary>,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
 }
 
 #[derive(Serialize)]
 pub struct RunsShowOutput {
     pub command: &'static str,
     pub run: RunDetail,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
 }
 
 /// Field-projection result for `runs show -q` / `runs artifact get -q`.
@@ -687,4 +701,97 @@ pub struct RunDetail {
     pub homeboy_version: Option<String>,
     pub metadata: Value,
     pub artifacts: Vec<ArtifactRecord>,
+}
+
+pub(super) fn actionable_for_run_summary(run: &RunSummary) -> CommandActionableMetadata {
+    CommandActionableMetadata::for_run(run_ref_from_summary(run))
+        .with_next_action(
+            CommandNextAction::new("show run", format!("homeboy runs show {}", run.id))
+                .with_kind(CommandNextActionKind::Show),
+        )
+        .with_next_action(
+            CommandNextAction::new("watch run", format!("homeboy runs watch {}", run.id))
+                .with_kind(CommandNextActionKind::Watch),
+        )
+        .with_next_action(
+            CommandNextAction::new(
+                "list artifacts",
+                format!("homeboy runs artifacts {}", run.id),
+            )
+            .with_kind(CommandNextActionKind::Artifacts),
+        )
+}
+
+pub(super) fn actionable_for_run_list(runs: &[RunSummary]) -> CommandActionableMetadata {
+    let run_refs = runs.iter().map(run_ref_from_summary).collect::<Vec<_>>();
+    let next_actions = runs
+        .iter()
+        .take(10)
+        .flat_map(|run| {
+            [
+                CommandNextAction::new("show run", format!("homeboy runs show {}", run.id))
+                    .with_kind(CommandNextActionKind::Show),
+                CommandNextAction::new("watch run", format!("homeboy runs watch {}", run.id))
+                    .with_kind(CommandNextActionKind::Watch),
+            ]
+        })
+        .collect();
+
+    CommandActionableMetadata {
+        run: run_refs.first().cloned(),
+        refs: CommandResultRefs {
+            runs: run_refs,
+            ..Default::default()
+        },
+        next_actions,
+        ..Default::default()
+    }
+}
+
+pub(super) fn actionable_for_run_detail(run: &RunDetail) -> CommandActionableMetadata {
+    let mut metadata = actionable_for_run_summary(&run.summary);
+    metadata.artifacts = run
+        .artifacts
+        .iter()
+        .map(|artifact| CommandArtifactRef {
+            id: artifact.id.clone(),
+            kind: artifact.kind.clone(),
+            uri: artifact
+                .public_url
+                .clone()
+                .or_else(|| artifact.viewer_url.clone())
+                .or_else(|| artifact.url.clone())
+                .unwrap_or_else(|| artifact.path.clone()),
+            semantic_key: Some(artifact.artifact_type.clone()),
+        })
+        .collect();
+    metadata
+        .next_actions
+        .extend(run.artifacts.iter().filter_map(|artifact| {
+            (artifact.artifact_type == "file").then(|| {
+                CommandNextAction::new(
+                    format!("get artifact {}", artifact.id),
+                    format!(
+                        "homeboy runs artifact get {} {} -o <path>",
+                        run.summary.id, artifact.id
+                    ),
+                )
+                .with_kind(CommandNextActionKind::Artifacts)
+            })
+        }));
+    metadata
+}
+
+fn run_ref_from_summary(run: &RunSummary) -> CommandRunRef {
+    CommandRunRef {
+        id: run.id.clone(),
+        kind: run.kind.clone(),
+        source: "homeboy-observation-store".to_string(),
+        location: run.cwd.clone(),
+        started_at: Some(run.started_at.clone()),
+        updated_at: None,
+        finished_at: run.finished_at.clone(),
+        status_command: format!("homeboy runs show {}", run.id),
+        watch_command: format!("homeboy runs watch {}", run.id),
+    }
 }

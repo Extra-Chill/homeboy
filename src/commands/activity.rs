@@ -8,6 +8,10 @@ use homeboy::core::notify::{self, NotifyEvent, NotifyOutcome};
 use homeboy::core::observation::ObservationStore;
 use homeboy::core::{Error, Result};
 
+use super::utils::response::{
+    CommandActionableMetadata, CommandAgentTaskRef, CommandJobRef, CommandNextAction,
+    CommandNextActionKind, CommandResultRefs, CommandRunRef,
+};
 use super::{CmdResult, GlobalArgs};
 
 const TIMEOUT_EXIT_CODE: i32 = 124;
@@ -59,8 +63,19 @@ pub struct ActivityWatchArgs {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ActivityOutput {
-    Report(ActivityReport),
+    Report(ActivityReportOutput),
     Watch(ActivityWatchOutput),
+}
+
+#[derive(Serialize)]
+pub struct ActivityReportOutput {
+    #[serde(flatten)]
+    pub report: ActivityReport,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
 }
 
 #[derive(Serialize)]
@@ -76,6 +91,11 @@ pub struct ActivityWatchOutput {
     pub item: ActivityItem,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyOutcome>,
 }
@@ -169,15 +189,22 @@ fn list(args: ActivityListArgs) -> CmdResult<ActivityOutput> {
     } else {
         ActivityScope::ActiveRecent
     };
+    let report = activity::activity_report(scope, args.limit)?;
+    let actionable = actionable_for_activity_report(&report);
     Ok((
-        ActivityOutput::Report(activity::activity_report(scope, args.limit)?),
+        ActivityOutput::Report(ActivityReportOutput { report, actionable }),
         0,
     ))
 }
 
 fn show(id: &str) -> CmdResult<ActivityOutput> {
     reconcile_runs_best_effort();
-    Ok((ActivityOutput::Report(activity::show_activity(id)?), 0))
+    let report = activity::show_activity(id)?;
+    let actionable = actionable_for_activity_report(&report);
+    Ok((
+        ActivityOutput::Report(ActivityReportOutput { report, actionable }),
+        0,
+    ))
 }
 
 fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
@@ -244,6 +271,7 @@ fn watch_output(
         .iter()
         .map(|action| action.command.clone())
         .collect();
+    let actionable = actionable_for_activity_item(&item);
     (
         ActivityOutput::Watch(ActivityWatchOutput {
             schema: activity::ACTIVITY_REPORT_SCHEMA,
@@ -256,10 +284,133 @@ fn watch_output(
             poll_count,
             item,
             next_actions,
+            actionable,
             notify,
         }),
         exit_code,
     )
+}
+
+fn actionable_for_activity_item(item: &ActivityItem) -> CommandActionableMetadata {
+    let mut metadata = CommandActionableMetadata {
+        refs: CommandResultRefs {
+            runs: item
+                .refs
+                .run_id
+                .as_deref()
+                .map(activity_run_ref)
+                .into_iter()
+                .collect(),
+            jobs: item
+                .refs
+                .runner_job_id
+                .as_deref()
+                .map(activity_job_ref)
+                .into_iter()
+                .collect(),
+            agent_tasks: item
+                .refs
+                .agent_task_run_id
+                .as_deref()
+                .map(activity_agent_task_ref)
+                .into_iter()
+                .collect(),
+        },
+        next_actions: item
+            .next_actions
+            .iter()
+            .map(|action| {
+                CommandNextAction::new(action.label.clone(), action.command.clone())
+                    .with_kind(action_kind_from_label(&action.label))
+            })
+            .collect(),
+        artifacts: item
+            .artifacts
+            .iter()
+            .map(|artifact| super::utils::response::CommandArtifactRef {
+                id: artifact.id.clone(),
+                kind: artifact.kind.clone(),
+                uri: artifact.uri.clone(),
+                semantic_key: None,
+            })
+            .collect(),
+        evidence: item
+            .evidence
+            .iter()
+            .map(|evidence| super::utils::response::CommandEvidenceRef {
+                id: evidence.id.clone(),
+                kind: evidence.kind.clone(),
+                uri: evidence.uri.clone(),
+                semantic_key: None,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    metadata.run = metadata.refs.runs.first().cloned();
+    metadata
+}
+
+fn actionable_for_activity_report(report: &ActivityReport) -> CommandActionableMetadata {
+    let mut metadata = CommandActionableMetadata::default();
+    for item in report.items.iter().take(20) {
+        let item_metadata = actionable_for_activity_item(item);
+        if metadata.run.is_none() {
+            metadata.run = item_metadata.run.clone();
+        }
+        metadata.refs.runs.extend(item_metadata.refs.runs);
+        metadata.refs.jobs.extend(item_metadata.refs.jobs);
+        metadata
+            .refs
+            .agent_tasks
+            .extend(item_metadata.refs.agent_tasks);
+        metadata.next_actions.extend(item_metadata.next_actions);
+        metadata.artifacts.extend(item_metadata.artifacts);
+        metadata.evidence.extend(item_metadata.evidence);
+    }
+    metadata
+}
+
+fn activity_run_ref(run_id: &str) -> CommandRunRef {
+    CommandRunRef {
+        id: run_id.to_string(),
+        kind: "activity".to_string(),
+        source: "homeboy-activity".to_string(),
+        location: None,
+        started_at: None,
+        updated_at: None,
+        finished_at: None,
+        status_command: format!("homeboy runs show {run_id}"),
+        watch_command: format!("homeboy runs watch {run_id}"),
+    }
+}
+
+fn activity_job_ref(job_id: &str) -> CommandJobRef {
+    CommandJobRef {
+        id: job_id.to_string(),
+        kind: "runner_job".to_string(),
+        source: "homeboy-activity".to_string(),
+        status_command: format!("homeboy activity show {job_id}"),
+        watch_command: Some(format!("homeboy activity watch {job_id}")),
+    }
+}
+
+fn activity_agent_task_ref(run_id: &str) -> CommandAgentTaskRef {
+    CommandAgentTaskRef {
+        id: run_id.to_string(),
+        source: "homeboy-activity".to_string(),
+        status_command: format!("homeboy agent-task status {run_id} --full"),
+        logs_command: format!("homeboy agent-task logs {run_id}"),
+        review_command: Some(format!("homeboy agent-task review {run_id}")),
+    }
+}
+
+fn action_kind_from_label(label: &str) -> CommandNextActionKind {
+    match label {
+        "watch" => CommandNextActionKind::Watch,
+        "artifacts" => CommandNextActionKind::Artifacts,
+        "repair" | "reconcile" => CommandNextActionKind::Repair,
+        _ => CommandNextActionKind::Show,
+    }
 }
 
 fn maybe_notify(
