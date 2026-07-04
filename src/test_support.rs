@@ -1,6 +1,12 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use tempfile::TempDir;
+
+static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
+static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 
 pub(crate) struct HomeGuard {
     prior: Option<String>,
@@ -190,6 +196,73 @@ pub(crate) fn write_source_extension(home: &std::path::Path, id: &str, file_exte
         std::fs::write(extension_dir.join("grammar.toml"), minimal_source_grammar())
             .expect("source grammar");
     }
+}
+
+pub(crate) fn shared_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
+    shared_git_repo_fixture_from_template(name, shared_empty_git_repo_template())
+}
+
+pub(crate) fn shared_committed_git_repo_fixture(name: &str) -> (TempDir, PathBuf) {
+    shared_git_repo_fixture_from_template(name, shared_committed_git_repo_template())
+}
+
+fn shared_git_repo_fixture_from_template(name: &str, template: &Path) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().expect("git fixture tempdir");
+    let repo = temp.path().join(name);
+    copy_dir_all(template, &repo).expect("copy git fixture template");
+    (temp, repo)
+}
+
+fn shared_empty_git_repo_template() -> &'static Path {
+    SHARED_EMPTY_GIT_REPO_TEMPLATE
+        .get_or_init(|| {
+            let temp = TempDir::new().expect("git template tempdir");
+            run_git_fixture_command(temp.path(), &["init", "-q"]);
+            temp
+        })
+        .path()
+}
+
+fn shared_committed_git_repo_template() -> &'static Path {
+    SHARED_COMMITTED_GIT_REPO_TEMPLATE
+        .get_or_init(|| {
+            let temp = TempDir::new().expect("committed git template tempdir");
+            run_git_fixture_command(temp.path(), &["init", "-q"]);
+            std::fs::write(temp.path().join("README.md"), "# homeboy test fixture\n")
+                .expect("git template readme");
+            run_git_fixture_command(temp.path(), &["add", "README.md"]);
+            run_git_fixture_command(temp.path(), &["commit", "-q", "-m", "test fixture"]);
+            temp
+        })
+        .path()
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_git_fixture_command(repo: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "homeboy-test")
+        .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "homeboy-test")
+        .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
+        .status()
+        .expect("git fixture command");
+    assert!(status.success(), "git fixture command {:?} failed", args);
 }
 
 fn minimal_source_grammar() -> &'static str {
