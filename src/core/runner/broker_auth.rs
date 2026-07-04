@@ -185,7 +185,7 @@ impl BrokerAuthStore {
                 "broker has no paired runner credentials configured",
                 runner_id.map(str::to_string),
                 vec![
-                    "Pair a runner with `homeboy runner broker pair` to mint a scoped token."
+                    "Pair and install a runner credential with `homeboy runner broker pair <id> --runner-id <runner> --submit --work`, or use `--no-install` only when you will copy broker_auth.json to the broker enforcement host yourself."
                         .to_string(),
                     "For loopback-only smoke runs, set allow_unauthenticated_loopback in broker_auth.json."
                         .to_string(),
@@ -441,6 +441,9 @@ mod tests {
             .authorize(true, None, BrokerScope::Work, Some("runner-a"))
             .expect_err("secure by default");
         assert_eq!(err.code.as_str(), "broker.auth_denied");
+        assert!(err.hints.iter().any(|hint| {
+            hint.message.contains("--no-install") && hint.message.contains("broker_auth.json")
+        }));
     }
 
     #[test]
@@ -551,6 +554,39 @@ mod tests {
             .iter()
             .all(|cred| cred.token_sha256 != token));
         assert_eq!(store.credentials[0].token_sha256, sha256_hex(&token));
+    }
+
+    #[test]
+    fn saved_store_round_trips_hashed_credential_for_enforcement() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut store = BrokerAuthStore::default();
+            let minted = store
+                .pair(
+                    "cred-1",
+                    "runner-a",
+                    scopes(&[BrokerScope::Submit, BrokerScope::Work]),
+                )
+                .expect("pair");
+            let path = store.save().expect("save store");
+
+            assert!(path.ends_with("broker_auth.json"));
+            let loaded = BrokerAuthStore::load().expect("load store");
+            loaded
+                .authorize(false, Some(&minted.token), BrokerScope::Submit, None)
+                .expect("submit token survives store round trip");
+            loaded
+                .authorize(
+                    false,
+                    Some(&minted.token),
+                    BrokerScope::Work,
+                    Some("runner-a"),
+                )
+                .expect("work token survives store round trip");
+            assert!(loaded
+                .credentials
+                .iter()
+                .all(|credential| credential.token_sha256 != minted.token));
+        });
     }
 
     #[test]
