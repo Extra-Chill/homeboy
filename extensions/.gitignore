@@ -2,3 +2,4 @@
 **/__pycache__/
 .claude/CLAUDE.local.md
 rust/dist-manifest.json
+wordpress/vendor/

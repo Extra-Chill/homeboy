@@ -236,7 +236,7 @@ echo "Setting up WordPress extension..."
 # and the extension's own self-tests, not for running component tests).
 if [ -f "composer.json" ]; then
     echo "Installing PHP dependencies..."
-    composer install --quiet --no-interaction
+    composer install --quiet --no-interaction --prefer-dist
 
     if [ -x "vendor/bin/phpcs" ]; then
         echo "Registering PHPCS standards..."
