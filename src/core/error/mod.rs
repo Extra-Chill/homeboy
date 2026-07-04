@@ -445,8 +445,16 @@ impl Error {
         context: Option<String>,
         received: Option<String>,
     ) -> Self {
+        let error = err.to_string();
+        let category = match err.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "data",
+            serde_json::error::Category::Eof => "eof",
+        };
         let mut details = serde_json::json!({
-            "error": err.to_string(),
+            "error": error,
+            "category": category,
             "context": context,
         });
         if let Some(received_json) = received {
@@ -454,7 +462,25 @@ impl Error {
                 serde_json::json!(received_json.chars().take(200).collect::<String>());
         }
 
-        Self::new(ErrorCode::ValidationInvalidJson, "Invalid JSON", details)
+        Self::new(
+            ErrorCode::ValidationInvalidJson,
+            format!("Invalid JSON: {error}"),
+            details,
+        )
+    }
+
+    pub fn validation_json_error(&self) -> Option<&str> {
+        if self.code != ErrorCode::ValidationInvalidJson {
+            return None;
+        }
+        self.details.get("error").and_then(Value::as_str)
+    }
+
+    pub fn validation_json_category(&self) -> Option<&str> {
+        if self.code != ErrorCode::ValidationInvalidJson {
+            return None;
+        }
+        self.details.get("category").and_then(Value::as_str)
     }
 
     pub fn dependency_step_failed(

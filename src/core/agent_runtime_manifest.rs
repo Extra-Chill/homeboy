@@ -379,13 +379,20 @@ fn load_standalone_agent_runtime_manifest(
     let mut manifest: AgentRuntimeManifest = match config::from_str(&content) {
         Ok(manifest) => manifest,
         Err(error) => {
+            let class = match error.validation_json_category() {
+                Some("data") => "agent_runtime_manifest.schema_mismatch",
+                _ => "agent_runtime_manifest.parse_failed",
+            };
             return StandaloneAgentRuntimeManifestLoad::Invalid(AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_runtime_manifest.parse_failed".to_string(),
-                message: error.to_string(),
+                class: class.to_string(),
+                message: error
+                    .validation_json_error()
+                    .unwrap_or_else(|| error.message.as_str())
+                    .to_string(),
                 runtime_id: Some(id),
                 extension_id: None,
                 path: Some(manifest_path.display().to_string()),
-            })
+            });
         }
     };
     manifest.id = id;
@@ -934,6 +941,48 @@ mod tests {
             assert_eq!(
                 catalog.diagnostics[0].runtime_id.as_deref(),
                 Some("broken-runtime")
+            );
+            assert!(
+                catalog.diagnostics[0].message.contains("line 1 column"),
+                "expected serde location detail, got {:?}",
+                catalog.diagnostics[0].message
+            );
+        });
+    }
+
+    #[test]
+    fn standalone_runtime_catalog_reports_schema_mismatch_for_valid_json_wrong_shape() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("skewed-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("skewed-runtime.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "skewed-runtime",
+                    "agent_task_executors": "not-an-array"
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let catalog = discover_standalone_agent_runtime_catalog();
+
+            assert!(catalog.manifests.is_empty());
+            assert_eq!(catalog.diagnostics.len(), 1);
+            assert_eq!(
+                catalog.diagnostics[0].class,
+                "agent_runtime_manifest.schema_mismatch"
+            );
+            assert!(
+                catalog.diagnostics[0]
+                    .message
+                    .contains("invalid type: string \"not-an-array\", expected a sequence"),
+                "expected serde schema detail, got {:?}",
+                catalog.diagnostics[0].message
             );
         });
     }

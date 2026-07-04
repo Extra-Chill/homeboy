@@ -21,7 +21,13 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             request.executor.selector.as_deref(),
         ) {
             ProviderResolution::Resolved(provider) => provider,
-            resolution => return provider_resolution_failure_outcome(&request, resolution),
+            resolution => {
+                return provider_resolution_failure_outcome(
+                    &request,
+                    resolution,
+                    self.diagnostics(),
+                )
+            }
         };
 
         let missing_capabilities: Vec<String> = request
@@ -53,20 +59,27 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
 fn provider_resolution_failure_outcome(
     request: &AgentTaskRequest,
     resolution: ProviderResolution<'_>,
+    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
 ) -> AgentTaskOutcome {
     match resolution {
         ProviderResolution::Resolved(_) => unreachable!("resolved provider handled before failure"),
-        ProviderResolution::NotFound => failure_outcome(
-            request,
-            AgentTaskOutcomeStatus::Failed,
-            AgentTaskFailureClassification::CapabilityMissing,
-            "agent_task.provider_missing",
-            format!(
-                "no extension agent-task provider found for backend '{}'",
-                request.executor.backend
-            ),
-            json!({ "backend": request.executor.backend }),
-        ),
+        ProviderResolution::NotFound => {
+            let matching_diagnostics = runtime_discovery_diagnostics_for_backend(
+                diagnostics,
+                &request.executor.backend,
+            );
+            failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskFailureClassification::CapabilityMissing,
+                "agent_task.provider_missing",
+                provider_not_found_message(&request.executor.backend, &matching_diagnostics),
+                json!({
+                    "backend": request.executor.backend,
+                    "runtime_discovery_diagnostics": matching_diagnostics,
+                }),
+            )
+        }
         ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => failure_outcome(
             request,
             AgentTaskOutcomeStatus::Failed,
