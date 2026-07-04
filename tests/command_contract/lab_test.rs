@@ -313,6 +313,18 @@ fn unsupported_lab_command_cases() -> Vec<Commands> {
     vec![
         parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123"]),
         parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"]),
+        parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "true",
+            "--dry-run",
+            "https://github.com/Extra-Chill/homeboy/issues/6453",
+        ]),
         parsed_command(&["homeboy", "review", "--changed-only"]),
         parsed_command(&[
             "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
@@ -326,6 +338,56 @@ fn unsupported_lab_command_cases() -> Vec<Commands> {
         parsed_command(&["homeboy", "worktree", "list"]),
         parsed_command(&["homeboy", "worktree", "remove", "homeboy@task"]),
     ]
+}
+
+#[test]
+fn agent_task_fanout_cook_batch_dry_run_stays_controller_local() {
+    let dry_run = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "--repo",
+        "homeboy",
+        "--verify",
+        "true",
+        "--dry-run",
+        "https://github.com/Extra-Chill/homeboy/issues/6453",
+    ]);
+    let contract = dry_run
+        .lab_contract()
+        .expect("dry-run planning exposes a local-only Lab contract");
+
+    assert!(!dry_run.supports_lab_runner());
+    assert_eq!(contract.hot_label, "agent-task fanout cook-batch");
+    assert_eq!(
+        contract.portability,
+        LabCommandPortability::LocalOnly(AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON)
+    );
+    assert!(!contract.routing_policy.default_lab_offload);
+    assert!(!contract.routing_policy.infer_source_path_tools);
+    assert!(!contract.capture_mutation_patch);
+
+    let actual_cook = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "--repo",
+        "homeboy",
+        "--verify",
+        "true",
+        "https://github.com/Extra-Chill/homeboy/issues/6453",
+    ]);
+
+    assert!(actual_cook.supports_lab_runner());
+    assert_eq!(
+        actual_cook
+            .lab_contract()
+            .expect("actual cook-batch remains Lab portable")
+            .portability,
+        LabCommandPortability::Portable
+    );
 }
 
 #[test]
