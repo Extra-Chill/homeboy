@@ -12,7 +12,7 @@ pub struct RedactionPolicy {
 
 impl Default for RedactionPolicy {
     fn default() -> Self {
-        Self {
+        let mut policy = Self {
             sensitive_keys: [
                 "api_key",
                 "apikey",
@@ -43,13 +43,22 @@ impl Default for RedactionPolicy {
                 "x-api-key",
                 "x-auth-token",
                 "x-csrf-token",
-                "x-wp-nonce",
             ]
             .into_iter()
             .map(str::to_string)
             .collect(),
             replacement: DEFAULT_REPLACEMENT.to_string(),
+        };
+        if let Ok(raw) = std::env::var("HOMEBOY_REDACTION_SENSITIVE_HEADERS") {
+            for header in raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                policy = policy.with_sensitive_header(header);
+            }
         }
+        policy
     }
 }
 
