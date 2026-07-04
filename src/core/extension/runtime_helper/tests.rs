@@ -50,6 +50,10 @@ fn ensure_all_helpers_writes_all_files() {
             "resolve context helper should be in pairs"
         );
         assert!(
+            pairs.iter().any(|(k, _)| k == DISPOSABLE_LOCAL_DB_ENV),
+            "disposable local DB helper should be in pairs"
+        );
+        assert!(
             pairs.iter().any(|(k, _)| k == BENCH_HELPER_JS_ENV),
             "bench JS helper should be in pairs"
         );
@@ -178,6 +182,30 @@ fn sidecar_writer_appends_and_merges_json_arrays() {
         r#"[{"tool":"lint","message":"one","fingerprint":"first"},{"tool":"lint","message":"two","fingerprint":"second"},{"tool":"lint","message":"three","fingerprint":"third"}]
 "#
     );
+}
+
+#[test]
+fn disposable_local_db_helper_exports_requested_env_names_without_framework_terms() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let helper_path = dir.path().join("disposable-local-db.sh");
+    std::fs::write(&helper_path, assets::DISPOSABLE_LOCAL_DB_SH).expect("write helper");
+
+    let output = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&helper_path)
+        .output()
+        .expect("syntax check helper");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = std::fs::read_to_string(&helper_path).expect("helper content");
+    assert!(content.contains("--env-database"));
+    assert!(content.contains("homeboy_disposable_local_db_start"));
+    assert!(!content.to_lowercase().contains("wpcom"));
+    assert!(!content.to_lowercase().contains("wordpress"));
 }
 
 fn shasum_hex(algo: &str, identity: &str) -> String {
