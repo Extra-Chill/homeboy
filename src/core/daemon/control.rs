@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use crate::core::error::{Error, Result};
 use crate::core::execution_contract::encode_uri_component;
 
-use super::{parse_bind_addr, read_status, DaemonStartResult};
+use super::{
+    acquire_daemon_operation_lock, parse_bind_addr, read_status, stop_unlocked, DaemonStartResult,
+    DAEMON_STARTUP_TOKEN_ENV,
+};
 
 /// Outcome of a daemon byte-endpoint artifact download.
 #[derive(Debug, Clone)]
@@ -30,10 +33,11 @@ pub struct ArtifactFetchOutcome {
 /// process publishes its address (or a timeout elapses).
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
 
     let existing = read_status()?;
     if existing.state.is_some() || existing.stale_reason.is_some() {
-        let _ = super::stop()?;
+        let _ = stop_unlocked()?;
     }
 
     let exe = std::env::current_exe().map_err(|e| {
@@ -42,8 +46,10 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
             Some("resolve current executable".to_string()),
         )
     })?;
+    let startup_token = uuid::Uuid::new_v4().to_string();
     let child = Command::new(exe)
         .args(["daemon", "serve", "--addr", addr])
+        .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -55,7 +61,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     loop {
         let status = read_status()?;
         if let Some(state) = status.state {
-            if state.pid == pid {
+            if state.pid == pid && state.startup_token == startup_token {
                 return Ok(DaemonStartResult {
                     pid,
                     address: state.address,
@@ -67,7 +73,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 
         if Instant::now() >= deadline {
             return Err(Error::internal_unexpected(format!(
-                "daemon process {} did not publish state before timeout",
+                "daemon process {} did not publish matching startup token before timeout",
                 pid
             )));
         }

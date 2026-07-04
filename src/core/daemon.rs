@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,7 @@ static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
 static DAEMON_RUNTIME_SNAPSHOT: OnceLock<DaemonRuntimeSnapshot> = OnceLock::new();
 
 const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
+const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
 
@@ -52,6 +53,8 @@ const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_
 pub struct DaemonState {
     pub schema: String,
     pub lease_id: String,
+    #[serde(default)]
+    pub startup_token: String,
     pub address: String,
     pub pid: u32,
     pub state_path: String,
@@ -88,6 +91,30 @@ pub struct DaemonStopResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub state_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonLeaseIdentity {
+    lease_id: String,
+    startup_token: String,
+}
+
+impl DaemonLeaseIdentity {
+    fn from_state(state: &DaemonState) -> Self {
+        Self {
+            lease_id: state.lease_id.clone(),
+            startup_token: state.startup_token.clone(),
+        }
+    }
+
+    fn matches(&self, state: &DaemonState) -> bool {
+        self.lease_id == state.lease_id && self.startup_token == state.startup_token
+    }
+}
+
+#[derive(Debug)]
+struct DaemonOperationLock {
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -310,26 +337,68 @@ fn runtime_snapshot_stale_reason(snapshot: &DaemonRuntimeSnapshot) -> Option<Str
 }
 
 pub fn stop() -> Result<DaemonStopResult> {
+    let _lock = acquire_daemon_operation_lock()?;
+    stop_unlocked()
+}
+
+fn stop_unlocked() -> Result<DaemonStopResult> {
     let path = state_path()?;
     let state_path_display = path.display().to_string();
     let validation = validate_lease_file(&path)?;
-    let Some(pid) = validation
-        .state
-        .as_ref()
-        .map(|state| state.pid)
-        .or(validation.invalid_pid)
-    else {
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| {
-                Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
-            })?;
-        }
+    if validation.invalid_pid.is_some()
+        || (validation.state.is_none() && validation.stale_reason.is_some() && path.exists())
+    {
+        return Err(corrupt_daemon_lease_error(&path, validation.stale_reason));
+    }
+
+    let Some(state) = validation.state.as_ref() else {
         return Ok(DaemonStopResult {
             stopped: false,
             pid: None,
             state_path: state_path_display,
         });
     };
+
+    if !validation.fresh || !validation.running {
+        if !validation.running && path.exists() {
+            remove_lease_if_identity_matches(&path, &DaemonLeaseIdentity::from_state(state))?;
+        }
+        return Ok(DaemonStopResult {
+            stopped: false,
+            pid: Some(state.pid),
+            state_path: state_path_display,
+        });
+    }
+
+    if state.startup_token.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!(
+                "daemon lease at {} does not contain a startup token; refusing to signal pid {}",
+                path.display(),
+                state.pid
+            ),
+            Some(path.display().to_string()),
+            Some(vec![
+                "Start the daemon with `homeboy daemon start` so lifecycle ownership is tokenized"
+                    .to_string(),
+                format!(
+                    "If this lease is stale, remove {} manually after verifying the pid",
+                    path.display()
+                ),
+            ]),
+        ));
+    }
+
+    let identity = DaemonLeaseIdentity::from_state(state);
+    let pid = state.pid;
+    let current_state = read_lease_if_identity_matches(&path, &identity)?;
+    if current_state.pid != pid {
+        return Err(Error::internal_unexpected(format!(
+            "daemon lease changed pid from {} to {}; refusing to signal",
+            pid, current_state.pid
+        )));
+    }
 
     let stopped = if pid_is_running(pid) {
         terminate_pid(pid)?;
@@ -338,11 +407,7 @@ pub fn stop() -> Result<DaemonStopResult> {
         false
     };
 
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
-        })?;
-    }
+    remove_lease_if_identity_matches(&path, &identity)?;
 
     Ok(DaemonStopResult {
         stopped,
@@ -1212,6 +1277,7 @@ fn write_state(addr: SocketAddr) -> Result<DaemonState> {
     let state = DaemonState {
         schema: DAEMON_LEASE_SCHEMA.to_string(),
         lease_id: Uuid::new_v4().to_string(),
+        startup_token: std::env::var(DAEMON_STARTUP_TOKEN_ENV).unwrap_or_default(),
         address: addr.to_string(),
         pid: std::process::id(),
         state_path: path.display().to_string(),
@@ -1244,10 +1310,152 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;
-    fs::write(&path, body).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_io(
+            "daemon lease path has no parent directory",
+            Some(format!("write {}", path.display())),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state.json"),
+        Uuid::new_v4()
+    ));
+    {
+        let mut file = File::create(&temp_path).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("create {}", temp_path.display())),
+            )
+        })?;
+        file.write_all(body.as_bytes()).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("write {}", temp_path.display())),
+            )
+        })?;
+        file.sync_all().map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("sync {}", temp_path.display())))
+        })?;
+    }
+    fs::rename(&temp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&temp_path);
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "rename {} to {}",
+                temp_path.display(),
+                path.display()
+            )),
+        )
     })?;
     Ok(())
+}
+
+fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
+    let state = state_path()?;
+    let Some(parent) = state.parent() else {
+        return Err(Error::internal_io(
+            "daemon state path has no parent directory",
+            Some(format!("lock daemon lifecycle for {}", state.display())),
+        ));
+    };
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
+    })?;
+    let path = parent.join("operation.lock");
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Error::internal_unexpected(format!(
+                "daemon lifecycle operation already in progress; lock file exists at {}",
+                path.display()
+            ))
+            .with_hint(format!(
+                "If no homeboy daemon start/stop command is running, remove {} and retry",
+                path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", path.display())),
+            ));
+        }
+    };
+    let body = format!("pid={}\n", std::process::id());
+    file.write_all(body.as_bytes()).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
+    })?;
+    Ok(DaemonOperationLock { path })
+}
+
+impl Drop for DaemonOperationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn corrupt_daemon_lease_error(path: &Path, reason: Option<String>) -> Error {
+    Error::validation_invalid_argument(
+        "daemon_lease",
+        format!(
+            "daemon lease at {} is corrupt{}; refusing to signal any pid from it",
+            path.display(),
+            reason
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ),
+        Some(path.display().to_string()),
+        Some(vec![format!(
+            "Inspect {} and remove it manually only after verifying no daemon process owns it",
+            path.display()
+        )]),
+    )
+}
+
+fn remove_lease_if_identity_matches(path: &Path, expected: &DaemonLeaseIdentity) -> Result<bool> {
+    let _ = read_lease_if_identity_matches(path, expected)?;
+    fs::remove_file(path).map_err(|e| {
+        Error::internal_io(e.to_string(), Some(format!("delete {}", path.display())))
+    })?;
+    Ok(true)
+}
+
+fn read_lease_if_identity_matches(
+    path: &Path,
+    expected: &DaemonLeaseIdentity,
+) -> Result<DaemonState> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::internal_unexpected(format!(
+                "daemon lease disappeared before lifecycle operation could verify {}",
+                path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", path.display())),
+            ))
+        }
+    };
+    let state: DaemonState = serde_json::from_str(&content)
+        .map_err(|error| corrupt_daemon_lease_error(path, Some(error.to_string())))?;
+    if !expected.matches(&state) {
+        return Err(Error::internal_unexpected(format!(
+            "daemon lease changed while stopping pid {}; refusing to remove {}",
+            state.pid,
+            path.display()
+        )));
+    }
+    Ok(state)
 }
 
 fn current_binary_sha256() -> Result<Option<String>> {
