@@ -272,6 +272,9 @@ fn replay_provider_boundary_projects_latest_executor_input() {
                         },
                         "runtime_env": {
                             "SAMPLE_RUNTIME_DATA_MACHINE_PATH": "/runner/data-machine-patched"
+                        },
+                        "runtime_env_path_aliases": {
+                            "agent_runtime": "WP_CODEBOX_DATA_MACHINE_PATH"
                         }
                     }
                 },
@@ -837,61 +840,66 @@ fn resume_command_executes_existing_run() {
 
 #[test]
 fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
-    let observed_request = Arc::new(Mutex::new(None));
-    let executor = CapturingExecutor {
-        observed_request: Arc::clone(&observed_request),
-    };
-    let mut plan = test_plan();
-    plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
-    plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
-    plan.tasks[0].workspace.branch = Some("fix/runtime-guidance".to_string());
-    plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
-    plan.tasks[0].workspace.task_url =
-        Some("https://github.com/example/sample-agent-runtime/issues/179".to_string());
-    plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
-    plan.tasks[0].workspace.materialization = json!({
-        "root": "/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance"
+    with_temp_home(|| {
+        let observed_request = Arc::new(Mutex::new(None));
+        let executor = CapturingExecutor {
+            observed_request: Arc::clone(&observed_request),
+        };
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
+        plan.tasks[0].workspace.branch = Some("fix/runtime-guidance".to_string());
+        plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
+        plan.tasks[0].workspace.task_url =
+            Some("https://github.com/example/sample-agent-runtime/issues/179".to_string());
+        plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+        plan.tasks[0].workspace.materialization = json!({
+            "root": "/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance"
+        });
+
+        let (_value, exit_code) =
+            run_loaded_plan(plan, None, executor).expect("run-plan completed");
+        let observed = observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("provider saw request");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            observed.workspace.mode,
+            homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing
+        );
+        assert_eq!(
+            observed.workspace.root.as_deref(),
+            Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
+        );
+        assert_eq!(
+            observed.workspace.slug.as_deref(),
+            Some("sample-agent-runtime")
+        );
+        assert!(observed.workspace.kind.is_none());
+        assert!(observed.workspace.component_id.is_none());
+        assert!(observed.workspace.branch.is_none());
+        assert!(observed.workspace.base_ref.is_none());
+        assert!(observed.workspace.task_url.is_none());
+        assert!(observed.workspace.cleanup.is_none());
+        assert!(observed.workspace.materialization.is_null());
     });
-
-    let (_value, exit_code) = run_loaded_plan(plan, None, executor).expect("run-plan completed");
-    let observed = observed_request
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-        .expect("provider saw request");
-
-    assert_eq!(exit_code, 0);
-    assert_eq!(
-        observed.workspace.mode,
-        homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing
-    );
-    assert_eq!(
-        observed.workspace.root.as_deref(),
-        Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
-    );
-    assert_eq!(
-        observed.workspace.slug.as_deref(),
-        Some("sample-agent-runtime")
-    );
-    assert!(observed.workspace.kind.is_none());
-    assert!(observed.workspace.component_id.is_none());
-    assert!(observed.workspace.branch.is_none());
-    assert!(observed.workspace.base_ref.is_none());
-    assert!(observed.workspace.task_url.is_none());
-    assert!(observed.workspace.cleanup.is_none());
-    assert!(observed.workspace.materialization.is_null());
 }
 
 #[test]
 fn run_plan_rejects_component_worktree_without_branch() {
-    let mut plan = test_plan();
-    plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
-    plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
+    with_temp_home(|| {
+        let mut plan = test_plan();
+        plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+        plan.tasks[0].workspace.component_id = Some("sample-agent-runtime".to_string());
 
-    let error = run_loaded_plan(plan, None, CapturingExecutor::default())
-        .expect_err("component worktree without branch rejected");
-    let message = error.to_string();
+        let error = run_loaded_plan(plan, None, CapturingExecutor::default())
+            .expect_err("component worktree without branch rejected");
+        let message = error.to_string();
 
-    assert!(message.contains("workspace.branch"));
-    assert!(message.contains("requires branch"));
+        assert!(message.contains("workspace.branch"));
+        assert!(message.contains("requires branch"));
+    });
 }

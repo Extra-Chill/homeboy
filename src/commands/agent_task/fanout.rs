@@ -900,6 +900,7 @@ mod tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::{AgentTaskCommand, AgentTaskFanoutCommand};
+    use crate::test_support::with_isolated_home;
     use clap::Parser;
     use serde_json::json;
 
@@ -915,78 +916,83 @@ mod tests {
 
     #[test]
     fn batch_cook_plan_requires_independent_cooks_with_worktrees() {
-        let plan = BatchCookFanoutPlan::from_value(
-            json!({
-                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
-                "fanout_id": "fanout/original",
-                "cooks": [
-                    {
-                        "cook_id": "5929-docs",
-                        "prompt": "fix docs",
-                        "repo": "homeboy",
-                        "cwd": "/runner/workspaces/homeboy@5929-docs",
-                        "workspace_materialization": [{
-                            "field": "cwd",
-                            "controller_path": "/Users/user/Developer/homeboy@5929-docs",
-                            "runner_path": "/runner/workspaces/homeboy@5929-docs",
-                            "branch": "fix/5929-docs",
-                            "ref": "fix/5929-docs",
-                            "sync_status": "materialized"
-                        }],
-                        "to_worktree": "homeboy@fix-5929-docs",
-                        "head": "fix/5929-docs",
-                        "verify": ["homeboy test homeboy"]
-                    },
-                    {
-                        "cook_id": "5929-cli",
-                        "prompt": "fix cli",
-                        "repo": "homeboy",
-                        "to_worktree": "homeboy@fix-5929-cli",
-                        "head": "fix/5929-cli",
-                        "verify": ["homeboy test homeboy"]
-                    }
-                ]
-            }),
-            &args(),
-        )
-        .expect("batch cook fanout plan");
+        with_isolated_home(|_| {
+            let plan = BatchCookFanoutPlan::from_value(
+                json!({
+                    "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                    "fanout_id": "fanout/original",
+                    "cooks": [
+                        {
+                            "cook_id": "5929-docs",
+                            "prompt": "fix docs",
+                            "repo": "homeboy",
+                            "cwd": "/runner/workspaces/homeboy@5929-docs",
+                            "workspace_materialization": [{
+                                "field": "cwd",
+                                "controller_path": "/Users/user/Developer/homeboy@5929-docs",
+                                "runner_path": "/runner/workspaces/homeboy@5929-docs",
+                                "branch": "fix/5929-docs",
+                                "ref": "fix/5929-docs",
+                                "sync_status": "materialized"
+                            }],
+                            "to_worktree": "homeboy@fix-5929-docs",
+                            "head": "fix/5929-docs",
+                            "verify": ["homeboy test homeboy"]
+                        },
+                        {
+                            "cook_id": "5929-cli",
+                            "prompt": "fix cli",
+                            "repo": "homeboy",
+                            "to_worktree": "homeboy@fix-5929-cli",
+                            "head": "fix/5929-cli",
+                            "verify": ["homeboy test homeboy"]
+                        }
+                    ]
+                }),
+                &args(),
+            )
+            .expect("batch cook fanout plan");
 
-        assert_eq!(plan.fanout_id, "fanout/refactor");
-        assert_eq!(plan.cooks.len(), 2);
-        assert_eq!(plan.cooks[0].backend.as_deref(), Some("test"));
-        assert_eq!(plan.cooks[0].selector.as_deref(), Some("fixture"));
-        let invocation = plan.cooks[0]
-            .to_cook_invocation(&plan)
-            .expect("cook invocation");
-        assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
-        assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
-        assert_eq!(
-            invocation.dispatch.cwd.as_deref(),
-            Some("/runner/workspaces/homeboy@5929-docs")
-        );
-        assert_eq!(invocation.dispatch.workspace, None);
-        assert_eq!(
-            invocation.dispatch.run_id.as_deref(),
-            Some("cook-5929-docs")
-        );
-        assert_eq!(
-            invocation.options.gates.verify,
-            vec!["homeboy test homeboy"]
-        );
-        assert!(invocation
-            .dispatch
-            .core
-            .client_context
-            .as_deref()
-            .expect("client context")
-            .contains("batch_cook"));
-        assert!(invocation
-            .dispatch
-            .core
-            .client_context
-            .as_deref()
-            .expect("client context")
-            .contains("/Users/user/Developer/homeboy@5929-docs"));
+            assert_eq!(plan.fanout_id, "fanout/refactor");
+            assert_eq!(plan.cooks.len(), 2);
+            assert_eq!(plan.cooks[0].backend.as_deref(), Some("test"));
+            assert_eq!(plan.cooks[0].selector.as_deref(), Some("fixture"));
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
+            assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
+            assert_eq!(
+                invocation.dispatch.cwd.as_deref(),
+                Some("/runner/workspaces/homeboy@5929-docs")
+            );
+            assert_eq!(invocation.dispatch.workspace, None);
+            let run_id = invocation
+                .dispatch
+                .run_id
+                .as_deref()
+                .expect("attempt run id");
+            assert!(run_id.starts_with("cook-5929-docs-attempt-1-"));
+            assert_eq!(run_id.len(), "cook-5929-docs-attempt-1-".len() + 8);
+            assert_eq!(
+                invocation.options.gates.verify,
+                vec!["homeboy test homeboy"]
+            );
+            assert!(invocation
+                .dispatch
+                .core
+                .client_context
+                .as_deref()
+                .expect("client context")
+                .contains("batch_cook"));
+            assert!(invocation
+                .dispatch
+                .core
+                .client_context
+                .as_deref()
+                .expect("client context")
+                .contains("/Users/user/Developer/homeboy@5929-docs"));
+        });
     }
 
     #[test]
@@ -1036,41 +1042,45 @@ mod tests {
 
     #[test]
     fn cook_batch_builds_batch_cook_plan_from_issue_urls() {
-        let args = cook_batch_args();
-        let plan = build_cook_batch_plan(&args).expect("cook batch plan");
+        with_isolated_home(|_| {
+            let args = cook_batch_args();
+            let plan = build_cook_batch_plan(&args).expect("cook batch plan");
 
-        assert_eq!(plan.fanout_id, "issue-wave");
-        assert_eq!(plan.cooks.len(), 2);
-        assert_eq!(plan.cooks[0].cook_id, "issue-6453");
-        assert_eq!(plan.cooks[0].to_worktree, "homeboy@fix-issue-6453-homeboy");
-        assert_eq!(
-            plan.cooks[0].head.as_deref(),
-            Some("fix/issue-6453-homeboy")
-        );
-        assert_eq!(
-            plan.cooks[0].title.as_deref(),
-            Some("Fix Extra-Chill/homeboy#6453")
-        );
-        assert!(plan.cooks[0]
-            .prompt
-            .as_deref()
-            .expect("prompt")
-            .contains("https://github.com/Extra-Chill/homeboy/issues/6453"));
-        let prompt = plan.cooks[0].prompt.as_deref().expect("prompt");
-        assert!(prompt.contains("Homeboy will commit, push fix/issue-6453-homeboy"));
-        assert!(prompt.contains("open/update the PR"));
-        assert!(prompt.contains("add AI disclosure"));
-        assert!(prompt.contains("Do not inspect credentials, configure git identity, commit, push"));
-        assert_eq!(plan.cooks[0].verify, vec!["cargo test --lib"]);
-        assert_eq!(plan.cooks[0].backend.as_deref(), Some("sandbox"));
+            assert_eq!(plan.fanout_id, "issue-wave");
+            assert_eq!(plan.cooks.len(), 2);
+            assert_eq!(plan.cooks[0].cook_id, "issue-6453");
+            assert_eq!(plan.cooks[0].to_worktree, "homeboy@fix-issue-6453-homeboy");
+            assert_eq!(
+                plan.cooks[0].head.as_deref(),
+                Some("fix/issue-6453-homeboy")
+            );
+            assert_eq!(
+                plan.cooks[0].title.as_deref(),
+                Some("Fix Extra-Chill/homeboy#6453")
+            );
+            assert!(plan.cooks[0]
+                .prompt
+                .as_deref()
+                .expect("prompt")
+                .contains("https://github.com/Extra-Chill/homeboy/issues/6453"));
+            let prompt = plan.cooks[0].prompt.as_deref().expect("prompt");
+            assert!(prompt.contains("Homeboy will commit, push fix/issue-6453-homeboy"));
+            assert!(prompt.contains("open/update the PR"));
+            assert!(prompt.contains("add AI disclosure"));
+            assert!(
+                prompt.contains("Do not inspect credentials, configure git identity, commit, push")
+            );
+            assert_eq!(plan.cooks[0].verify, vec!["cargo test --lib"]);
+            assert_eq!(plan.cooks[0].backend.as_deref(), Some("sandbox"));
 
-        let invocation = plan.cooks[0]
-            .to_cook_invocation(&plan)
-            .expect("cook invocation");
-        assert_eq!(
-            invocation.dispatch.workspace.as_deref(),
-            Some("homeboy@fix-issue-6453-homeboy")
-        );
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            assert_eq!(
+                invocation.dispatch.workspace.as_deref(),
+                Some("homeboy@fix-issue-6453-homeboy")
+            );
+        });
     }
 
     #[test]
