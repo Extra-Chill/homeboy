@@ -538,7 +538,7 @@ pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
         "/runner/jobs/reconcile",
         Value::Null,
         "reconcile reverse runner broker jobs",
-        broker_auth::broker_token_from_env().as_deref(),
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
 }
 
@@ -551,7 +551,7 @@ pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str)
         &broker_url,
         &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
         "lookup reverse runner broker artifact",
-        broker_auth::broker_token_from_env().as_deref(),
+        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
 }
 

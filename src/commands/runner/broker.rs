@@ -109,7 +109,8 @@ fn install_store_on_ssh_runner(
     let mut client = server::SshClient::from_server(&configured_server, server_id)?;
     client.env = runner::RunnerSpec::from_runner(&configured_runner).effective_env();
 
-    let serialized = serde_json::to_string_pretty(store).map_err(|err| {
+    let enforcement_store = store.enforcement_copy();
+    let serialized = serde_json::to_string_pretty(&enforcement_store).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("serialize broker auth store for runner install".to_string()),

@@ -60,6 +60,7 @@ pub(crate) enum RunnerFileTransferCapability {
 
 pub(crate) struct RunnerFileTransfer {
     runner_id: String,
+    workspace_root: Option<String>,
     channel: RunnerFileChannel,
 }
 
@@ -160,7 +161,7 @@ impl RunnerFileTransfer {
                 let client = client_builder.build().map_err(|err| {
                     Error::internal_unexpected(format!("build runner file HTTP client: {err}"))
                 })?;
-                let broker_token = broker_auth::broker_token_from_env();
+                let broker_token = broker_auth::broker_submit_token_for_runner(&runner.id)?;
                 if broker {
                     RunnerFileChannel::BrokerHttp {
                         client,
@@ -185,6 +186,7 @@ impl RunnerFileTransfer {
         };
         Ok(RunnerFileTransfer {
             runner_id: runner.id.clone(),
+            workspace_root: runner.workspace_root.clone(),
             channel,
         })
     }
@@ -206,7 +208,7 @@ impl RunnerFileTransfer {
             RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
                 self.http_post_json(
                     "/files/mkdir",
-                    json!({ "runner_id": &self.runner_id, "path": remote_dir }),
+                    self.file_path_body(remote_dir),
                     "mkdir",
                     remote_dir,
                 )?;
@@ -235,11 +237,10 @@ impl RunnerFileTransfer {
                 })?;
                 self.http_post_json(
                     "/files/upload",
-                    json!({
-                        "runner_id": &self.runner_id,
-                        "path": remote_path,
-                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
-                    }),
+                    self.file_upload_body(
+                        remote_path,
+                        base64::engine::general_purpose::STANDARD.encode(content),
+                    ),
                     "upload",
                     remote_path,
                 )?;
@@ -265,7 +266,7 @@ impl RunnerFileTransfer {
             RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
                 let body = self.http_post_json(
                     "/files/download",
-                    json!({ "runner_id": &self.runner_id, "path": remote_path }),
+                    self.file_path_body(remote_path),
                     "download",
                     remote_path,
                 )?;
@@ -336,6 +337,23 @@ impl RunnerFileTransfer {
                     )
                 }),
         }
+    }
+
+    fn file_path_body(&self, path: &str) -> Value {
+        json!({
+            "runner_id": &self.runner_id,
+            "path": path,
+            "workspace_root": &self.workspace_root,
+        })
+    }
+
+    fn file_upload_body(&self, path: &str, content_base64: String) -> Value {
+        json!({
+            "runner_id": &self.runner_id,
+            "path": path,
+            "workspace_root": &self.workspace_root,
+            "content_base64": content_base64,
+        })
     }
 }
 
@@ -496,6 +514,7 @@ mod tests {
     use crate::core::runner::session::{
         RunnerActiveJobState, RunnerSessionRole, RunnerSessionState,
     };
+    use std::io::{Read, Write};
 
     fn runner(kind: RunnerKind) -> Runner {
         Runner {
@@ -631,5 +650,54 @@ mod tests {
                 broker: false,
             }
         );
+    }
+
+    #[test]
+    fn daemon_file_post_json_attaches_broker_token_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = String::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read");
+                if read == 0 {
+                    break;
+                }
+                request.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                if request.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "{\"success\":true,\"data\":{\"body\":{\"ok\":true}}}"
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+            request
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("client");
+
+        let body = daemon_file_post_json(
+            &client,
+            &format!("http://{address}"),
+            "/files/mkdir",
+            json!({ "runner_id": "test-runner", "path": "/tmp/x" }),
+            Some("secret-token"),
+        )
+        .expect("daemon response");
+
+        assert_eq!(body["ok"], true);
+        let request = server.join().expect("server");
+        assert!(request.contains("x-homeboy-broker-token: secret-token"));
+        assert!(request.contains("authorization: Bearer secret-token"));
     }
 }

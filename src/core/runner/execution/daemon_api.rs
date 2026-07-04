@@ -136,7 +136,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
                 ]),
             ));
         };
-        let broker_token = super::super::broker_auth::broker_token_from_env();
+        let broker_token = super::super::broker_auth::broker_submit_token_for_runner(runner_id)?;
         return match method {
             "GET" => broker_http::get_json(
                 &client,

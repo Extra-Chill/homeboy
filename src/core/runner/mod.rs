@@ -15,9 +15,9 @@ mod apply;
 mod broker_auth;
 mod broker_http;
 pub use broker_auth::{
-    broker_token_from_env, extract_bearer_token, store_path as broker_auth_store_path,
-    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
-    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    broker_submit_token_for_runner, broker_token_from_env, extract_bearer_token,
+    store_path as broker_auth_store_path, BrokerAuthGrant, BrokerAuthStore, BrokerCredential,
+    BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 mod capabilities;
 mod command_path;
