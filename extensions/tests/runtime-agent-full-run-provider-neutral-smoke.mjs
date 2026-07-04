@@ -20,16 +20,22 @@ const baseEnv = {
   PROVIDER_PLUGIN: '{}',
   PROVIDER: 'openai',
 };
+const fixtureProviderId = 'openai';
+const fixtureProviderPluginRepo = 'WordPress/ai-provider-for-openai';
+const fixtureProviderPluginTarget = '.ci/ai-provider-for-openai';
+const fixtureProviderCanonicalSecretEnv = 'OPENAI_API_KEY';
+const fixtureProviderSecretKey = 'connectors_ai_openai_api_key';
+const fixtureProviderSecretEnv = 'PROVIDER_SECRET_1';
 
 assert.deepEqual(dependencyEntries(baseEnv), []);
 assert.deepEqual(resolvePlan(dependencyEntries(baseEnv), true), []);
-assert.deepEqual(normalizeProviderPlugin('{}', 'openai', true).provider_secret_env, {});
+assert.deepEqual(normalizeProviderPlugin('{}', fixtureProviderId, true).provider_secret_env, {});
 const explicitProviderPlugin = {
-  repo: 'WordPress/ai-provider-for-openai',
+  repo: fixtureProviderPluginRepo,
   ref: 'trunk',
   path: '.',
   provider_secret_env: {
-    connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
+    [fixtureProviderSecretKey]: fixtureProviderSecretEnv,
   },
 };
 const providerPluginPlan = resolvePlan(dependencyEntries({
@@ -37,13 +43,13 @@ const providerPluginPlan = resolvePlan(dependencyEntries({
   PROVIDER_PLUGIN: JSON.stringify(explicitProviderPlugin),
 }), true, { workspace: repoRoot });
 assert.deepEqual(providerPluginPlan, [{
-  repo: 'WordPress/ai-provider-for-openai',
+  repo: fixtureProviderPluginRepo,
   ref: 'trunk',
-  target: '.ci/ai-provider-for-openai',
-  targetPath: path.join(repoRoot, '.ci', 'ai-provider-for-openai'),
+  target: fixtureProviderPluginTarget,
+  targetPath: path.join(repoRoot, fixtureProviderPluginTarget),
 }]);
-assert.deepEqual(normalizeProviderPlugin(JSON.stringify(explicitProviderPlugin), 'openai', true).provider_secret_env, {
-  connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
+assert.deepEqual(normalizeProviderPlugin(JSON.stringify(explicitProviderPlugin), fixtureProviderId, true).provider_secret_env, {
+  [fixtureProviderSecretKey]: fixtureProviderSecretEnv,
 });
 
 for (const unsafeTarget of ['.', '/tmp/foo', '../repo']) {
@@ -66,10 +72,10 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutra
 const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutral-runner-'));
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-neutral-bin-'));
 const runtime = resolveRuntimeProvider('wp-codebox', { workspace });
-assert.deepEqual(providerBenchEnvFromManifest(runtime, 'openai', {
-  OPENAI_API_KEY: 'manifest-secret-value',
-}), new Set(['OPENAI_API_KEY']));
-assert.deepEqual(providerBenchEnvFromManifest(runtime, 'openai', {}), new Set(['OPENAI_API_KEY']));
+assert.deepEqual(providerBenchEnvFromManifest(runtime, fixtureProviderId, {
+  [fixtureProviderCanonicalSecretEnv]: 'manifest-secret-value',
+}), new Set([fixtureProviderCanonicalSecretEnv]));
+assert.deepEqual(providerBenchEnvFromManifest(runtime, fixtureProviderId, {}), new Set([fixtureProviderCanonicalSecretEnv]));
 
 const config = buildConfig({
   GITHUB_WORKSPACE: workspace,
@@ -84,22 +90,22 @@ const config = buildConfig({
       id: 'local-shell-profile',
     },
   }),
-  PROVIDER: 'openai',
+  PROVIDER: fixtureProviderId,
   PROVIDER_PLUGIN: JSON.stringify(explicitProviderPlugin),
-  PROVIDER_SECRET_1: 'secret-value',
-  OPENAI_API_KEY: 'manifest-secret-value',
+  [fixtureProviderSecretEnv]: 'secret-value',
+  [fixtureProviderCanonicalSecretEnv]: 'manifest-secret-value',
 });
 
 assert.deepEqual(config.provider_secret_env_mapping, {
-  connectors_ai_openai_api_key: 'PROVIDER_SECRET_1',
+  [fixtureProviderSecretKey]: fixtureProviderSecretEnv,
 });
 assert.deepEqual(config.secret_env, [
   'GITHUB_TOKEN',
   'HOMEBOY_GITHUB_APP_TOKEN',
-  'PROVIDER_SECRET_1',
+  fixtureProviderSecretEnv,
 ]);
-assert.equal('PROVIDER_SECRET_1' in config.bench_env, false);
-assert.equal('OPENAI_API_KEY' in config.bench_env, false);
+assert.equal(fixtureProviderSecretEnv in config.bench_env, false);
+assert.equal(fixtureProviderCanonicalSecretEnv in config.bench_env, false);
 assert.equal('GITHUB_TOKEN' in config.bench_env, false);
 assert.equal('HOMEBOY_GITHUB_APP_TOKEN' in config.bench_env, false);
 assert.equal(JSON.stringify(config).includes('secret-value'), false);
@@ -118,12 +124,12 @@ const neutralConfig = buildConfig({
       id: 'local-shell-profile',
     },
   }),
-  PROVIDER: 'openai',
+  PROVIDER: fixtureProviderId,
   PROVIDER_PLUGIN: '{}',
 });
 
 assert.deepEqual(neutralConfig.provider_secret_env_mapping, {});
-assert.equal('OPENAI_API_KEY' in neutralConfig.bench_env, false);
+assert.equal(fixtureProviderCanonicalSecretEnv in neutralConfig.bench_env, false);
 assert.deepEqual(neutralConfig.secret_env, ['GITHUB_TOKEN', 'HOMEBOY_GITHUB_APP_TOKEN']);
 
 // Secret env fallbacks: the provider's canonical key is sourced from the mapped
@@ -132,12 +138,12 @@ assert.deepEqual(
   buildSecretEnvFallbacks({
     githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
     githubRepositoryTokenEnv: 'GITHUB_TOKEN',
-    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
-    providerCredentialSourceEnvNames: ['PROVIDER_SECRET_1'],
+    providerCanonicalSecretEnvNames: [fixtureProviderCanonicalSecretEnv],
+    providerCredentialSourceEnvNames: [fixtureProviderSecretEnv],
   }),
   {
     HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'],
-    OPENAI_API_KEY: ['PROVIDER_SECRET_1'],
+    [fixtureProviderCanonicalSecretEnv]: [fixtureProviderSecretEnv],
   }
 );
 
@@ -146,7 +152,7 @@ assert.deepEqual(
   buildSecretEnvFallbacks({
     githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
     githubRepositoryTokenEnv: 'GITHUB_TOKEN',
-    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
+    providerCanonicalSecretEnvNames: [fixtureProviderCanonicalSecretEnv],
     providerCredentialSourceEnvNames: [],
   }),
   { HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'] }
@@ -157,8 +163,8 @@ assert.deepEqual(
   buildSecretEnvFallbacks({
     githubTokenEnv: 'HOMEBOY_GITHUB_APP_TOKEN',
     githubRepositoryTokenEnv: 'GITHUB_TOKEN',
-    providerCanonicalSecretEnvNames: ['OPENAI_API_KEY'],
-    providerCredentialSourceEnvNames: ['OPENAI_API_KEY'],
+    providerCanonicalSecretEnvNames: [fixtureProviderCanonicalSecretEnv],
+    providerCredentialSourceEnvNames: [fixtureProviderCanonicalSecretEnv],
   }),
   { HOMEBOY_GITHUB_APP_TOKEN: ['GITHUB_TOKEN'] }
 );

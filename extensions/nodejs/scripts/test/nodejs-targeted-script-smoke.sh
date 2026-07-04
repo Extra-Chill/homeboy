@@ -7,13 +7,13 @@ EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-targeted.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-run_gutenberg_fallback_smoke() {
-    local project_dir="${TMPDIR}/gutenberg"
+run_declared_targeted_script_smoke() {
+    local project_dir="${TMPDIR}/declared"
     mkdir -p "$project_dir/packages/core-data/src/test"
 
     cat > "${project_dir}/package.json" <<'JSON'
 {
-  "name": "gutenberg",
+  "name": "declared-targeted-script",
   "scripts": {
     "test": "node aggregate-test-should-not-run.mjs",
     "test:unit": "node unit-test-recorder.mjs"
@@ -45,12 +45,13 @@ JS
 
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_PATH="$project_dir" \
-    HOMEBOY_COMPONENT_ID="gutenberg-targeted-smoke" \
-    bash "${SCRIPT_DIR}/test-runner.sh" packages/core-data/src/test/resolvers.js --runInBand > "${TMPDIR}/gutenberg.out"
+    HOMEBOY_COMPONENT_ID="declared-targeted-smoke" \
+    HOMEBOY_SETTINGS_JSON='{"test_script":"test:unit"}' \
+    bash "${SCRIPT_DIR}/test-runner.sh" packages/core-data/src/test/resolvers.js --runInBand > "${TMPDIR}/declared.out"
 
-    if ! grep -q 'Command:   npm run test:unit --' "${TMPDIR}/gutenberg.out"; then
-        echo "Expected Gutenberg targeted args to use test:unit" >&2
-        cat "${TMPDIR}/gutenberg.out" >&2
+    if ! grep -q 'Command:   npm run test:unit --' "${TMPDIR}/declared.out"; then
+        echo "Expected declared targeted args to use test:unit" >&2
+        cat "${TMPDIR}/declared.out" >&2
         exit 1
     fi
 
@@ -117,7 +118,7 @@ JS
     fi
 }
 
-run_gutenberg_fallback_smoke
+run_declared_targeted_script_smoke
 run_configured_script_smoke
 
 echo "nodejs targeted-script smoke passed"

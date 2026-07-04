@@ -110,19 +110,6 @@ records. Keep new executor-neutral extraction behavior in
 `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js`; keep Codebox request/session/artifact
 details inside the Codebox audit fanout lane.
 
-## Static Site Fanout Adapter
-
-The static-site fanout adapter emits generic `homeboy/agent-task-request/v1`
-requests by default. It does not select WP Codebox or any other executor backend
-unless the caller passes an explicit `backend`/`runtime_backend` value or agent
-task backend override.
-
-WP Codebox task-input compatibility is an opt-in compatibility path for callers
-that still consume `wp-codebox/task-input/v1`. Select it with
-`compatibility_provider: "wp-codebox"` or the legacy
-`request_kind: "wp-codebox"` flag. New callers should prefer the generic
-agent-task request schema and make runtime selection outside the adapter.
-
 ## Product Adapter Boundaries
 
 Generic WordPress helpers keep default profiling and helper manifests scoped to

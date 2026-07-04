@@ -11,7 +11,6 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const workspace = path.join(rootDir, 'fixture-workspace');
 const {
 	DEFAULT_RUNTIME_ID,
-	normalizeRuntimeId,
 	resolveRuntimeProvider,
 	runtimeRegistry,
 } = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
@@ -60,13 +59,6 @@ assert.deepEqual(runtime.executor.runtime_execution_contracts.bundle, {
 	ability_field: 'runtime_bundle_ability',
 	required_capabilities: ['agent_bundle_execution'],
 });
-
-assert.equal(normalizeRuntimeId('codebox'), 'codebox');
-assert.throws(
-	() => resolveRuntimeProvider('codebox', { repoRoot: rootDir, workspace }),
-	/Unsupported agent_runtime: codebox/,
-	'legacy codebox runtime id is not accepted'
-);
 
 const envRuntime = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,

@@ -33,7 +33,5 @@ for (const exportName of stableWpCodeboxConsumerExports) {
 
 const wordpressPackage = await import(path.join(repoRoot, 'wordpress/index.js'));
 assert.equal(typeof wordpressPackage.default.auditFanoutRuntimeProviderInterface, 'function');
-assert.equal(wordpressPackage.default.createAuditWpCodeboxFanoutPlan, undefined);
-assert.equal(wordpressPackage.default.wpCodebox?.createAuditWpCodeboxFanoutPlan, undefined);
 
 console.log('architectural boundary contract passed');

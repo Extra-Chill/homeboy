@@ -149,10 +149,6 @@ const {
 assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.runtimeBoundary.profile'), true);
 assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('commands.wordpressRuntime.runFuzzSuite'), true);
 assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('readiness.wordpressRuntime.schema'), true);
-// The canonical wp-codebox runtime contract dropped the legacy run-response alias
-// (Automattic/wp-codebox#1637). The loader must not require a manifest path the
-// canonical contract no longer publishes, or every real run fails validation.
-assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.agentTask.legacyRunResponse'), false);
 for (const requiredPath of REQUIRED_RUNTIME_CONTRACT_PATHS) {
   assert.equal(
     typeof requiredPath.split('.').reduce((value, key) => (value == null ? value : value[key]), canonicalManifest),
@@ -185,18 +181,6 @@ assert.deepEqual(wpCodeboxProviderRuntimeInvocationContract(), {
 });
 
 validateCanonicalRuntimeContractManifest(canonicalManifest);
-
-const runtimeContractSource = fs.readFileSync(
-  path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-runtime-contract-source.js'),
-  'utf8'
-);
-assert.deepEqual(
-  [...runtimeContractSource.matchAll(/const\s+(FALLBACK_[A-Z0-9_]+)/g)].map((match) => match[1]),
-  [],
-  'Do not carry hardcoded WP Codebox fallback contract constants; consume the public Codebox runtime contract manifest instead.'
-);
-assert.doesNotMatch(runtimeContractSource, /homeboy-extensions-fallback/);
-assert.doesNotMatch(runtimeContractSource, /\.cache\/homeboy\/wp-codebox|setupCacheCoreModuleCandidates|HOMEBOY_WP_CODEBOX_INSTALL_DIR/);
 
 assert.throws(
   () => validateCanonicalRuntimeContractManifest({

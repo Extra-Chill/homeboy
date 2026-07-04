@@ -57,16 +57,6 @@ elif [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     done <<< "$HOMEBOY_CHANGED_TEST_FILES"
 fi
 
-homeboy_node_package_value() {
-    local expression="$1"
-    PACKAGE_JSON_PATH="${PROJECT_PATH}/package.json" \
-    node -e "
-        const pkg = require(process.env.PACKAGE_JSON_PATH);
-        const value = (${expression});
-        if (typeof value === 'string' && value) console.log(value);
-    " 2>/dev/null || true
-}
-
 homeboy_node_script_command() {
     local script_name="$1"
     printf '%s --' "$(homeboy_project_run_script_command "$script_name")"
@@ -84,13 +74,6 @@ homeboy_node_targeted_test_script() {
             exit 1
         fi
         printf '%s' "$configured_script"
-        return 0
-    fi
-
-    local package_name
-    package_name="$(homeboy_node_package_value "pkg.name || ''")"
-    if [ "$package_name" = "gutenberg" ] && homeboy_has_npm_script "test:unit"; then
-        printf '%s' "test:unit"
         return 0
     fi
 

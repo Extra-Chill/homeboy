@@ -176,17 +176,8 @@ an injected `runtime_manifest` when the caller does not want to rely on the
 checked-in runtime registry. It emits durable JSON loop results, ordered events,
 and the existing outcome/results files consumed by workflow adapters.
 
-The public `runtime-agent-ci` binaries are the package `bin` entries. Legacy
-agent-loop, artifact-fanout, agent-task-to-review, and WordPress compatibility
-wrapper commands were removed after active callsites migrated to the canonical
-loop, fanout, and review publication primitives. Use
-`homeboy-runtime-agent-ci/generic-orchestration`,
-`homeboy-runtime-agent-ci/provider-adapters`,
-`homeboy-runtime-agent-ci/generic-fanout-reconcile-workflow`,
-`homeboy-runtime-agent-ci/fanout-reconcile-runner`,
-`runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs`, and the
-`.github/scripts/runtime-agent-full-run/*` workflow helpers directly. The
-package exposes only explicit subpath exports for those public surfaces.
+The public `runtime-agent-ci` binaries are the package `bin` entries. The
+package exposes only explicit subpath exports for public surfaces.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,

@@ -20,7 +20,6 @@ const {
   normalizeTypedArtifactEntry,
   normalizeTypedArtifacts,
   typedArtifactsFromCodeboxResult,
-  typedArtifactFileRefs,
 } = require(path.join(repoRoot, 'agent-runtimes/wp-codebox/lib/codebox-artifact-contract'));
 const {
   AGENT_TASK_REQUEST_SCHEMA,
@@ -35,8 +34,6 @@ assert.equal(artifactRoleFromCodeboxArtifact({ kind: 'codebox-patch' }, { artifa
 assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }), 'artifact');
 assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }, { allowArtifactRoleFallbackCompatibility: true }), 'changed_files');
 assert.equal(allowArtifactRoleFallbackCompatibility({}), false);
-
-assert.deepEqual(typedArtifactFileRefs({ fileRefs: [{ path: 'artifact.json' }] }), [{ path: 'artifact.json' }]);
 
 assert.deepEqual(normalizeTypedArtifactEntry('packet', {
   kind: 'json',
@@ -102,34 +99,6 @@ const projectedResult = {
 assert.equal(artifactResultEnvelopeFromCodeboxResult(projectedResult), null);
 assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedResult)), []);
 assert.equal(artifactResultEnvelopeFromCodeboxResult({ artifactResult: artifactResultEnvelope }), null);
-assert.deepEqual(typedArtifactsFromCodeboxResult({
-  artifact_result: artifactResultEnvelope,
-  metadata: {
-    agent_runtime: {
-      result: {
-        outputs: {
-          typed_artifacts: {
-            legacy: { type: 'json', payload: { old: true } },
-          },
-        },
-      },
-    },
-  },
-}).review.artifact_schema, 'example/review/v1');
-assert.equal(Object.hasOwn(typedArtifactsFromCodeboxResult({
-  artifact_result: artifactResultEnvelope,
-  metadata: {
-    agent_runtime: {
-      result: {
-        outputs: {
-          typed_artifacts: {
-            legacy: { type: 'json', payload: { old: true } },
-          },
-        },
-      },
-    },
-  },
-}), 'legacy'), false);
 
 const runtimeAccessResult = {
   artifact_result: normalizeArtifactResultEnvelope({
@@ -233,19 +202,6 @@ assert.ok(missingConceptPacketOutcome.diagnostics.some((diagnostic) => (
   diagnostic.class === 'codebox.required_typed_artifacts_missing'
     && diagnostic.message.includes('concept_packet')
 )));
-assert.deepEqual(typedArtifactsFromCodeboxResult({
-  metadata: {
-    agent_runtime: {
-      result: {
-        outputs: {
-          typed_artifacts: {
-            legacy: { type: 'json', payload: { old: true } },
-          },
-        },
-      },
-    },
-  },
-}), {});
 assert.deepEqual(normalizeCaseArtifactIndex({
   case_refs: [{
     componentId: 'component-one',
