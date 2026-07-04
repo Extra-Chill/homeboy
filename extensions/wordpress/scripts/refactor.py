@@ -254,10 +254,8 @@ def namespace_to_path(namespace, psr4_mappings=None):
     """Convert a PHP namespace to a directory path using PSR-4 mappings.
 
     With PSR-4 mappings from composer.json:
-        DataMachineSocials\\Abilities\\Traits -> inc/Abilities/Traits
-        (if composer.json has "DataMachineSocials\\": "inc/")
-
-    Falls back to heuristic for DataMachine -> inc/ when no mappings found.
+        ExamplePlugin\\Abilities\\Traits -> inc/Abilities/Traits
+        (if composer.json has "ExamplePlugin\\": "inc/")
     """
     if psr4_mappings:
         # Sort by specificity — longest namespace prefix first
@@ -275,17 +273,13 @@ def namespace_to_path(namespace, psr4_mappings=None):
                 remainder = namespace[len(ns_prefix) + 1:]
                 return dir_path + '/' + remainder.replace('\\', '/')
 
-    # Fallback: hardcoded DataMachine -> inc/ for backwards compatibility
-    parts = namespace.split('\\')
-    if parts and parts[0] == 'DataMachine':
-        parts[0] = 'inc'
-    return '/'.join(parts)
+    return namespace.replace('\\', '/')
 
 
-def path_to_namespace(file_path, psr4_mappings=None, root_mapping='inc:DataMachine'):
+def path_to_namespace(file_path, psr4_mappings=None, root_mapping='inc:ExamplePlugin'):
     """Convert a file path to a PHP namespace using PSR-4 mappings.
 
-    inc/Abilities/Traits/HasPermissionCheck.php -> DataMachine\\Abilities\\Traits
+    inc/Abilities/Traits/HasPermissionCheck.php -> ExamplePlugin\\Abilities\\Traits
     """
     # Strip the file extension
     path = re.sub(r'\.php$', '', file_path)
@@ -416,7 +410,7 @@ def generate_trait_file(function_name, method_source, namespace_base, trait_name
     Args:
         function_name: Name of the duplicated function
         method_source: The full method source code (with doc comment)
-        namespace_base: Base namespace for the trait (e.g., DataMachine\\Abilities)
+        namespace_base: Base namespace for the trait (e.g., ExamplePlugin\\Abilities)
         trait_name: Name of the trait
         dependency_imports: List of use statements the method depends on
     """
@@ -472,9 +466,9 @@ def generate_trait_file(function_name, method_source, namespace_base, trait_name
 def common_namespace_prefix(namespaces):
     """Find the longest common namespace prefix from a list of namespaces.
 
-    ['DataMachine\\Abilities\\Flow', 'DataMachine\\Abilities\\Job',
-     'DataMachine\\Abilities\\Taxonomy']
-    → 'DataMachine\\Abilities'
+    ['ExamplePlugin\\Abilities\\Flow', 'ExamplePlugin\\Abilities\\Job',
+     'ExamplePlugin\\Abilities\\Taxonomy']
+    → 'ExamplePlugin\\Abilities'
     """
     if not namespaces:
         return ''

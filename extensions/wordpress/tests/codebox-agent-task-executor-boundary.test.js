@@ -941,8 +941,8 @@ const explicitRuntimePackageComponentTaskInput = codeboxTaskRequestFromAgentTask
       provider: 'codex',
       component_contracts: [
         { slug: 'agents-api', path: '/components/agents-api' },
-        { slug: 'data-machine', path: '/components/data-machine' },
-        { slug: 'data-machine-code', path: '/components/data-machine-code' },
+        { slug: 'sample-plugin', path: '/components/sample-plugin' },
+        { slug: 'sample-plugin-tools', path: '/components/sample-plugin-tools' },
       ],
     },
   },
@@ -957,22 +957,23 @@ const explicitRuntimePackageComponentTaskInput = codeboxTaskRequestFromAgentTask
   componentPathDefaults: {
     contract_slug_map: {
       'agents-api': 'agents_api',
-      'data-machine': 'agent_runtime',
-      'data-machine-code': 'data_machine_code',
+      'sample-plugin': 'agent_runtime',
+      'sample-plugin-tools': 'agent_runtime_tools',
     },
     path_aliases: {
       agent_runtime: ['contract:agent_runtime'],
+      agent_runtime_tools: ['contract:agent_runtime_tools'],
     },
   },
 });
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_task.ability, 'wp-codebox/run-runtime-package');
-assert.deepEqual(explicitRuntimePackageComponentTaskInput.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine', 'data-machine-code']);
+assert.deepEqual(explicitRuntimePackageComponentTaskInput.component_contracts.map((contract) => contract.slug), ['agents-api', 'sample-plugin', 'sample-plugin-tools']);
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agents_api, '/components/agents-api');
-assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agent_runtime, '/components/data-machine');
-assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.data_machine_code, '/components/data-machine-code');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agent_runtime, '/components/sample-plugin');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_component_paths.agent_runtime_tools, '/components/sample-plugin-tools');
 assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_AGENTS_API_PATH, '/components/agents-api');
-assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, '/components/data-machine');
-assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_CODE_PATH, '/components/data-machine-code');
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, undefined);
+assert.equal(explicitRuntimePackageComponentTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_CODE_PATH, undefined);
 
 const previousStaleDataMachinePath = process.env.WP_CODEBOX_DATA_MACHINE_PATH;
 process.env.WP_CODEBOX_DATA_MACHINE_PATH = '/components/stale-data-machine';
@@ -984,11 +985,11 @@ const explicitRuntimeComponentOverridesEnvTaskInput = codeboxTaskRequestFromAgen
     config: {
       provider: 'codex',
       runtime_component_paths: {
-        agent_runtime: '/components/explicit-data-machine',
+        agent_runtime: '/components/explicit-sample-plugin',
       },
     },
   },
-  instructions: 'Run a runtime-package task with an explicit Data Machine component path.',
+  instructions: 'Run a runtime-package task with an explicit sample component path.',
   inputs: {
     ability_request: {
       name: 'runtime-package/run',
@@ -997,8 +998,8 @@ const explicitRuntimeComponentOverridesEnvTaskInput = codeboxTaskRequestFromAgen
   },
 });
 restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousStaleDataMachinePath);
-assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_component_paths.agent_runtime, '/components/explicit-data-machine');
-assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, '/components/explicit-data-machine');
+assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_component_paths.agent_runtime, '/components/explicit-sample-plugin');
+assert.equal(explicitRuntimeComponentOverridesEnvTaskInput.runtime_env.WP_CODEBOX_DATA_MACHINE_PATH, undefined);
 
 const runtimePackageWithoutSubstrateTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -1038,8 +1039,8 @@ restoreEnv('WP_CODEBOX_DATA_MACHINE_PATH', previousDataMachinePath);
 restoreEnv('WP_CODEBOX_DATA_MACHINE_CODE_PATH', previousDataMachineCodePath);
 assert.deepEqual(runtimePackageEnvSubstrateTaskInput.component_contracts, []);
 assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agents_api, workspaceRoot);
-assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agent_runtime, workspaceRoot);
-assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.data_machine_code, workspaceRoot);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.agent_runtime, undefined);
+assert.equal(runtimePackageEnvSubstrateTaskInput.runtime_component_paths.data_machine_code, undefined);
 
 const explicitRuntimeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

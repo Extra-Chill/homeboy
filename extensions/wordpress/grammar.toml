@@ -67,7 +67,7 @@ apply_filters = 'filter'
 # ===========================================================================
 
 [patterns.namespace]
-# Matches: namespace DataMachine\Abilities;
+# Matches: namespace ExampleVendor\Plugin;
 # Allows optional leading whitespace — PHP accepts indented top-level
 # namespace declarations (e.g. after a docblock), and `context = top_level`
 # already guarantees brace depth 0.

@@ -24,19 +24,19 @@ Arguments are passed directly to WP-CLI. The shell processes quotes **before** h
 ### Do NOT quote multi-word commands
 
 ```sh
-# WRONG - shell passes single arg: "datamachine-events health-check --scope=upcoming"
-homeboy wp extra-chill events "datamachine-events health-check --scope=upcoming"
+# WRONG - shell passes single arg: "sample-plugin health-check --scope=upcoming"
+homeboy wp example-site staging "sample-plugin health-check --scope=upcoming"
 
 # CORRECT - shell passes separate args to homeboy
-homeboy wp extra-chill events datamachine-events health-check --scope=upcoming
+homeboy wp example-site staging sample-plugin health-check --scope=upcoming
 ```
 
 ### DO quote values with spaces
 
 ```sh
 # CORRECT - quotes protect the value, not the command structure
-homeboy wp extra-chill post create --post_title="My New Post"
-homeboy wp extra-chill user create bob@example.com --display_name="Bob Smith"
+homeboy wp example-site post create --post_title="My New Post"
+homeboy wp example-site user create bob@example.com --display_name="Bob Smith"
 ```
 
 ### Subtarget example
@@ -44,11 +44,11 @@ homeboy wp extra-chill user create bob@example.com --display_name="Bob Smith"
 For projects with subtargets, specify the subtarget after the project ID:
 
 ```sh
-# Run WP-CLI on the 'events' subtarget
-homeboy wp extra-chill events core version
+# Run WP-CLI on the 'staging' subtarget
+homeboy wp example-site staging core version
 
 # Run a plugin command on a subtarget
-homeboy wp extra-chill events datamachine-events health-check --scope=upcoming
+homeboy wp example-site staging sample-plugin health-check --scope=upcoming
 ```
 
 ## JSON output

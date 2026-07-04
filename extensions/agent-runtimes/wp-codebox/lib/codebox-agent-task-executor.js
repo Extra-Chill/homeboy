@@ -1481,7 +1481,6 @@ function runtimeComponentPaths(config, options = {}) {
     agents_api: contractPaths.agents_api || firstValue(process.env.WP_CODEBOX_AGENTS_API_PATH, process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH),
     agent_runtime: contractPaths.agent_runtime || explicit.agent_runtime || config.agent_runtime || options.agentRuntime,
     agent_runtime_tools: config.agent_runtime_tools || options.agentRuntimeTools,
-    data_machine_code: contractPaths.data_machine_code || firstValue(process.env.WP_CODEBOX_DATA_MACHINE_CODE_PATH, process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH),
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
   };
@@ -1499,8 +1498,6 @@ function runtimeComponentPaths(config, options = {}) {
     })));
   }
 
-  resolved.agent_runtime = resolved.agent_runtime || firstValue(process.env.WP_CODEBOX_DATA_MACHINE_PATH, process.env.HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH);
-
   return Object.fromEntries(Object.entries(resolved).filter(([, value]) => value !== undefined && value !== ''));
 }
 
@@ -1509,12 +1506,6 @@ function runtimeEnvWithComponentPaths(runtimeEnv = {}, components = {}) {
 
   if (components.agents_api) {
     env.WP_CODEBOX_AGENTS_API_PATH = components.agents_api;
-  }
-  if (components.agent_runtime) {
-    env.WP_CODEBOX_DATA_MACHINE_PATH = components.agent_runtime;
-  }
-  if (components.data_machine_code) {
-    env.WP_CODEBOX_DATA_MACHINE_CODE_PATH = components.data_machine_code;
   }
 
   return env;
@@ -1567,17 +1558,7 @@ function runtimeComponentPathsFromContracts(contracts, options = {}) {
 
 function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const settings = firstObject(options.settings, parseJsonObject(process.env.HOMEBOY_SETTINGS_JSON)) || {};
-  const discovery = runtimeComponentDiscovery(options);
   const workspaceRoot = resolveWorkspaceRoot(request, config, inputs, settings, options);
-  const workspaceBase = workspaceRoot ? path.dirname(workspaceRoot) : process.cwd();
-  const agentRuntimePath = firstExistingPath(
-    options.agentRuntime,
-    ...componentDiscoveryCandidates('agent_runtime', discovery, settings, workspaceBase),
-  );
-  const agentRuntimeToolsPath = firstExistingPath(
-    options.agentRuntimeTools,
-    ...componentDiscoveryCandidates('agent_runtime_tools', discovery, settings, workspaceBase),
-  );
   const providerPluginPath = firstExistingPath(
     settings.wp_codebox_provider_plugin_path,
     process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
@@ -1587,10 +1568,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const providerConfig = providerConfigFor(provider, settings, providerDefaults);
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   return {
-    agentRuntime: agentRuntimePath,
-    agentRuntimeTools: agentRuntimeToolsPath,
-    legacyRuntime: agentRuntimePath,
-    legacyRuntimeTools: agentRuntimeToolsPath,
     providerPluginPaths: defaultProviderPluginPaths(provider, config, options, settings, providerConfig, providerPluginPath),
     provider,
     model,

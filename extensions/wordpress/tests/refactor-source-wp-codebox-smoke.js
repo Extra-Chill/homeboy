@@ -7,6 +7,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-refactor-source-wp-codebox-'));
+const fixtureCodeboxCoreModule = path.join(__dirname, '..', '..', 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 
 function pathInside(parent, candidate) {
   const relative = path.relative(fs.realpathSync(parent), path.resolve(candidate));
@@ -66,10 +67,11 @@ const os = require('node:os');
 const path = require('node:path');
 const inputArg = process.argv.find((arg) => arg.startsWith('--input-file='));
 const inputPath = inputArg ? inputArg.slice('--input-file='.length) : '';
-if (process.argv[2] !== 'agent-task-run' || !inputPath) {
+if (!['agent-task-run', 'run-agent-task'].includes(process.argv[2]) || !inputPath) {
   process.exit(2);
 }
-const task = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+const runRequest = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+const task = runRequest.task_input || runRequest;
 const artifactsRoot = task.artifacts_path || '';
 const sessionId = task.sandbox_session_id;
 if (process.env.FIXTURE_HANG_GROUP === task.group_key) {
@@ -201,6 +203,7 @@ process.stdout.write(JSON.stringify({
     input: JSON.stringify(writeCommand),
     env: {
       ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule,
       OPENCODE_API_KEY: 'redacted-test-key',
     },
   });
@@ -243,6 +246,7 @@ process.stdout.write(JSON.stringify({
     }),
     env: {
       ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule,
       FIXTURE_INVALID_PATCH: '1',
       OPENCODE_API_KEY: 'redacted-test-key',
     },
@@ -269,6 +273,7 @@ process.stdout.write(JSON.stringify({
     }),
     env: {
       ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule,
       FIXTURE_HANG_GROUP: 'docs-reference',
       OPENCODE_API_KEY: 'redacted-test-key',
     },
@@ -299,6 +304,7 @@ process.stdout.write(JSON.stringify({
     }),
     env: {
       ...process.env,
+      HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule,
       OPENCODE_API_KEY: '',
     },
   });

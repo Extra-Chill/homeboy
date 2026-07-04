@@ -18,7 +18,7 @@ set -euo pipefail
 #
 # Reads the release payload from HOMEBOY_SETTINGS_JSON which homeboy passes
 # when invoking extension actions. The payload shape is:
-#   { "release": { "tag": "vX.Y.Z", "component_id": "data-machine", ... },
+#   { "release": { "tag": "vX.Y.Z", "component_id": "sample-plugin", ... },
 #     "config":  { ... } }
 #
 # Reads the release-latest branch name from the component's homeboy.json at
@@ -184,7 +184,7 @@ resolve_github_token
 # Assert the artifact's internal version matches the release tag before
 # uploading. This is the last chokepoint before a ZIP becomes the GitHub
 # Release asset that deploys consume — a stale artifact here means silent
-# production rollback (data-machine-socials v0.14.0 shipped a v0.8.1 zip
+# production rollback (sample-plugin v0.14.0 shipped a v0.8.1 zip
 # for 6 days). Strip the leading "v" and any monorepo "<component>-v"
 # prefix from the tag to get the bare semver.
 EXPECTED_VERSION="${TAG##*v}"

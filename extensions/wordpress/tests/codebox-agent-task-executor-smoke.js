@@ -1051,9 +1051,9 @@ try {
   const runtimeToolsPath = path.join(defaultsRoot, 'example-runtime-tools');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  const dataMachinePath = path.join(defaultsRoot, 'data-machine');
+  const samplePluginPath = path.join(defaultsRoot, 'sample-plugin');
   const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, runtimeToolsPath, staleStandaloneAgentsApiPath, providerPath, dataMachinePath, phpAiClientPath]) {
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, runtimeToolsPath, staleStandaloneAgentsApiPath, providerPath, samplePluginPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -1119,11 +1119,11 @@ try {
     inputs: {
       target: { root: workspaceRoot },
     },
-  }, {
-    agentRuntime: runtimePath,
-    settings: {
-      wp_codebox_chat_handler_plugin_paths: [dataMachinePath],
-    },
+    }, {
+      agentRuntime: runtimePath,
+      settings: {
+        wp_codebox_chat_handler_plugin_paths: [samplePluginPath],
+      },
   });
   assert.deepEqual((chatHandlerRequest.runtime_requirements.component_contracts || []).map((contract) => contract.slug), []);
   assert.deepEqual(chatHandlerRequest.component_contracts.map((contract) => contract.slug), []);
@@ -3051,7 +3051,6 @@ try {
     GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
     XDG_DATA_HOME: '/runtime/provider/data',
     WP_CODEBOX_AGENTS_API_PATH: '/components/agents-api',
-    WP_CODEBOX_DATA_MACHINE_PATH: '/components/example-runtime',
   };
   const fullRunnerRuntimeStateMounts = [{
     source: '/host/provider/state.json',

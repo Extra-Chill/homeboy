@@ -240,7 +240,7 @@ def resolve_imports(moved_items: list[dict], source_content: str, source_path: s
     # Never scan raw text with startswith("use ") here — test fixtures and raw
     # strings can contain foreign-language `use` lines (e.g. PHP namespace imports)
     # that are not Rust imports. Those bogus lines caused PR #1024 to inject
-    # `use DataMachine\Core\Pipeline;` into Rust files.
+    # `use ExamplePlugin\Core\Pipeline;` into Rust files.
     source_uses = extract_top_level_use_statements(source_lines)
 
     # Collect all real top-level definitions from the source file via the Rust

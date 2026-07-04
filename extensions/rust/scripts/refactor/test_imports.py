@@ -343,10 +343,10 @@ mod tests {
     #[test]
     fn load_and_use_php_grammar() {
         let sample = r#"<?php
-namespace DataMachine\Abilities;
+namespace ExamplePlugin\Abilities;
 
 use WP_UnitTestCase;
-use DataMachine\Core\Pipeline;
+use ExamplePlugin\Core\Pipeline;
 
 class PipelineAbilities extends BaseAbilities {}
 "#;
@@ -372,7 +372,7 @@ class PipelineAbilities extends BaseAbilities {}
         import_text = "\n".join(imports)
         self.assertEqual(import_text, "")
         self.assertNotIn("WP_UnitTestCase", import_text)
-        self.assertNotIn("DataMachine\\Core\\Pipeline", import_text)
+        self.assertNotIn("ExamplePlugin\\Core\\Pipeline", import_text)
 
     def test_ignores_comment_mentions_of_source_definitions(self):
         """Names mentioned in comments/docs must not trigger same-module imports."""
