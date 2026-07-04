@@ -1,6 +1,7 @@
 //! Bench command output — unified envelope for the `homeboy bench` command.
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::artifact::{BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata};
 use super::baseline::BenchBaselineComparison;
@@ -57,6 +58,8 @@ pub struct BenchCommandOutput {
     /// find the full evidence without scraping the `hints` array.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persisted_run: Option<BenchPersistedRun>,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<Value>,
 }
 
 /// Compact, structured pointer to the persisted observation run backing a
@@ -125,6 +128,7 @@ pub fn from_main_workflow_with_rig_and_ci_context(
             diagnostics: result.diagnostics,
             ci_context,
             persisted_run: None,
+            actionable: None,
         },
         exit_code,
     )

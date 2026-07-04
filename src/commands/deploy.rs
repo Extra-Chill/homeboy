@@ -7,6 +7,9 @@ use homeboy::core::deploy::{
 };
 
 use super::utils::resolve::{infer_project_for_components, resolve_project_components};
+use super::utils::response::{
+    CommandActionableMetadata, CommandNextAction, CommandNextActionKind,
+};
 use super::CmdResult;
 
 const DEPLOY_RECIPES: &[&str] = &[
@@ -92,6 +95,8 @@ pub struct DeployOutput {
     pub force: bool,
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<CommandActionableMetadata>,
 }
 
 #[derive(Serialize)]
@@ -104,6 +109,8 @@ pub struct MultiProjectDeployOutput {
     pub dry_run: bool,
     pub check: bool,
     pub force: bool,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<CommandActionableMetadata>,
 }
 
 #[derive(Serialize)]
@@ -176,7 +183,7 @@ pub fn run(
         DeployCommandOutput::Single(DeployOutput {
             command: "deploy.run".to_string(),
             variant: "single",
-            project_id,
+            project_id: project_id.clone(),
             all: args.all,
             outdated: args.outdated,
             behind_upstream: args.behind_upstream,
@@ -185,6 +192,7 @@ pub fn run(
             force: args.force,
             results: result.results,
             summary: result.summary,
+            actionable: Some(deploy_actionable(&project_id)),
         }),
         exit_code,
     ))
@@ -345,6 +353,7 @@ fn run_multi_output(
     let result = deploy::run_multi(project_ids, component_ids, config)?;
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
+    let actionable = multi_deploy_actionable(&result.projects);
     Ok((
         DeployCommandOutput::Multi(MultiProjectDeployOutput {
             command: "deploy.run_multi".to_string(),
@@ -355,9 +364,31 @@ fn run_multi_output(
             dry_run: args.dry_run,
             check: args.check,
             force: args.force,
+            actionable: Some(actionable),
         }),
         exit_code,
     ))
+}
+
+fn deploy_actionable(project_id: &str) -> CommandActionableMetadata {
+    CommandActionableMetadata::default().with_next_action(
+        CommandNextAction::new("check deployment", format!("homeboy deploy {project_id} --check"))
+            .with_kind(CommandNextActionKind::Show),
+    )
+}
+
+fn multi_deploy_actionable(projects: &[ProjectDeployResult]) -> CommandActionableMetadata {
+    let mut metadata = CommandActionableMetadata::default();
+    for project in projects.iter().take(10) {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                format!("check {}", project.project_id),
+                format!("homeboy deploy {} --check", project.project_id),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+    }
+    metadata
 }
 
 #[cfg(test)]

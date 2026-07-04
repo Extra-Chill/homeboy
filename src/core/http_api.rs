@@ -15,7 +15,7 @@ use crate::core::observation::{
     run_owner_pid, running_status_note, FindingListFilter, ObservationStore, RunListFilter,
     RunRecord, RunStatus,
 };
-use crate::core::{component, git, paths, rig, runner, stack};
+use crate::core::{activity, component, git, paths, rig, runner, stack};
 
 const OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES: i64 = 30;
 
@@ -84,6 +84,10 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         }),
         (HttpMethod::Get, ["audit", "runs"]) => Ok(HttpEndpoint::AuditRuns),
         (HttpMethod::Get, ["bench", "runs"]) => Ok(HttpEndpoint::BenchRuns),
+        (HttpMethod::Get, ["activity"]) => Ok(HttpEndpoint::Activity),
+        (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
+            id: (*id).to_string(),
+        }),
         (HttpMethod::Get, ["jobs"]) => Ok(HttpEndpoint::Jobs),
         (HttpMethod::Get, ["jobs", id]) => Ok(HttpEndpoint::Job {
             id: (*id).to_string(),
@@ -136,6 +140,8 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /runs/:id/findings".to_string(),
                 "GET /audit/runs".to_string(),
                 "GET /bench/runs".to_string(),
+                "GET /activity".to_string(),
+                "GET /activity/:id".to_string(),
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
@@ -259,6 +265,14 @@ where
             "command": "api.bench.runs",
             "runs": list_runs(&request.path, Some("bench"), job_store)?,
         }),
+        HttpEndpoint::Activity => json!({
+            "command": "api.activity.list",
+            "activity": activity::activity_report(activity_scope_for_path(&request.path), activity_limit_for_path(&request.path))?,
+        }),
+        HttpEndpoint::ActivityItem { id } => json!({
+            "command": "api.activity.show",
+            "activity": activity::show_activity(id)?,
+        }),
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
             let stale_runner_jobs = job_store.stale_runner_jobs();
@@ -309,6 +323,21 @@ where
         endpoint: endpoint.name().to_string(),
         body,
     })
+}
+
+fn activity_scope_for_path(path: &str) -> activity::ActivityScope {
+    if query_value(path, "all").is_some_and(|value| value == "1" || value == "true") {
+        activity::ActivityScope::All
+    } else {
+        activity::ActivityScope::ActiveRecent
+    }
+}
+
+fn activity_limit_for_path(path: &str) -> usize {
+    query_value(path, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|limit| limit.clamp(1, 1000))
+        .unwrap_or(20)
 }
 
 fn enqueue_sandbox_tool_job(

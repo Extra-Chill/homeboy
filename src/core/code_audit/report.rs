@@ -14,6 +14,7 @@ use crate::core::code_audit::{
 use crate::core::extension::ExtensionPhaseTiming;
 use crate::core::finding::HomeboyFinding;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::run::AuditRunWorkflowResult;
 
@@ -111,6 +112,8 @@ pub enum AuditCommandOutput {
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension_phase_timings: Vec<ExtensionPhaseTiming>,
+        #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+        actionable: Option<Value>,
     },
 
     #[serde(rename = "audit.conventions")]
@@ -145,6 +148,8 @@ pub enum AuditCommandOutput {
         fixability: Option<AuditFixability>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension_phase_timings: Vec<ExtensionPhaseTiming>,
+        #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+        actionable: Option<Value>,
     },
 
     #[serde(rename = "audit.summary")]

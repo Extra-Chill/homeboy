@@ -21,6 +21,7 @@ use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
@@ -187,6 +188,9 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             Some(runner.run_dir()),
             active_observation.as_ref(),
         );
+        let run_id = active_observation
+            .as_ref()
+            .map(|observation| observation.run_id().to_string());
         let workflow = runner.finish(
             active_observation,
             workflow,
@@ -194,7 +198,9 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             |active, error| finish_lint_observation_error(active, &observation, error),
         )?;
 
-        return Ok(report::from_main_workflow(workflow));
+        let (mut output, exit_code) = report::from_main_workflow(workflow);
+        attach_lint_actionable(&mut output, run_id);
+        return Ok((output, exit_code));
     }
 
     let ctx = resolve_source_context(
@@ -224,6 +230,10 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         Some(runner.run_dir()),
     );
 
+    let active_observation = ActiveObservation::start_best_effort(observation.start_record());
+    let run_id = active_observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
     let workflow = run_main_lint_workflow(
         &ctx.component,
         &ctx.source_path,
@@ -250,12 +260,29 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         },
         runner.run_dir(),
     );
-    let workflow = runner.finish_adapted(observation, workflow)?;
+    let workflow = runner.finish(
+        active_observation,
+        workflow,
+        |active, workflow| finish_lint_observation(active, &observation, workflow),
+        |active, error| finish_lint_observation_error(active, &observation, error),
+    )?;
 
-    Ok(report::from_main_workflow_with_ci_context(
+    let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
-    ))
+    );
+    attach_lint_actionable(&mut output, run_id);
+    Ok((output, exit_code))
+}
+
+fn attach_lint_actionable(output: &mut LintCommandOutput, run_id: Option<String>) {
+    if let Some(run_id) = run_id {
+        output.actionable = Some(actionable_metadata_value_for_run_ref(
+            run_id,
+            "lint",
+            "homeboy-lint",
+        ));
+    }
 }
 
 fn changed_files_from_args(args: &LintArgs) -> homeboy::core::Result<Option<Vec<String>>> {

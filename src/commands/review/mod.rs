@@ -33,6 +33,7 @@ use std::path::Path;
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::utils::output::{write_output_file_atomically, OutputWriteOptions};
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{audit, lint, test, CmdResult, GlobalArgs};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 
@@ -254,7 +255,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
         });
         let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
 
-        let output = ReviewService::skipped_output(
+        let mut output = ReviewService::skipped_output(
             ReviewOutputInput {
                 component: component_label.clone(),
                 plan: build_quality_plan(QualityPlanOptions::skipped_review(
@@ -271,6 +272,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
             "no files changed",
             args.ci_profile.is_some(),
         );
+        attach_review_actionable(&mut output);
         observation::finish_success(review_observation, &output, 0);
         return Ok((output, 0));
     }
@@ -388,7 +390,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     }
 
     let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
-    let (output, overall_exit) = ReviewService::output_from_stages(
+    let (mut output, overall_exit) = ReviewService::output_from_stages(
         ReviewOutputInput {
             component: component_label.clone(),
             plan: quality_plan,
@@ -406,12 +408,23 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
             ci_profile: ci_profile_stage,
         },
     );
+    attach_review_actionable(&mut output);
 
     print_human_summary(&output);
 
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+fn attach_review_actionable(output: &mut ReviewCommandOutput) {
+    if let Some(observation) = &output.observation {
+        output.actionable = Some(actionable_metadata_value_for_run_ref(
+            observation.run_id.clone(),
+            "review",
+            "homeboy-review",
+        ));
+    }
 }
 
 fn preflight_review_scope(

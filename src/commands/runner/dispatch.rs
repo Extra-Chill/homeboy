@@ -445,7 +445,12 @@ fn run_json_exec(
             summary_outputs,
             command,
         )
-        .map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code)),
+        .map(|(output, exit_code)| {
+            (
+                RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+                exit_code,
+            )
+        }),
     );
     JsonCommandRun::from_stdout_result(stdout_result, exit_code)
 }
@@ -604,7 +609,7 @@ pub(super) fn run_compact_exec(
 pub(super) fn compact_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> RawCommandRun {
     let compact_stdout = render_compact_exec_output(&output);
     let (output_file_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
-        RunnerCommandOutput::Execution(output),
+        RunnerCommandOutput::Execution(runner_exec_command_output(output)),
         exit_code,
     )));
 
@@ -670,7 +675,7 @@ pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> 
     let presentation_stdout = output.stdout.clone();
     let presentation_stderr = output.stderr.clone();
     let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
-        RunnerCommandOutput::Execution(output),
+        RunnerCommandOutput::Execution(runner_exec_command_output(output)),
         exit_code,
     )));
 
@@ -712,7 +717,46 @@ fn map_doctor(result: CmdResult<doctor::RunnerDoctorOutput>) -> CmdResult<Runner
 }
 
 fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code))
+    result.map(|(output, exit_code)| {
+        (
+            RunnerCommandOutput::Execution(runner_exec_command_output(output)),
+            exit_code,
+        )
+    })
+}
+
+fn runner_exec_command_output(output: RunnerExecOutput) -> super::types::RunnerExecutionCommandOutput {
+    let actionable = output
+        .mirror_run_id
+        .as_ref()
+        .map(|run_id| {
+            crate::commands::utils::response::actionable_metadata_for_run_ref(
+                run_id.clone(),
+                "runner_exec",
+                "homeboy-runner-exec",
+            )
+        })
+        .or_else(|| {
+            output.job_id.as_ref().map(|job_id| {
+                let mut metadata = crate::commands::utils::response::CommandActionableMetadata::default();
+                metadata.refs.jobs.push(crate::commands::utils::response::CommandJobRef {
+                    id: job_id.clone(),
+                    kind: "runner_job".to_string(),
+                    source: "homeboy-runner-exec".to_string(),
+                    status_command: format!("homeboy activity show {job_id}"),
+                    watch_command: Some(format!("homeboy activity watch {job_id}")),
+                });
+                metadata.next_actions.push(
+                    crate::commands::utils::response::CommandNextAction::new(
+                        "show activity",
+                        format!("homeboy activity show {job_id}"),
+                    )
+                    .with_kind(crate::commands::utils::response::CommandNextActionKind::Show),
+                );
+                metadata
+            })
+        });
+    super::types::RunnerExecutionCommandOutput { output, actionable }
 }
 
 fn map_refresh_homeboy(

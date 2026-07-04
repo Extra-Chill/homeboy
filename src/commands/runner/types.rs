@@ -14,6 +14,7 @@ use super::doctor;
 use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
+use crate::commands::utils::response::CommandActionableMetadata;
 
 #[derive(Debug, Serialize)]
 pub struct RunnerExtra {
@@ -272,7 +273,7 @@ pub(super) const REDACTED_ENV_VALUE: &str = "[redacted]";
 pub enum RunnerCommandOutput {
     Registry(RunnerOutput),
     Doctor(doctor::RunnerDoctorOutput),
-    Execution(RunnerExecOutput),
+    Execution(RunnerExecutionCommandOutput),
     Env(RunnerEnvOutput),
     Lifecycle(lifecycle::RunnerLifecycleOutput),
     Job(RunnerJobOutput),
@@ -283,6 +284,14 @@ pub enum RunnerCommandOutput {
     Workspace(workspace::RunnerWorkspaceOutput),
     RefreshPlan(refresh_plan::LabRefreshPlanOutput),
     Broker(RunnerBrokerOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerExecutionCommandOutput {
+    #[serde(flatten)]
+    pub output: RunnerExecOutput,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<CommandActionableMetadata>,
 }
 
 /// Result of a broker auth/pairing management command. The plaintext `token` is

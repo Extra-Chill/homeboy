@@ -79,6 +79,8 @@ pub struct ReviewCommandOutput {
     pub test: ReviewStage<TestCommandOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_profile: Option<ReviewStage<CiRunOutput>>,
+    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    pub actionable: Option<Value>,
 }
 
 /// Stable machine-readable artifact for automated PR review consumers.
@@ -186,6 +188,7 @@ impl ReviewService {
             lint: stages.lint,
             test: stages.test,
             ci_profile: stages.ci_profile,
+            actionable: None,
         };
 
         (output, overall_exit)

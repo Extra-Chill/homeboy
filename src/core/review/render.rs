@@ -395,6 +395,7 @@ mod tests {
             lint: stage_lint_passing(),
             test: stage_test_passing(0),
             ci_profile: None,
+            actionable: None,
         }
     }
 
@@ -523,6 +524,7 @@ mod tests {
             result,
             fixability: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         }
     }
 
@@ -566,6 +568,7 @@ mod tests {
             self_check_capture: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         }
     }
 
@@ -598,6 +601,7 @@ mod tests {
             raw_output: None,
             ci_context: None,
             extension_phase_timings: Vec::new(),
+            actionable: None,
         }
     }
 
@@ -813,6 +817,7 @@ mod tests {
             lint: stage_skipped("lint", "no files changed"),
             test: stage_skipped("test", "no files changed"),
             ci_profile: None,
+            actionable: None,
         };
         let md = render_pr_comment(&env);
         assert!(

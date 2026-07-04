@@ -21,6 +21,7 @@ use super::utils::args::{
     PositionalComponentArgs, SettingArgs,
 };
 use super::utils::observed_workflow::ObservedWorkflowRunner;
+use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
@@ -169,6 +170,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             observation.as_ref().map(|observation| &observation.active),
         );
 
+        let run_id = observation
+            .as_ref()
+            .map(|observation| observation.run_id().to_string());
         let workflow = runner.finish(
             observation,
             workflow,
@@ -176,7 +180,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             |observation, error| finish_test_observation_error(Some(observation), error),
         )?;
 
-        return Ok(report::from_main_workflow(workflow));
+        let (mut output, exit_code) = report::from_main_workflow(workflow);
+        attach_test_actionable(&mut output, run_id);
+        return Ok((output, exit_code));
     }
 
     let ctx = resolve_source_context(
@@ -194,6 +200,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         let observation =
             start_test_observation(&ctx.component_id, &ctx.source_path, &args, "drift", None);
         let result = detect_test_drift(&effective_id, &ctx.component, &args.since);
+        let run_id = observation
+            .as_ref()
+            .map(|observation| observation.run_id().to_string());
         let result = match result {
             Ok(result) => {
                 finish_test_drift_observation(observation, &result);
@@ -204,7 +213,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
                 return Err(error);
             }
         };
-        return Ok(report::from_drift_workflow(result));
+        let (mut output, exit_code) = report::from_drift_workflow(result);
+        attach_test_actionable(&mut output, run_id);
+        return Ok((output, exit_code));
     }
 
     // Main test workflow — delegate to core
@@ -244,6 +255,9 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         },
         runner.run_dir(),
     );
+    let run_id = observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
     let workflow = runner.finish(
         observation,
         workflow,
@@ -251,10 +265,22 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         |observation, error| finish_test_observation_error(Some(observation), error),
     )?;
 
-    Ok(report::from_main_workflow_with_ci_context(
+    let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
-    ))
+    );
+    attach_test_actionable(&mut output, run_id);
+    Ok((output, exit_code))
+}
+
+fn attach_test_actionable(output: &mut TestCommandOutput, run_id: Option<String>) {
+    if let Some(run_id) = run_id {
+        output.actionable = Some(actionable_metadata_value_for_run_ref(
+            run_id,
+            "test",
+            "homeboy-test",
+        ));
+    }
 }
 
 fn changed_files_from_args(args: &TestArgs) -> homeboy::core::Result<Option<Vec<String>>> {
@@ -297,6 +323,12 @@ fn test_runner_ci_env(job: Option<&CiResolvedJob>) -> Vec<(String, String)> {
 struct TestObservation {
     active: ActiveObservation,
     run_dir: Option<PathBuf>,
+}
+
+impl TestObservation {
+    fn run_id(&self) -> &str {
+        self.active.run_id()
+    }
 }
 
 fn start_test_observation(
