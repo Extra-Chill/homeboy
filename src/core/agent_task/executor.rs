@@ -79,7 +79,6 @@ impl AgentTaskExecutor {
             .and_then(|selection| selection.model.as_deref())
             .or(self.model.as_deref())
     }
-
 }
 
 fn config_str<'a>(config: &'a Value, key: &str) -> Option<&'a str> {

@@ -99,7 +99,7 @@ pub(super) fn try_download_release_artifact(
         tag
     );
 
-    release_download::download_release_artifact(&github, tag, &artifact_name)
+    release_download::download_release_artifact(&github, &component.github, tag, &artifact_name)
         .map(Some)
         .map_err(|error| release_asset_download_error(component, tag, &artifact_name, error))
 }

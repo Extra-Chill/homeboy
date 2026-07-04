@@ -13,8 +13,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::core::component::Component;
+use crate::core::component::{Component, GithubConfig};
 use crate::core::error::{Error, Result};
+use crate::core::git::github_cli_env;
 use serde_json::Value;
 
 const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
@@ -151,13 +152,16 @@ pub fn resolve_artifact_name(component: &Component) -> Option<String> {
 /// Returns the local path to the downloaded file.
 pub fn download_release_artifact(
     github: &GitHubRepo,
+    github_config: &GithubConfig,
     tag: &str,
     artifact_name: &str,
 ) -> Result<PathBuf> {
-    let auth_token = github_auth_token(&github.host);
+    let auth_token = github_auth_token(github, github_config);
     let url = match auth_token.as_deref() {
-        Some(token) => resolve_release_asset_api_url(github, tag, artifact_name, token)?
-            .unwrap_or_else(|| github.release_artifact_url(tag, artifact_name)),
+        Some(token) => {
+            resolve_release_asset_api_url(github, github_config, tag, artifact_name, token)?
+                .unwrap_or_else(|| github.release_artifact_url(tag, artifact_name))
+        }
         None => github.release_artifact_url(tag, artifact_name),
     };
 
@@ -171,11 +175,13 @@ pub fn download_release_artifact(
         &url,
         dest_path.to_str().unwrap_or("artifact"),
         auth_token.as_deref(),
+        github_command_env(github, github_config),
     );
 
     // Use curl for the download (follows redirects, handles GitHub's CDN)
     let mut command = std::process::Command::new("curl");
     command.args(&curl_command.args);
+    apply_command_env(&mut command, &curl_command.env);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
@@ -257,15 +263,18 @@ pub fn download_release_artifact(
 
 fn resolve_release_asset_api_url(
     github: &GitHubRepo,
+    github_config: &GithubConfig,
     tag: &str,
     artifact_name: &str,
     auth_token: &str,
 ) -> Result<Option<String>> {
     let url = github.release_by_tag_api_url(tag);
-    let config_stdin = github_api_config(auth_token);
+    let curl_command =
+        curl_release_asset_api_command(&url, auth_token, github_command_env(github, github_config));
 
     let mut command = std::process::Command::new("curl");
-    command.args(["-fsSL", "--retry", "3", "--config", "-", &url]);
+    command.args(&curl_command.args);
+    apply_command_env(&mut command, &curl_command.env);
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
@@ -282,12 +291,14 @@ fn resolve_release_asset_api_url(
             Some("resolve release asset".to_string()),
         )
     })?;
-    stdin.write_all(config_stdin.as_bytes()).map_err(|e| {
-        Error::internal_io(
-            format!("Failed to write curl config: {}", e),
-            Some("resolve release asset".to_string()),
-        )
-    })?;
+    stdin
+        .write_all(curl_command.config_stdin.as_bytes())
+        .map_err(|e| {
+            Error::internal_io(
+                format!("Failed to write curl config: {}", e),
+                Some("resolve release asset".to_string()),
+            )
+        })?;
     drop(stdin);
 
     let output = child.wait_with_output().map_err(|e| {
@@ -342,11 +353,12 @@ fn release_asset_name_matches(asset_name: &str, artifact_name: &str) -> bool {
     !ordinal.is_empty() && ordinal.chars().all(|c| c.is_ascii_digit()) && rest == artifact_name
 }
 
-fn github_auth_token(host: &str) -> Option<String> {
-    let output = std::process::Command::new("gh")
-        .args(["auth", "token", "--hostname", host])
-        .output()
-        .ok()?;
+fn github_auth_token(github: &GitHubRepo, github_config: &GithubConfig) -> Option<String> {
+    let gh_command = gh_auth_token_command(github, github_config);
+    let mut command = std::process::Command::new("gh");
+    command.args(&gh_command.args);
+    apply_command_env(&mut command, &gh_command.env);
+    let output = command.output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -360,15 +372,40 @@ fn github_auth_token(host: &str) -> Option<String> {
     }
 }
 
+struct GitHubCommand {
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
 struct CurlReleaseArtifactCommand {
     args: Vec<String>,
     config_stdin: Option<String>,
+    env: Vec<(String, String)>,
+}
+
+struct CurlReleaseAssetApiCommand {
+    args: Vec<String>,
+    config_stdin: String,
+    env: Vec<(String, String)>,
+}
+
+fn gh_auth_token_command(github: &GitHubRepo, github_config: &GithubConfig) -> GitHubCommand {
+    GitHubCommand {
+        args: vec![
+            "auth".to_string(),
+            "token".to_string(),
+            "--hostname".to_string(),
+            github.host.clone(),
+        ],
+        env: github_command_env(github, github_config),
+    }
 }
 
 fn curl_release_artifact_command(
     url: &str,
     dest_path: &str,
     auth_token: Option<&str>,
+    env: Vec<(String, String)>,
 ) -> CurlReleaseArtifactCommand {
     let mut args = vec!["-fsSL".to_string(), "--retry".to_string(), "3".to_string()];
 
@@ -385,7 +422,40 @@ fn curl_release_artifact_command(
 
     args.extend(["-o".to_string(), dest_path.to_string(), url.to_string()]);
 
-    CurlReleaseArtifactCommand { args, config_stdin }
+    CurlReleaseArtifactCommand {
+        args,
+        config_stdin,
+        env,
+    }
+}
+
+fn curl_release_asset_api_command(
+    url: &str,
+    auth_token: &str,
+    env: Vec<(String, String)>,
+) -> CurlReleaseAssetApiCommand {
+    CurlReleaseAssetApiCommand {
+        args: vec![
+            "-fsSL".to_string(),
+            "--retry".to_string(),
+            "3".to_string(),
+            "--config".to_string(),
+            "-".to_string(),
+            url.to_string(),
+        ],
+        config_stdin: github_api_config(auth_token),
+        env,
+    }
+}
+
+fn github_command_env(github: &GitHubRepo, github_config: &GithubConfig) -> Vec<(String, String)> {
+    github_cli_env(&github.host, github_config)
+}
+
+fn apply_command_env(command: &mut std::process::Command, env: &[(String, String)]) {
+    for (key, value) in env {
+        command.env(key, value);
+    }
 }
 
 fn github_api_config(token: &str) -> String {
@@ -505,6 +575,10 @@ pub fn detect_remote_url(repo_path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use crate::core::component::GithubHostConfig;
+
     use super::*;
 
     #[test]
@@ -700,6 +774,7 @@ mod tests {
             "https://github.example.com/example-org/theme/releases/download/v1/theme.zip",
             "/tmp/theme.zip",
             Some("secret-token"),
+            Vec::new(),
         );
 
         assert!(command.args.contains(&"--config".to_string()));
@@ -721,6 +796,7 @@ mod tests {
             "https://github.com/example-org/theme/releases/download/v1/theme.zip",
             "/tmp/theme.zip",
             None,
+            Vec::new(),
         );
 
         assert!(!command.args.contains(&"--config".to_string()));
@@ -752,6 +828,97 @@ mod tests {
         assert_eq!(
             repo.release_by_tag_api_url("v1.2.3"),
             "https://api.github.com/repos/Extra-Chill/homeboy/releases/tags/v1.2.3"
+        );
+    }
+
+    #[test]
+    fn release_asset_commands_include_enterprise_host_and_configured_proxy_env() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "example-org".to_string(),
+            repo: "theme".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("socks5://127.0.0.1:8080".to_string()),
+                    env: HashMap::new(),
+                },
+            )]),
+        };
+
+        let gh_command = gh_auth_token_command(&github, &config);
+        let api_command = curl_release_asset_api_command(
+            &github.release_by_tag_api_url("v1.2.3"),
+            "secret-token",
+            github_command_env(&github, &config),
+        );
+        let artifact_command = curl_release_artifact_command(
+            &github.release_artifact_url("v1.2.3", "theme.zip"),
+            "/tmp/theme.zip",
+            Some("secret-token"),
+            github_command_env(&github, &config),
+        );
+
+        assert_eq!(
+            gh_command.args,
+            vec!["auth", "token", "--hostname", "github.enterprise.test"]
+        );
+        for env in [&gh_command.env, &api_command.env, &artifact_command.env] {
+            assert!(env.contains(&("GH_HOST".to_string(), "github.enterprise.test".to_string())));
+            assert!(env.contains(&(
+                "HTTPS_PROXY".to_string(),
+                "socks5://127.0.0.1:8080".to_string()
+            )));
+        }
+        assert_eq!(
+            api_command.args,
+            vec![
+                "-fsSL",
+                "--retry",
+                "3",
+                "--config",
+                "-",
+                "https://github.enterprise.test/api/v3/repos/example-org/theme/releases/tags/v1.2.3"
+            ]
+        );
+        assert_eq!(
+            artifact_command.args.last().map(String::as_str),
+            Some("https://github.enterprise.test/example-org/theme/releases/download/v1.2.3/theme.zip")
+        );
+    }
+
+    #[test]
+    fn release_asset_commands_do_not_add_enterprise_env_for_github_com() {
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "theme".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("socks5://127.0.0.1:8080".to_string()),
+                    env: HashMap::new(),
+                },
+            )]),
+        };
+
+        let gh_command = gh_auth_token_command(&github, &config);
+        let artifact_command = curl_release_artifact_command(
+            &github.release_artifact_url("v1.2.3", "theme.zip"),
+            "/tmp/theme.zip",
+            None,
+            github_command_env(&github, &config),
+        );
+
+        assert_eq!(gh_command.env, Vec::<(String, String)>::new());
+        assert_eq!(artifact_command.env, Vec::<(String, String)>::new());
+        assert_eq!(
+            gh_command.args,
+            vec!["auth", "token", "--hostname", "github.com"]
         );
     }
 
