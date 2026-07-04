@@ -2,8 +2,10 @@ use homeboy::core::runners::{
     self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
 };
 use homeboy::core::server::RunnerSettings;
+use serde_json::Value;
 
 use super::super::output_runtime::{CommandPresentation, JsonCommandRun};
+use super::super::raw_output::RawCommandRun;
 use super::super::CmdResult;
 use super::broker::run_broker;
 use super::cli::{RunnerArgs, RunnerCommand};
@@ -174,6 +176,7 @@ pub fn run(
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            json: _,
             raw: _,
             command,
         } => map_execution(exec(
@@ -269,9 +272,92 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             artifact_outputs,
             artifact_dir_outputs,
             summary_outputs,
+            json: true,
+            raw: false,
+            command,
+        } => run_json_exec(
+            id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            secret_env,
+            secret_env_plan,
+            secret_env_plan_file,
+            dry_run,
+            run_id,
+            artifact_outputs,
+            artifact_dir_outputs,
+            summary_outputs,
+            command,
+        ),
+        RunnerCommand::Exec {
+            id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            secret_env,
+            secret_env_plan,
+            secret_env_plan_file,
+            dry_run,
+            run_id,
+            artifact_outputs,
+            artifact_dir_outputs,
+            summary_outputs,
             raw: true,
+            json: false,
             command,
         } => run_raw_exec(
+            id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            secret_env,
+            secret_env_plan,
+            secret_env_plan_file,
+            dry_run,
+            run_id,
+            artifact_outputs,
+            artifact_dir_outputs,
+            summary_outputs,
+            command,
+        ),
+        RunnerCommand::Exec {
+            id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            secret_env,
+            secret_env_plan,
+            secret_env_plan_file,
+            dry_run,
+            run_id,
+            artifact_outputs,
+            artifact_dir_outputs,
+            summary_outputs,
+            raw: false,
+            json: false,
+            command,
+        } => run_compact_exec_json(
             id,
             cwd,
             sync_workspace,
@@ -300,6 +386,53 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_json_exec(
+    id: String,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    project: Option<String>,
+    ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
+    dry_run: bool,
+    run_id: Option<String>,
+    artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
+    summary_outputs: Vec<String>,
+    command: Vec<String>,
+) -> JsonCommandRun {
+    let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
+        exec(
+            &id,
+            cwd,
+            sync_workspace,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            secret_env,
+            secret_env_plan,
+            secret_env_plan_file,
+            dry_run,
+            run_id,
+            artifact_outputs,
+            artifact_dir_outputs,
+            summary_outputs,
+            command,
+        )
+        .map(|(output, exit_code)| (RunnerCommandOutput::Execution(output), exit_code)),
+    );
+    JsonCommandRun::from_stdout_result(stdout_result, exit_code)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -352,6 +485,170 @@ fn run_raw_exec(
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_compact_exec_json(
+    id: String,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    project: Option<String>,
+    ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
+    dry_run: bool,
+    run_id: Option<String>,
+    artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
+    summary_outputs: Vec<String>,
+    command: Vec<String>,
+) -> JsonCommandRun {
+    let raw_run = run_compact_exec(
+        id,
+        cwd,
+        sync_workspace,
+        project,
+        ssh,
+        capture_patch,
+        require_paths,
+        script_file,
+        env,
+        secret_env,
+        secret_env_plan,
+        secret_env_plan_file,
+        dry_run,
+        run_id,
+        artifact_outputs,
+        artifact_dir_outputs,
+        summary_outputs,
+        command,
+    );
+    let (run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
+    run.with_presentation(CommandPresentation {
+        stdout: raw_stdout.ok(),
+        stderr: None,
+    })
+    .with_command("runner")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_compact_exec(
+    id: String,
+    cwd: Option<String>,
+    sync_workspace: Option<String>,
+    project: Option<String>,
+    ssh: bool,
+    capture_patch: bool,
+    require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    secret_env: Vec<String>,
+    secret_env_plan: Option<String>,
+    secret_env_plan_file: Option<String>,
+    dry_run: bool,
+    run_id: Option<String>,
+    artifact_outputs: Vec<String>,
+    artifact_dir_outputs: Vec<String>,
+    summary_outputs: Vec<String>,
+    command: Vec<String>,
+) -> RawCommandRun {
+    match exec(
+        &id,
+        cwd,
+        sync_workspace,
+        project,
+        ssh,
+        capture_patch,
+        require_paths,
+        script_file,
+        env,
+        secret_env,
+        secret_env_plan,
+        secret_env_plan_file,
+        dry_run,
+        run_id,
+        artifact_outputs,
+        artifact_dir_outputs,
+        summary_outputs,
+        command,
+    ) {
+        Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),
+        Err(err) => RawCommandRun {
+            stdout_result: Err(err),
+            exit_code: 1,
+            output_file_result: None,
+        },
+    }
+}
+
+pub(super) fn compact_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> RawCommandRun {
+    let compact_stdout = render_compact_exec_output(&output);
+    let (output_file_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
+        RunnerCommandOutput::Execution(output),
+        exit_code,
+    )));
+
+    RawCommandRun {
+        stdout_result: Ok(compact_stdout),
+        exit_code,
+        output_file_result: Some(output_file_result),
+    }
+}
+
+pub(super) fn render_compact_exec_output(output: &RunnerExecOutput) -> String {
+    let mut rendered = String::new();
+    rendered.push_str(&format!("Runner: {}\n", output.runner_id));
+    rendered.push_str(&format!("Remote cwd: {}\n", output.remote_cwd));
+    rendered.push_str(&format!("Exit status: {}\n", output.exit_code));
+    if let Some(job_id) = output.job_id.as_deref() {
+        rendered.push_str(&format!("Job: {job_id}\n"));
+    }
+    if let Some(run_id) = output.mirror_run_id.as_deref() {
+        rendered.push_str(&format!("Run: {run_id}\n"));
+    }
+    for artifact in &output.artifacts {
+        let label = artifact.name.as_deref().unwrap_or(&artifact.id);
+        let uri = artifact
+            .url
+            .as_deref()
+            .or(artifact.path.as_deref())
+            .unwrap_or("unresolved");
+        rendered.push_str(&format!("Artifact: {label} ({uri})\n"));
+    }
+    for artifact in &output.promoted_outputs {
+        rendered.push_str(&format!(
+            "Artifact: {} ({})\n",
+            artifact.artifact_id, artifact.artifact_path
+        ));
+    }
+    rendered.push('\n');
+    if !output.stdout.is_empty() {
+        rendered.push_str("Stdout:\n");
+        rendered.push_str(&render_stream(&output.stdout));
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+    if !output.stderr.is_empty() {
+        rendered.push_str("Stderr:\n");
+        rendered.push_str(&output.stderr);
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+    }
+    rendered
+}
+
+fn render_stream(stream: &str) -> String {
+    serde_json::from_str::<Value>(stream)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| stream.to_string())
 }
 
 pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommandRun {

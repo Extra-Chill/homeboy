@@ -13,7 +13,7 @@
 
 use crate::cli_surface::Commands;
 use crate::commands::{
-    changelog, file, fleet, logs, observe, report, review, runtime, trace, version,
+    changelog, file, fleet, logs, observe, report, review, runner, runtime, trace, version,
 };
 
 use super::lab::apply_lab_contract_to_descriptor;
@@ -228,6 +228,9 @@ impl Commands {
             Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
             Commands::Contract(_) => {
                 crate::commands::contract::adapter(output_file_mode).output_descriptor()
+            }
+            Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
+                raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
             Commands::AgentTask(_)
             | Commands::Project(_)
@@ -514,6 +517,35 @@ mod tests {
             CommandResponsePlan {
                 stdout: CommandStdoutMode::Raw(CommandRawOutputMode::Markdown),
                 output_file: CommandOutputFileMode::TraceJsonSummaryArtifact,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&["homeboy", "runner", "exec", "lab", "--", "homeboy", "runs", "list"])
+                .response_plan(false),
+            CommandResponsePlan {
+                stdout: CommandStdoutMode::Raw(CommandRawOutputMode::PlainText),
+                output_file: CommandOutputFileMode::None,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&[
+                "homeboy", "runner", "exec", "lab", "--json", "--", "homeboy", "runs", "list",
+            ])
+            .response_plan(false),
+            CommandResponsePlan {
+                stdout: CommandStdoutMode::JsonEnvelope,
+                output_file: CommandOutputFileMode::None,
+            }
+        );
+
+        assert_eq!(
+            parsed_command(&["homeboy", "runner", "exec", "lab", "--", "homeboy", "runs", "list"])
+                .response_plan(true),
+            CommandResponsePlan {
+                stdout: CommandStdoutMode::Raw(CommandRawOutputMode::PlainText),
+                output_file: CommandOutputFileMode::GenericEnvelope,
             }
         );
     }

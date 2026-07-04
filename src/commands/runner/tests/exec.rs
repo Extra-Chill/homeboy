@@ -1,4 +1,6 @@
-use super::super::dispatch::raw_exec_command_run;
+use super::super::dispatch::{
+    compact_exec_command_run, raw_exec_command_run, render_compact_exec_output,
+};
 use super::super::exec::{
     exec, exec_workspace_context, prepare_runner_exec_command, prepare_runner_exec_env,
     prepare_runner_exec_secret_env_plan, promote_runner_exec_artifact_dirs,
@@ -55,6 +57,103 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
     assert_eq!(value["stdout"], "hello\n");
     assert_eq!(value["stderr"], "warn\n");
     assert_eq!(value["job_id"], "job-123");
+}
+
+#[test]
+fn compact_exec_output_shows_metadata_and_streams_once() {
+    let output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab".to_string(),
+        dry_run: false,
+        mode: runner::RunnerExecMode::Daemon,
+        argv: vec![
+            "homeboy".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+        ],
+        remote_cwd: "/workspace".to_string(),
+        exit_code: 0,
+        stdout: r#"{"runs":[{"id":"run-1"}]}"#.to_string(),
+        stderr: "warn\n".to_string(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: Some("mirror-1".to_string()),
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+
+    let rendered = render_compact_exec_output(&output);
+
+    assert!(rendered.contains("Runner: lab\n"));
+    assert!(rendered.contains("Remote cwd: /workspace\n"));
+    assert!(rendered.contains("Exit status: 0\n"));
+    assert!(rendered.contains("Job: job-123\n"));
+    assert!(rendered.contains("Run: mirror-1\n"));
+    assert!(rendered.contains("Stdout:\n{\n  \"runs\": ["));
+    assert!(rendered.contains("Stderr:\nwarn\n"));
+    assert_eq!(rendered.matches("Stdout:").count(), 1);
+    assert_eq!(rendered.matches("Stderr:").count(), 1);
+}
+
+#[test]
+fn compact_exec_command_run_preserves_full_output_file_payload() {
+    let output = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "lab".to_string(),
+        dry_run: false,
+        mode: runner::RunnerExecMode::Daemon,
+        argv: vec!["printf".to_string(), "hello".to_string()],
+        remote_cwd: "/workspace".to_string(),
+        exit_code: 0,
+        stdout: "hello\n".to_string(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: Some("job-123".to_string()),
+        job_events: None,
+        mirror_run_id: None,
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+
+    let run = compact_exec_command_run(output, 0);
+
+    assert!(run
+        .stdout_result
+        .as_ref()
+        .expect("compact stdout")
+        .contains("Stdout:\nhello\n"));
+    let output_file = run
+        .output_file_result
+        .expect("full output file payload")
+        .expect("serialized payload");
+    assert_eq!(output_file["command"], "runner.exec");
+    assert_eq!(output_file["stdout"], "hello\n");
+    assert_eq!(output_file["job_id"], "job-123");
 }
 
 #[test]
