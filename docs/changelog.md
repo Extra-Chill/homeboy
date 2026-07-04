@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.3] - 2026-07-04
+
+### Changed
+- Speed up git-backed status tests
+- Install broker credentials during runner pairing
+- Collapse API and release command pillars
+- Unify runner extension materialization
+- Unify resident lab dispatch tail
+- assert serde detail in malformed provider-config error
+- Content-edit repo-config dotfiles and prune emptied dirs after rename moves (#7566)
+- Derive Title-Kebab-Case rename variants (#7567)
+- Complete actionable command envelope loop
+- Purge core genericity hardcodes
+- Derive Title_Snake_Case rename variants (#7556)
+
+### Fixed
+- Fix remote daemon handshake noise parsing
+- Fix remaining release blockers from #7529
+
 ## [0.281.2] - 2026-07-04
 
 ### Changed
