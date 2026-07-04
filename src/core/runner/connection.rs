@@ -1402,10 +1402,26 @@ mod tests {
             Some("0.204.0")
         );
         assert_eq!(
+            daemon_version_from_body(&serde_json::json!({
+                "success": true,
+                "data": {"version": "0.281.2"}
+            })),
+            Some("0.281.2")
+        );
+        assert_eq!(
             daemon_identity_from_body(
                 &serde_json::json!({"version":"0.228.13","build_identity":{"display":"homeboy 0.228.13+f7569a5e"}})
             ),
             Some("homeboy 0.228.13+f7569a5e")
+        );
+        assert_eq!(
+            daemon_identity_from_body(&serde_json::json!({
+                "success": true,
+                "data": {
+                    "build_identity": {"display": "homeboy 0.281.2+b078972b3edd"}
+                }
+            })),
+            Some("homeboy 0.281.2+b078972b3edd")
         );
         assert_eq!(
             daemon_identity_from_body(&serde_json::json!({"version":"0.228.13"})),
