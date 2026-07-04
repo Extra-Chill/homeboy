@@ -1,0 +1,30 @@
+{
+  "name": "Managed Preview",
+  "id": "managed-preview",
+  "version": "0.1.0",
+  "provides": {
+    "file_extensions": ["json", "mjs", "sh"],
+    "capabilities": ["preview-backend", "public-preview-preflight"]
+  },
+  "scripts": { "validate": "tests/public-preview-backend-smoke.mjs" },
+  "browser_trace_helpers": [{
+    "schema": "homeboy/public-preview-preflight-helper/v1",
+    "id": "managed-preview.public-preview-preflight",
+    "label": "Public preview preflight for browser trace workloads",
+    "command": "node {{extension_path}}/scripts/public-preview-preflight.mjs",
+    "contract": {
+      "accepts_env": ["HOMEBOY_LOCAL_PREVIEW_URL", "HOMEBOY_PUBLIC_PREVIEW_URL"],
+      "records_metadata_schema": "homeboy/public-preview-preflight/v1"
+    },
+    "capabilities": ["preview-port-selection", "browser-trace-metadata"]
+  }],
+  "preview_backends": [{
+    "schema": "homeboy/managed-preview-backend-command/v1",
+    "id": "managed-preview.host-preserving-broker",
+    "label": "Hostname-preserving preview broker",
+    "provider": "external-broker",
+    "command": "node {{extension_path}}/scripts/public-preview-backend.mjs",
+    "contract": { "requires_env": ["HOMEBOY_SERVICE_LOCAL_URL"], "keeps_process_alive": true },
+    "capabilities": ["reviewer-clickable-public-url", "browser-origin-evidence"]
+  }]
+}

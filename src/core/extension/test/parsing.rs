@@ -2,8 +2,10 @@ use serde::Serialize;
 
 use crate::core::engine::local_files;
 use crate::core::engine::output_parse::{Aggregate, DeriveRule, ParseRule, ParseSpec};
+use crate::core::error::Result;
 use crate::core::extension::test::analyze::{TestAnalysis, TestAnalysisInput};
 use crate::core::extension::test::TestCounts;
+use crate::core::structured_sidecar;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageOutput {
@@ -90,9 +92,25 @@ pub fn build_test_summary(
     }
 }
 
-pub fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> {
-    let content = local_files::read_file(path, "read test failures file").ok()?;
-    let mut parsed: TestAnalysisInput = serde_json::from_str(&content).ok()?;
+pub fn parse_failures_file(path: &std::path::Path) -> Result<Option<TestAnalysisInput>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = local_files::read_file(path, "read test failures file")?;
+    let payload: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        crate::core::Error::internal_json(
+            format!("Malformed test failures JSON in {}: {}", path.display(), e),
+            Some("test.failures.parse".to_string()),
+        )
+    })?;
+    structured_sidecar::validate_payload("test.failures", &payload)?;
+    let mut parsed: TestAnalysisInput = serde_json::from_value(payload).map_err(|e| {
+        crate::core::Error::internal_json(
+            format!("Malformed test failures JSON in {}: {}", path.display(), e),
+            Some("test.failures.parse".to_string()),
+        )
+    })?;
 
     if parsed.total == 0 && !parsed.failures.is_empty() {
         parsed.total = parsed.failures.len() as u64;
@@ -102,25 +120,35 @@ pub fn parse_failures_file(path: &std::path::Path) -> Option<TestAnalysisInput> 
         parsed.passed = parsed.total;
     }
 
-    Some(parsed)
+    Ok(Some(parsed))
 }
 
-pub fn parse_test_results_file(path: &std::path::Path) -> Option<TestCounts> {
+pub fn parse_test_results_file(path: &std::path::Path) -> Result<Option<TestCounts>> {
     parse_test_results_file_with_spec(path, None)
 }
 
 pub fn parse_test_results_file_with_spec(
     path: &std::path::Path,
     _spec: Option<&ParseSpec>,
-) -> Option<TestCounts> {
-    let content = local_files::read_file(path, "read test results file").ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+) -> Result<Option<TestCounts>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = local_files::read_file(path, "read test results file")?;
+    let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        crate::core::Error::internal_json(
+            format!("Malformed test results JSON in {}: {}", path.display(), e),
+            Some("test.results.parse".to_string()),
+        )
+    })?;
+    structured_sidecar::validate_payload("test.results", &data)?;
 
     let has_flat_counts = ["total", "passed", "failed", "errors", "skipped"]
         .iter()
         .any(|key| data.get(key).is_some());
     if !has_flat_counts {
-        return None;
+        return Ok(None);
     }
 
     let total = data
@@ -146,7 +174,12 @@ pub fn parse_test_results_file_with_spec(
 
     // `TestCounts` has no separate errors field; fold runner errors into
     // `failed` so status/baseline decisions do not treat errors as passing.
-    Some(TestCounts::new(total, passed, failed + errors, skipped))
+    Ok(Some(TestCounts::new(
+        total,
+        passed,
+        failed + errors,
+        skipped,
+    )))
 }
 
 pub fn parse_test_results_text(text: &str) -> Option<TestCounts> {
@@ -268,13 +301,28 @@ fn default_test_result_parse_spec() -> ParseSpec {
     }
 }
 
-pub fn parse_coverage_file(path: &std::path::Path) -> Option<CoverageOutput> {
-    let content = local_files::read_file(path, "read coverage file").ok()?;
-    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
+pub fn parse_coverage_file(path: &std::path::Path) -> Result<Option<CoverageOutput>> {
+    if !path.exists() {
+        return Ok(None);
+    }
 
-    let totals = data.get("totals")?;
-    let lines = totals.get("lines")?;
-    let methods = totals.get("methods")?;
+    let content = local_files::read_file(path, "read coverage file")?;
+    let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        crate::core::Error::internal_json(
+            format!("Malformed test coverage JSON in {}: {}", path.display(), e),
+            Some("test.coverage.parse".to_string()),
+        )
+    })?;
+
+    let Some(totals) = data.get("totals") else {
+        return Ok(None);
+    };
+    let Some(lines) = totals.get("lines") else {
+        return Ok(None);
+    };
+    let Some(methods) = totals.get("methods") else {
+        return Ok(None);
+    };
 
     let lines_pct = lines
         .get("pct")
@@ -318,13 +366,13 @@ pub fn parse_coverage_file(path: &std::path::Path) -> Option<CoverageOutput> {
         })
         .unwrap_or_default();
 
-    Some(CoverageOutput {
+    Ok(Some(CoverageOutput {
         lines_pct,
         lines_total,
         lines_covered,
         methods_pct,
         uncovered_files,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -429,6 +477,7 @@ mod tests {
 
         let file_counts =
             parse_test_results_file(&results_file).expect("flat test-results JSON should parse");
+        let file_counts = file_counts.expect("flat counts should be present");
 
         assert_eq!(file_counts.total, 5);
         assert_eq!(file_counts.passed, 2);
@@ -450,6 +499,7 @@ mod tests {
         .expect("write test results");
 
         let counts = parse_test_results_file(&results_file);
+        let counts = counts.expect("schema JSON should parse");
 
         assert!(counts.is_none());
     }

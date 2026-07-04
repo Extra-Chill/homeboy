@@ -1,0 +1,27 @@
+{
+  "name": "Rust",
+  "version": "1.21.1",
+  "provides": {
+    "file_extensions": ["rs"],
+    "capabilities": ["fingerprint", "refactor", "format", "validate"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "annotations": true
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
+    "refactor": "scripts/refactor.sh",
+    "validate": "scripts/validate.sh",
+    "format": "scripts/format.sh",
+    "compiler_warnings": "scripts/compiler-warnings.py",
+    "compiler_warning_fixes": "scripts/compiler-warning-fixes.py"
+  },
+  "lint": { "extension_script": "scripts/lint-runner.sh" },
+  "test": { "extension_script": "scripts/test-runner.sh" },
+  "bench": { "extension_script": "scripts/bench/bench-runner.sh" }
+}

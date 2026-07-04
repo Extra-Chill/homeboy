@@ -1,0 +1,36 @@
+{
+  "name": "Go",
+  "id": "go",
+  "version": "1.5.2",
+  "provides": {
+    "file_extensions": ["go", "mod", "sum"],
+    "capabilities": ["fingerprint", "format", "validate"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": false,
+    "test.failures": true,
+    "test.coverage": false,
+    "annotations": false
+  },
+  "scripts": {
+    "fingerprint": "scripts/fingerprint.sh",
+    "validate": "scripts/validate.sh",
+    "format": "scripts/format.sh"
+  },
+  "build": {
+    "command_template": "bash {{script}}",
+    "extension_script": "scripts/build.sh",
+    "cleanup_paths": ["bin", "dist"],
+    "lockfile_paths": ["go.sum"]
+  },
+  "lint": { "extension_script": "scripts/lint-runner.sh" },
+  "test": { "extension_script": "scripts/test-runner.sh" },
+  "cli": {
+    "tool": "go",
+    "display_name": "Go",
+    "command_template": "{{cliPath}} {{args}}",
+    "working_dir_template": "{{sitePath}}",
+    "default_cli_path": "go"
+  }
+}

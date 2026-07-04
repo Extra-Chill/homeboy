@@ -269,7 +269,7 @@ pub fn run_main_test_workflow(
         run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
     }
 
-    let mut test_counts = parse_test_results_file_with_spec(&results_file, result_parse.as_ref())
+    let mut test_counts = parse_test_results_file_with_spec(&results_file, result_parse.as_ref())?
         .or_else(|| {
             result_parse
                 .as_ref()
@@ -292,9 +292,13 @@ pub fn run_main_test_workflow(
         require_phpunit_tests,
     );
 
-    let coverage = coverage_file.as_deref().and_then(parse_coverage_file);
+    let coverage = coverage_file
+        .as_deref()
+        .map(parse_coverage_file)
+        .transpose()?
+        .flatten();
 
-    let failure_analysis_input = parse_failures_file(&failures_file);
+    let failure_analysis_input = parse_failures_file(&failures_file)?;
     let findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);
@@ -1037,6 +1041,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
                 Some(&spec),
             )
             .expect("declared parser should write normalized counts");
+            let counts = counts.expect("normalized counts should be present");
 
             run_dir.cleanup();
 
@@ -1225,6 +1230,7 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
                 Some(&spec),
             )
             .expect("parser stdout JSON should be normalized to test-results.json");
+            let counts = counts.expect("normalized counts should be present");
 
             run_dir.cleanup();
 
