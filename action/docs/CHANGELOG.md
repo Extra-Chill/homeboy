@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.6] - 2026-07-04
+
+### Fixed
+- gate review quality commands differentially
+
 ## [2.8.5] - 2026-07-04
 
 ### Changed
