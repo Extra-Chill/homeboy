@@ -10,6 +10,71 @@ const index = JSON.parse(fs.readFileSync(path.join(manifestRoot, 'index.json'), 
 const exampleDir = path.join(manifestRoot, 'examples');
 const exampleFiles = fs.readdirSync(exampleDir).filter((file) => file.endsWith('.json')).sort();
 
+function schemaAt(ref) {
+	assert.ok(ref.startsWith('#/'), `Unsupported schema ref: ${ref}`);
+	return ref.slice(2).split('/').reduce((current, segment) => current[segment], schema);
+}
+
+function validateAgainstSchema(definition, value, label) {
+	if (definition.$ref) {
+		validateAgainstSchema(schemaAt(definition.$ref), value, label);
+		return;
+	}
+
+	if (definition.const !== undefined) {
+		assert.equal(value, definition.const, `${label} matches const ${definition.const}`);
+	}
+
+	if (definition.type) {
+		const actualType = Array.isArray(value) ? 'array' : value === null ? 'null' : Number.isInteger(value) ? 'integer' : typeof value;
+		if (definition.type === 'integer') {
+			assert.equal(actualType, 'integer', `${label} is an integer`);
+		} else {
+			assert.equal(actualType, definition.type, `${label} is a ${definition.type}`);
+		}
+	}
+
+	if (definition.enum) {
+		assert.ok(definition.enum.includes(value), `${label} is one of ${definition.enum.join(', ')}`);
+	}
+
+	if (definition.pattern && typeof value === 'string') {
+		assert.match(value, new RegExp(definition.pattern), `${label} matches ${definition.pattern}`);
+	}
+
+	if (definition.minimum !== undefined && typeof value === 'number') {
+		assert.ok(value >= definition.minimum, `${label} is at least ${definition.minimum}`);
+	}
+
+	if (definition.type === 'array') {
+		if (definition.minItems !== undefined) {
+			assert.ok(value.length >= definition.minItems, `${label} has at least ${definition.minItems} items`);
+		}
+		for (const [index, item] of value.entries()) {
+			validateAgainstSchema(definition.items, item, `${label}[${index}]`);
+		}
+	}
+
+	if (definition.type === 'object') {
+		for (const required of definition.required || []) {
+			assert.ok(Object.hasOwn(value, required), `${label} declares ${required}`);
+		}
+
+		if (definition.additionalProperties === false) {
+			const allowed = new Set(Object.keys(definition.properties || {}));
+			for (const key of Object.keys(value)) {
+				assert.ok(allowed.has(key), `${label} has schema-declared property ${key}`);
+			}
+		}
+
+		for (const [key, propertySchema] of Object.entries(definition.properties || {})) {
+			if (Object.hasOwn(value, key)) {
+				validateAgainstSchema(propertySchema, value[key], `${label}.${key}`);
+			}
+		}
+	}
+}
+
 assert.equal(schema.properties.schema.const, 'homeboy-extension/dependency-adapter-manifest/v1');
 assert.ok(schema.required.includes('ecosystem'));
 assert.ok(schema.required.includes('project_signals'));
@@ -21,6 +86,7 @@ assert.deepEqual(
 	exampleFiles.map((file) => `examples/${file}`).sort(),
 	'index lists every shipped adapter manifest'
 );
+assert.ok(Array.isArray(index.manifests), 'index declares manifests array');
 
 const ids = new Set();
 const productSpecificTerms = ['woocommerce', 'jetpack', 'studio-native'];
@@ -30,7 +96,12 @@ for (const file of exampleFiles) {
 	const indexEntry = index.manifests.find((entry) => entry.path === `examples/${file}`);
 	const serialized = JSON.stringify(manifest).toLowerCase();
 
+	validateAgainstSchema(schema, manifest, file);
+
 	assert.ok(indexEntry, `${file} has an index entry`);
+	assert.equal(typeof indexEntry.id, 'string', `${file} index id is a string`);
+	assert.equal(typeof indexEntry.ecosystem, 'string', `${file} index ecosystem is a string`);
+	assert.equal(typeof indexEntry.path, 'string', `${file} index path is a string`);
 	assert.equal(indexEntry.id, manifest.id, `${file} index id matches manifest id`);
 	assert.equal(indexEntry.ecosystem, manifest.ecosystem, `${file} index ecosystem matches manifest ecosystem`);
 	assert.equal(manifest.schema, schema.properties.schema.const, `${file} uses the adapter schema`);

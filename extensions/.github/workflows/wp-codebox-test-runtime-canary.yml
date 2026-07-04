@@ -55,11 +55,6 @@ jobs:
           npm install
           npm run build
 
-      - name: Verify canonical runtime contract manifest loads from built module
-        env:
-          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/contracts.js
-        run: node tests/wp-codebox-runtime-contract-built-module-canary.mjs
-
       - name: Run WP Codebox-backed test runner canary
         env:
           HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js

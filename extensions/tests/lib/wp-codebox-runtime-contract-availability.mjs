@@ -40,7 +40,7 @@ export function skipUnlessWpCodeboxCanonicalContract(label) {
 	const resolved = loadCanonicalRuntimeContractSourceSync({ required: false, wpCodeboxCoreModule: coreModule });
 	if (!resolved) {
 		console.log(
-			`skipped: ${label} (WP Codebox canonical runtime contract unavailable at ${coreModule}; set HOMEBOY_WP_CODEBOX_CORE_MODULE)`
+			`SKIPPED ${label}: WP Codebox canonical runtime contract unavailable at ${coreModule}; set HOMEBOY_WP_CODEBOX_CORE_MODULE`
 		);
 		process.exit(0);
 	}
