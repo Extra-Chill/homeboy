@@ -28,7 +28,7 @@ ORDERED_COMMANDS="$(resolve_baseline_commands "${EFFECTIVE_COMMANDS}" "${BASELIN
 IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${CMD}" | xargs)"
-  case "${CMD}" in
+  case "$(quality_base_command "${CMD}")" in
     audit|lint|test)
       BASELINE_RUN_COMMANDS+=("${CMD}")
       ;;

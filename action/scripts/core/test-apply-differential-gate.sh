@@ -40,7 +40,14 @@ printf '{"test":{"status":"fail","exit_code":1,"command":"homeboy test sample --
 result="$(python3 "${APPLY_GATE}" '{"test":"fail"}' "${current_dir}" "${base_dir}")"
 assert_equals '{"test":"pass"}' "${result}" "matching baseline failure count is accepted"
 
+printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${current_dir}/review-test.json"
+printf '{"success":false,"data":{"test_counts":{"failed":1,"errors":0}}}\n' > "${base_dir}/review-test.json"
+printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"pass"}' "${result}" "matching review test baseline failure count is accepted"
+
 printf '{"success":false,"data":{"test_counts":{"failed":2,"errors":0}}}\n' > "${current_dir}/test.json"
+printf '{"test":{"status":"fail","exit_code":1,"command":"homeboy test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
 result="$(python3 "${APPLY_GATE}" '{"test":"fail"}' "${current_dir}" "${base_dir}")"
 assert_equals '{"test":"fail"}' "${result}" "candidate regression still fails"
 

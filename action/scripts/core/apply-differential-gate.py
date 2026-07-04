@@ -98,6 +98,13 @@ def lint_count(payload: dict[str, Any] | None) -> int | None:
     return None
 
 
+def quality_base_command(command: str) -> str:
+    parts = command.split()
+    if len(parts) >= 2 and parts[0] == "review" and parts[1] in {"audit", "lint", "test"}:
+        return parts[1]
+    return parts[0] if parts else command
+
+
 def changed_scope_introduced_count(command: str, payload: dict[str, Any] | None) -> int | None:
     data = unwrap(payload)
     changed_since = data.get("changed_since", {}) if isinstance(data, dict) else {}
@@ -114,15 +121,16 @@ def output_stem(command: str) -> str:
 
 
 def metric_for(command: str, directory: str) -> int | None:
+    base_command = quality_base_command(command)
     payload = read_json(os.path.join(directory, f"{output_stem(command)}.json"))
-    scoped_count = changed_scope_introduced_count(command, payload)
+    scoped_count = changed_scope_introduced_count(base_command, payload)
     if scoped_count is not None:
         return scoped_count
-    if command == "audit":
+    if base_command == "audit":
         return audit_count(payload)
-    if command == "lint":
+    if base_command == "lint":
         return lint_count(payload)
-    if command == "test":
+    if base_command == "test":
         return test_count(payload)
     return None
 
@@ -165,8 +173,11 @@ def main() -> int:
         return 0
 
     adjusted = dict(results)
-    for command in ("audit", "lint", "test"):
-        if adjusted.get(command) != "fail":
+    for command, status in list(adjusted.items()):
+        base_command = quality_base_command(command)
+        if base_command not in {"audit", "lint", "test"}:
+            continue
+        if status != "fail":
             continue
 
         current = metric_for(command, current_dir)
