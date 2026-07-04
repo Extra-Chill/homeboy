@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 RUNNER="$ROOT_DIR/wordpress/scripts/lint/lint-runner.sh"
 PHPSTAN_RUNNER="$ROOT_DIR/wordpress/scripts/lint/phpstan-runner.sh"
 PHPSTAN_CONFIG="$ROOT_DIR/wordpress/phpstan.neon.dist"
@@ -18,6 +21,15 @@ assert_contains() {
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
+    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
+
 COMPONENT_DIR="$TMP_DIR/example-plugin"
 FAKE_EXTENSION="$TMP_DIR/fake-wordpress-extension"
 mkdir -p "$COMPONENT_DIR/tools" "$COMPONENT_DIR/tests" "$COMPONENT_DIR/vendor_prefixed/example" "$FAKE_EXTENSION/vendor/bin" "$FAKE_EXTENSION/HomeboyWordPress"
@@ -30,7 +42,16 @@ cat > "$COMPONENT_DIR/example-plugin.php" <<'PHP'
  */
 PHP
 
-touch "$FAKE_EXTENSION/vendor/bin/phpcs" "$FAKE_EXTENSION/vendor/bin/phpcbf" "$FAKE_EXTENSION/phpcs.xml.dist"
+cat > "$FAKE_EXTENSION/vendor/bin/phpcs" <<'BASH'
+#!/usr/bin/env bash
+exit 0
+BASH
+cat > "$FAKE_EXTENSION/vendor/bin/phpcbf" <<'BASH'
+#!/usr/bin/env bash
+exit 0
+BASH
+chmod +x "$FAKE_EXTENSION/vendor/bin/phpcs" "$FAKE_EXTENSION/vendor/bin/phpcbf"
+touch "$FAKE_EXTENSION/phpcs.xml.dist"
 
 cat > "$COMPONENT_DIR/scoper.inc.php" <<'PHP'
 <?php
@@ -63,12 +84,13 @@ PHP
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
 HOMEBOY_STEP="none" \
     bash "$RUNNER" > "$TMP_DIR/lint.out" 2>&1
 
 assert_contains "$TMP_DIR/lint.out" "Linting passed"
 
-assert_contains "$RUNNER" 'homeboy_resolve_context --component-alias PLUGIN_PATH'
+assert_contains "$RUNNER" 'homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH'
 assert_contains "$RUNNER" "*/vendor_prefixed/*"
 assert_contains "$RUNNER" "*/tools/*"
 assert_contains "$RUNNER" "*/scoper.inc.php"
@@ -82,19 +104,38 @@ assert_contains "$PHPSTAN_CONFIG" "customRulesetUsed: false"
 
 for non_runtime_file in \
     scoper.inc.php \
-    tools/build-autoloader.php \
     tests/smoke-example.php \
     tests/ExampleUnitTest.php \
     vendor_prefixed/example/generated.php; do
+    set +e
     HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
     HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
     HOMEBOY_COMPONENT_ID="example-plugin" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
     HOMEBOY_LINT_FILE="$non_runtime_file" \
         bash "$RUNNER" > "$TMP_DIR/non-runtime.out" 2>&1
+    non_runtime_status=$?
+    set -e
+
+    if [ "$non_runtime_status" -ne 0 ]; then
+        echo "Expected non-runtime lint scope to pass for $non_runtime_file" >&2
+        sed 's/^/  /' "$TMP_DIR/non-runtime.out" >&2
+        exit 1
+    fi
 
     assert_contains "$TMP_DIR/non-runtime.out" "Skipping production WordPress lint profile for non-runtime file scope"
     assert_contains "$TMP_DIR/non-runtime.out" "Linting passed"
 done
+
+HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_LINT_FILE="tools/build-autoloader.php" \
+    bash "$RUNNER" > "$TMP_DIR/tooling.out" 2>&1
+assert_contains "$TMP_DIR/tooling.out" "WordPress lint role: tooling"
+assert_contains "$TMP_DIR/tooling.out" "PHPCS linting passed"
+assert_contains "$TMP_DIR/tooling.out" "Linting passed"
 
 mkdir -p "$COMPONENT_DIR/includes" "$COMPONENT_DIR/vendor_prefixed/Example/Vendor"
 
@@ -182,6 +223,7 @@ EXPECTED_VENDOR_PREFIXED_AUTOLOAD="$COMPONENT_DIR/vendor_prefixed/autoload.php" 
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 HOMEBOY_LINT_FILE="includes/class-example-adapter.php" \
     bash "$PHPSTAN_RUNNER" > "$TMP_DIR/phpstan-scoped.out" 2>&1
 
@@ -240,6 +282,7 @@ EXPECTED_RUNTIME_CLASS="$COMPONENT_DIR/includes/class-example-adapter.php" \
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
     bash "$PHPSTAN_RUNNER" > "$TMP_DIR/phpstan-full.out" 2>&1
 
 assert_contains "$TMP_DIR/phpstan-full.out" "PHPStan full fake passed"

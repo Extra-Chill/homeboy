@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 RUNNER="$ROOT_DIR/wordpress/scripts/lint/eslint-runner.sh"
 
 assert_contains() {
@@ -28,6 +30,11 @@ assert_not_contains() {
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
 
 COMPONENT_DIR="$TMP_DIR/example-plugin"
 FAKE_EXTENSION="$TMP_DIR/fake-wordpress-extension"
@@ -64,9 +71,9 @@ cat > "$COMPONENT_DIR/docs/example.md" <<'MD'
 # Example docs
 MD
 
-cat > "$FAKE_EXTENSION/.eslintrc.json" <<'JSON'
-{}
-JSON
+cat > "$FAKE_EXTENSION/eslint.config.mjs" <<'JS'
+export default [];
+JS
 
 cat > "$SIDECAR_WRITER" <<'SH'
 homeboy_sidecar_merge_json_array() {
@@ -99,6 +106,7 @@ chmod +x "$FAKE_EXTENSION/node_modules/.bin/eslint"
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FILE='docs/example.md' \
@@ -113,6 +121,7 @@ fi
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_GLOB='{example-plugin.php,inc/runtime.php}' \
@@ -128,6 +137,7 @@ fi
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_GLOB='{example-plugin.php,assets/admin.js,inc/runtime.php,assets/view.ts}' \
@@ -144,6 +154,7 @@ rm -f "$ESLINT_ARGS_FILE"
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FILE='assets/admin.js' \
@@ -151,9 +162,8 @@ HOMEBOY_LINT_FILE='assets/admin.js' \
 
 assert_contains "$TMP_DIR/js-success.out" "Linting single file: assets/admin.js"
 assert_contains "$TMP_DIR/js-success.out" "ESLint linting passed"
-assert_contains "$ESLINT_ARGS_FILE" "--no-eslintrc"
-assert_contains "$ESLINT_ARGS_FILE" "--resolve-plugins-relative-to"
-assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION"
+assert_contains "$ESLINT_ARGS_FILE" "--config"
+assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION/eslint.config.mjs"
 assert_contains "$ESLINT_ARGS_FILE" "assets/admin.js"
 
 cat > "$COMPONENT_DIR/assets/bad.js" <<'JS'
@@ -164,6 +174,7 @@ set +e
 HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
 HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
 HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
 ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
 HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \

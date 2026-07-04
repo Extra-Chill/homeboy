@@ -3,8 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/swift"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
 
 FIXTURE="$TMP_DIR/minimal-swift"
 mkdir -p "$FIXTURE"
@@ -14,7 +21,7 @@ struct AppModel {
 }
 SWIFT
 
-HOMEBOY_COMPONENT_PATH="$FIXTURE" bash "$SWIFT_DIR/scripts/lint-runner.sh" > "$TMP_DIR/lint.out"
+HOMEBOY_COMPONENT_PATH="$FIXTURE" HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" bash "$SWIFT_DIR/scripts/lint-runner.sh" > "$TMP_DIR/lint.out"
 
 if ! command -v swiftlint >/dev/null 2>&1 && ! command -v swiftformat >/dev/null 2>&1; then
     if ! grep -Fq "Swift lint skipped" "$TMP_DIR/lint.out"; then

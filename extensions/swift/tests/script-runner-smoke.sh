@@ -3,8 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/swift"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
+    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
+    exit 1
+fi
 
 assert_contains() {
     local file="$1"
@@ -29,17 +36,17 @@ guard fixturesPath.hasSuffix("tests") else {
 print("contract ok")
 SWIFT
 
-HOMEBOY_COMPONENT_PATH="$FIXTURE" bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/pass.out"
+HOMEBOY_COMPONENT_PATH="$FIXTURE" HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/pass.out"
 assert_contains "$TMP_DIR/pass.out" "Running: ContractTests.swift"
 assert_contains "$TMP_DIR/pass.out" "contract ok"
 assert_contains "$TMP_DIR/pass.out" "Results: 1/1 tests passed"
 
-HOMEBOY_COMPONENT_PATH="$FIXTURE" HOMEBOY_SETTINGS_JSON='{"test_type":"script"}' bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/settings.out"
+HOMEBOY_COMPONENT_PATH="$FIXTURE" HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" HOMEBOY_SETTINGS_JSON='{"test_type":"script"}' bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/settings.out"
 assert_contains "$TMP_DIR/settings.out" "Results: 1/1 tests passed"
 
 NO_TESTS="$TMP_DIR/no-tests"
 mkdir -p "$NO_TESTS"
-if HOMEBOY_COMPONENT_PATH="$NO_TESTS" bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/missing.out" 2>&1; then
+if HOMEBOY_COMPONENT_PATH="$NO_TESTS" HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" bash "$SWIFT_DIR/scripts/test-runner.sh" > "$TMP_DIR/missing.out" 2>&1; then
     echo "Expected missing tests directory to fail" >&2
     exit 1
 fi

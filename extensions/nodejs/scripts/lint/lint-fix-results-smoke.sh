@@ -7,11 +7,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
     echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
+    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$COMMAND_CAPTURE_HELPER" ]; then
+    echo "Missing command capture helper: $COMMAND_CAPTURE_HELPER" >&2
     exit 1
 fi
 
@@ -42,6 +52,8 @@ HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
 HOMEBOY_EXTENSION_PATH="${ROOT_DIR}/nodejs" \
 HOMEBOY_COMPONENT_ID="node-fix-results-smoke" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
 HOMEBOY_FIX_ONLY=1 \
 HOMEBOY_FIX_RESULTS_FILE="$RESULTS_FILE" \
 HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE" \

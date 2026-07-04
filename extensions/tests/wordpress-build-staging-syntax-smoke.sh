@@ -2,9 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 BUILD_SCRIPT="$ROOT_DIR/wordpress/scripts/build/build.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
 
 PROJECT_DIR="$TMP_DIR/staging-smoke-plugin"
 OUTPUT_FILE="$TMP_DIR/build.out"
@@ -31,7 +38,7 @@ EOF
 
 (
     cd "$PROJECT_DIR"
-    bash "$BUILD_SCRIPT" >"$OUTPUT_FILE"
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" bash "$BUILD_SCRIPT" >"$OUTPUT_FILE"
 )
 
 ZIP_FILE="$PROJECT_DIR/build/staging-smoke-plugin.zip"
@@ -78,7 +85,7 @@ EOF
 
 if (
     cd "$BAD_PROJECT_DIR"
-    bash "$BUILD_SCRIPT" >"$BAD_OUTPUT_FILE" 2>&1
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" bash "$BUILD_SCRIPT" >"$BAD_OUTPUT_FILE" 2>&1
 ); then
     echo "Build unexpectedly passed with invalid staged PHP" >&2
     cat "$BAD_OUTPUT_FILE" >&2

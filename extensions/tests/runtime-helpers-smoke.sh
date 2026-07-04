@@ -47,6 +47,15 @@ assert_not_contains() {
     fi
 }
 
+assert_sources() {
+    local file="$1"
+    local expected="$2"
+    if ! grep -Fq "$expected" "$file"; then
+        echo "Expected $file to source shared helper via: $expected" >&2
+        exit 1
+    fi
+}
+
 assert_file "$FAILURE_TRAP_HELPER"
 assert_file "$WRITE_TEST_RESULTS_HELPER"
 assert_file "$SIDECAR_WRITER_HELPER"
@@ -331,35 +340,66 @@ fi
 assert_contains "$TMP_DIR/node-build.out" 'BUILD FAILED: No build defined'
 assert_contains "$TMP_DIR/node-build.out" 'Error details:'
 
-if grep -R "print_failure_summary()" \
-    "$ROOT_DIR/nodejs/scripts" \
-    "$ROOT_DIR/rust/scripts" \
-    "$ROOT_DIR/wordpress/scripts/test" \
-    "$ROOT_DIR/wordpress/scripts/bench" >/dev/null; then
-    echo "Runner scripts should not define local print_failure_summary functions" >&2
-    exit 1
-fi
+for runner in \
+    nodejs/scripts/build/build-runner.sh \
+    nodejs/scripts/lint/lint-runner.sh \
+    nodejs/scripts/test/test-runner.sh \
+    rust/scripts/lint-runner.sh \
+    rust/scripts/test-runner.sh \
+    swift/scripts/test-runner.sh \
+    wordpress/scripts/lint/lint-runner.sh \
+    wordpress/scripts/test/test-runner.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'HOMEBOY_RUNTIME_RUNNER_PRELUDE'
+done
 
-if grep -R --exclude='*smoke.sh' "homeboy_write_test_results()" \
-    "$ROOT_DIR/nodejs/scripts" \
-    "$ROOT_DIR/rust/scripts" \
-    "$ROOT_DIR/wordpress/scripts/test" >/dev/null; then
-    echo "Extension scripts should not define local homeboy_write_test_results functions" >&2
-    exit 1
-fi
+for runner in \
+    nodejs/scripts/bench/bench-runner.sh \
+    nodejs/scripts/trace/trace-runner.sh \
+    rust/scripts/bench/bench-runner.sh \
+    wordpress/scripts/bench/bench-runner.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'HOMEBOY_RUNTIME_BASH_PREFLIGHT'
+done
 
-if grep "BASH_VERSINFO" \
-    "$ROOT_DIR/nodejs/scripts/bench/bench-runner.sh" \
-    "$ROOT_DIR/nodejs/scripts/build/build-runner.sh" \
-    "$ROOT_DIR/nodejs/scripts/lint/lint-runner.sh" \
-    "$ROOT_DIR/nodejs/scripts/test/test-runner.sh" \
-    "$ROOT_DIR/nodejs/scripts/trace/trace-runner.sh" \
-    "$ROOT_DIR/rust/scripts/bench/bench-runner.sh" \
-    "$ROOT_DIR/wordpress/scripts/bench/bench-runner.sh" \
-    "$ROOT_DIR/wordpress/scripts/lint/lint-runner.sh" \
-    "$ROOT_DIR/wordpress/scripts/test/test-runner.sh" >/dev/null; then
-    echo "Runner scripts should use HOMEBOY_RUNTIME_BASH_PREFLIGHT instead of local BASH_VERSINFO checks" >&2
-    exit 1
-fi
+for runner in \
+    nodejs/scripts/bench/bench-runner.sh \
+    nodejs/scripts/format.sh \
+    nodejs/scripts/trace/trace-runner.sh \
+    nodejs/scripts/validate.sh \
+    rust/scripts/bench/bench-runner.sh \
+    rust/scripts/format.sh \
+    rust/scripts/validate.sh \
+    swift/scripts/lint-runner.sh \
+    swift/scripts/validate.sh \
+    wordpress/scripts/bench/bench-runner-wp-codebox.sh \
+    wordpress/scripts/build/build.sh \
+    wordpress/scripts/lint/eslint-runner.sh \
+    wordpress/scripts/lint/lint-runner-core-dev.sh \
+    wordpress/scripts/test/test-runner-host-smoke-wp.sh \
+    wordpress/scripts/test/test-runner-wp-codebox.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'HOMEBOY_RUNTIME_RESOLVE_CONTEXT'
+done
+
+for runner in \
+    nodejs/scripts/build/build-runner.sh \
+    nodejs/scripts/test/test-runner.sh \
+    rust/scripts/lint-runner.sh \
+    rust/scripts/test-runner.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'HOMEBOY_RUNTIME_COMMAND_CAPTURE'
+done
+
+for runner in \
+    nodejs/scripts/test/test-runner.sh \
+    rust/scripts/bench/bench-runner.sh \
+    rust/scripts/test-runner.sh \
+    wordpress/scripts/test/test-runner.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'scripts/lib/settings.sh'
+done
+
+for runner in \
+    nodejs/scripts/lint/lint-runner.sh \
+    rust/scripts/lint-runner.sh \
+    wordpress/scripts/lint/lint-runner.sh; do
+    assert_sources "$ROOT_DIR/$runner" 'scripts/lib/fix-results.sh'
+done
 
 echo "runtime helper smoke passed"

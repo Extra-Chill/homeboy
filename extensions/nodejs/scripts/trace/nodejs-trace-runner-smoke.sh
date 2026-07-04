@@ -5,11 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_DIR}/../.." && pwd)/homeboy}"
 BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 MANIFEST="${EXTENSION_DIR}/nodejs.json"
 RUNNER="${SCRIPT_DIR}/trace-runner.sh"
 HELPER_FIXTURE="${SCRIPT_DIR}/fixtures/helper.trace.mjs"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-trace.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$BASH_PREFLIGHT_HELPER" ]; then
+    echo "Missing bash preflight helper: $BASH_PREFLIGHT_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
 
 assert_json() {
     local file="$1"
@@ -40,6 +50,7 @@ run_trace() {
     HOMEBOY_TRACE_EXTRA_WORKLOADS="$extra_workloads" \
     HOMEBOY_RUN_DIR="$(dirname "$results_file")" \
     HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
         bash "$RUNNER"
 }
 
@@ -79,6 +90,7 @@ HOMEBOY_TRACE_LIST_ONLY="1" \
 HOMEBOY_TRACE_RESULTS_FILE="$LIST_RESULTS" \
 HOMEBOY_TRACE_EXTRA_WORKLOADS="$EXTRA_TRACE_FILE" \
 HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
     bash "$RUNNER" >/dev/null
 assert_json "$LIST_RESULTS" '
 if (data.status !== "pass") throw new Error("list envelope did not pass");

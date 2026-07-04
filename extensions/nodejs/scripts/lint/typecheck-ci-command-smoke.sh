@@ -5,11 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-prelude.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/command-capture.sh}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 if [ ! -f "$SIDECAR_WRITER_HELPER" ]; then
     echo "Missing sidecar writer helper: $SIDECAR_WRITER_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$RUNNER_PRELUDE_HELPER" ]; then
+    echo "Missing runner prelude helper: $RUNNER_PRELUDE_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$COMMAND_CAPTURE_HELPER" ]; then
+    echo "Missing command capture helper: $COMMAND_CAPTURE_HELPER" >&2
     exit 1
 fi
 
@@ -28,6 +38,8 @@ JSON
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_PATH="$PROJECT" \
 HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
 HOMEBOY_NODE_LINT_COMMAND="__homeboy_typecheck" \
     bash "${EXTENSION_PATH}/scripts/lint/lint-runner.sh" > "${TMPDIR}/typecheck.out"
 
