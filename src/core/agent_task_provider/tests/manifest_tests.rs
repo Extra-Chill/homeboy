@@ -402,7 +402,7 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
         staging: AgentTaskRuntimeStagingContract::default(),
     };
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
@@ -451,7 +451,7 @@ fn runtime_contract_maps_failed_runtime_status() {
     provider.runtime_contract.normalization.status_path =
         Some("outputs.sample_runtime.state".to_string());
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
     assert_eq!(

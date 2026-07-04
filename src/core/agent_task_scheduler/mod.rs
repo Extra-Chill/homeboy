@@ -45,6 +45,7 @@ pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
 
 pub struct AgentTaskScheduler<E> {
     executor: Arc<E>,
+    run_id: Option<String>,
 }
 
 impl<E> AgentTaskScheduler<E>
@@ -54,7 +55,13 @@ where
     pub fn new(executor: E) -> Self {
         Self {
             executor: Arc::new(executor),
+            run_id: None,
         }
+    }
+
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
     }
 
     pub fn run(&self, plan: AgentTaskPlan) -> AgentTaskAggregate {
@@ -307,6 +314,7 @@ where
                 let attempt = scheduled.attempt;
                 let context = AgentTaskExecutionContext {
                     plan_id,
+                    run_id: self.run_id.clone(),
                     attempt,
                     cancellation: cancellation.clone(),
                 };

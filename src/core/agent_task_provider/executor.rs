@@ -6,7 +6,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     fn execute(
         &self,
         request: AgentTaskRequest,
-        _context: AgentTaskExecutionContext,
+        context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         if request.executor.backend == "fixture" {
             return run_fixture_provider(&request);
@@ -46,7 +46,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             );
         }
 
-        run_provider_command(&request, provider)
+        run_provider_command(&request, provider, context.run_id.as_deref())
     }
 }
 

@@ -52,9 +52,10 @@ pub const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
 pub(crate) fn link_latest_executor_evidence(
     request: &AgentTaskRequest,
     outcome: &mut AgentTaskOutcome,
+    run_id: Option<&str>,
 ) {
     let policy = RedactionPolicy::default();
-    let dir = executor_evidence_dir(&request.task_id);
+    let dir = executor_evidence_dir(run_id, &request.task_id);
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -88,14 +89,14 @@ pub(crate) fn link_latest_executor_evidence(
     }
 }
 
-/// Stable, per-task evidence directory under the system temp dir.
+/// Stable, per-run/per-task evidence directory under the system temp dir.
 ///
-/// Keyed by a sanitized task id (not a random suffix) so the latest raw input
-/// and result always live at a predictable path operators can read directly
-/// instead of guessing temp directory names.
-fn executor_evidence_dir(task_id: &str) -> PathBuf {
+/// Recorded runs use their durable run id as the first path segment so repeated
+/// fanout child cooks with the same task id keep distinct evidence files.
+fn executor_evidence_dir(run_id: Option<&str>, task_id: &str) -> PathBuf {
     std::env::temp_dir()
         .join("homeboy-agent-task-evidence")
+        .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
         .join(sanitize_task_id(task_id))
 }
 
@@ -179,6 +180,9 @@ mod tests {
         AgentTaskPolicy, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
+    use std::sync::Mutex;
+
+    static TEMP_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
@@ -236,8 +240,9 @@ mod tests {
     }
 
     fn with_temp_dir<R>(test: impl FnOnce() -> R) -> R {
-        // Isolate writes to a unique temp dir so the stable per-task path does
-        // not collide across parallel test runs.
+        // Isolate writes to a unique temp dir without racing parallel tests that
+        // also read `std::env::temp_dir()`.
+        let _lock = TEMP_DIR_ENV_LOCK.lock().expect("temp dir env lock");
         let guard = tempfile::tempdir().expect("temp dir");
         let previous = std::env::var_os("TMPDIR");
         std::env::set_var("TMPDIR", guard.path());
@@ -254,7 +259,7 @@ mod tests {
         with_temp_dir(|| {
             let request = test_request();
             let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome);
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
             let kinds: Vec<&str> = outcome
                 .evidence_refs
@@ -279,7 +284,7 @@ mod tests {
         with_temp_dir(|| {
             let request = test_request();
             let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome);
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
             let input_ref = outcome
                 .evidence_refs
@@ -309,20 +314,57 @@ mod tests {
         with_temp_dir(|| {
             let request = test_request();
             let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome);
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
             let first = outcome.evidence_refs.len();
-            link_latest_executor_evidence(&request, &mut outcome);
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
             assert_eq!(outcome.evidence_refs.len(), first);
         });
     }
 
     #[test]
-    fn evidence_dir_is_stable_for_a_task_id() {
-        let first = executor_evidence_dir("task/with weird:chars");
-        let second = executor_evidence_dir("task/with weird:chars");
+    fn evidence_dir_is_stable_for_a_run_and_task_id() {
+        let first = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
+        let second = executor_evidence_dir(Some("run/attempt:1"), "task/with weird:chars");
         assert_eq!(first, second);
         assert!(first
             .to_string_lossy()
             .contains("homeboy-agent-task-evidence"));
+    }
+
+    #[test]
+    fn repeated_child_runs_with_same_task_id_keep_distinct_evidence_paths() {
+        with_temp_dir(|| {
+            let request = test_request();
+            let mut first_outcome = test_outcome();
+            let mut second_outcome = test_outcome();
+
+            link_latest_executor_evidence(
+                &request,
+                &mut first_outcome,
+                Some("cook-homeboy-attempt-1-aaaa1111"),
+            );
+            link_latest_executor_evidence(
+                &request,
+                &mut second_outcome,
+                Some("cook-homeboy-attempt-1-bbbb2222"),
+            );
+
+            let first_input = first_outcome
+                .evidence_refs
+                .iter()
+                .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
+                .expect("first executor input evidence");
+            let second_input = second_outcome
+                .evidence_refs
+                .iter()
+                .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
+                .expect("second executor input evidence");
+
+            assert_ne!(first_input.uri, second_input.uri);
+            assert!(first_input.uri.contains("cook-homeboy-attempt-1-aaaa1111"));
+            assert!(second_input.uri.contains("cook-homeboy-attempt-1-bbbb2222"));
+            assert!(Path::new(first_input.uri.strip_prefix("file://").unwrap()).is_file());
+            assert!(Path::new(second_input.uri.strip_prefix("file://").unwrap()).is_file());
+        });
     }
 }

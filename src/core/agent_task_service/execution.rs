@@ -55,7 +55,7 @@ where
         agent_task_lifecycle::mark_running(run_id)?;
     }
 
-    let aggregate = run_plan_with_scheduler(plan.clone(), executor);
+    let aggregate = run_plan_with_scheduler(plan.clone(), record_run_id, executor);
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     }
@@ -177,7 +177,7 @@ fn run_prepared_claimed<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate = run_plan_with_scheduler(plan.clone(), executor);
+    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor);
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -224,11 +224,19 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
     })
 }
 
-fn run_plan_with_scheduler<E>(plan: AgentTaskPlan, executor: E) -> AgentTaskAggregate
+fn run_plan_with_scheduler<E>(
+    plan: AgentTaskPlan,
+    run_id: Option<&str>,
+    executor: E,
+) -> AgentTaskAggregate
 where
     E: AgentTaskExecutorAdapter,
 {
-    AgentTaskScheduler::new(executor).run(plan)
+    let scheduler = AgentTaskScheduler::new(executor);
+    match run_id {
+        Some(run_id) => scheduler.with_run_id(run_id.to_string()).run(plan),
+        None => scheduler.run(plan),
+    }
 }
 
 pub fn aggregate_exit_code(aggregate: &AgentTaskAggregate) -> i32 {

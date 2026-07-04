@@ -863,6 +863,7 @@ mod cancellation {
     #[derive(Debug, Clone)]
     pub struct AgentTaskExecutionContext {
         pub plan_id: String,
+        pub run_id: Option<String>,
         pub attempt: u32,
         pub cancellation: AgentTaskCancellationToken,
     }

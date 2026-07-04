@@ -133,7 +133,7 @@ fn provider_preserves_structured_outcome_from_stderr_when_stdout_empty() {
     );
     let (request, provider) = request("task-stderr-outcome", command);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
     assert_eq!(
@@ -155,7 +155,7 @@ fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
     );
     let (request, provider) = request("task-empty-stdout", command);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
@@ -209,7 +209,7 @@ fn provider_can_return_timeout_payload_during_wrapper_grace() {
     let (mut request, provider) = request("task-timeout-payload", command);
     request.limits.timeout_ms = Some(3000);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
     assert_eq!(
@@ -469,7 +469,7 @@ fn provider_retries_transient_error_then_succeeds() {
     let command = format!("node {}", transient_then_success_script(&state_path, 2));
     let (request, provider) = request("task-transient-recover", command);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(
         outcome.status,
@@ -498,7 +498,7 @@ fn provider_does_not_retry_permanent_error() {
     let command = format!("node {}", permanent_error_script(&state_path));
     let (request, provider) = request("task-permanent", command);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
@@ -529,7 +529,7 @@ fn provider_exhausts_bounded_transient_retries() {
     let command = format!("node {}", transient_then_success_script(&state_path, 999));
     let (request, provider) = request("task-transient-exhaust", command);
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(
         outcome.status,

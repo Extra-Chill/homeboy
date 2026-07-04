@@ -35,6 +35,7 @@ const PROVIDER_TRANSIENT_BASE_BACKOFF_MS: u64 = 250;
 pub(super) fn run_provider_command(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
+    run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let mut attempt = 1;
     loop {
@@ -48,7 +49,7 @@ pub(super) fn run_provider_command(
             }
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
-            link_latest_executor_evidence(request, &mut outcome);
+            link_latest_executor_evidence(request, &mut outcome, run_id);
             return outcome;
         }
 
