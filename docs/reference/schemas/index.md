@@ -2,6 +2,8 @@
 
 Schemas document Homeboy configuration structures.
 
+For overlapping configuration concepts and runtime precedence, see [Configuration precedence map](../../config-precedence.md).
+
 - [Component schema](component-schema.md)
 - [Project schema](project-schema.md)
 - [Server schema](server-schema.md)

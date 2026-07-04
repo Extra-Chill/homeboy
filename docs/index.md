@@ -48,6 +48,7 @@ Exact CLI, configuration, schema, and output details:
 - [Root command and global flags](reference/cli/homeboy-root-command.md)
 - [Command index](commands/commands-index.md)
 - [Configuration reference](reference/configuration.md)
+- [Configuration precedence map](config-precedence.md)
 - [Template variables](reference/template-variables.md)
 - [Configuration schemas](reference/schemas/index.md)
 - [JSON output contract](architecture/output-system.md)
