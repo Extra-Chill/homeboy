@@ -4,9 +4,10 @@ use std::process::{Command, Output, Stdio};
 
 use serde::de::DeserializeOwned;
 
-use crate::core::component::GithubConfig;
+use crate::core::component::{GithubConfig, GithubHostConfig};
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct GhClient {
@@ -198,12 +199,16 @@ pub fn command_probe_succeeds(mut command: Command) -> bool {
 }
 
 pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)> {
-    github_cli_env_with_inherited(host, config, |key| std::env::var(key).ok())
+    let global_config = crate::core::defaults::load_config();
+    github_cli_env_with_global_and_inherited(host, config, &global_config.github_hosts, |key| {
+        std::env::var(key).ok()
+    })
 }
 
-fn github_cli_env_with_inherited(
+fn github_cli_env_with_global_and_inherited(
     host: &str,
     config: &GithubConfig,
+    global_hosts: &HashMap<String, GithubHostConfig>,
     inherited_env: impl Fn(&str) -> Option<String>,
 ) -> Vec<(String, String)> {
     let mut env = Vec::new();
@@ -211,9 +216,11 @@ fn github_cli_env_with_inherited(
         env.push(("GH_HOST".to_string(), host.to_string()));
     }
 
-    let host_config = config.hosts.get(host);
-    if let Some(proxy) = host_config
+    let global_host_config = global_hosts.get(host);
+    let component_host_config = config.hosts.get(host);
+    if let Some(proxy) = component_host_config
         .and_then(|host_config| host_config.proxy.clone())
+        .or_else(|| global_host_config.and_then(|host_config| host_config.proxy.clone()))
         .or_else(|| inherited_enterprise_https_proxy(host, &inherited_env))
         .filter(|proxy| !proxy.is_empty())
     {
@@ -241,18 +248,22 @@ fn github_cli_env_with_inherited(
         }
     }
 
-    let Some(host_config) = host_config else {
-        return env;
-    };
+    apply_host_env(&mut env, global_host_config);
+    apply_host_env(&mut env, component_host_config);
 
+    env
+}
+
+fn apply_host_env(env: &mut Vec<(String, String)>, host_config: Option<&GithubHostConfig>) {
+    let Some(host_config) = host_config else {
+        return;
+    };
     for (key, value) in &host_config.env {
         if !key.is_empty() && key != "GH_HOST" {
             env.retain(|(existing, _)| existing != key);
             env.push((key.clone(), value.clone()));
         }
     }
-
-    env
 }
 
 fn inherited_enterprise_https_proxy(
@@ -276,7 +287,7 @@ mod tests {
     use crate::core::component::{GithubConfig, GithubHostConfig};
 
     use super::{
-        delete_branch_ref_api_args, github_cli_env, github_cli_env_with_inherited,
+        delete_branch_ref_api_args, github_cli_env, github_cli_env_with_global_and_inherited,
         pr_merge_api_args, GhClient,
     };
 
@@ -331,9 +342,10 @@ mod tests {
 
     #[test]
     fn github_cli_env_sets_enterprise_host_without_implicit_proxy() {
-        let env = github_cli_env_with_inherited(
+        let env = github_cli_env_with_global_and_inherited(
             "github.enterprise.test",
             &GithubConfig::default(),
+            &HashMap::new(),
             |_| None,
         );
 
@@ -356,9 +368,10 @@ mod tests {
             ),
         ]);
 
-        let env = github_cli_env_with_inherited(
+        let env = github_cli_env_with_global_and_inherited(
             "github.enterprise.test",
             &GithubConfig::default(),
+            &HashMap::new(),
             |key| inherited.get(key).cloned(),
         );
 
@@ -400,9 +413,12 @@ mod tests {
             ),
         ]);
 
-        let env = github_cli_env_with_inherited("github.enterprise.test", &config, |key| {
-            inherited.get(key).cloned()
-        });
+        let env = github_cli_env_with_global_and_inherited(
+            "github.enterprise.test",
+            &config,
+            &HashMap::new(),
+            |key| inherited.get(key).cloned(),
+        );
 
         assert!(env.contains(&(
             "HTTPS_PROXY".to_string(),
@@ -436,6 +452,69 @@ mod tests {
             "HTTPS_PROXY".to_string(),
             "https://proxy.example.test:9443".to_string()
         )));
+    }
+
+    #[test]
+    fn github_cli_env_applies_global_host_env() {
+        let mut global_hosts = HashMap::new();
+        global_hosts.insert(
+            "github.enterprise.test".to_string(),
+            GithubHostConfig {
+                proxy: Some("socks5://127.0.0.1:8080".to_string()),
+                env: HashMap::from([("NO_PROXY".to_string(), "metadata.internal".to_string())]),
+            },
+        );
+
+        let env = github_cli_env_with_global_and_inherited(
+            "github.enterprise.test",
+            &GithubConfig::default(),
+            &global_hosts,
+            |_| None,
+        );
+
+        assert!(env.contains(&("GH_HOST".to_string(), "github.enterprise.test".to_string())));
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "socks5://127.0.0.1:8080".to_string()
+        )));
+        assert!(env.contains(&("NO_PROXY".to_string(), "metadata.internal".to_string())));
+    }
+
+    #[test]
+    fn github_cli_env_component_host_env_overrides_global_host_env() {
+        let mut global_hosts = HashMap::new();
+        global_hosts.insert(
+            "github.enterprise.test".to_string(),
+            GithubHostConfig {
+                proxy: Some("socks5://127.0.0.1:8080".to_string()),
+                env: HashMap::from([("NO_PROXY".to_string(), "global".to_string())]),
+            },
+        );
+        let mut component_hosts = HashMap::new();
+        component_hosts.insert(
+            "github.enterprise.test".to_string(),
+            GithubHostConfig {
+                proxy: Some("https://component-proxy.example.test".to_string()),
+                env: HashMap::from([("NO_PROXY".to_string(), "component".to_string())]),
+            },
+        );
+        let config = GithubConfig {
+            hosts: component_hosts,
+        };
+
+        let env = github_cli_env_with_global_and_inherited(
+            "github.enterprise.test",
+            &config,
+            &global_hosts,
+            |_| None,
+        );
+
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "https://component-proxy.example.test".to_string()
+        )));
+        assert!(env.contains(&("NO_PROXY".to_string(), "component".to_string())));
+        assert!(!env.contains(&("NO_PROXY".to_string(), "global".to_string())));
     }
 
     #[test]

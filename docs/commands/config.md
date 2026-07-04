@@ -42,6 +42,9 @@ homeboy config set /defaults/permissions/local/file_mode '"g+r"'
 # Store copied run artifacts in a repo- or agent-readable directory
 homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'
 
+# Apply environment to every gh subprocess for a GitHub Enterprise host
+homeboy config set /github_hosts/github.example.com/env/HTTPS_PROXY '"socks5://127.0.0.1:8080"'
+
 # Set an extension string setting without JSON quoting
 homeboy config set /settings/wp_sample-runtime_provider codex --string
 ```
@@ -82,6 +85,13 @@ homeboy config path
 ```json
 {
   "artifact_root": null,
+  "github_hosts": {
+    "github.example.com": {
+      "env": {
+        "HTTPS_PROXY": "socks5://127.0.0.1:8080"
+      }
+    }
+  },
   "defaults": {
     "install_methods": {
       "homebrew": {
@@ -135,6 +145,15 @@ Controls where Homeboy copies persisted run artifacts from commands such as `ben
 - Config override: `homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'`
 
 Precedence is CLI flag, then environment variable, then global config, then the built-in default.
+
+### GitHub Hosts
+
+Controls environment variables Homeboy adds to `gh` subprocesses for repositories on a specific GitHub host.
+
+- `github_hosts.<hostname>.env`: Environment variables applied to `gh` when the component remote host matches `<hostname>`.
+- `github_hosts.<hostname>.proxy`: Convenience value for `HTTPS_PROXY`.
+- Component-owned `github.hosts.<hostname>` config overrides global `github_hosts.<hostname>` values.
+- `GH_HOST` is derived from the repository host and is not accepted from config.
 
 ### Install Methods
 
