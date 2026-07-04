@@ -103,9 +103,9 @@ fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSu
 pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    runs_service::require_run(&store, run_id)?;
-    runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
     let run = runs_service::require_run(&store, run_id)?;
+    runs_service::refresh_mirrored_daemon_evidence_best_effort(&run.id);
+    let run = runs_service::require_run(&store, &run.id)?;
     Ok((
         RunsOutput::Show(RunsShowOutput {
             command: "runs.show",
@@ -186,20 +186,22 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     }
 
     let store = ObservationStore::open_initialized()?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &args.run_id)?;
+    let run = runs_service::require_run(&store, &args.run_id)?;
+    let run_id = run.id;
+    let artifacts = runs_service::list_artifacts_for_run(&store, &run_id)?;
     let preview_entrypoints = artifacts
         .iter()
         .flat_map(homeboy::core::artifacts::html_preview_entrypoints)
         .collect();
     let findings = store.list_findings(FindingListFilter {
-        run_id: Some(args.run_id.to_string()),
+        run_id: Some(run_id.clone()),
         tool: None,
         file: None,
         fingerprint: None,
         limit: Some(10_000),
     })?;
     let matrix_summary =
-        homeboy::core::artifacts::summarize_matrix_artifacts(&args.run_id, &artifacts, &findings);
+        homeboy::core::artifacts::summarize_matrix_artifacts(&run_id, &artifacts, &findings);
     let fuzz_result_envelopes = artifacts
         .iter()
         .filter_map(homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact)
@@ -217,9 +219,9 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Artifacts(RunsArtifactsOutput {
             command: "runs.artifacts",
-            run_id: args.run_id.clone(),
+            run_id: run_id.clone(),
             runner_id: None,
-            path_guide: RunsArtifactPathGuide::for_listing(&args.run_id, None),
+            path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
             artifacts,
             resource_lifecycle_index,
             directory_publication,

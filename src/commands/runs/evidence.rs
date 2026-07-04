@@ -11,7 +11,7 @@ pub type RunsEvidenceOutput = RunEvidenceReport<RunSummary>;
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
+    let artifacts = runs_service::list_artifacts_for_run(&store, &run.id)?;
     let artifact_root = homeboy::core::artifacts::root()?;
     let disk_budget = disk::disk_budget(
         &artifact_root,

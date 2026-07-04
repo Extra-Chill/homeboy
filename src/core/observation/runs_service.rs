@@ -150,7 +150,117 @@ mod run_lookup {
         if let Ok(Some(run)) = crate::core::runners::mirror_connected_runner_run(run_id) {
             return Ok(run);
         }
+        if let Some(run) = resolve_run_label(store, run_id)? {
+            return Ok(run);
+        }
         Err(missing_run_error(run_id))
+    }
+
+    fn resolve_run_label(store: &ObservationStore, label: &str) -> Result<Option<RunRecord>> {
+        let runs = store.list_runs(RunListFilter {
+            limit: Some(1000),
+            ..Default::default()
+        })?;
+        let mut matches = matching_run_labels(&runs, label);
+        for report in crate::core::runners::statuses()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|report| report.connected)
+        {
+            let Ok(data) =
+                crate::core::runners::daemon_api_get(&report.runner_id, "/runs?limit=200")
+            else {
+                continue;
+            };
+            let runs: Vec<RunRecord> =
+                serde_json::from_value(data["body"]["runs"].clone()).unwrap_or_default();
+            matches.extend(matching_run_labels(&runs, label));
+        }
+        resolve_run_label_matches(label, matches)
+    }
+
+    fn resolve_run_label_matches(
+        label: &str,
+        matches: Vec<RunRecord>,
+    ) -> Result<Option<RunRecord>> {
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.into_iter().next()),
+            _ => Err(ambiguous_run_label_error(label, &matches)),
+        }
+    }
+
+    fn ambiguous_run_label_error(label: &str, matches: &[RunRecord]) -> Error {
+        let hints = matches.iter().map(disambiguation_hint).collect::<Vec<_>>();
+        Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "run label `{label}` is ambiguous; {} persisted runs match",
+                matches.len()
+            ),
+            Some(label.to_string()),
+            Some(hints),
+        )
+    }
+
+    fn disambiguation_hint(run: &RunRecord) -> String {
+        format!(
+            "Use persisted id `{}` (started_at={}, component={}, rig={})",
+            run.id,
+            run.started_at,
+            run.component_id.as_deref().unwrap_or("<none>"),
+            run.rig_id.as_deref().unwrap_or("<none>")
+        )
+    }
+
+    fn matching_run_labels(runs: &[RunRecord], label: &str) -> Vec<RunRecord> {
+        runs.iter()
+            .filter(|run| run_matches_label(run, label))
+            .cloned()
+            .collect()
+    }
+
+    fn run_matches_label(run: &RunRecord, label: &str) -> bool {
+        if run.id == label {
+            return true;
+        }
+        if let Some(command) = run.command.as_deref() {
+            if command_run_id_label(command) == Some(label) {
+                return true;
+            }
+        }
+        for pointer in [
+            "/requested_run_id",
+            "/lab/run_label",
+            "/lab/explicit_run_id",
+            "/lab/requested_run_id",
+            "/lab/mirror_run_id",
+            "/proof/provenance/run_id",
+            "/caller_run_id",
+            "/mirror_run_id",
+            "/persisted_run_id",
+            "/run_id",
+        ] {
+            if run.metadata_json.pointer(pointer).and_then(Value::as_str) == Some(label) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn command_run_id_label(command: &str) -> Option<&str> {
+        let mut expect_value = false;
+        for token in command.split_whitespace() {
+            if expect_value {
+                return (!token.is_empty()).then_some(token);
+            }
+            if token == "--run-id" {
+                expect_value = true;
+            } else if let Some(value) = token.strip_prefix("--run-id=") {
+                return (!value.is_empty()).then_some(value);
+            }
+        }
+        None
     }
 
     fn missing_run_error(run_id: &str) -> Error {
@@ -320,10 +430,10 @@ mod artifact_links {
         store: &ObservationStore,
         run_id: &str,
     ) -> Result<Vec<ArtifactRecord>> {
-        require_run(store, run_id)?;
-        refresh_mirrored_daemon_evidence_best_effort(run_id);
-        crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, run_id)?;
-        let artifacts = store.list_artifacts(run_id)?;
+        let run = require_run(store, run_id)?;
+        refresh_mirrored_daemon_evidence_best_effort(&run.id);
+        crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, &run.id)?;
+        let artifacts = store.list_artifacts(&run.id)?;
         Ok(enrich_artifact_links(artifacts))
     }
 }
@@ -342,16 +452,16 @@ mod artifact_resolve {
         run_id: &str,
         artifact_id: &str,
     ) -> Result<ArtifactRecord> {
-        require_run(store, run_id)?;
-        crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, run_id)?;
-        let artifact = match store.get_artifact_for_run_token(run_id, artifact_id)? {
+        let run = require_run(store, run_id)?;
+        crate::core::artifacts::index_remote_published_artifact_refs_for_run(store, &run.id)?;
+        let artifact = match store.get_artifact_for_run_token(&run.id, artifact_id)? {
             Some(artifact) => artifact,
             None => {
-                return Err(unknown_artifact_error(store, run_id, artifact_id));
+                return Err(unknown_artifact_error(store, &run.id, artifact_id));
             }
         };
 
-        if artifact.run_id != run_id {
+        if artifact.run_id != run.id {
             return Err(Error::validation_invalid_argument(
                 "artifact_id",
                 "artifact does not belong to requested run",
@@ -614,45 +724,11 @@ mod artifact_resolve {
 
     /// Resolve a run id *or* a human run label to an observation run id.
     ///
-    /// First tries the value as a run id (local store or a mirrorable
-    /// connected-runner run). If that fails, scans connected runners' run
-    /// lists for a run whose human label matches and returns its observation
-    /// run id, so `report matrix-artifacts <my-run-id>` works as a one-liner
-    /// from the `--run-id` label the operator set at launch. When nothing
-    /// matches, the canonical missing-run error for the input is returned.
     pub fn resolve_run_id_or_label(
         store: &ObservationStore,
         run_id_or_label: &str,
     ) -> Result<String> {
-        if require_run(store, run_id_or_label).is_ok() {
-            return Ok(run_id_or_label.to_string());
-        }
-        if let Some(run) = find_run_by_label_on_connected_runners(run_id_or_label)? {
-            return Ok(run.id);
-        }
-        // No label match — surface the canonical missing-run error.
         require_run(store, run_id_or_label).map(|run| run.id)
-    }
-
-    /// Scan connected runners' run lists for a run whose human label matches.
-    /// This is the live hop; the matching predicate [`match_run_label`] is pure.
-    fn find_run_by_label_on_connected_runners(label: &str) -> Result<Option<RunRecord>> {
-        for report in crate::core::runners::statuses()?
-            .into_iter()
-            .filter(|report| report.connected)
-        {
-            let Ok(data) =
-                crate::core::runners::daemon_api_get(&report.runner_id, "/runs?limit=200")
-            else {
-                continue;
-            };
-            let runs: Vec<RunRecord> =
-                serde_json::from_value(data["body"]["runs"].clone()).unwrap_or_default();
-            if let Some(run) = match_run_label(&runs, label) {
-                return Ok(Some(run));
-            }
-        }
-        Ok(None)
     }
 
     /// Find the first run whose human label matches `label`. A run matches when
@@ -674,9 +750,15 @@ mod artifact_resolve {
             }
         }
         for pointer in [
+            "/requested_run_id",
             "/lab/run_label",
             "/lab/explicit_run_id",
+            "/lab/requested_run_id",
+            "/lab/mirror_run_id",
             "/proof/provenance/run_id",
+            "/caller_run_id",
+            "/mirror_run_id",
+            "/persisted_run_id",
             "/run_id",
         ] {
             if run.metadata_json.pointer(pointer).and_then(Value::as_str) == Some(label) {
@@ -1494,6 +1576,110 @@ mod tests {
             let resolved =
                 resolve_run_id_or_label(&store, &run.id).expect("resolve existing run id");
             assert_eq!(resolved, run.id);
+        });
+    }
+
+    #[test]
+    fn require_run_resolves_requested_run_id_metadata_alias() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .command("homeboy bench homeboy --run-id proof-label")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                        .rig_id("studio")
+                        .metadata(serde_json::json!({ "requested_run_id": "proof-label" }))
+                        .build(),
+                )
+                .expect("run");
+
+            let resolved = require_run(&store, "proof-label").expect("alias resolves");
+            assert_eq!(resolved.id, run.id);
+            assert_eq!(
+                resolve_run_id_or_label(&store, "proof-label").expect("alias id"),
+                run.id
+            );
+        });
+    }
+
+    #[test]
+    fn list_artifacts_for_run_resolves_requested_run_id_alias() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .command("homeboy bench homeboy --run-id proof-label")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+                        .rig_id("studio")
+                        .metadata(serde_json::json!({ "requested_run_id": "proof-label" }))
+                        .build(),
+                )
+                .expect("run");
+            let source = home.path().join("bench-results.json");
+            std::fs::write(&source, br#"{"ok":true}"#).expect("source");
+            store
+                .record_artifact(&run.id, "bench_results", &source)
+                .expect("record");
+
+            let artifacts = list_artifacts_for_run(&store, "proof-label").expect("artifacts");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].run_id, run.id);
+            assert_eq!(artifacts[0].kind, "bench_results");
+        });
+    }
+
+    #[test]
+    fn require_run_rejects_ambiguous_requested_run_id_alias() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let first = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture-a"))
+                        .rig_id("studio-a")
+                        .metadata(serde_json::json!({ "requested_run_id": "shared-label" }))
+                        .build(),
+                )
+                .expect("first run");
+            let second = store
+                .start_run(
+                    NewRunRecord::builder("bench")
+                        .component_id("homeboy")
+                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture-b"))
+                        .rig_id("studio-b")
+                        .metadata(serde_json::json!({ "requested_run_id": "shared-label" }))
+                        .build(),
+                )
+                .expect("second run");
+
+            let err = require_run(&store, "shared-label").expect_err("ambiguous label");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err
+                .message
+                .contains("run label `shared-label` is ambiguous"));
+            let joined = err
+                .details
+                .get("tried")
+                .and_then(Value::as_array)
+                .expect("disambiguation entries")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(joined.contains(&first.id));
+            assert!(joined.contains(&second.id));
+            assert!(joined.contains("started_at="));
+            assert!(joined.contains("component=homeboy"));
+            assert!(joined.contains("rig=studio-a"));
+            assert!(joined.contains("rig=studio-b"));
         });
     }
 }
