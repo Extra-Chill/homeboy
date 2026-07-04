@@ -220,7 +220,7 @@ fn runner_provider_unavailable_reason(
             candidate_ids.len(),
             candidate_ids.join(", ")
         )),
-        ProviderResolution::SelectorMismatch { available_ids } => Some(format!(
+        ProviderResolution::SelectorMismatch { available_ids, .. } => Some(format!(
             "backend `{}` matches runner providers ({}), but selector/id `{}` does not match any of them",
             selection.backend,
             available_ids.join(", "),

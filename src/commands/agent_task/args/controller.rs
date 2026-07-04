@@ -55,8 +55,8 @@ pub struct AgentTaskControllerDispatchArgs {
 
     /// Extension-provider selector: the Homeboy executor provider id (e.g.
     /// `sample.executor-provider`) that runs controller-spawned
-    /// dispatch actions when the action omits one. This is NOT a model or AI
-    /// runtime name (codex, opencode, claude-code) — pass those in
+    /// dispatch actions when the action omits one. This is not model/runtime
+    /// provider configuration; pass runtime-specific values in
     /// --dispatch-provider-config. Run `homeboy agent-task providers` for valid ids.
     #[arg(
         long = "dispatch-selector",
@@ -71,8 +71,8 @@ pub struct AgentTaskControllerDispatchArgs {
 
     /// Agent/model provider config (JSON, @file, or -): the nested AI
     /// runtime/provider/model the selected executor uses for controller-spawned
-    /// dispatch actions when the action omits one. Put AI runtime names like
-    /// `codex`/`opencode`/`claude-code` here, not in --dispatch-selector.
+    /// dispatch actions when the action omits one. Put runtime-specific provider
+    /// selection here, not in --dispatch-selector.
     #[arg(long = "dispatch-provider-config", value_name = "JSON")]
     pub dispatch_provider_config: Option<String>,
 }

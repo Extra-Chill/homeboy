@@ -232,6 +232,7 @@ fn provider_selection_reports_exact_backend_selector_mismatch() {
         resolution,
         ProviderResolution::SelectorMismatch {
             available_ids: vec!["example.synthetic-agent-task-executor".to_string()],
+            selector_hint: None,
         }
     );
 }
@@ -241,6 +242,7 @@ fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
     let (_, mut provider) = request("task-a", "node provider.js".to_string());
     provider.id = "example.sandbox-agent-task-executor".to_string();
     provider.backend = "sandbox".to_string();
+    provider.cli.reserved_selector_hints = vec!["codex".to_string()];
 
     let error = validate_provider_runner_readiness_for_backend_with_providers(
         &[provider],
@@ -255,7 +257,7 @@ fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
         .expect("tried suggestions");
     assert!(suggestions.iter().any(|value| value
         .as_str()
-        .is_some_and(|suggestion| suggestion.contains("nested AI runtime provider"))));
+        .is_some_and(|suggestion| suggestion.contains("runtime-specific provider configuration"))));
     assert!(suggestions.iter().any(|value| value
         .as_str()
         .is_some_and(|suggestion| suggestion.contains("example.sandbox-agent-task-executor"))));

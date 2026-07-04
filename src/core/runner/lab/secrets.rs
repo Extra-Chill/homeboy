@@ -2343,6 +2343,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             lab_runtime_components: Vec::new(),
             timeout_artifact_discovery: Default::default(),
             role_aliases: Default::default(),
+            cli: Default::default(),
             result_contract: Default::default(),
             runtime_contract: Default::default(),
             extension_id: None,

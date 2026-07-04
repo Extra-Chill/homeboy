@@ -40,7 +40,7 @@ pub struct FinalizePrEvidenceArgs {
     pub artifact_refs: Vec<String>,
 
     /// AI tool disclosure line for the PR body.
-    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
     /// Actual model identifier for AI disclosure. Use "not recorded" only when provider metadata is missing.
@@ -393,7 +393,7 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
         .unwrap_or_else(|| "sample.executor-provider".to_string());
 
     serde_json::json!({
-        "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which AI runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass the AI runtime (codex, opencode, claude-code, ...) inside --dispatch-provider-config — never the other way around.",
+        "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass runtime-specific provider configuration inside --dispatch-provider-config — never the other way around.",
         "layers": [
             {
                 "layer": "extension_provider_selector",
@@ -405,15 +405,15 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
             {
                 "layer": "agent_model_provider_config",
                 "flags": ["--dispatch-provider-config", "--provider-config", "--dispatch-model", "--model"],
-                "selects": "Which AI runtime/provider/model the selected executor uses (e.g. codex, opencode, claude-code).",
-                "value_is": "Nested provider config JSON (and/or a model override), passed to the executor — this is where an AI runtime name like `codex` belongs.",
+                "selects": "Which runtime/provider/model the selected executor uses.",
+                "value_is": "Nested provider config JSON (and/or a model override), passed to the executor.",
             }
         ],
-        "common_mistake": "Passing an AI runtime name (codex, opencode, claude-code) to --dispatch-selector. That selects the executor, not the model, so it fails with 'no extension agent-task provider ... matched selector'. Put the AI runtime in --dispatch-provider-config instead.",
+        "common_mistake": "Passing runtime-specific provider configuration to --dispatch-selector. That selects the executor, not the model/provider, so it fails with 'no extension agent-task provider ... matched selector'. Put runtime-specific values in --dispatch-provider-config instead.",
         "example": {
             "description": "Run a task with a selected executor provider driving a nested AI runtime/provider config.",
             "command": format!(
-                "homeboy agent-task cook --dispatch-selector {example_selector} --dispatch-provider-config '{{\"provider\":\"codex\"}}' --prompt @task.md"
+                "homeboy agent-task cook --dispatch-selector {example_selector} --dispatch-provider-config '{{\"provider\":\"example\"}}' --prompt @task.md"
             ),
         }
     })

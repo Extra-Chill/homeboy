@@ -48,6 +48,7 @@ fn scheduler_reports_provider_selector_mismatch() {
     request.executor.selector = Some("codex".to_string());
     provider.id = "example.synthetic-agent-task-executor".to_string();
     provider.backend = "synthetic-runtime".to_string();
+    provider.cli.reserved_selector_hints = vec!["codex".to_string()];
     let scheduler =
         AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
             provider,
@@ -66,10 +67,10 @@ fn scheduler_reports_provider_selector_mismatch() {
     );
     assert!(aggregate.outcomes[0].diagnostics[0]
         .message
-        .contains("nested AI runtime provider"));
+        .contains("matched selector"));
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["hint"],
-        "'codex' looks like a nested AI runtime provider, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend 'synthetic-runtime'; pass the AI provider in --dispatch-provider-config instead."
+        "'codex' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend 'synthetic-runtime'; pass runtime/provider configuration through --dispatch-provider-config instead."
     );
 }
 
