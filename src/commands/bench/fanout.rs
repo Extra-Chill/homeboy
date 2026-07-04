@@ -10,7 +10,7 @@ use homeboy::core::agent_tasks::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
-use homeboy::core::extension::bench::{BenchGate, BenchGateResult};
+use homeboy::core::extension::bench::{BenchGate, BenchGateOp, BenchGateResult};
 use homeboy::core::rig::RigSpec;
 
 use super::{matrix, BenchReportFormat, BenchRunArgs};
@@ -166,15 +166,23 @@ fn apply_result_gates(
     mut matrix: AgentTaskMatrixAggregate,
     gates: &[BenchGate],
 ) -> (AgentTaskMatrixAggregate, Vec<BenchGateResult>, Vec<String>) {
-    if gates.is_empty() {
-        return (matrix, Vec::new(), Vec::new());
-    }
-
     let mut results = Vec::new();
     let mut failures = Vec::new();
     for cell in &mut matrix.cells {
         let metrics = numeric_metrics_for_cell(&cell.metadata);
-        for gate in gates {
+        let mut cell_gates = gates.to_vec();
+        if should_default_gate_not_run_fixtures(&metrics, &cell.metadata)
+            && !cell_gates
+                .iter()
+                .any(|gate| gate.metric == "not_run_fixture_count")
+        {
+            cell_gates.push(BenchGate {
+                metric: "not_run_fixture_count".to_string(),
+                op: BenchGateOp::Lte,
+                value: 0.0,
+            });
+        }
+        for gate in &cell_gates {
             let result = gate.evaluate_actual(
                 &format!("matrix cell `{}` result", cell.cell_id),
                 metrics.get(&gate.metric).copied(),
@@ -205,6 +213,25 @@ fn apply_result_gates(
     }
 
     (matrix, results, failures)
+}
+
+fn should_default_gate_not_run_fixtures(metrics: &BTreeMap<String, f64>, metadata: &Value) -> bool {
+    metrics.get("fixture_count").copied().unwrap_or(0.0) > 0.0
+        && metrics.contains_key("not_run_fixture_count")
+        && !explicit_planning_or_dry_run_metadata(metadata)
+}
+
+fn explicit_planning_or_dry_run_metadata(metadata: &Value) -> bool {
+    ["execution_status", "mode", "intent"].iter().any(|key| {
+        metadata
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(is_planning_or_dry_run_value)
+    })
+}
+
+fn is_planning_or_dry_run_value(value: &str) -> bool {
+    matches!(value, "dry_run" | "dry-run" | "planning")
 }
 
 fn numeric_metrics_for_cell(metadata: &Value) -> BTreeMap<String, f64> {
@@ -526,7 +553,52 @@ mod tests {
         assert!(failures.is_empty());
     }
 
+    #[test]
+    fn default_result_gate_fails_matrix_cell_with_discovered_but_not_run_fixtures() {
+        let aggregate = matrix_aggregate_with_metrics(serde_json::json!({
+            "fixture_count": 13,
+            "not_run_fixture_count": 13,
+            "failed_fixture_count": 0
+        }));
+
+        let (aggregate, results, failures) = apply_result_gates(aggregate, &[]);
+
+        assert!(!aggregate.passed);
+        assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        );
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert_eq!(results[0].metric, "not_run_fixture_count");
+        assert!(failures[0].contains("not_run_fixture_count lte 0"));
+    }
+
+    #[test]
+    fn default_result_gate_skips_matrix_cell_explicit_planning_workload() {
+        let mut aggregate = matrix_aggregate_with_metrics(serde_json::json!({
+            "fixture_count": 13,
+            "not_run_fixture_count": 13,
+            "failed_fixture_count": 0
+        }));
+        aggregate.cells[0].metadata["execution_status"] = serde_json::json!("planning");
+
+        let (aggregate, results, failures) = apply_result_gates(aggregate, &[]);
+
+        assert!(aggregate.passed);
+        assert_eq!(
+            aggregate.execution_state,
+            AgentTaskMatrixExecutionState::ExecutedClean
+        );
+        assert!(results.is_empty());
+        assert!(failures.is_empty());
+    }
+
     fn matrix_aggregate_with_metric(metric: &str, value: f64) -> AgentTaskMatrixAggregate {
+        matrix_aggregate_with_metrics(serde_json::json!({ metric: value }))
+    }
+
+    fn matrix_aggregate_with_metrics(metrics: serde_json::Value) -> AgentTaskMatrixAggregate {
         AgentTaskMatrixAggregate {
             schema: homeboy::core::agent_tasks::AGENT_TASK_MATRIX_AGGREGATE_SCHEMA.to_string(),
             plan_id: "bench/example".to_string(),
@@ -541,7 +613,7 @@ mod tests {
                 artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
-                metadata: serde_json::json!({ "metrics": { metric: value } }),
+                metadata: serde_json::json!({ "metrics": metrics }),
             }],
         }
     }
