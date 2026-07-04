@@ -42,6 +42,38 @@ pub use types::{
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{run_batch, run_command, SKIPPED_RELEASE_EXIT_CODE};
 
+/// Return the release tag name this component uses for a version.
+///
+/// This is the shared tag naming contract for release, deploy, status, and
+/// changes. Components scoped below a repository root use component-prefixed
+/// tags; root components use plain `vX.Y.Z` tags.
+pub fn component_tag_name(
+    component: &crate::core::component::Component,
+    version: &str,
+) -> crate::core::Result<String> {
+    let version = version.trim_start_matches('v');
+    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
+    Ok(scope.tag_name(version))
+}
+
+/// Return the tag prefix this component uses, when it has a component-scoped
+/// release namespace.
+pub fn component_tag_prefix(
+    component: &crate::core::component::Component,
+) -> crate::core::Result<Option<String>> {
+    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
+    Ok(scope.tag_prefix().map(str::to_string))
+}
+
+/// Resolve the latest release tag for this component using the same namespace
+/// that release uses when creating tags.
+pub fn latest_component_tag(
+    component: &crate::core::component::Component,
+) -> crate::core::Result<Option<String>> {
+    let scope = scope::ReleaseScope::resolve(component, &component.id)?;
+    scope.latest_tag()
+}
+
 /// Whether this component would normally get a reviewer-facing GitHub Release
 /// created as part of a release (i.e. it resolves to a GitHub remote).
 ///

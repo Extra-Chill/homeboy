@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::core::component::Component;
-use crate::core::git;
+use crate::core::release;
 
 use super::super::orchestration_tag_checkout::deploy_tag_for_version;
 use super::super::release_download;
@@ -127,7 +127,7 @@ fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<St
         return Some(deploy_tag_for_version(component, version));
     }
 
-    git::get_latest_tag(&component.local_path).ok().flatten()
+    release::latest_component_tag(component).ok().flatten()
 }
 
 #[cfg(test)]

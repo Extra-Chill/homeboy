@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::component::Component;
 use crate::core::engine::command;
-use crate::core::git;
+use crate::core::release;
 
 use super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
 use super::types::{ArtifactIdentity, BuildProvenance, BuildSource};
@@ -113,7 +113,7 @@ pub struct TagGap {
 /// Returns None if HEAD is at or behind the tag, or if no tags exist.
 pub fn detect_tag_gap(component: &Component) -> Option<TagGap> {
     let path = &component.local_path;
-    let tag = git::get_latest_tag(path).ok().flatten()?;
+    let tag = release::latest_component_tag(component).ok().flatten()?;
 
     let ahead_str = command::run_in_optional(
         path,

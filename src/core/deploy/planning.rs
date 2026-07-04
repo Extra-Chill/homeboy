@@ -615,7 +615,15 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
         .ok()
         .map(|info| info.version);
 
-    let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
+    let tag_prefix = crate::core::release::component_tag_prefix(component)
+        .ok()
+        .flatten();
+    let baseline = git::detect_baseline_with_version_and_tag_prefix(
+        path,
+        current_version.as_deref(),
+        tag_prefix.as_deref(),
+    )
+    .ok()?;
 
     calculate_release_state_from_baseline(component, &baseline)
 }

@@ -344,4 +344,82 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "fix: update blocks engine package");
     }
+
+    #[test]
+    fn sibling_shared_repo_component_uses_its_prefixed_latest_tag() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "studio-native-theme-v0.1.0"]);
+        commit_file(
+            dir,
+            "packages/theme/style.css",
+            "Version: 0.1.1",
+            "release theme 0.1.1",
+        );
+        run_git(dir, &["tag", "studio-native-theme-v0.1.1"]);
+        commit_file(
+            dir,
+            "apps/studio-native/package.json",
+            "{\"version\":\"0.13.1\"}",
+            "release app 0.13.1",
+        );
+        run_git(dir, &["tag", "v0.13.1"]);
+
+        let primary = Component {
+            id: "studio-native".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let theme = Component {
+            id: "studio-native-theme".to_string(),
+            local_path: dir.join("packages/theme").to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            crate::core::release::component_tag_name(&primary, "0.13.2").unwrap(),
+            "v0.13.2"
+        );
+        assert_eq!(
+            crate::core::release::latest_component_tag(&primary)
+                .unwrap()
+                .as_deref(),
+            Some("v0.13.1")
+        );
+        assert_eq!(
+            crate::core::release::component_tag_name(&theme, "0.1.2").unwrap(),
+            "studio-native-theme-v0.1.2"
+        );
+        assert_eq!(
+            crate::core::release::latest_component_tag(&theme)
+                .unwrap()
+                .as_deref(),
+            Some("studio-native-theme-v0.1.1")
+        );
+    }
+
+    #[test]
+    fn secondary_shared_repo_component_does_not_fall_back_to_plain_tags() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        std::fs::create_dir_all(dir.join("packages/theme")).expect("theme dir");
+        run_git(dir, &["tag", "v0.13.1"]);
+
+        let theme = Component {
+            id: "studio-native-theme".to_string(),
+            local_path: dir.join("packages/theme").to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            crate::core::release::component_tag_name(&theme, "0.1.1").unwrap(),
+            "studio-native-theme-v0.1.1"
+        );
+        assert_eq!(
+            crate::core::release::latest_component_tag(&theme).unwrap(),
+            None
+        );
+    }
 }

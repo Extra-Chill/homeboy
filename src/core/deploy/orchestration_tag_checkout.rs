@@ -6,7 +6,7 @@
 
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
-use crate::core::git;
+use crate::core::release;
 
 /// Record of a tag checkout for later branch restoration.
 pub(super) struct TagCheckout {
@@ -69,7 +69,7 @@ pub(super) fn checkout_deploy_tags(
 
         let tag = match expected_version {
             Some(version) => deploy_tag_for_version(component, version),
-            None => match git::get_latest_tag(path) {
+            None => match release::latest_component_tag(component) {
                 Ok(Some(t)) => t,
                 Ok(None) => {
                     if !checkouts.is_empty() {
@@ -198,11 +198,10 @@ pub(super) fn checkout_deploy_tags(
 }
 
 pub(super) fn deploy_tag_for_version(component: &Component, version: &str) -> String {
-    let version = version.trim_start_matches('v');
-    match git::MonorepoContext::detect(&component.local_path, &component.id) {
-        Some(context) => context.format_tag(version),
-        None => format!("v{}", version),
-    }
+    release::component_tag_name(component, version).unwrap_or_else(|_| {
+        let version = version.trim_start_matches('v');
+        format!("v{}", version)
+    })
 }
 
 /// Restore original branches after deployment.
