@@ -430,6 +430,12 @@ const fn guarded_safety(dangerous_flags: &'static [&'static str]) -> CommandSafe
 }
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        output_notes: "unified active/recent activity read model in the standard JSON envelope",
+        lab_supported: false,
+        lab_notes: "read-only local activity query; never offloaded because it inspects operator-local stores",
+        ..command_spec("activity", CommandJsonFamily::Workspace)
+    },
     command_spec_with_representative_argv(
         &["homeboy", "agent-task", "providers"],
         lab_command_spec_with_summary(

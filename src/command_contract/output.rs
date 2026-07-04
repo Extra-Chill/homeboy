@@ -232,7 +232,8 @@ impl Commands {
             Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
-            Commands::AgentTask(_)
+            Commands::Activity(_)
+            | Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)

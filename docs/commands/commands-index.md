@@ -1,6 +1,7 @@
 # Commands index
 
 - [api](api.md)
+- [activity](activity.md) — unified active and recently finished Homeboy work
 - [agent-task](agent-task.md)
 - [artifact-postprocess](artifact-postprocess.md) — generic helper-driven postprocessing for persisted artifact roots
 - [audit](audit.md) — code convention drift and structural analysis
