@@ -1,9 +1,6 @@
 {
   "id": "go",
   "changelog_target": "docs/CHANGELOG.md",
-  "extensions": {
-    "go": {}
-  },
   "version_targets": [
     {
       "file": "go.json",
