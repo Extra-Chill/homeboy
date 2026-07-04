@@ -3,8 +3,24 @@
 The default Rust gate is the bounded unit suite:
 
 ```sh
-cargo nextest run --lib --no-fail-fast
+cargo nextest run --profile default --lib
 ```
+
+CI uses the non-fail-fast profile so one run reports the full failure set:
+
+```sh
+cargo nextest run --profile ci --lib
+```
+
+For local edit loops, use the quick profile with the module or test filter you are changing:
+
+```sh
+cargo nextest run --profile quick --lib <filter>
+```
+
+The profile timeouts are guardrails for hangs, not performance targets. When doing
+test-suite speed work, capture before/after wall time and the slowest tests from
+the nextest summary so lock contention and fixture setup costs stay visible.
 
 Full-pipeline audit/refactor regressions that intentionally run broad audit machinery live in the explicit slow tier:
 

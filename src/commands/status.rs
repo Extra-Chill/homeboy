@@ -1161,15 +1161,11 @@ mod tests {
     }
 
     fn make_git_repo(name: &str) -> (TempDir, std::path::PathBuf) {
-        let dir = TempDir::new().expect("tempdir");
-        let repo = dir.path().join(name);
-        fs::create_dir_all(&repo).expect("repo dir");
-        Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&repo)
-            .status()
-            .expect("git init");
-        (dir, repo)
+        crate::test_support::shared_git_repo_fixture(name)
+    }
+
+    fn make_committed_git_repo(name: &str) -> (TempDir, std::path::PathBuf) {
+        crate::test_support::shared_committed_git_repo_fixture(name)
     }
 
     fn empty_status_output() -> StatusOutput {
@@ -1391,10 +1387,6 @@ mod tests {
         assert!(status.success(), "git {:?} failed", args);
     }
 
-    fn commit_empty(repo: &std::path::Path, message: &str) {
-        run_git(repo, &["commit", "--allow-empty", "-q", "-m", message]);
-    }
-
     #[test]
     fn parser_accepts_unreleased_filter() {
         let cli = Cli::try_parse_from(["homeboy", "status", "--unreleased"])
@@ -1453,9 +1445,8 @@ mod tests {
 
     #[test]
     fn default_origin_branch_resolves_origin_head_symbolic_ref() {
-        let (_dir, repo) = make_git_repo("with-origin");
+        let (_dir, repo) = make_committed_git_repo("with-origin");
         // Build a fake "origin" remote by cloning into a bare repo and wiring it up.
-        commit_empty(&repo, "feat: initial");
         // Create the origin/main remote-tracking ref directly so the resolver
         // has something to find without network access.
         run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
@@ -1474,8 +1465,7 @@ mod tests {
 
     #[test]
     fn default_origin_branch_falls_back_to_conventional_branches() {
-        let (_dir, repo) = make_git_repo("fallback-origin");
-        commit_empty(&repo, "feat: initial");
+        let (_dir, repo) = make_committed_git_repo("fallback-origin");
         // No origin/HEAD symbolic ref; only a conventional remote-tracking ref.
         run_git(&repo, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
 
@@ -1485,8 +1475,7 @@ mod tests {
 
     #[test]
     fn default_origin_branch_none_without_remote_refs() {
-        let (_dir, repo) = make_git_repo("no-origin");
-        commit_empty(&repo, "feat: initial");
+        let (_dir, repo) = make_committed_git_repo("no-origin");
 
         assert!(default_origin_branch(&repo.to_string_lossy()).is_none());
     }
