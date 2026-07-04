@@ -1,9 +1,11 @@
 use std::time::Duration;
 
 use reqwest::blocking::Client;
+use reqwest::blocking::RequestBuilder;
+use reqwest::header::CONNECTION;
 use serde_json::{json, Value};
 
-use crate::core::error::{Error, Result};
+use crate::core::error::{Error, ErrorCode, Result};
 
 use super::super::broker_http;
 use super::super::daemon_http_get::{daemon_get, parse_daemon_response_json};
@@ -16,9 +18,78 @@ fn unsupported_daemon_api_method(method: &str) -> Error {
     Error::internal_unexpected(format!("unsupported daemon API method {method}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DaemonHttpErrorKind {
+    Connect,
+    Timeout,
+    Status,
+    BodyDecode,
+}
+
+impl DaemonHttpErrorKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            DaemonHttpErrorKind::Connect => "connect",
+            DaemonHttpErrorKind::Timeout => "timeout",
+            DaemonHttpErrorKind::Status => "status",
+            DaemonHttpErrorKind::BodyDecode => "body_decode",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct DaemonPostOptions {
+    pub(super) connection_close: bool,
+}
+
+pub(super) struct DaemonHttpTextResponse {
+    pub(super) status_code: u16,
+    pub(super) body: String,
+}
+
 pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
     data.get("body")
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
+}
+
+pub(super) fn daemon_transport_error(
+    kind: DaemonHttpErrorKind,
+    path: &str,
+    status_code: Option<u16>,
+    context: &str,
+    error: impl Into<String>,
+) -> Error {
+    let mut err = Error::new(
+        ErrorCode::InternalUnexpected,
+        format!("{context}: {}", error.into()),
+        json!({
+            "daemon_transport_error": {
+                "kind": kind.as_str(),
+                "path": path,
+                "http_status": status_code,
+            }
+        }),
+    );
+    err.retryable = Some(true);
+    err
+}
+
+fn classify_reqwest_error(err: &reqwest::Error) -> DaemonHttpErrorKind {
+    if err.is_timeout() {
+        DaemonHttpErrorKind::Timeout
+    } else if err.is_connect() {
+        DaemonHttpErrorKind::Connect
+    } else {
+        DaemonHttpErrorKind::Status
+    }
+}
+
+fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions) -> RequestBuilder {
+    if options.connection_close {
+        request.header(CONNECTION, "close")
+    } else {
+        request
+    }
 }
 
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
@@ -96,14 +167,15 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
 }
 
 pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
-    let response = client
-        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let status_code = response.status().as_u16();
-    let body = response
-        .text()
-        .map_err(|err| Error::internal_unexpected(format!("read runner daemon response: {err}")))?;
+    let response = daemon_post_json_text(
+        client,
+        local_url,
+        path,
+        &json!({}),
+        DaemonPostOptions::default(),
+    )?;
+    let status_code = response.status_code;
+    let body = response.body;
     let envelope: DaemonEnvelope =
         parse_daemon_response_json(&body, status_code, path, "parse daemon response")?;
     if !envelope.success {
@@ -115,4 +187,43 @@ pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Resul
     envelope
         .data
         .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
+}
+
+pub(super) fn daemon_post_json_text(
+    client: &Client,
+    local_url: &str,
+    path: &str,
+    payload: &Value,
+    options: DaemonPostOptions,
+) -> Result<DaemonHttpTextResponse> {
+    let request = client
+        .post(format!("{}{}", local_url.trim_end_matches('/'), path))
+        .json(payload);
+    let response = with_daemon_post_options(request, options)
+        .send()
+        .map_err(|err| {
+            daemon_transport_error(
+                classify_reqwest_error(&err),
+                path,
+                err.status().map(|status| status.as_u16()),
+                "query runner daemon",
+                err.to_string(),
+            )
+        })?;
+    let status_code = response.status().as_u16();
+    let body = response.text().map_err(|err| {
+        daemon_transport_error(
+            if err.is_timeout() {
+                DaemonHttpErrorKind::Timeout
+            } else {
+                DaemonHttpErrorKind::BodyDecode
+            },
+            path,
+            Some(status_code),
+            "read runner daemon response",
+            err.to_string(),
+        )
+    })?;
+
+    Ok(DaemonHttpTextResponse { status_code, body })
 }

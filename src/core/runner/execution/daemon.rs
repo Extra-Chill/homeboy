@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -74,8 +72,18 @@ pub(super) fn exec_via_daemon(
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
         "lifecycle": lifecycle,
     });
-    let (status_code, response_body) = daemon_loopback_post_json(local_url, "/exec", &payload)
-        .map_err(|err| daemon_exec_loopback_transport_error(&runner.id, err))?;
+    let response = daemon_post_json_text(
+        &client,
+        local_url,
+        "/exec",
+        &payload,
+        DaemonPostOptions {
+            connection_close: true,
+        },
+    )
+    .map_err(|err| daemon_exec_loopback_transport_error(&runner.id, err))?;
+    let status_code = response.status_code;
+    let response_body = response.body;
     let envelope: DaemonEnvelope = serde_json::from_str(&response_body).map_err(|err| {
         // A stale/restarting daemon can answer the tunnel with a non-JSON or
         // empty body. Surface a clear, actionable error instead of a bare parse
@@ -254,104 +262,6 @@ pub(super) fn exec_via_daemon(
         },
         exit_code,
     ))
-}
-
-fn daemon_loopback_post_json(
-    local_url: &str,
-    path: &str,
-    payload: &Value,
-) -> std::io::Result<(u16, String)> {
-    let address = local_url
-        .trim_end_matches('/')
-        .strip_prefix("http://")
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "runner daemon URL must be http:// loopback",
-            )
-        })?;
-    if !(address.starts_with("127.0.0.1:") || address.starts_with("localhost:")) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "runner daemon URL must target loopback",
-        ));
-    }
-    let body = serde_json::to_string(payload)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let mut stream = TcpStream::connect(address)?;
-    let timeout = Duration::from_secs(10);
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    write!(
-        stream,
-        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )?;
-    stream.flush()?;
-    stream.shutdown(Shutdown::Write)?;
-    let mut response = Vec::new();
-    let header_end = loop {
-        let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break None;
-        }
-        response.extend_from_slice(&chunk[..read]);
-        if let Some(index) = response.windows(4).position(|window| window == b"\r\n\r\n") {
-            break Some(index + 4);
-        }
-    }
-    .ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "daemon HTTP response missing header boundary",
-        )
-    })?;
-    let head = String::from_utf8_lossy(&response[..header_end - 4]);
-    let status_code = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "daemon HTTP response missing status code",
-            )
-        })?;
-    let content_length = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "daemon HTTP response missing content-length",
-            )
-        })?;
-    while response.len().saturating_sub(header_end) < content_length {
-        let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&chunk[..read]);
-    }
-    let body_end = header_end + content_length;
-    if response.len() < body_end {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "daemon HTTP response ended before content-length bytes were read",
-        ));
-    }
-    let body = String::from_utf8(response[header_end..body_end].to_vec())
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    Ok((status_code, body))
 }
 
 pub(super) fn preflight_runner_capability_plan(

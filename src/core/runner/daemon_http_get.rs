@@ -73,6 +73,11 @@ fn daemon_response_json_error(
             "body_bytes": body.len(),
             "body_preview": preview,
             "likely_truncated": likely_truncated,
+            "daemon_transport_error": {
+                "kind": "body_decode",
+                "path": path,
+                "http_status": status_code,
+            },
         }),
     );
     error.retryable = Some(true);

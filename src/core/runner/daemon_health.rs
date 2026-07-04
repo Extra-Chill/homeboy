@@ -16,7 +16,12 @@ pub(super) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHe
     }
 
     let message = err.message.as_str();
-    let daemon_transport_failure = message.contains("query runner daemon")
+    let daemon_transport_failure = err
+        .details
+        .pointer("/daemon_transport_error/kind")
+        .and_then(|value| value.as_str())
+        .is_some_and(|kind| matches!(kind, "connect" | "timeout" | "status" | "body_decode"))
+        || message.contains("query runner daemon")
         || message.contains("submit runner daemon exec job")
         || message.contains("parse daemon exec response")
         || message.contains("daemon exec request failed");
@@ -45,14 +50,22 @@ mod tests {
 
     #[test]
     fn classifies_stale_daemon_transport_failures() {
-        let err = Error::internal_unexpected(
-            "query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)",
+        let err = Error::new(
+            ErrorCode::InternalUnexpected,
+            "runner daemon request failed",
+            serde_json::json!({
+                "daemon_transport_error": {
+                    "kind": "connect",
+                    "path": "/jobs/id",
+                    "http_status": null,
+                }
+            }),
         );
 
         assert_eq!(
             runner_daemon_health_failure(&err),
             Some(RunnerDaemonHealthFailure {
-                reason: "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
+                reason: "runner daemon health check failed: runner daemon request failed"
                     .to_string(),
                 runner_id: None,
                 job_id: None,
