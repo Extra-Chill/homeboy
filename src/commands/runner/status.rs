@@ -204,6 +204,9 @@ pub(super) fn lab_runner_homeboy_output(
             "homeboy upgrade --force --upgrade-runner {}",
             shell_arg(runner_id)
         ),
+        dev_sync: runner::load(runner_id)
+            .ok()
+            .and_then(|runner| runner.resources.get("dev_sync").cloned()),
     }
 }
 

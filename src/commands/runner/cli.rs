@@ -252,6 +252,31 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Sync a controller-local Homeboy dev binary to the runner and select it for Lab jobs
+    DevSync {
+        /// Runner ID
+        runner_id: String,
+
+        /// Controller-local Homeboy source checkout to build before upload. Defaults to current directory.
+        #[arg(long)]
+        homeboy_source: Option<String>,
+
+        /// Controller-local prebuilt Homeboy binary to upload instead of building from source
+        #[arg(long)]
+        homeboy_binary: Option<String>,
+
+        /// Dev extension source to sync later, in id=path form. Accepted and recorded; extension relink is deferred.
+        #[arg(long = "extensions")]
+        extensions: Vec<String>,
+
+        /// Disconnect and reconnect the runner daemon after selecting the dev binary
+        #[arg(long)]
+        reconnect: bool,
+
+        /// Print the plan without executing it or changing runner config
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Execute a command on a configured runner
     Exec {
         /// Runner ID

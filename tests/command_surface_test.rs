@@ -371,6 +371,22 @@ fn runner_job_broker_wrapper_commands_parse() {
 }
 
 #[test]
+fn runner_dev_sync_command_parses() {
+    Cli::try_parse_from([
+        "homeboy",
+        "runner",
+        "dev-sync",
+        "homeboy-lab",
+        "--homeboy-source",
+        ".",
+        "--extensions",
+        "sample=/tmp/sample-runtime",
+        "--reconnect",
+    ])
+    .expect("runner dev-sync command should parse");
+}
+
+#[test]
 fn runner_exec_flags_parse_before_trailing_command() {
     // `runner exec` collects the remote command via `trailing_var_arg`, so every
     // exec-side flag must bind before the trailing argv begins. Exercise the

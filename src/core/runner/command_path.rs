@@ -46,6 +46,10 @@ pub(crate) fn normalize_runner_command_env_for_homeboy_path(
         return;
     };
     prepend_path_entry(env, parent);
+    env.insert(
+        "HOMEBOY_COMMAND".to_string(),
+        homeboy_path.display().to_string(),
+    );
 }
 
 fn prepend_path_entry(env: &mut HashMap<String, String>, entry: &str) {
