@@ -21,14 +21,51 @@ summary artifact.
 
 ## Top-level envelope
 
-In JSON mode, Homeboy prints a `CliResponse<T>` where `T` is the
+In JSON mode, Homeboy prints a `homeboy/command-result/v3` envelope around the
 **command-specific output struct**.
 
 Success:
 
 ```json
 {
+  "schema": "homeboy/command-result/v3",
+  "command": "runs.show",
   "success": true,
+  "exit_code": 0,
+  "status": "succeeded",
+  "run": {
+    "id": "bench-run-42",
+    "kind": "bench",
+    "source": "homeboy-observation-store",
+    "status_command": "homeboy runs show bench-run-42",
+    "watch_command": "homeboy runs watch bench-run-42"
+  },
+  "refs": {
+    "runs": [
+      {
+        "id": "bench-run-42",
+        "kind": "bench",
+        "source": "homeboy-observation-store",
+        "status_command": "homeboy runs show bench-run-42",
+        "watch_command": "homeboy runs watch bench-run-42"
+      }
+    ]
+  },
+  "next_actions": [
+    {
+      "label": "show run",
+      "command": "homeboy runs show bench-run-42",
+      "kind": "show"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "bench_artifact",
+      "kind": "bench_artifact",
+      "uri": "/tmp/bench-result.json",
+      "semantic_key": "file"
+    }
+  ],
   "data": { "...": "..." }
 }
 ```
@@ -52,6 +89,38 @@ Notes:
 - `error` is omitted on success.
 - `error.hints`/`error.retryable` are omitted when not set.
 - JSON serialization errors return `internal.json_error` (no silent fallback).
+- `next_actions`, `refs`, `artifacts`, and `evidence` are populated only from
+  typed command-output metadata. The envelope does not infer them from incidental
+  payload keys such as `run_id`, `hints`, or `artifact_path`.
+
+## Actionable result metadata
+
+Command handlers that have actionable follow-ups attach a reserved
+`_homeboy_actionable` field to their serializable output at the point they build
+the payload. The response layer consumes that reserved field, removes it from
+`data`, and copies the typed values into the envelope.
+
+The reserved metadata shape is:
+
+```json
+{
+  "run": { "id": "run-id", "kind": "bench", "source": "...", "status_command": "...", "watch_command": "..." },
+  "refs": {
+    "runs": [],
+    "jobs": [],
+    "agent_tasks": []
+  },
+  "next_actions": [
+    { "label": "review run", "command": "homeboy agent-task review run-id", "kind": "show" }
+  ],
+  "artifacts": [],
+  "evidence": []
+}
+```
+
+`next_actions[].kind` is optional and currently uses `watch`, `show`,
+`artifacts`, or `repair`. Commands not migrated to this metadata contract emit
+empty actionable envelope fields rather than guessed actions.
 
 ## Full status report output
 

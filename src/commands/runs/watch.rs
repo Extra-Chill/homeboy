@@ -24,8 +24,9 @@ use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 
 use super::common::{parse_duration, RunSummary};
-use super::types::RunsOutput;
+use super::types::{actionable_for_run_summary, RunsOutput};
 use super::{reconcile, CmdResult};
+use crate::commands::utils::response::CommandActionableMetadata;
 
 /// Exit code returned when the run did not settle before `--timeout`. Matches
 /// the GNU `timeout(1)` convention so wrappers can recognize the case.
@@ -65,6 +66,11 @@ pub struct RunsWatchOutput {
     pub waited_secs: u64,
     pub poll_count: u64,
     pub run: RunSummary,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyOutcome>,
 }
@@ -210,6 +216,9 @@ fn build_output(
         exit_code_for_status(&status)
     };
 
+    let run = super::run_summary(result.run);
+    let actionable = actionable_for_run_summary(&run);
+
     (
         RunsWatchOutput {
             command: "runs.watch",
@@ -219,7 +228,8 @@ fn build_output(
             timed_out,
             waited_secs: result.waited.as_secs(),
             poll_count: result.poll_count,
-            run: super::run_summary(result.run),
+            run,
+            actionable,
             notify,
         },
         exit_code,

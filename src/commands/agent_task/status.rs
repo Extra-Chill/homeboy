@@ -17,6 +17,10 @@ use homeboy::core::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 
 use super::super::CmdResult;
 use super::args::{CancelArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, StatusArgs};
+use crate::commands::utils::response::{
+    CommandActionableMetadata, CommandAgentTaskRef, CommandNextAction, CommandNextActionKind,
+    CommandResultRefs, ACTIONABLE_METADATA_KEY,
+};
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
 /// aggregate cannot flood recovery output. Overflow is reported as an
@@ -47,9 +51,12 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     if args.full {
+        attach_agent_task_status_actionable(&mut value, &args.run_id);
         return Ok((value, 0));
     }
     let summary = compact_status_summary(&value, &args.run_id);
+    let mut summary = summary;
+    attach_agent_task_status_actionable(&mut summary, &args.run_id);
     Ok((summary, 0))
 }
 
@@ -63,7 +70,9 @@ pub(super) fn list_runs(
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
-    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    attach_agent_task_discovery_actionable(&mut value);
+    Ok((value, 0))
 }
 
 /// `agent-task active`: list queued + running runs, but SEPARATE them into
@@ -91,6 +100,7 @@ pub(super) fn list_active(
             json!("run `homeboy agent-task active --reconcile` (or the per-run `commands.reconcile`) to safely cancel stale-running records without manual state edits"),
         );
     }
+    attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }
 
@@ -135,6 +145,121 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
         "suspect": suspect,
         "unreconciled": unreconciled,
     })
+}
+
+fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
+    let mut metadata = CommandActionableMetadata {
+        refs: CommandResultRefs {
+            agent_tasks: vec![agent_task_ref(run_id)],
+            ..Default::default()
+        },
+        next_actions: vec![
+            CommandNextAction::new(
+                "show status",
+                format!("homeboy agent-task status {run_id} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+            CommandNextAction::new("show logs", format!("homeboy agent-task logs {run_id}"))
+                .with_kind(CommandNextActionKind::Show),
+            CommandNextAction::new(
+                "list artifacts",
+                format!("homeboy agent-task artifacts {run_id}"),
+            )
+            .with_kind(CommandNextActionKind::Artifacts),
+        ],
+        ..Default::default()
+    };
+
+    let review_command = format!("homeboy agent-task review {run_id}");
+    metadata.next_actions.push(
+        CommandNextAction::new("review run", review_command).with_kind(CommandNextActionKind::Show),
+    );
+
+    attach_actionable_metadata(value, metadata);
+}
+
+fn attach_agent_task_discovery_actionable(value: &mut Value) {
+    let runs = value
+        .get("runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut metadata = CommandActionableMetadata::default();
+
+    for run in runs.iter().take(20) {
+        let Some(run_id) = run.get("run_id").and_then(Value::as_str) else {
+            continue;
+        };
+        metadata.refs.agent_tasks.push(agent_task_ref(run_id));
+        if let Some(commands) = run.get("commands") {
+            push_command_action(
+                &mut metadata.next_actions,
+                "show status",
+                commands.get("status"),
+                CommandNextActionKind::Show,
+            );
+            push_command_action(
+                &mut metadata.next_actions,
+                "show logs",
+                commands.get("logs"),
+                CommandNextActionKind::Show,
+            );
+            push_command_action(
+                &mut metadata.next_actions,
+                "list artifacts",
+                commands.get("artifacts"),
+                CommandNextActionKind::Artifacts,
+            );
+            if run
+                .get("liveness")
+                .and_then(Value::as_str)
+                .is_some_and(|liveness| liveness != "active")
+            {
+                push_command_action(
+                    &mut metadata.next_actions,
+                    "reconcile stale run",
+                    commands.get("reconcile"),
+                    CommandNextActionKind::Repair,
+                );
+            }
+        }
+    }
+
+    attach_actionable_metadata(value, metadata);
+}
+
+fn agent_task_ref(run_id: &str) -> CommandAgentTaskRef {
+    CommandAgentTaskRef {
+        id: run_id.to_string(),
+        source: "homeboy-agent-task-lifecycle".to_string(),
+        status_command: format!("homeboy agent-task status {run_id} --full"),
+        logs_command: format!("homeboy agent-task logs {run_id}"),
+        review_command: Some(format!("homeboy agent-task review {run_id}")),
+    }
+}
+
+fn push_command_action(
+    actions: &mut Vec<CommandNextAction>,
+    label: &str,
+    command: Option<&Value>,
+    kind: CommandNextActionKind,
+) {
+    let Some(command) = command.and_then(Value::as_str) else {
+        return;
+    };
+    actions.push(CommandNextAction::new(label, command).with_kind(kind));
+}
+
+fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMetadata) {
+    if metadata.is_empty() {
+        return;
+    }
+    let Value::Object(map) = value else {
+        return;
+    };
+    if let Ok(metadata) = serde_json::to_value(metadata) {
+        map.insert(ACTIONABLE_METADATA_KEY.to_string(), metadata);
+    }
 }
 
 pub(super) fn logs(args: StatusArgs) -> CmdResult<Value> {

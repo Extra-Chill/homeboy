@@ -4,14 +4,13 @@
 
 use homeboy::core::error::Hint;
 use homeboy::core::{Error, ErrorCode, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use super::output::{write_output_file_atomically, OutputWriteOptions};
 
-const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v2";
+const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v3";
+pub const ACTIONABLE_METADATA_KEY: &str = "_homeboy_actionable";
 
 #[derive(Debug, Serialize)]
 pub struct CommandResultEnvelope<T: Serialize> {
@@ -22,10 +21,12 @@ pub struct CommandResultEnvelope<T: Serialize> {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<CommandRunRef>,
+    #[serde(default, skip_serializing_if = "CommandResultRefs::is_empty")]
+    pub refs: CommandResultRefs,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_actions: Vec<String>,
+    pub next_actions: Vec<CommandNextAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<CommandArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -38,7 +39,100 @@ pub struct CommandResultEnvelope<T: Serialize> {
     pub presentation: Option<CommandPresentationEnvelope>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandActionableMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<CommandRunRef>,
+    #[serde(default, skip_serializing_if = "CommandResultRefs::is_empty")]
+    pub refs: CommandResultRefs,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<CommandNextAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<CommandArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<CommandEvidenceRef>,
+}
+
+impl CommandActionableMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.run.is_none()
+            && self.refs.is_empty()
+            && self.next_actions.is_empty()
+            && self.artifacts.is_empty()
+            && self.evidence.is_empty()
+    }
+
+    pub fn for_run(run: CommandRunRef) -> Self {
+        Self {
+            run: Some(run.clone()),
+            refs: CommandResultRefs {
+                runs: vec![run],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn with_next_action(mut self, action: CommandNextAction) -> Self {
+        self.next_actions.push(action);
+        self
+    }
+
+    pub fn with_artifact(mut self, artifact: CommandArtifactRef) -> Self {
+        self.artifacts.push(artifact);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandResultRefs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<CommandRunRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<CommandJobRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_tasks: Vec<CommandAgentTaskRef>,
+}
+
+impl CommandResultRefs {
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty() && self.jobs.is_empty() && self.agent_tasks.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandNextAction {
+    pub label: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CommandNextActionKind>,
+}
+
+impl CommandNextAction {
+    pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            command: command.into(),
+            kind: None,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: CommandNextActionKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandNextActionKind {
+    Watch,
+    Show,
+    Artifacts,
+    Repair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandRunRef {
     pub id: String,
     pub kind: String,
@@ -55,7 +149,27 @@ pub struct CommandRunRef {
     pub watch_command: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandJobRef {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub status_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watch_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandAgentTaskRef {
+    pub id: String,
+    pub source: String,
+    pub status_command: String,
+    pub logs_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandArtifactRef {
     pub id: String,
     pub kind: String,
@@ -64,7 +178,7 @@ pub struct CommandArtifactRef {
     pub semantic_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandEvidenceRef {
     pub id: String,
     pub kind: String,
@@ -101,6 +215,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
             exit_code: 0,
             status: "succeeded".to_string(),
             run: None,
+            refs: CommandResultRefs::default(),
             summary: None,
             next_actions: Vec::new(),
             artifacts: Vec::new(),
@@ -127,8 +242,9 @@ impl CommandResultEnvelope<()> {
             exit_code,
             status: status_for_result(None, exit_code),
             run: None,
+            refs: CommandResultRefs::default(),
             summary: Some(err.message.clone()),
-            next_actions: err.hints.iter().map(|hint| hint.message.clone()).collect(),
+            next_actions: Vec::new(),
             artifacts: Vec::new(),
             evidence: Vec::new(),
             diagnostics: Some(CommandDiagnostics {
@@ -304,6 +420,7 @@ impl CommandResultEnvelope<()> {
             exit_code: self.exit_code,
             status: self.status,
             run: self.run,
+            refs: self.refs,
             summary: self.summary,
             next_actions: self.next_actions,
             artifacts: self.artifacts,
@@ -317,14 +434,19 @@ impl CommandResultEnvelope<()> {
 
 fn envelope_for_data(
     command: &str,
-    data: Value,
+    mut data: Value,
     exit_code: i32,
     presentation: Option<CommandPresentationEnvelope>,
 ) -> CommandResultEnvelope<Value> {
     let success = exit_code == 0;
-    let run = run_ref_for_payload(command, &data);
-    let artifacts = artifact_refs_for_payload(&data);
-    let mut evidence = evidence_refs_for_payload(&data);
+    let mut actionable = actionable_metadata_for_payload(&mut data).unwrap_or_default();
+    if actionable.run.is_none() {
+        actionable.run = actionable.refs.runs.first().cloned();
+    }
+    let run = actionable.run;
+    let refs = actionable.refs;
+    let artifacts = actionable.artifacts;
+    let mut evidence = actionable.evidence;
 
     if evidence.is_empty() {
         if let Some(run) = &run {
@@ -344,8 +466,9 @@ fn envelope_for_data(
         exit_code,
         status: status_for_result(Some(&data), exit_code),
         run,
+        refs,
         summary: summary_for_payload(&data, presentation.as_ref()),
-        next_actions: next_actions_for_payload(&data),
+        next_actions: actionable.next_actions,
         artifacts,
         evidence,
         diagnostics: None,
@@ -379,128 +502,27 @@ fn normalize_status(status: &str) -> Option<&'static str> {
     }
 }
 
-fn run_ref_for_payload(command: &str, data: &Value) -> Option<CommandRunRef> {
-    let id = string_at(data, &["run_id"])
-        .or_else(|| string_at(data, &["run", "id"]))
-        .or_else(|| string_at(data, &["status", "run_id"]))
-        .or_else(|| synthetic_run_id(command, data));
-    let id = id?;
-    let kind = string_at(data, &["run", "kind"])
-        .or_else(|| string_at(data, &["kind"]))
-        .unwrap_or_else(|| command.to_string());
-    let location =
-        string_at(data, &["run", "location"]).or_else(|| string_at(data, &["artifact_path"]));
-
-    Some(CommandRunRef {
-        id: id.clone(),
-        kind,
-        source: "homeboy-cli".to_string(),
-        location,
-        started_at: string_at(data, &["run", "started_at"])
-            .or_else(|| string_at(data, &["started_at"])),
-        updated_at: string_at(data, &["run", "updated_at"])
-            .or_else(|| string_at(data, &["updated_at"])),
-        finished_at: string_at(data, &["run", "finished_at"])
-            .or_else(|| string_at(data, &["finished_at"])),
-        status_command: format!("homeboy runs show {id}"),
-        watch_command: format!("homeboy runs watch {id}"),
-    })
-}
-
-fn synthetic_run_id(command: &str, data: &Value) -> Option<String> {
-    if !matches!(command, "build" | "deploy" | "release") {
-        return None;
-    }
-
-    let mut hasher = DefaultHasher::new();
-    command.hash(&mut hasher);
-    serde_json::to_string(data).ok()?.hash(&mut hasher);
-    Some(format!("{command}-{:016x}", hasher.finish()))
-}
-
-fn artifact_refs_for_payload(data: &Value) -> Vec<CommandArtifactRef> {
-    let mut refs = Vec::new();
-    collect_artifact_paths(data, &mut refs);
-    refs
-}
-
-fn collect_artifact_paths(value: &Value, refs: &mut Vec<CommandArtifactRef>) {
-    match value {
+fn actionable_metadata_for_payload(data: &mut Value) -> Option<CommandActionableMetadata> {
+    match data {
         Value::Object(map) => {
-            if let Some(path) = map.get("artifact_path").and_then(Value::as_str) {
-                let id = format!("artifact-{}", refs.len() + 1);
-                refs.push(CommandArtifactRef {
-                    id,
-                    kind: "file".to_string(),
-                    uri: path.to_string(),
-                    semantic_key: Some("artifact_path".to_string()),
-                });
+            if let Some(metadata) = map.remove(ACTIONABLE_METADATA_KEY) {
+                return serde_json::from_value(metadata).ok();
             }
-            if let Some(path) = map.get("durable_path").and_then(Value::as_str) {
-                let id = format!("artifact-{}", refs.len() + 1);
-                refs.push(CommandArtifactRef {
-                    id,
-                    kind: "file".to_string(),
-                    uri: path.to_string(),
-                    semantic_key: Some("durable_path".to_string()),
-                });
+            for child in map.values_mut() {
+                if let Some(metadata) = actionable_metadata_for_payload(child) {
+                    return Some(metadata);
+                }
             }
-            for child in map.values() {
-                collect_artifact_paths(child, refs);
-            }
+            None
         }
         Value::Array(items) => {
-            for item in items {
-                collect_artifact_paths(item, refs);
+            for child in items {
+                if let Some(metadata) = actionable_metadata_for_payload(child) {
+                    return Some(metadata);
+                }
             }
+            None
         }
-        _ => {}
-    }
-}
-
-fn evidence_refs_for_payload(data: &Value) -> Vec<CommandEvidenceRef> {
-    data.get("evidence_refs")
-        .or_else(|| data.get("evidence"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .enumerate()
-                .filter_map(|(index, item)| evidence_ref_from_value(index, item))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn evidence_ref_from_value(index: usize, value: &Value) -> Option<CommandEvidenceRef> {
-    match value {
-        Value::String(uri) => Some(CommandEvidenceRef {
-            id: format!("evidence-{}", index + 1),
-            kind: "reference".to_string(),
-            uri: uri.clone(),
-            semantic_key: None,
-        }),
-        Value::Object(map) => Some(CommandEvidenceRef {
-            id: map
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("evidence")
-                .to_string(),
-            kind: map
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("reference")
-                .to_string(),
-            uri: map
-                .get("uri")
-                .or_else(|| map.get("path"))
-                .and_then(Value::as_str)?
-                .to_string(),
-            semantic_key: map
-                .get("semantic_key")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        }),
         _ => None,
     }
 }
@@ -514,20 +536,6 @@ fn summary_for_payload(
         .or_else(|| string_at(data, &["summary"]))
         .or_else(|| string_at(data, &["message"]))
         .map(|summary| summary.chars().take(4000).collect())
-}
-
-fn next_actions_for_payload(data: &Value) -> Vec<String> {
-    data.get("next_actions")
-        .or_else(|| data.get("hints"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn string_at(value: &Value, path: &[&str]) -> Option<String> {
@@ -610,7 +618,7 @@ mod tests {
         assert_eq!(parsed["schema"], COMMAND_RESULT_SCHEMA);
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["data"]["run_id"], "run-plan-atomic");
-        assert_eq!(parsed["run"]["id"], "run-plan-atomic");
+        assert!(parsed.get("run").is_none());
         assert_eq!(parsed["data"]["complete"], true);
         assert!(
             std::fs::read_dir(dir.path())
@@ -625,9 +633,55 @@ mod tests {
     }
 
     #[test]
-    fn json_envelope_uses_v2_contract_and_embeds_presentation() {
+    fn json_envelope_uses_v3_contract_and_embeds_typed_actionable_metadata() {
         let response = cli_response_for_json_result_for_command(
-            &Ok(json!({ "run_id": "run-123", "hints": ["homeboy runs show run-123"] })),
+            &Ok(json!({
+                "run_id": "run-123",
+                "hints": ["not lifted"],
+                ACTIONABLE_METADATA_KEY: {
+                    "run": {
+                        "id": "run-123",
+                        "kind": "bench",
+                        "source": "test",
+                        "location": null,
+                        "started_at": null,
+                        "updated_at": null,
+                        "finished_at": null,
+                        "status_command": "homeboy runs show run-123",
+                        "watch_command": "homeboy runs watch run-123"
+                    },
+                    "refs": {
+                        "runs": [{
+                            "id": "run-123",
+                            "kind": "bench",
+                            "source": "test",
+                            "location": null,
+                            "started_at": null,
+                            "updated_at": null,
+                            "finished_at": null,
+                            "status_command": "homeboy runs show run-123",
+                            "watch_command": "homeboy runs watch run-123"
+                        }]
+                    },
+                    "next_actions": [{
+                        "label": "show run",
+                        "command": "homeboy runs show run-123",
+                        "kind": "show"
+                    }],
+                    "artifacts": [{
+                        "id": "artifact-1",
+                        "kind": "file",
+                        "uri": "/tmp/artifact.json",
+                        "semantic_key": "report"
+                    }],
+                    "evidence": [{
+                        "id": "evidence-1",
+                        "kind": "command-result",
+                        "uri": "homeboy://runs/run-123/result",
+                        "semantic_key": "command_result"
+                    }]
+                }
+            })),
             0,
             "observe",
             Some(CommandPresentationEnvelope {
@@ -641,27 +695,38 @@ mod tests {
         assert_eq!(value["command"], "observe");
         assert_eq!(value["status"], "succeeded");
         assert_eq!(value["run"]["id"], "run-123");
+        assert_eq!(value["refs"]["runs"][0]["id"], "run-123");
         assert_eq!(value["run"]["status_command"], "homeboy runs show run-123");
         assert_eq!(value["presentation"]["stdout"], "Observed 3 events\n");
         assert_eq!(value["summary"], "Observed 3 events\n");
-        assert_eq!(value["next_actions"][0], "homeboy runs show run-123");
+        assert_eq!(value["next_actions"][0]["label"], "show run");
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy runs show run-123"
+        );
+        assert_eq!(value["artifacts"][0]["uri"], "/tmp/artifact.json");
+        assert!(value["data"].get(ACTIONABLE_METADATA_KEY).is_none());
     }
 
     #[test]
-    fn build_deploy_and_release_payloads_get_stable_run_and_evidence_refs() {
-        for command in ["build", "deploy", "release"] {
-            let payload = Ok(json!({ "command": command, "component_id": "component-a" }));
-            let first = cli_response_for_json_result_for_command(&payload, 0, command, None);
-            let second = cli_response_for_json_result_for_command(&payload, 0, command, None);
-            let first = serde_json::to_value(first).expect("first json");
-            let second = serde_json::to_value(second).expect("second json");
+    fn unmigrated_payloads_do_not_get_heuristic_actionable_fields() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "run_id": "run-123",
+                "hints": ["homeboy runs show run-123"],
+                "artifact_path": "/tmp/artifact.json",
+                "evidence": ["homeboy://runs/run-123/result"]
+            })),
+            0,
+            "observe",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
 
-            assert!(first["run"]["id"]
-                .as_str()
-                .expect("run id")
-                .starts_with(command));
-            assert_eq!(first["run"]["id"], second["run"]["id"]);
-            assert_eq!(first["evidence"][0]["semantic_key"], "command_result");
-        }
+        assert!(value.get("run").is_none());
+        assert!(value.get("refs").is_none());
+        assert!(value.get("next_actions").is_none());
+        assert!(value.get("artifacts").is_none());
+        assert!(value.get("evidence").is_none());
     }
 }

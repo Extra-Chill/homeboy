@@ -7,10 +7,10 @@ use homeboy::core::runners as runner;
 use homeboy::core::Error;
 
 use super::types::{
-    RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput,
+    actionable_for_run_list, RunsArtifactGetArgs, RunsArtifactPathGuide, RunsArtifactsOutput,
     RunsDirectoryArtifactPublicationGuidance,
 };
-use super::{remote_artifact, CmdResult, RunsListArgs, RunsListOutput, RunsOutput};
+use super::{remote_artifact, CmdResult, RunSummary, RunsListArgs, RunsListOutput, RunsOutput};
 
 pub fn list_runner_runs(
     runner_id: &str,
@@ -42,14 +42,23 @@ pub fn list_runner_runs(
         .collect::<Vec<_>>()
         .join("&");
     let data = runner::daemon_api_get(runner_id, &format!("/runs?{query}"))?;
-    let runs = serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse runner daemon runs list".to_string()),
-        )
-    })?;
+    let runs: Vec<RunSummary> =
+        serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse runner daemon runs list".to_string()),
+            )
+        })?;
 
-    Ok((RunsOutput::List(RunsListOutput { command, runs }), 0))
+    let actionable = actionable_for_run_list(&runs);
+    Ok((
+        RunsOutput::List(RunsListOutput {
+            command,
+            runs,
+            actionable,
+        }),
+        0,
+    ))
 }
 
 pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> {
