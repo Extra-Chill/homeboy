@@ -7,7 +7,7 @@ fn test_standard_outcome_dry_run_preview() {
     let outcome = standard_outcome(
         AutofixMode::DryRun,
         1,
-        Some("homeboy test homeboy --analyze".to_string()),
+        Some("homeboy review test homeboy --analyze".to_string()),
         vec![],
     );
 
@@ -28,7 +28,7 @@ fn test_standard_outcome_write_rerun_hint() {
     let outcome = standard_outcome(
         AutofixMode::Write,
         2,
-        Some("homeboy test homeboy --analyze".to_string()),
+        Some("homeboy review test homeboy --analyze".to_string()),
         vec![],
     );
 
@@ -37,7 +37,7 @@ fn test_standard_outcome_write_rerun_hint() {
     assert!(outcome
         .hints
         .iter()
-        .any(|h| h.contains("Re-run checks: homeboy test homeboy --analyze")));
+        .any(|h| h.contains("Re-run checks: homeboy review test homeboy --analyze")));
 }
 
 #[test]

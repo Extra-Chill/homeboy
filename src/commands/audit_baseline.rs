@@ -174,7 +174,7 @@ fn merge(
         return Err(homeboy::core::Error::validation_invalid_argument(
             "homeboy.json",
             format!(
-                "{baseline_path} has no in-progress merge conflict to resolve. If main moved, run `homeboy audit-baseline refresh {source_path} --changed-since origin/main` instead."
+                "{baseline_path} has no in-progress merge conflict to resolve. If main moved, run `homeboy review audit baseline refresh {source_path} --changed-since origin/main` instead."
             ),
             None,
             None,
@@ -354,7 +354,7 @@ fn fail_if_homeboy_json_has_conflict_markers(source: &Path) -> homeboy::core::Re
         return Err(homeboy::core::Error::validation_invalid_argument(
             "homeboy.json",
             format!(
-                "{} contains merge conflict markers. Resolve non-baseline config first, then run `homeboy audit-baseline refresh --path {} --changed-since origin/main`.",
+                "{} contains merge conflict markers. Resolve non-baseline config first, then run `homeboy review audit baseline refresh --path {} --changed-since origin/main`.",
                 path.display(),
                 source.display()
             ),

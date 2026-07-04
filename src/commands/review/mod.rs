@@ -12,7 +12,7 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/1500
 
-use clap::Args;
+use clap::{Args, Subcommand};
 use homeboy::core::ci_profile::{self, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
@@ -34,14 +34,17 @@ use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::utils::output::{write_output_file_atomically, OutputWriteOptions};
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{audit, lint, test, CmdResult, GlobalArgs};
+use super::{audit, audit_baseline, build, ci, lint, test, CmdResult, GlobalArgs};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 
 mod observation;
 pub(super) mod raw_output;
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args)]
 pub struct ReviewArgs {
+    #[command(subcommand)]
+    pub command: Option<ReviewCommand>,
+
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
 
@@ -91,14 +94,60 @@ pub struct ReviewArgs {
     pub lab_changed_files_json: Option<String>,
 }
 
+#[derive(Subcommand)]
+pub enum ReviewCommand {
+    /// Audit code conventions and detect architectural drift
+    Audit(ReviewAuditArgs),
+    /// Internal target for normalized `review audit baseline ...` invocations
+    #[command(name = "audit-baseline", hide = true)]
+    AuditBaseline(audit_baseline::AuditBaselineArgs),
+    /// Lint a component
+    Lint(lint::LintArgs),
+    /// Run tests for a component
+    Test(test::TestArgs),
+    /// Run a local build quality gate for a component
+    Build(build::BuildArgs),
+    /// Inspect CI reproduction profiles and discovered CI surfaces
+    Ci(ci::CiArgs),
+}
+
+#[derive(Args)]
+pub struct ReviewAuditArgs {
+    #[command(flatten)]
+    pub audit: audit::AuditArgs,
+}
+
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
-    pub(crate) fn lab_contract(&self) -> LabCommandContract {
+    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        if let Some(command) = &self.command {
+            return match command {
+                ReviewCommand::Audit(args) => args
+                    .audit
+                    .lab_contract()
+                    .map(|contract| contract.with_hot_label("review audit")),
+                ReviewCommand::Lint(args) => args
+                    .lab_contract()
+                    .map(|contract| contract.with_hot_label("review lint")),
+                ReviewCommand::Test(args) => {
+                    Some(args.lab_contract().with_hot_label("review test"))
+                }
+                ReviewCommand::AuditBaseline(_)
+                | ReviewCommand::Build(_)
+                | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
+                    REVIEW_LAB_LABEL,
+                    "this nested review subcommand has no portable Lab contract",
+                )),
+            };
+        }
         if self.changed_since.is_some() || self.changed_only {
-            LabCommandContract::local_only(REVIEW_LAB_LABEL, REVIEW_SCOPED_LAB_UNSUPPORTED_REASON)
+            Some(LabCommandContract::local_only(
+                REVIEW_LAB_LABEL,
+                REVIEW_SCOPED_LAB_UNSUPPORTED_REASON,
+            ))
         } else {
-            LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate()
+            Some(LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate())
         }
     }
 }
@@ -107,7 +156,7 @@ impl ReviewArgs {
 /// the structured JSON envelope. Used by the top-level dispatcher to route
 /// the response through `RawOutputMode::Markdown`.
 pub fn is_markdown_mode(args: &ReviewArgs) -> bool {
-    args.report.as_deref() == Some("pr-comment")
+    args.command.is_none() && args.report.as_deref() == Some("pr-comment")
 }
 
 struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
@@ -149,7 +198,7 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
         let finding_count = (self.finding_count)(&output);
 
         let mut hint = format!(
-            "Deep dive: homeboy {} {}{}",
+            "Deep dive: homeboy review {} {}{}",
             self.name,
             component_label,
             scope_flag_suffix(review_args, self.include_changed_only_scope),
@@ -223,7 +272,29 @@ fn dispatch_review_plan_step(
     }
 }
 
-pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
+pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<Value> {
+    match args.command {
+        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit, global)),
+        Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args, global)),
+        Some(ReviewCommand::Lint(args)) => to_value(lint::run(args, global)),
+        Some(ReviewCommand::Test(args)) => to_value(test::run(args, global)),
+        Some(ReviewCommand::Build(args)) => to_value(build::run(args, global)),
+        Some(ReviewCommand::Ci(args)) => to_value(ci::run(args, global)),
+        None => to_value(run_umbrella(args, global)),
+    }
+}
+
+fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
+    let (output, exit_code) = result?;
+    let value = serde_json::to_value(output).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to serialize review command output: {error}"
+        ))
+    })?;
+    Ok((value, exit_code))
+}
+
+pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component = args.comp.load()?;
@@ -372,7 +443,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
                 exit_code,
                 finding_count,
                 hint: format!(
-                    "Deep dive: homeboy ci run {} --profile {}",
+                    "Deep dive: homeboy review ci run {} --profile {}",
                     component_label, profile
                 ),
                 skipped_reason: None,
@@ -468,7 +539,7 @@ fn preflight_review_scope(
 /// section header.
 pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> {
     let banners = args.banner.clone();
-    let (output, exit_code) = run(args, global)?;
+    let (output, exit_code) = run_umbrella(args, global)?;
     let md = if banners.is_empty() {
         review::render::render_pr_comment(&output)
     } else {
@@ -684,7 +755,7 @@ mod tests {
     use clap::Parser;
 
     /// Minimal CLI wrapper to exercise clap parsing of `ReviewArgs`.
-    #[derive(Parser, Debug)]
+    #[derive(Parser)]
     struct TestCli {
         #[command(flatten)]
         review: ReviewArgs,
@@ -929,6 +1000,7 @@ mod tests {
     #[test]
     fn scope_flag_suffix_renders_changed_since() {
         let args = ReviewArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -951,6 +1023,7 @@ mod tests {
     #[test]
     fn scope_flag_suffix_renders_changed_only_only_when_allowed() {
         let args = ReviewArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -975,6 +1048,7 @@ mod tests {
     #[test]
     fn scope_flag_suffix_empty_for_full_run() {
         let args = ReviewArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -1079,6 +1153,7 @@ mod tests {
 
     fn review_args_fixture() -> ReviewArgs {
         ReviewArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: Some("fixture".to_string()),
                 path: None,

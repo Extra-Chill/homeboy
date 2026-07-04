@@ -73,8 +73,8 @@ pub fn run(
             "Provide component ID, project ID with --all, or JSON spec",
             None,
             Some(vec![
-                "Build a single component: homeboy build <component-id>".to_string(),
-                "Build all project components: homeboy build <project-id> --all".to_string(),
+                "Build a single component: homeboy review build <component-id>".to_string(),
+                "Build all project components: homeboy review build <project-id> --all".to_string(),
             ]),
         )
     })?;
@@ -88,7 +88,7 @@ pub fn run(
                 None,
                 Some(vec![
                     format!("Error: {}", e),
-                    "Use --all only with a project ID: homeboy build <project-id> --all"
+                    "Use --all only with a project ID: homeboy review build <project-id> --all"
                         .to_string(),
                 ]),
             )

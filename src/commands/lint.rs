@@ -146,7 +146,7 @@ impl LintArgs {
     }
 
     /// Positional component id targeted by this run, if any (the
-    /// `homeboy lint <component>` form). Returns `None` when the component is
+    /// `homeboy review lint <component>` form). Returns `None` when the component is
     /// auto-detected from the working directory.
     pub fn lab_offload_positional_component(&self) -> Option<String> {
         self.comp.component.clone()
@@ -349,7 +349,7 @@ impl WorkflowObservationAdapter<homeboy::core::extension::lint::LintRunWorkflowR
             .cwd_path(&self.source_path)
             .current_homeboy_version()
             .metadata(serde_json::json!({
-                "source": "homeboy lint",
+                "source": "homeboy review lint",
             }))
             .build()
     }
@@ -451,9 +451,9 @@ fn lint_command_label(component_id: &str, args: &LintArgs) -> String {
     parts.join(" ")
 }
 
-/// Dispatch `homeboy lint --fix` to the canonical refactor sources pipeline.
+/// Dispatch `homeboy review lint --fix` to the canonical refactor sources pipeline.
 ///
-/// `homeboy lint --fix` is a thin alias for `homeboy refactor <component>
+/// `homeboy review lint --fix` is a thin adapter for `homeboy refactor <component>
 /// --from lint --write`. Under the hood we invoke the same
 /// `run_lint_refactor` primitive that the refactor command uses, then wrap
 /// the result in a `LintCommandOutput` so the lint command surface returns a
@@ -589,7 +589,7 @@ mod tests {
         let adapter = LintObservationAdapter::new(
             "homeboy".to_string(),
             dir.path(),
-            "homeboy lint homeboy".to_string(),
+            "homeboy review lint homeboy".to_string(),
             Some(&run_dir),
         );
 
@@ -654,7 +654,7 @@ mod tests {
 
         let hints = output.hints.as_ref().expect("hints populated");
         assert!(
-            hints.iter().any(|h| h.contains("homeboy lint demo")),
+            hints.iter().any(|h| h.contains("homeboy review lint demo")),
             "expected re-run hint pointing back at lint, got {:?}",
             hints
         );

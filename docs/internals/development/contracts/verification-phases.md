@@ -14,8 +14,8 @@ The shared phase vocabulary is:
 5. `test` — behavioral test harness execution such as PHPUnit, cargo test, or npm test
 
 These phases are a contract, not a requirement that one command runs all of
-them. `homeboy test` runs only the `test` phase. `homeboy lint` runs only the
-`lint` phase. `homeboy audit` runs only the `audit` phase. A composed command
+them. `homeboy review test` runs only the `test` phase. `homeboy review lint` runs only the
+`lint` phase. `homeboy review audit` runs only the `audit` phase. A composed command
 or CI wrapper can run the phases in canonical order when it needs a full check.
 
 ## Exit codes
@@ -77,10 +77,10 @@ Composed workflows should treat primitive commands as independent inputs:
 
 ```text
 syntax     -> optional primitive / extension runner
-lint       -> homeboy lint
+lint       -> homeboy review lint
 typecheck  -> optional primitive / extension runner
-audit      -> homeboy audit
-test       -> homeboy test
+audit      -> homeboy review audit
+test       -> homeboy review test
 ```
 
 This keeps each command debuggable on its own while giving CI, future `check`

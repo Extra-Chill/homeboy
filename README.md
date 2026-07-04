@@ -8,7 +8,7 @@ Homeboy core is intentionally domain-agnostic. The CLI owns orchestration, confi
 
 ## What You Can Do
 
-- Run repeatable quality gates with `homeboy audit`, `homeboy lint`, `homeboy test`, `homeboy build`, and `homeboy review`.
+- Run repeatable quality gates with `homeboy review audit`, `homeboy review lint`, `homeboy review test`, `homeboy review build`, and `homeboy review`.
 - Produce structured evidence with `--output` so CI jobs and coding agents can inspect results without scraping terminal logs.
 - Capture benchmark, fuzz, trace, and review artifacts as persisted runs.
 - Coordinate many branches and worktrees with comparable checks, reports, and PR evidence.

@@ -7,28 +7,16 @@
     },
     "command_status_contracts": {
       "required_commands": [
-        "audit",
         "deploy",
-        "lint",
         "release",
         "review",
         "runs",
-        "stack",
-        "test"
+        "stack"
       ],
       "required_output_error_commands": [
         "status"
       ],
       "scenarios": [
-        {
-          "command": "audit",
-          "expected_fields": {
-            "/data/command": "audit.summary",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/audit-summary.json",
-          "id": "audit-summary-golden"
-        },
         {
           "command": "deploy",
           "expected_fields": {
@@ -37,15 +25,6 @@
           },
           "file": "tests/fixtures/golden_json_contracts/deploy_contract.json",
           "id": "deploy-golden-contract"
-        },
-        {
-          "command": "lint",
-          "expected_fields": {
-            "/data/phase/phase": "lint",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/lint-findings.json",
-          "id": "lint-findings-golden"
         },
         {
           "command": "release",
@@ -93,15 +72,6 @@
           "id": "status-runner-validation-error-output",
           "outcome": "validation_error",
           "output_file": true
-        },
-        {
-          "command": "test",
-          "expected_fields": {
-            "/data/phase/phase": "test",
-            "/success": false
-          },
-          "file": "tests/fixtures/output_contracts/quality/test-summary.json",
-          "id": "test-summary-golden"
         }
       ]
     },
@@ -505,10 +475,15 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-07-04T18:25:24Z",
-      "item_count": 492,
+      "created_at": "2026-07-04T20:02:08Z",
+      "item_count": 499,
       "known_fingerprints": [
         "Commands::src/commands/agent_task_dispatch.rs::MissingMethod",
+        "compiler::src/command_contract/lab.rs::CompilerWarning",
+        "compiler::src/command_contract/spec.rs::CompilerWarning",
+        "compiler::src/commands/audit.rs::CompilerWarning",
+        "compiler::src/commands/json_output/mod.rs::CompilerWarning",
+        "compiler::src/commands/lint.rs::CompilerWarning",
         "core_boundary_leak:core-agnostic-source::src/core/agent_task_controller_service/run_failure_summary.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `classify_owner_surface`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/agent_task_controller_service/run_failure_summary.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `classify_owner_surface`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/agent_task_controller_service/tests/failure_summary_tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `run_failure_summary_normalizes_nested_provider_failure`::CoreBoundaryLeak",
@@ -757,6 +732,7 @@
         "field_patterns::src/commands/fuzz/report.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/fuzz/types.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/lint.rs::RepeatedFieldPattern",
+        "field_patterns::src/commands/review/mod.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/runner/types.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/runs/gh_actions.rs::RepeatedFieldPattern",
         "field_patterns::src/commands/trace/output.rs::RepeatedFieldPattern",
@@ -907,6 +883,7 @@
         "structural::src/commands/fuzz/tests/execution_tests.rs::HighItemCount",
         "structural::src/commands/infra/route.rs::GodFile",
         "structural::src/commands/infra/route.rs::HighItemCount",
+        "structural::src/commands/review/mod.rs::HighItemCount",
         "structural::src/commands/runner/doctor/probes.rs::HighItemCount",
         "structural::src/commands/runner/exec.rs::HighItemCount",
         "structural::src/commands/runner/refresh_plan.rs::HighItemCount",

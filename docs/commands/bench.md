@@ -199,7 +199,7 @@ The JSON output uses the `matrix_fanout` bench variant and includes:
 When `--ci-profile <ID>` is used, args declared on that profile's bench job
 are forwarded before explicit CLI passthrough arguments, and job env is passed
 to the bench runner. Profiles with zero jobs, multiple jobs, or a non-`bench`
-job are rejected for command-native bench reproduction; use `homeboy ci run
+job are rejected for command-native bench reproduction; use `homeboy review ci run
 --profile <ID>` when you need to execute a multi-job CI profile directly.
 
 `homeboy bench` is resource-policy aware. If the current machine is already warm

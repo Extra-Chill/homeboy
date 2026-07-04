@@ -29,14 +29,14 @@ Components can declare deterministic downstream propagation edges in `homeboy.js
       "downstream": "block-format-bridge",
       "package": "example-org/html-to-blocks-converter",
       "post_update": ["composer build"],
-      "test": ["homeboy test --path . --extension wordpress"]
+      "test": ["homeboy review test --path . --extension wordpress"]
     },
     {
       "upstream": "block-format-bridge",
       "downstream": "static-site-importer",
       "package": "example-org/block-format-bridge",
       "update": "composer update example-org/block-format-bridge --with-dependencies --no-interaction",
-      "test": ["homeboy test --path . --extension wordpress"]
+      "test": ["homeboy review test --path . --extension wordpress"]
     }
   ]
 }

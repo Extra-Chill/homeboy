@@ -376,13 +376,41 @@ fn dispatched_command_label(command_args: &[String], expected_label: &str) -> Op
         return None;
     }
 
-    Some(
-        command_args[..expected_parts.len()]
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    let mut matched = Vec::with_capacity(expected_parts.len());
+    let mut command_index = 0;
+
+    for expected in expected_parts {
+        loop {
+            let Some(arg) = command_args.get(command_index).map(String::as_str) else {
+                return None;
+            };
+            command_index += 1;
+
+            if runner_workload_command_label_value_option(arg) {
+                command_index += 1;
+                continue;
+            }
+            if runner_workload_command_label_flag_option(arg) {
+                continue;
+            }
+
+            matched.push(arg);
+            if arg != expected {
+                return Some(matched.join(" "));
+            }
+            break;
+        }
+    }
+
+    Some(matched.join(" "))
+}
+
+fn runner_workload_command_label_value_option(arg: &str) -> bool {
+    matches!(arg, "--extension" | "--path")
+}
+
+fn runner_workload_command_label_flag_option(arg: &str) -> bool {
+    arg.starts_with("--extension=") || arg.starts_with("--path=")
 }
 
 fn dispatched_command_family(command_args: &[String]) -> RunnerWorkloadCommandFamily {

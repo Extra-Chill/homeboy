@@ -175,7 +175,7 @@ jobs:
           source: '.'
           extension: rust
           component: my-project
-          commands: lint
+          commands: review lint
           autofix: 'true'
           autofix-mode: 'on-failure'
           autofix-max-commits: '3'
@@ -196,7 +196,7 @@ jobs:
           source: '.'
           extension: rust
           component: my-project
-          commands: test
+          commands: review test
 
   audit:
     name: Audit
@@ -221,7 +221,7 @@ jobs:
           source: '.'
           extension: rust
           component: my-project
-          commands: audit
+          commands: review audit
           autofix: 'true'
           autofix-mode: 'always'
           autofix-commands: 'refactor --from audit --write'

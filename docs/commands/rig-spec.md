@@ -324,7 +324,7 @@ Starts, checks, or stops a declared service. `start` is idempotent for managed s
 { "kind": "build", "component": "wordpress-playground", "label": "build tarballs" }
 ```
 
-Delegates to `homeboy build` using the component path from the rig spec.
+Delegates to `homeboy review build` using the component path from the rig spec.
 
 ### `extension`
 

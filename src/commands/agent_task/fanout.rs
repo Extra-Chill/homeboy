@@ -1002,7 +1002,7 @@ mod tests {
                             }],
                             "to_worktree": "homeboy@fix-5929-docs",
                             "head": "fix/5929-docs",
-                            "verify": ["homeboy test homeboy"]
+                            "verify": ["homeboy review test homeboy"]
                         },
                         {
                             "cook_id": "5929-cli",
@@ -1010,7 +1010,7 @@ mod tests {
                             "repo": "homeboy",
                             "to_worktree": "homeboy@fix-5929-cli",
                             "head": "fix/5929-cli",
-                            "verify": ["homeboy test homeboy"]
+                            "verify": ["homeboy review test homeboy"]
                         }
                     ]
                 }),
@@ -1041,7 +1041,7 @@ mod tests {
             assert_eq!(run_id.len(), "cook-5929-docs-attempt-1-".len() + 8);
             assert_eq!(
                 invocation.options.gates.verify,
-                vec!["homeboy test homeboy"]
+                vec!["homeboy review test homeboy"]
             );
             assert!(invocation
                 .dispatch

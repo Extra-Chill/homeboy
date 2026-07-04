@@ -187,6 +187,7 @@ mod tests {
 
     fn review_args() -> ReviewArgs {
         ReviewArgs {
+            command: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -236,7 +237,7 @@ mod tests {
             passed: true,
             exit_code: 0,
             finding_count: 0,
-            hint: "Deep dive: homeboy audit homeboy --changed-since=origin/main".to_string(),
+            hint: "Deep dive: homeboy review audit homeboy --changed-since=origin/main".to_string(),
             skipped_reason: None,
             output: None::<AuditCommandOutput>,
         };
@@ -246,7 +247,7 @@ mod tests {
             passed: false,
             exit_code: 1,
             finding_count: 2,
-            hint: "Deep dive: homeboy lint homeboy --changed-since=origin/main".to_string(),
+            hint: "Deep dive: homeboy review lint homeboy --changed-since=origin/main".to_string(),
             skipped_reason: None,
             output: None::<LintCommandOutput>,
         };
@@ -256,7 +257,7 @@ mod tests {
             passed: true,
             exit_code: 0,
             finding_count: 0,
-            hint: "Run individually: homeboy test".to_string(),
+            hint: "Run individually: homeboy review test".to_string(),
             skipped_reason: Some("no tests".to_string()),
             output: None::<TestCommandOutput>,
         };

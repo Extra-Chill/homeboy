@@ -14,7 +14,7 @@ Use Homeboy CI workflows when a component declares CI profiles that can be run t
 Start by asking Homeboy what it knows about the component's CI surface:
 
 ```bash
-homeboy ci list --path /path/to/repo --extension <extension-id>
+homeboy review ci list --path /path/to/repo --extension <extension-id>
 ```
 
 Use discovered provider inventory as context, not as proof that every provider job is locally reproducible.
@@ -24,15 +24,15 @@ Use discovered provider inventory as context, not as proof that every provider j
 When a declared job maps to a Homeboy command, run it through that command's normal workflow:
 
 ```bash
-homeboy ci run --path /path/to/repo --extension <extension-id> --job <job-id>
-homeboy ci run --path /path/to/repo --extension <extension-id> --profile <profile-id>
+homeboy review ci run --path /path/to/repo --extension <extension-id> --job <job-id>
+homeboy review ci run --path /path/to/repo --extension <extension-id> --profile <profile-id>
 ```
 
 For jobs that map directly to native Homeboy commands, you can also run the command itself:
 
 ```bash
-homeboy lint <component-id> --ci-job <job-id>
-homeboy test <component-id> --ci-job <job-id>
+homeboy review lint <component-id> --ci-job <job-id>
+homeboy review test <component-id> --ci-job <job-id>
 homeboy bench <component-id> --ci-profile <profile-id>
 ```
 
@@ -58,10 +58,10 @@ Command-native CI reproduction includes `ci_context` metadata so downstream tool
 Use differential classification when you need to distinguish pre-existing failures from branch-introduced failures:
 
 ```bash
-homeboy ci differential-gate \
-  --baseline-command 'homeboy test <component-id> --changed-since origin/main' \
+homeboy review ci differential-gate \
+  --baseline-command 'homeboy review test <component-id> --changed-since origin/main' \
   --baseline-exit-code 0 \
-  --head-command 'homeboy test <component-id> --changed-since origin/main' \
+  --head-command 'homeboy review test <component-id> --changed-since origin/main' \
   --head-exit-code 1
 ```
 
@@ -72,7 +72,7 @@ This is useful for reporting whether a branch newly broke the gate or inherited 
 When CI is allowed to push autofixes, dry-run the transaction first:
 
 ```bash
-homeboy ci autofix \
+homeboy review ci autofix \
   --path /path/to/repo \
   --target-repo owner/repo \
   --target-branch pr-head-branch \

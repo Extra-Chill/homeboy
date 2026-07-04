@@ -31,8 +31,8 @@ pub struct IssuesArgs {
 pub(crate) enum IssuesCommand {
     /// Reconcile a finding stream against an issue tracker.
     ///
-    /// Reads structured findings (from `homeboy audit --json-summary` or
-    /// `homeboy lint --json` or any equivalent), inspects open and closed
+    /// Reads structured findings (from `homeboy review audit --json-summary` or
+    /// `homeboy review lint --json` or any equivalent), inspects open and closed
     /// issues on the tracker, and produces a deterministic plan: file new,
     /// update, close, dedupe, or skip per category.
     ///

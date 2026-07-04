@@ -59,9 +59,9 @@ Extension settings merge across project and component scopes. Component settings
 Prefer Homeboy commands over direct extension scripts:
 
 ```bash
-homeboy lint my-component
-homeboy test my-component
-homeboy build my-component
+homeboy review lint my-component
+homeboy review test my-component
+homeboy review build my-component
 homeboy review my-component --changed-since origin/main
 ```
 

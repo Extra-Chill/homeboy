@@ -2,11 +2,11 @@ use crate::commands::raw_output::RawCommandRun;
 use crate::commands::GlobalArgs;
 use homeboy::core::review::render;
 
-use super::{run, ReviewArgs};
+use super::{run_umbrella, ReviewArgs};
 
 pub fn run_markdown_with_json(args: ReviewArgs, global: &GlobalArgs) -> RawCommandRun {
     let banners = args.banner.clone();
-    match run(args, global) {
+    match run_umbrella(args, global) {
         Ok((output, exit_code)) => {
             let md = if banners.is_empty() {
                 render::render_pr_comment(&output)

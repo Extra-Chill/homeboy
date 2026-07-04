@@ -1,6 +1,8 @@
 # Review Command
 
 Run scoped audit + lint + test in a single invocation against PR-style changes.
+`review` also owns the individual quality gates: `review audit`, `review lint`,
+`review test`, `review build`, and `review ci`.
 
 ## Synopsis
 
@@ -9,6 +11,13 @@ homeboy review [component] --changed-since=<ref>
 homeboy review [component] --changed-since=<ref> --ci-profile=<profile>
 homeboy review [component] --changed-only
 homeboy review [component]
+homeboy review audit [component]
+homeboy review audit baseline refresh [component]
+homeboy review audit baseline merge [component]
+homeboy review lint [component]
+homeboy review test [component]
+homeboy review build [component]
+homeboy review ci <list|plan|run|autofix|scope|differential-gate|triage> ...
 ```
 
 ## Description
@@ -30,6 +39,58 @@ command** for agents. Run it through normal/Lab routing — never with
 `--force-hot`/`--allow-local-hot` or a source/`cargo` invocation, which are
 debugging aids, not proof. See
 [Release-gate proof: canonical non-local command path](../operations/release-gate-proof-path.md).
+
+## Individual Quality Gates
+
+The standalone quality commands now live under `review`:
+
+| Old command | New command |
+|---|---|
+| `homeboy audit` | `homeboy review audit` |
+| `homeboy audit-baseline refresh` | `homeboy review audit baseline refresh` |
+| `homeboy audit-baseline merge` | `homeboy review audit baseline merge` |
+| `homeboy lint` | `homeboy review lint` |
+| `homeboy test` | `homeboy review test` |
+| `homeboy build` | `homeboy review build` |
+| `homeboy ci ...` | `homeboy review ci ...` |
+
+Audit baseline remains under `review audit baseline` because the persisted
+baseline is audit-owned data. A top-level `review baseline` would hide that
+ownership and leave the name too broad for future non-audit review baselines.
+
+### `review audit`
+
+Runs convention drift and structural analysis for a component. Common flags:
+`--conventions`, `--only`, `--exclude`, `--profile`, `--changed-since`,
+`--json-summary`, `--fixability`, `--baseline`, `--ignore-baseline`, and
+`--ratchet`.
+
+### `review audit baseline refresh|merge`
+
+Refreshes generated audit baseline fingerprints for changed files or merges a
+baseline-only `homeboy.json` conflict.
+
+### `review lint`
+
+Runs the lint workflow. Common flags: `--summary`, `--file`, `--glob`,
+`--changed-only`, `--changed-since`, `--ci-job`, `--category`, `--fix`,
+`--force`, `--json-summary`, and baseline flags.
+
+### `review test`
+
+Runs the test workflow. Common flags: `--skip-lint`, `--coverage`,
+`--coverage-min`, `--analyze`, `--drift`, `--write`, `--since`,
+`--changed-since`, `--ci-job`, `--json-summary`, and trailing test-runner args
+after `--`.
+
+### `review build`
+
+Runs the build quality gate for one component or all project components.
+
+### `review ci`
+
+Owns CI reproduction profile and action-support utilities:
+`list`, `plan`, `run`, `autofix`, `scope`, `differential-gate`, and `triage`.
 
 ## Arguments
 
@@ -56,7 +117,7 @@ equivalent to running `audit`, `lint`, and `test` back-to-back without scope.
 - `--ci-profile <ID>`: Run an extension-declared CI profile as an additional
   review gate after audit, lint, and test. The profile resolves through the
   same explicit `ci.profiles` / `ci.jobs` manifest contract used by
-  `homeboy ci run --profile <ID>`.
+  `homeboy review ci run --profile <ID>`.
 
 `review --ci-profile` does not parse arbitrary provider YAML. Discovered CI
 files remain inventory-only; runnable review parity comes from extension-owned
@@ -143,7 +204,7 @@ consolidates all three stages:
       "passed": true,
       "exit_code": 0,
       "finding_count": 0,
-      "hint": "Deep dive: homeboy audit my-plugin --changed-since=trunk",
+      "hint": "Deep dive: homeboy review audit my-plugin --changed-since=trunk",
       "output": { "...": "full AuditCommandOutput" }
     },
     "lint": { "...": "full LintCommandOutput" },
@@ -153,7 +214,7 @@ consolidates all three stages:
 ```
 
 Each stage's `output` field carries the same structured payload that running
-`homeboy <stage>` directly would produce, so downstream consumers (the sectioned
+`homeboy review <stage>` directly would produce, so downstream consumers (the sectioned
 PR-comment primitive, CI wrappers) can render per-stage detail without needing
 a separate invocation.
 
@@ -225,15 +286,15 @@ homeboy review my-plugin --changed-since=main --report=pr-comment
 - **ability-shape** — 3 finding(s)
 - **naming-convention** — 1 finding(s)
 - _Total: 4 finding(s)_
-> Deep dive: homeboy audit my-plugin --changed-since=main
+> Deep dive: homeboy review audit my-plugin --changed-since=main
 
 :white_check_mark: **lint**
-> Deep dive: homeboy lint my-plugin --changed-since=main
+> Deep dive: homeboy review lint my-plugin --changed-since=main
 
 :white_check_mark: **test**
 - 87 passed
 - 2 skipped
-> Deep dive: homeboy test my-plugin --changed-since=main
+> Deep dive: homeboy review test my-plugin --changed-since=main
 ```
 
 ## Exit codes
@@ -244,8 +305,5 @@ homeboy review my-plugin --changed-since=main --report=pr-comment
 
 ## Related
 
-- [audit](audit.md) — convention drift detection (run individually for deep dive)
-- [lint](lint.md) — code-style validation (only stage that natively supports `--changed-only`)
-- [test](test.md) — test execution + drift detection
 - [refactor](refactor.md) — apply automated fixes after review identifies issues
 - Issue [#1500](https://github.com/Extra-Chill/homeboy/issues/1500) — design and motivation

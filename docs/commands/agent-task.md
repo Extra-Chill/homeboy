@@ -468,7 +468,7 @@ The public input shape is `homeboy/agent-task-batch-cook-fanout-plan/v1`:
       "repo": "homeboy",
       "to_worktree": "homeboy@fix-finding-a",
       "head": "fix/finding-a",
-      "verify": ["homeboy test homeboy"]
+      "verify": ["homeboy review test homeboy"]
     }
   ]
 }
@@ -518,7 +518,7 @@ homeboy agent-task cook \
   --task-url https://github.com/Extra-Chill/homeboy/issues/3357 \
   --concurrency 4 \
   --attempts 2 \
-  --verify "homeboy test homeboy" \
+  --verify "homeboy review test homeboy" \
   --run-id "$run_id" \
   --prompt @task.txt
 
@@ -739,7 +739,7 @@ homeboy runner exec homeboy-lab \
     --repo homeboy \
     --cwd /srv/homeboy/checkouts/homeboy \
     --to-worktree homeboy@remote-cook \
-    --verify "homeboy test homeboy" \
+    --verify "homeboy review test homeboy" \
     --prompt @task.txt
 ```
 
@@ -758,7 +758,7 @@ homeboy agent-task cook \
   --repo homeboy \
   --cwd /path/to/homeboy@fix-issue \
   --to-worktree homeboy@fix-issue \
-  --verify "homeboy test homeboy" \
+  --verify "homeboy review test homeboy" \
   --prompt @task.txt
 ```
 
@@ -770,7 +770,7 @@ homeboy worktree create homeboy --branch fix/issue-123
 homeboy agent-task cook \
   --workspace homeboy@fix-issue-123 \
   --to-worktree homeboy@fix-issue-123 \
-  --verify "homeboy test homeboy" \
+  --verify "homeboy review test homeboy" \
   --prompt @task.txt
 ```
 

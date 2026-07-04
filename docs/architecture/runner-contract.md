@@ -23,10 +23,10 @@ Four capabilities are first-class in core:
 
 | Capability | Manifest field | Typical script | Invoked by |
 |------------|---------------|----------------|------------|
-| `lint` | `lint.extension_script` | extension-owned lint runner | `homeboy lint` |
-| `test` | `test.extension_script` | extension-owned test runner | `homeboy test` |
-| `build` | `build.extension_script` | extension-owned build runner | `homeboy build`, `homeboy release` |
-| `audit` | *built-in to core* | n/a | `homeboy audit` |
+| `lint` | `lint.extension_script` | extension-owned lint runner | `homeboy review lint` |
+| `test` | `test.extension_script` | extension-owned test runner | `homeboy review test` |
+| `build` | `build.extension_script` | extension-owned build runner | `homeboy review build`, `homeboy release` |
+| `audit` | *built-in to core* | n/a | `homeboy review audit` |
 
 `lint`, `test`, and `build` are shell-script capabilities: extensions own
 the runtime. `audit` is a core-owned framework (pattern detectors, shared
@@ -112,7 +112,7 @@ Shape:
   "runner_id": "homeboy-lab",
   "job_id": "runner-daemon-job-id",
   "persisted_run_id": "runner-exec-homeboy-lab-run-id",
-  "command": ["homeboy", "test", "sample-plugin"],
+    "command": ["homeboy", "review", "test", "sample-plugin"],
   "exit_code": 2,
   "contract_field": "cwd",
   "reason": "Missing required field: cwd",
@@ -262,7 +262,7 @@ Optional `"partial": "<label>"` field when counts are incomplete (e.g.
 ### `HOMEBOY_TEST_FAILURES_FILE` — failure details
 
 Array of per-failure objects with file, line, test name, and the error
-message. Used by `homeboy test --analyze` for cluster analysis.
+message. Used by `homeboy review test --analyze` for cluster analysis.
 
 ### `HOMEBOY_LINT_FINDINGS_FILE` — lint findings
 
@@ -285,7 +285,7 @@ canonical category mapping).
 
 ### `HOMEBOY_COVERAGE_FILE` — coverage report
 
-Emitted when `homeboy test --coverage` is passed. Tool-specific; core
+Emitted when `homeboy review test --coverage` is passed. Tool-specific; core
 parses it via `parse_coverage_file()` with per-tool handlers.
 
 ### `HOMEBOY_ANNOTATIONS_DIR` — CI inline annotations
@@ -342,7 +342,7 @@ yet — this is a follow-up deliverable, not a current reference.
 
 ## Command-level behavior
 
-### `homeboy test`
+### `homeboy review test`
 
 Invokes the extension's `test.extension_script` with context env vars
 set. The script is expected to:
@@ -352,15 +352,15 @@ set. The script is expected to:
 3. Write failures sidecar if `HOMEBOY_TEST_FAILURES_FILE` is set.
 4. Exit per the convention above.
 
-`homeboy test` does not run lint or audit. Those are separate primitive
-commands (`homeboy lint`, `homeboy audit`) that composed workflows can run
+`homeboy review test` does not run lint or audit. Those are separate primitive
+commands (`homeboy review lint`, `homeboy review audit`) that composed workflows can run
 alongside test when they need a full verification sequence.
 
 Core handles baseline comparison, coverage threshold enforcement,
 test-drift detection, and analysis mode — extensions don't implement
 those features themselves.
 
-### `homeboy lint`
+### `homeboy review lint`
 
 Invokes `lint.extension_script` directly. Supports step filtering
 (`--step phpcs`, `--skip phpstan`) via the env pairs above. In fix-only
@@ -368,7 +368,7 @@ mode (`homeboy refactor --from lint --write`), sets
 `HOMEBOY_FIX_ONLY=1` which signals the runner to run fixers and skip
 validation.
 
-### `homeboy build`
+### `homeboy review build`
 
 Invokes `build.extension_script`. Sidecar contracts are different (build
 artifacts, version targets) — see [release-pipeline.md](release-pipeline.md).
@@ -379,7 +379,7 @@ Invokes `trace.extension_script` with the trace-specific sidecar and artifact va
 
 When `--attach` is present, core observes the declared already-running local targets before and after the runner executes. `fswatch` attachments also collect passive `file.watch` timeline events during the run. This augments the trace evidence but does not replace the scenario: the extension script still runs normally, and attach handling does not own the target lifecycle.
 
-### `homeboy audit`
+### `homeboy review audit`
 
 Runs entirely in core. No extension script invoked. Audit rules read
 the component's manifest for configuration

@@ -97,7 +97,7 @@ only fetch logs when they need extra debugging context.
       "passed": false,
       "exit_code": 1,
       "finding_count": 2,
-      "hint": "Deep dive: homeboy audit sample-plugin --changed-since=origin/main",
+      "hint": "Deep dive: homeboy review audit sample-plugin --changed-since=origin/main",
       "output": { "...": "AuditCommandOutput" }
     },
     "lint": { "...": "ReviewStage<LintCommandOutput>" },

@@ -45,7 +45,7 @@ homeboy --output "$RUNNER_TEMP/homeboy-results/review.json" \
   review my-component --changed-since=origin/main --summary
 ```
 
-Run individual stages (`homeboy audit`, `homeboy lint`, `homeboy test`) only for a
+Run individual stages (`homeboy review audit`, `homeboy review lint`, `homeboy review test`) only for a
 deep dive into one stage. The umbrella `review` run is the proof artifact.
 
 ## Routing: keep it non-local

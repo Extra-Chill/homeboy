@@ -54,9 +54,9 @@ Verify ALL discovered components have been documented before completion.
 
 ### 9. Validate References
 ```sh
-homeboy audit <component>
+homeboy review audit <component>
 ```
-Run focused source checks and repository quality gates that cover the changed docs. If `homeboy audit` reports documentation-reference findings, fix them before marking generation complete.
+Run focused source checks and repository quality gates that cover the changed docs. If `homeboy review audit` reports documentation-reference findings, fix them before marking generation complete.
 
 ## Forbidden Content
 
