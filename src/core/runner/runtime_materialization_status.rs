@@ -258,6 +258,7 @@ mod tests {
                 last_seen_at: None,
             }),
             stale_daemon,
+            daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),

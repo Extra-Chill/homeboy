@@ -5,6 +5,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use crate::core::server::{Server, SshClient};
 
 use super::super::session::RunnerStaleRuntimePath;
@@ -12,6 +13,7 @@ use super::{
     failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_start,
     remote_daemon_stop, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
 };
+use crate::core::runner::daemon_freshness::repair_or_fail;
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
 
@@ -38,9 +40,9 @@ pub(super) fn connect_remote_daemon(
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-    match daemon_freshness_mismatch(&local_url, expected_version, expected_identity) {
-        Ok(None) => Ok((local_port, tunnel_pid, local_url, daemon)),
-        Ok(Some(_)) => {
+    match daemon_freshness_report(&local_url, expected_version, expected_identity) {
+        Ok(report) if report.fresh => Ok((local_port, tunnel_pid, local_url, daemon)),
+        Ok(report) if repair_or_fail(&report).is_ok() => {
             if let Some(pid) = tunnel_pid {
                 terminate_pid(pid);
             }
@@ -65,13 +67,14 @@ pub(super) fn connect_remote_daemon(
             };
             let (local_port, tunnel_pid, local_url) =
                 open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-            match daemon_freshness_mismatch(&local_url, expected_version, expected_identity) {
-                Ok(None) => {}
-                Ok(Some(reason)) => {
+            match daemon_freshness_report(&local_url, expected_version, expected_identity) {
+                Ok(report) if report.fresh => {}
+                Ok(report) => {
                     return Err(failed_after_tunnel(
                         tunnel_pid,
                         format!(
-                            "remote daemon restarted but still reports stale Homeboy build: {reason}"
+                            "remote daemon restarted but still reports stale Homeboy build: {:?}",
+                            report.stale_reason_code
                         ),
                     ));
                 }
@@ -81,6 +84,10 @@ pub(super) fn connect_remote_daemon(
             }
             Ok((local_port, tunnel_pid, local_url, daemon))
         }
+        Ok(report) => Err(failed_after_tunnel(
+            tunnel_pid,
+            repair_or_fail(&report).unwrap_err(),
+        )),
         Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
     }
 }
@@ -191,6 +198,14 @@ pub(super) fn daemon_http_runtime_loaded_paths(
     Ok(daemon_runtime_loaded_paths_from_body(&body))
 }
 
+pub(super) fn daemon_http_freshness(
+    local_url: &str,
+    expected_version: &str,
+    expected_identity: &str,
+) -> std::result::Result<DaemonFreshnessReport, String> {
+    daemon_freshness_report(local_url, expected_version, expected_identity)
+}
+
 fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -267,12 +282,46 @@ pub(super) fn daemon_runtime_loaded_paths_from_body(body: &Value) -> BTreeMap<St
         .collect()
 }
 
-fn daemon_freshness_mismatch(
+fn daemon_freshness_report(
     local_url: &str,
     expected_version: &str,
     expected_identity: &str,
-) -> std::result::Result<Option<String>, String> {
+) -> std::result::Result<DaemonFreshnessReport, String> {
     let body = daemon_http_body(local_url)?;
+    if let Some(report) = daemon_freshness_from_body(&body) {
+        if report.fresh
+            && daemon_version_identity_mismatch(&body, expected_version, expected_identity)?
+                .is_none()
+        {
+            return Ok(report);
+        }
+        if report.fresh {
+            let mut report = report;
+            report.fresh = false;
+            report.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+            report.restartable = true;
+            return Ok(report);
+        }
+        return Ok(report);
+    }
+    let mismatch = daemon_version_identity_mismatch(&body, expected_version, expected_identity)?;
+    Ok(DaemonFreshnessReport {
+        fresh: mismatch.is_none(),
+        stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
+        binary_hash: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        repair_plan: Vec::new(),
+    })
+}
+
+fn daemon_version_identity_mismatch(
+    body: &Value,
+    expected_version: &str,
+    expected_identity: &str,
+) -> std::result::Result<Option<String>, String> {
     if daemon_lease_id_from_body(&body).is_none() {
         return Ok(Some(
             "remote daemon version response did not include a session lease".to_string(),
@@ -301,6 +350,12 @@ fn daemon_freshness_mismatch(
     }
 
     Ok(None)
+}
+
+fn daemon_freshness_from_body(body: &Value) -> Option<DaemonFreshnessReport> {
+    body.get("freshness")
+        .or_else(|| body.pointer("/data/freshness"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 fn daemon_lease_id_from_body(body: &Value) -> Option<&str> {

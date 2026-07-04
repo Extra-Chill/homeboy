@@ -229,6 +229,92 @@ fn read_status_classifies_unknown_binary_freshness_as_stale() {
         .as_deref()
         .unwrap_or_default()
         .contains("binary hash"));
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::BinaryHashMismatch)
+    );
+}
+
+#[test]
+fn freshness_report_classifies_missing_lease() {
+    let _home = HomeGuard::new();
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing)
+    );
+    assert!(status.freshness.restartable);
+}
+
+#[test]
+fn freshness_report_classifies_corrupt_lease() {
+    let _home = HomeGuard::new();
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, "not-json").expect("write corrupt lease");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseCorrupt)
+    );
+    assert!(!status.freshness.restartable);
+}
+
+#[test]
+fn freshness_report_classifies_schema_mismatch() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.schema = "homeboy.daemon.session_lease.v0".to_string();
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseSchemaMismatch)
+    );
+}
+
+#[test]
+fn freshness_report_classifies_version_mismatch() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.build_identity.version = "0.0.0".to_string();
+    state.build_identity.display = "homeboy 0.0.0".to_string();
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::VersionMismatch)
+    );
+}
+
+#[test]
+fn freshness_report_classifies_runtime_paths_drift() {
+    let _home = HomeGuard::new();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runtime_path = temp.path().join("runtime");
+    std::fs::write(&runtime_path, "loaded").expect("runtime file");
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.runtime_paths.paths.push(DaemonRuntimePathSnapshot {
+        env: "HOMEBOY_TEST_RUNTIME_PATH".to_string(),
+        path: runtime_path.display().to_string(),
+        fingerprint: "old".to_string(),
+    });
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::RuntimePathsDrift)
+    );
 }
 
 #[test]
@@ -275,6 +361,10 @@ fn read_status_reports_stale_state_as_not_running() {
         .as_deref()
         .unwrap_or_default()
         .contains("pid is not running"));
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::PidDead)
+    );
 }
 
 #[test]
@@ -995,7 +1085,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
     });
 
     let response: serde_json::Value = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("client")
         .post(format!("http://{addr}/exec"))

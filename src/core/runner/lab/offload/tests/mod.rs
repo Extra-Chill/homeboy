@@ -92,6 +92,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
             last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
         }),
         stale_daemon: None,
+        daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
         active_job_count: 0,

@@ -61,6 +61,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
         }),
         stale_daemon: None,
+        daemon_freshness: None,
         active_jobs: vec![homeboy::core::api_jobs::ActiveRunnerJobSummary {
             runner_id: "homeboy-lab".to_string(),
             job_id: "job-123".to_string(),
@@ -491,6 +492,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
         }),
         stale_daemon: None,
+        daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
         active_job_count: 0,
@@ -550,6 +552,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             last_seen_at: None,
         }),
         stale_daemon: None,
+        daemon_freshness: None,
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
         active_job_count: 0,
