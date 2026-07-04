@@ -133,6 +133,7 @@ fn repo_local_gate_execution_kind_runs_without_extension_provider() {
         request,
         AgentTaskExecutionContext {
             plan_id: "gate-plan".to_string(),
+            run_id: Some("gate-run".to_string()),
             attempt: 1,
             cancellation: AgentTaskCancellationToken::default(),
         },
@@ -317,7 +318,7 @@ process.stdout.write(JSON.stringify({
     let (mut request, provider) = request("task-artifact-normalization", command);
     request.expected_artifacts = vec!["patch".to_string()];
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert_eq!(outcome.outputs["artifact_declarations"][0]["name"], "patch");
@@ -358,7 +359,7 @@ process.stdout.write(JSON.stringify({
         "{{extension_path}}".to_string(),
     ];
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert!(outcome
@@ -392,7 +393,7 @@ process.stdout.write(JSON.stringify({
     provider.invocation.argv = vec!["node".to_string(), "provider.js".to_string()];
     provider.invocation.cwd = Some("{{runtime_path}}".to_string());
 
-    let outcome = run_provider_command(&request, &provider);
+    let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert!(outcome
