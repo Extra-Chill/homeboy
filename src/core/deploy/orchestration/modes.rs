@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
-use crate::core::git;
 use crate::core::project::Project;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
@@ -212,7 +211,7 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
         return Ok(deploy_tag_for_version(component, version));
     }
 
-    match git::get_latest_tag(&component.local_path) {
+    match crate::core::release::latest_component_tag(component) {
         Ok(Some(tag)) => Ok(tag),
         Ok(None) => Err(Error::validation_invalid_argument(
             "deploy",

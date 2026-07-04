@@ -109,6 +109,16 @@ pub fn detect_baseline_with_version(
     path: &str,
     current_version: Option<&str>,
 ) -> Result<BaselineInfo> {
+    detect_baseline_with_version_and_tag_prefix(path, current_version, None)
+}
+
+/// Detect baseline with version alignment checking and optional component tag
+/// namespace filtering.
+pub fn detect_baseline_with_version_and_tag_prefix(
+    path: &str,
+    current_version: Option<&str>,
+    tag_prefix: Option<&str>,
+) -> Result<BaselineInfo> {
     // Fetch tags from remote so locally-missing tags (pushed from another
     // machine) are available before we resolve the baseline. Best-effort:
     // if there is no remote or the network is unavailable we silently
@@ -116,7 +126,7 @@ pub fn detect_baseline_with_version(
     let _ =
         crate::core::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
 
-    detect_baseline_with_version_from_fetched_tags(path, current_version)
+    detect_baseline_with_version_and_tag_prefix_from_fetched_tags(path, current_version, tag_prefix)
 }
 
 /// Detect baseline using tags already available locally.
@@ -127,8 +137,18 @@ pub fn detect_baseline_with_version_from_fetched_tags(
     path: &str,
     current_version: Option<&str>,
 ) -> Result<BaselineInfo> {
+    detect_baseline_with_version_and_tag_prefix_from_fetched_tags(path, current_version, None)
+}
+
+/// Detect baseline using tags already available locally, scoped to a component
+/// tag prefix when the component release namespace requires one.
+pub fn detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
+    path: &str,
+    current_version: Option<&str>,
+    tag_prefix: Option<&str>,
+) -> Result<BaselineInfo> {
     // Priority 1: Check for latest tag
-    if let Some(tag) = get_latest_tag(path)? {
+    if let Some(tag) = get_latest_tag_with_prefix(path, tag_prefix)? {
         let tag_version = extract_version_from_tag(&tag);
 
         // If we have current version, check alignment
@@ -287,7 +307,15 @@ pub fn changes_at(
             let current_version = component
                 .as_ref()
                 .and_then(crate::core::release::version::get_component_version);
-            detect_baseline_with_version(&path, current_version.as_deref())?
+            let tag_prefix = component
+                .as_ref()
+                .and_then(|component| crate::core::release::component_tag_prefix(component).ok())
+                .flatten();
+            detect_baseline_with_version_and_tag_prefix(
+                &path,
+                current_version.as_deref(),
+                tag_prefix.as_deref(),
+            )?
         }
     };
 

@@ -533,8 +533,7 @@ fn summarize_components(
         timer.begin("inspect_upstream_and_unreleased");
         for comp in &components {
             if include_upstream_drift {
-                if let Some(drift) = git_cache.fetch_upstream_drift_for(&comp.local_path, &comp.id)
-                {
+                if let Some(drift) = git_cache.fetch_upstream_drift_for(comp) {
                     if drift.is_behind() {
                         behind_upstream.push(comp.id.clone());
                     }
@@ -686,7 +685,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         .iter()
         .filter_map(|c| {
             git_cache
-                .fetch_upstream_drift_for(&c.local_path, &c.id)
+                .fetch_upstream_drift_for(c)
                 .map(|d| (c.id.clone(), d))
         })
         .collect();
@@ -896,19 +895,23 @@ impl StatusGitCache {
         }
     }
 
-    fn fetch_upstream_drift_for(&mut self, path: &str, id: &str) -> Option<UpstreamDrift> {
-        let cache_key = upstream_drift_cache_key(path);
+    fn fetch_upstream_drift_for(
+        &mut self,
+        component: &component::Component,
+    ) -> Option<UpstreamDrift> {
+        let path = &component.local_path;
+        let cache_key = component_cache_key(component);
         if !self.upstream_drift.contains_key(&cache_key) {
             self.fetch_origin_tags_for(path);
             self.upstream_drift
-                .insert(cache_key.clone(), get_upstream_drift(path));
+                .insert(cache_key.clone(), get_upstream_drift(component));
         }
 
         let drift = self.upstream_drift.get(&cache_key)?;
 
         drift.as_ref().map(|cached| {
             let mut drift = cached.clone();
-            drift.component_id = id.to_string();
+            drift.component_id = component.id.clone();
             drift
         })
     }
@@ -932,9 +935,13 @@ impl StatusGitCache {
             let current_version = version::read_component_version(component)
                 .ok()
                 .map(|info| info.version);
-            let baseline = git::detect_baseline_with_version_from_fetched_tags(
+            let tag_prefix = homeboy::core::release::component_tag_prefix(component)
+                .ok()
+                .flatten();
+            let baseline = git::detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
                 &component.local_path,
                 current_version.as_deref(),
+                tag_prefix.as_deref(),
             )
             .ok();
             self.baselines.insert(cache_key.clone(), baseline);
@@ -1002,13 +1009,19 @@ fn fetch_origin_tags(path: &str) {
     );
 }
 
-fn get_upstream_drift(path: &str) -> Option<UpstreamDrift> {
+fn get_upstream_drift(component: &component::Component) -> Option<UpstreamDrift> {
+    let path = &component.local_path;
     let snapshot = git::get_repo_snapshot(path).ok()?;
 
     // After fetching tags, find the latest tag across ALL refs (not just HEAD).
     // `git describe --tags --abbrev=0` only returns tags reachable from HEAD,
     // which misses newer tags when the local checkout is behind.
-    let latest_origin_tag = get_latest_tag_overall(path);
+    let tag_prefix = homeboy::core::release::component_tag_prefix(component)
+        .ok()
+        .flatten();
+    let latest_origin_tag = git::get_latest_tag_any_with_prefix(path, tag_prefix.as_deref())
+        .ok()
+        .flatten();
 
     Some(UpstreamDrift {
         component_id: String::new(), // caller sets component_id after
@@ -1016,24 +1029,6 @@ fn get_upstream_drift(path: &str) -> Option<UpstreamDrift> {
         behind: snapshot.behind,
         latest_origin_tag,
     })
-}
-
-/// Get the latest version tag in the repo regardless of what HEAD points to.
-///
-/// Unlike `get_latest_tag()` which uses `git describe` (reachable from HEAD),
-/// this lists all tags and picks the one with the highest semver version.
-fn get_latest_tag_overall(path: &str) -> Option<String> {
-    let output = homeboy::core::engine::command::run_in_optional(
-        path,
-        "git",
-        &["tag", "-l", "--sort=-v:refname"],
-    )?;
-
-    output
-        .lines()
-        .next()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Log merged-but-unreleased components to stderr for human-readable output.
@@ -1520,18 +1515,26 @@ mod tests {
     }
 
     #[test]
-    fn upstream_drift_cache_reuses_git_root_and_preserves_component_id() {
+    fn upstream_drift_cache_is_component_scoped_in_shared_repos() {
         let (_dir, repo) = make_git_repo("monorepo");
         let component_dir = repo.join("components/demo");
         fs::create_dir_all(&component_dir).expect("component dir");
+        let component = component::Component {
+            id: "actual-component".to_string(),
+            local_path: component_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
 
         let repo_key = upstream_drift_cache_key(&repo.to_string_lossy());
         let component_key = upstream_drift_cache_key(&component_dir.to_string_lossy());
         assert_eq!(component_key, repo_key);
 
+        let scoped_cache_key = component_cache_key(&component);
+        assert_ne!(scoped_cache_key, repo_key);
+
         let mut git_cache = StatusGitCache::default();
         git_cache.upstream_drift.insert(
-            repo_key,
+            scoped_cache_key,
             Some(UpstreamDrift {
                 component_id: "cached-component".to_string(),
                 ahead: Some(2),
@@ -1541,7 +1544,7 @@ mod tests {
         );
 
         let drift = git_cache
-            .fetch_upstream_drift_for(&component_dir.to_string_lossy(), "actual-component")
+            .fetch_upstream_drift_for(&component)
             .expect("cached drift");
 
         assert_eq!(drift.component_id, "actual-component");

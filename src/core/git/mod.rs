@@ -58,6 +58,8 @@ pub use operations::{
 pub use operations_changes::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
     changes_project_filtered, detect_baseline_with_version,
+    detect_baseline_with_version_and_tag_prefix,
+    detect_baseline_with_version_and_tag_prefix_from_fetched_tags,
     detect_baseline_with_version_from_fetched_tags, BaselineInfo, BaselineSource, ChangelogInfo,
     ChangesOutput, RepoBaselineSnapshot,
 };

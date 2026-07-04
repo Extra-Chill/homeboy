@@ -323,11 +323,23 @@ fn resolve_release_asset_api_url(
 
     Ok(assets.iter().find_map(|asset| {
         let name = asset.get("name")?.as_str()?;
-        if name != artifact_name {
+        if !release_asset_name_matches(name, artifact_name) {
             return None;
         }
         asset.get("url")?.as_str().map(ToString::to_string)
     }))
+}
+
+fn release_asset_name_matches(asset_name: &str, artifact_name: &str) -> bool {
+    if asset_name == artifact_name {
+        return true;
+    }
+
+    let Some((ordinal, rest)) = asset_name.split_once('-') else {
+        return false;
+    };
+
+    !ordinal.is_empty() && ordinal.chars().all(|c| c.is_ascii_digit()) && rest == artifact_name
 }
 
 fn github_auth_token(host: &str) -> Option<String> {
@@ -741,6 +753,26 @@ mod tests {
             repo.release_by_tag_api_url("v1.2.3"),
             "https://api.github.com/repos/Extra-Chill/homeboy/releases/tags/v1.2.3"
         );
+    }
+
+    #[test]
+    fn release_asset_name_matches_homeboy_ordinal_artifact_names() {
+        assert!(release_asset_name_matches(
+            "01-studio-native-theme.zip",
+            "studio-native-theme.zip"
+        ));
+        assert!(release_asset_name_matches(
+            "studio-native-theme.zip",
+            "studio-native-theme.zip"
+        ));
+        assert!(!release_asset_name_matches(
+            "studio-native.zip",
+            "studio-native-theme.zip"
+        ));
+        assert!(!release_asset_name_matches(
+            "theme-01-studio-native-theme.zip",
+            "studio-native-theme.zip"
+        ));
     }
 
     #[test]
