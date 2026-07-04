@@ -3,6 +3,7 @@ use crate::core::component::{
 };
 use crate::core::error::{Error, Result};
 use crate::core::extension::{self, ExtensionCapability};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Shared target-resolution input for component/path-oriented commands.
@@ -379,6 +380,11 @@ fn synthetic_component_for_path(path: &str) -> Component {
 
 fn resolve_path_override(path: &str) -> Result<Component> {
     if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
+        validate_duplicate_portable_component_ids(
+            &discovered.id,
+            Path::new(path),
+            Some(Path::new(path)),
+        )?;
         discovered.local_path = path.to_string();
         discovered.resolve_remote_path();
         return Ok(discovered);
@@ -388,6 +394,7 @@ fn resolve_path_override(path: &str) -> Result<Component> {
     if let Some(git_root) = detect_git_root(dir) {
         if git_root != dir {
             if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
+                validate_duplicate_portable_component_ids(&discovered.id, &git_root, None)?;
                 discovered.local_path = path.to_string();
                 discovered.resolve_remote_path();
                 return Ok(discovered);
@@ -529,12 +536,14 @@ pub fn resolve(id: Option<&str>) -> Result<Component> {
     let cwd = std::env::current_dir().map_err(|e| Error::internal_io(e.to_string(), None))?;
 
     if let Some(component) = try_discover_from_portable(&cwd)? {
+        validate_duplicate_portable_component_ids(&component.id, &cwd, None)?;
         return Ok(component);
     }
 
     if let Some(git_root) = detect_git_root(&cwd) {
         if git_root != cwd {
             if let Some(component) = try_discover_from_portable(&git_root)? {
+                validate_duplicate_portable_component_ids(&component.id, &git_root, None)?;
                 return Ok(component);
             }
         }
@@ -593,7 +602,27 @@ fn resolve_effective_inner(
     if let Some(id) = id {
         if let Some(path) = path_override {
             if let Some(mut discovered) = try_discover_from_portable(Path::new(path))? {
-                discovered.id = id.to_string();
+                if discovered.id != id {
+                    return Err(Error::validation_invalid_argument(
+                        "component_id",
+                        format!(
+                            "Component ID '{}' does not match homeboy.json id '{}' at {}",
+                            id,
+                            discovered.id,
+                            Path::new(path).join("homeboy.json").display()
+                        ),
+                        Some(id.to_string()),
+                        Some(vec![
+                            format!("Use the path-owned component id: homeboy release {} --path {}", discovered.id, path),
+                            "Or rename one homeboy.json id so component IDs are unique within the checkout".to_string(),
+                        ]),
+                    ));
+                }
+                validate_duplicate_portable_component_ids(
+                    id,
+                    Path::new(path),
+                    Some(Path::new(path)),
+                )?;
                 discovered.local_path = path.to_string();
                 discovered.resolve_remote_path();
                 Ok(discovered)
@@ -622,6 +651,11 @@ fn resolve_effective_inner(
                     normalize_component_local_path(id).unwrap_or_else(|_| id.to_string());
 
                 if let Some(mut discovered) = try_discover_from_portable(id_path)? {
+                    validate_duplicate_portable_component_ids(
+                        &discovered.id,
+                        id_path,
+                        Some(id_path),
+                    )?;
                     discovered.local_path = local_path;
                     discovered.resolve_remote_path();
                     return Ok(discovered);
@@ -644,6 +678,11 @@ fn resolve_effective_inner(
             // This ensures `homeboy test foo` from a different clone of `foo`
             // operates on the current checkout, not the registered local_path (#694).
             if let Some(cwd_component) = prefer_cwd_for_component(id) {
+                validate_duplicate_portable_component_ids(
+                    id,
+                    Path::new(&cwd_component.local_path),
+                    None,
+                )?;
                 return Ok(cwd_component);
             }
 
@@ -670,6 +709,102 @@ fn resolve_effective_inner(
 
         resolve(None)
     }
+}
+
+pub(crate) fn validate_duplicate_portable_component_ids(
+    component_id: &str,
+    selected_dir: &Path,
+    explicit_dir: Option<&Path>,
+) -> Result<()> {
+    let scope = detect_git_root(selected_dir).unwrap_or_else(|| selected_dir.to_path_buf());
+    let matches = portable_config_paths_for_id(&scope, component_id)?;
+    if matches.len() <= 1 {
+        return Ok(());
+    }
+
+    if let Some(explicit_dir) = explicit_dir {
+        let explicit_config = canonical_config_path(explicit_dir.join("homeboy.json"));
+        if matches.iter().any(|path| path == &explicit_config) {
+            return Ok(());
+        }
+    }
+
+    Err(duplicate_portable_id_error(component_id, matches))
+}
+
+fn portable_config_paths_for_id(scope: &Path, component_id: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    collect_portable_config_paths_for_id(scope, component_id, &mut seen, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_portable_config_paths_for_id(
+    dir: &Path,
+    component_id: &str,
+    seen: &mut HashSet<PathBuf>,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+
+    let config_path = dir.join("homeboy.json");
+    if config_path.exists()
+        && crate::core::component::infer_portable_component_id(dir)
+            .ok()
+            .as_deref()
+            == Some(component_id)
+    {
+        let canonical = canonical_config_path(config_path);
+        if seen.insert(canonical.clone()) {
+            paths.push(canonical);
+        }
+    }
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || should_skip_portable_duplicate_scan_dir(&path) {
+            continue;
+        }
+        collect_portable_config_paths_for_id(&path, component_id, seen, paths)?;
+    }
+
+    Ok(())
+}
+
+fn should_skip_portable_duplicate_scan_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | ".homeboy" | "target" | "node_modules" | "vendor")
+    )
+}
+
+fn canonical_config_path(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+fn duplicate_portable_id_error(component_id: &str, paths: Vec<PathBuf>) -> Error {
+    let path_list = paths
+        .iter()
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Error::validation_invalid_argument(
+        "component_id",
+        format!(
+            "Component id '{}' is declared by multiple homeboy.json files:\n{}",
+            component_id, path_list
+        ),
+        Some(component_id.to_string()),
+        Some(vec![
+            "Rename one homeboy.json id so each local component id is unique within the checkout".to_string(),
+            "Use --path <component-dir> to disambiguate the intended component when the command supports path overrides".to_string(),
+        ]),
+    )
 }
 
 #[cfg(test)]
@@ -721,6 +856,57 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn write_portable(dir: &Path, id: &str) {
+        fs::create_dir_all(dir).expect("component dir");
+        fs::write(
+            dir.join("homeboy.json"),
+            serde_json::json!({
+                "id": id,
+                "build_artifact": format!("build/{id}.zip")
+            })
+            .to_string(),
+        )
+        .expect("portable config");
+    }
+
+    #[test]
+    fn duplicate_portable_ids_error_for_id_only_resolution_scope() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init"]);
+        write_portable(repo.path(), "fixture");
+        write_portable(&repo.path().join("plugins/fixture"), "fixture");
+
+        let err = validate_duplicate_portable_component_ids("fixture", repo.path(), None)
+            .expect_err("duplicate id should fail");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("multiple homeboy.json files"));
+        assert!(err.message.contains("plugins/fixture/homeboy.json"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("--path <component-dir>")));
+    }
+
+    #[test]
+    fn explicit_path_disambiguates_duplicate_portable_ids() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init"]);
+        write_portable(repo.path(), "fixture");
+        let nested = repo.path().join("plugins/fixture");
+        write_portable(&nested, "fixture");
+
+        let resolved = resolve_effective(
+            Some("fixture"),
+            Some(nested.to_string_lossy().as_ref()),
+            None,
+        )
+        .expect("explicit path should select the nested config");
+
+        assert_eq!(resolved.id, "fixture");
+        assert_eq!(resolved.local_path, nested.to_string_lossy());
     }
 
     #[test]

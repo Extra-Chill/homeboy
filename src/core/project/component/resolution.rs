@@ -25,6 +25,11 @@ pub fn resolve_project_component_with_standalone_snapshot(
             .find(|component| component.id == component_id)
     {
         super::super::validate_component_local_path(project, component_id)?;
+        crate::core::component::resolution::validate_duplicate_portable_component_ids(
+            component_id,
+            Path::new(&attachment.local_path),
+            None,
+        )?;
         (
             discover_attached_component(Path::new(&attachment.local_path)).ok_or_else(|| {
                 Error::validation_invalid_argument(

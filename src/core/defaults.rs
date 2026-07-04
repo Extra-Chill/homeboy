@@ -51,6 +51,14 @@ pub struct HomeboyConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub worktree_providers: HashMap<String, WorktreeProviderConfig>,
 
+    /// Host-scoped environment for GitHub CLI subprocesses keyed by hostname.
+    ///
+    /// Values are applied whenever Homeboy runs `gh` for a repository whose
+    /// remote URL resolves to that host. Component-level `github.hosts` entries
+    /// override these global defaults.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub github_hosts: HashMap<String, crate::core::component::GithubHostConfig>,
+
     /// Extension and executor settings addressed through `/settings/...`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub settings: HashMap<String, Value>,
@@ -123,6 +131,7 @@ impl Default for HomeboyConfig {
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
             worktree_providers: HashMap::new(),
+            github_hosts: HashMap::new(),
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
             artifact_root: None,
