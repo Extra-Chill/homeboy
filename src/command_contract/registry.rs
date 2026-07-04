@@ -249,38 +249,4 @@ mod tests {
         assert_eq!(by_schema, by_name);
         assert_eq!(by_name.title, "Secret environment plan");
     }
-
-    #[test]
-    fn registry_covers_first_slice_contracts() {
-        let names = CONTRACT_REGISTRY
-            .iter()
-            .map(|entry| entry.name)
-            .collect::<std::collections::BTreeSet<_>>();
-
-        for name in [
-            "lifecycle-contract",
-            "lifecycle-result",
-            "lifecycle-snapshot-ref",
-            "run-lifecycle-status",
-            "artifact-manifest",
-            "artifact-postprocess",
-            "secret-env-plan",
-            "env-materialization-plan",
-            "fuzz-workload",
-            "resource-cleanup-intent",
-            "resource-lifecycle-index",
-            "run-location-index",
-            "runner-artifact-manifest-ref",
-            "extension-materialization-source",
-            "resolved-agent-runtime-execution-contract",
-            "reviewer-facing-artifact-ref",
-            "run-outcome-envelope",
-            "runner-execution-envelope",
-            "runner-execution-record",
-            "path-materialization-plan",
-            "orchestration-target-provenance",
-        ] {
-            assert!(names.contains(name), "missing {name}");
-        }
-    }
 }

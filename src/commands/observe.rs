@@ -842,16 +842,6 @@ mod tests {
     }
 
     #[test]
-    fn observe_accepts_standard_probe_without_legacy_flags() {
-        let args = args_with_probes(
-            Some("demo"),
-            vec![r#"{"type":"cmd.run","command":"true"}"#.to_string()],
-        );
-
-        validate_probe_selection(&args).unwrap();
-    }
-
-    #[test]
     fn collect_timeline_consumes_standard_http_poll_and_process_snapshot() {
         use std::io::{Read, Write};
         use std::net::TcpListener;

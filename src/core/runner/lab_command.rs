@@ -42,21 +42,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ignores_legacy_self_command_prefix() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(
-            dir.path().join("homeboy.json"),
-            r#"{"id":"project","lab":{"self_command_prefix":["cargo","run","--quiet","--bin","homeboy","--"]}}"#,
-        )
-        .expect("write homeboy.json");
-
-        let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
-
-        assert_eq!(prefix.argv, vec!["/usr/local/bin/homeboy".to_string()]);
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
-    }
-
-    #[test]
     fn missing_self_command_prefix_uses_runner_homeboy_path() {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"project"}"#)

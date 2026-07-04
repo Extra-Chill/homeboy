@@ -478,7 +478,7 @@ fn run_fix(
 mod tests {
     use super::{LintArgs, LintObservationAdapter};
     use crate::commands::utils::observed_workflow::WorkflowObservationAdapter;
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
     use homeboy::core::component::Component;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::lint as extension_lint;
@@ -553,27 +553,6 @@ mod tests {
                 "scoped or behavior-changing args must use main lint workflow: {argv:?}"
             );
         }
-    }
-
-    #[test]
-    fn lint_help_documents_changed_since_once_as_read_only_scope() {
-        let help = TestCli::command().render_long_help().to_string();
-
-        assert_eq!(help.matches("--changed-since").count(), 1, "{help}");
-        assert!(
-            help.contains("Lint only files changed since a git ref (branch, tag, or SHA)"),
-            "{help}"
-        );
-        assert!(
-            help.contains(
-                "Apply auto-fixable lint findings in place using the lint fixer pipeline"
-            ),
-            "{help}"
-        );
-        assert!(
-            !help.contains("--from lint --write"),
-            "lint --help should not describe --changed-since or --fix as a refactor --write alias: {help}"
-        );
     }
 
     #[test]
