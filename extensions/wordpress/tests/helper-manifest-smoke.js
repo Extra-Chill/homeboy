@@ -60,6 +60,10 @@ assert.equal(
 	manifest.helpers.editorCanvasProbes,
 	path.resolve(__dirname, '..', 'lib', 'editor-canvas-probes.js')
 );
+assert.equal(
+	manifest.helpers.fuzzManifestContracts,
+	path.resolve(__dirname, '..', 'lib', 'fuzz-manifest-contracts.js')
+);
 assert.equal(manifest.helpers.woocommerceExpensiveShipping, undefined);
 assert.equal(manifest.productAdapters, undefined);
 

@@ -13,6 +13,8 @@ const extensionIds = new Set([
   'wordpress',
 ]);
 
+const rootManifest = readJson(path.join(rootDir, 'homeboy-extension-root.json')) || {};
+
 const allowedTopLevelDirs = new Set([
   '.git',
   '.github',
@@ -23,6 +25,7 @@ const allowedTopLevelDirs = new Set([
   'scripts',
   'tests',
   ...extensionIds,
+  ...(Array.isArray(rootManifest.shared_assets) ? rootManifest.shared_assets : []),
 ]);
 
 const failures = [];
