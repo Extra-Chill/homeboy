@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.2] - 2026-07-04
+
+### Changed
+- Unify Lab path materialization context
+- Unify daemon freshness repair policy
+
+### Fixed
+- Fix rename path-move integrity: move skipped-content files and preserve nested path segments (#7555)
+- Fix explicit --variant mappings losing to auto-derived variants with same from (#7553)
+
 ## [0.281.1] - 2026-07-04
 
 ### Changed
