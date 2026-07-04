@@ -524,7 +524,9 @@
     }
   ],
   "docs_dir": "docs",
-  "extensions": {},
+  "extensions": {
+    "rust": {}
+  },
   "hooks": {},
   "id": "homeboy",
   "scripts": {
