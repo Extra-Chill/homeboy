@@ -5,6 +5,7 @@ use homeboy::core::observation::{FindingListFilter, ObservationStore, RecordedHo
 use homeboy::core::Error;
 
 use crate::commands::{
+    issues,
     runs::{
         latest::latest_run_context, latest::RunsLatestFindingOutput, latest::RunsLatestRunArgs,
         run_summary, RunsOutput,
@@ -13,9 +14,13 @@ use crate::commands::{
 };
 
 #[derive(Args, Clone, Default)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct RunsFindingsArgs {
+    #[command(subcommand)]
+    pub command: Option<issues::IssuesCommand>,
+
     /// Observation run ID
-    pub run_id: String,
+    pub run_id: Option<String>,
     /// Finding tool, for example lint
     #[arg(long)]
     pub tool: Option<String>,
@@ -66,11 +71,22 @@ pub struct RunsFindingOutput {
 }
 
 pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
+    if let Some(command) = args.command {
+        let (output, exit_code) = issues::run(
+            issues::IssuesArgs { command },
+            &crate::commands::GlobalArgs {},
+        )?;
+        return Ok((RunsOutput::FindingsReconcile(output), exit_code));
+    }
+
+    let run_id = args
+        .run_id
+        .ok_or_else(|| Error::validation_missing_argument(vec!["run_id".to_string()]))?;
     let store = ObservationStore::open_initialized()?;
-    require_run(&store, &args.run_id)?;
+    require_run(&store, &run_id)?;
     let findings = store
         .list_findings(FindingListFilter {
-            run_id: Some(args.run_id.clone()),
+            run_id: Some(run_id.clone()),
             tool: args.tool,
             file: args.file,
             fingerprint: args.fingerprint,
@@ -83,7 +99,7 @@ pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     Ok((
         RunsOutput::Findings(RunsFindingsOutput {
             command: "runs.findings",
-            run_id: args.run_id,
+            run_id,
             findings,
         }),
         0,

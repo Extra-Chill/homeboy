@@ -390,13 +390,13 @@ mod options {
     ///
     /// `reason` defaults to `Completed` (the GitHub-native signal for "the
     /// underlying problem was resolved"). `NotPlanned` is preserved across CI
-    /// runs by `homeboy issues reconcile` as the "do not re-file" signal.
+    /// runs by `homeboy runs findings reconcile` as the "do not re-file" signal.
     #[derive(Debug, Clone, Default)]
     pub struct IssueCloseOptions {
         pub number: u64,
         /// Close-reason. `Completed` (default) is the GitHub-native signal for
         /// "the underlying problem was resolved." `NotPlanned` is the GitHub-native
-        /// signal for "we've decided not to fix this" - used by `homeboy issues
+        /// signal for "we've decided not to fix this" - used by `homeboy runs findings
         /// reconcile` to suppress re-filing on subsequent runs.
         pub reason: IssueCloseReason,
         /// Optional closing comment posted before the state transition. Useful

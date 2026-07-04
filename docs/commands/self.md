@@ -14,6 +14,7 @@ homeboy self <COMMAND>
 - `identity` — report the active binary build identity without external probes
 - `doctor` — report one authoritative binary/runtime view, command-surface drift checks, and host resource pressure
 - `cleanup-runtime-tmp` — plan or delete orphaned Homeboy runtime temp entries
+- `docs` — display embedded CLI documentation topics or generate a codebase map
 
 ### `status`
 
@@ -80,6 +81,20 @@ is a dry run. Pass `--apply` to delete the planned entries.
 - `--prefix <prefix>`: only include entries whose file or directory name starts with the prefix.
 - `--limit <n>`: maximum temp entries to inspect; defaults to `1000`.
 - `--apply`: delete planned entries instead of only reporting the plan.
+
+### `docs`
+
+```sh
+homeboy self docs [TOPIC]
+homeboy self docs list
+homeboy self docs map <component-id> [--write] [--include-private]
+```
+
+Topic display is the default mode. `homeboy self docs <topic>` renders embedded
+markdown documentation from the Homeboy binary, and `homeboy self docs list`
+prints available topics. `homeboy self docs map <component-id>` generates a
+machine-optimized codebase map; pass `--write` to write markdown files under the
+component docs directory.
 
 ## Related
 

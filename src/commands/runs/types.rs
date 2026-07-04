@@ -45,6 +45,7 @@ use crate::commands::utils::response::{
     CommandActionableMetadata, CommandArtifactRef, CommandNextAction, CommandNextActionKind,
     CommandResultRefs, CommandRunRef,
 };
+use crate::commands::{artifact_postprocess, issues};
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
@@ -206,7 +207,9 @@ pub enum RunsOutput {
     ArtifactCapture(RunsArtifactCaptureOutput),
     ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput),
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
+    ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessCommandOutput),
     Findings(RunsFindingsOutput),
+    FindingsReconcile(issues::IssuesCommandOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
     BenchCompare(BenchCompareOutput),
@@ -460,6 +463,8 @@ pub(super) enum RunsArtifactCommand {
     CleanupDownloads(RunsArtifactCleanupDownloadsArgs),
     /// Plan or delete persisted local run artifacts and their database records
     CleanupPersisted(RunsArtifactCleanupPersistedArgs),
+    /// Run a generic artifact postprocess plan over persisted artifact roots
+    Postprocess(artifact_postprocess::ArtifactPostprocessArgs),
 }
 
 #[derive(Args, Clone)]

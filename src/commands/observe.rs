@@ -75,7 +75,10 @@ pub struct ObserveOutput {
     pub event_count: usize,
     pub artifact_path: String,
     pub hints: Vec<String>,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<serde_json::Value>,
 }
 

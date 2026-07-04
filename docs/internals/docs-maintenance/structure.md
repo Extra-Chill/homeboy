@@ -125,4 +125,4 @@ These belong elsewhere, not in `/docs`:
 
 ## Documentation Commands
 
-Use `homeboy docs <topic>` to read embedded guidance and `homeboy docs map <component>` to generate a machine-optimized codebase map. Create or edit documentation manually against the current source, then verify with focused source checks plus `homeboy audit` or `homeboy lint` where those commands apply.
+Use `homeboy self docs <topic>` to read embedded guidance and `homeboy self docs map <component>` to generate a machine-optimized codebase map. Create or edit documentation manually against the current source, then verify with focused source checks plus `homeboy audit` or `homeboy lint` where those commands apply.

@@ -371,7 +371,7 @@ pub fn aggregate_comparison_with_axes(
     hints.push(
         "Cross-rig runs are comparison-only. Use `homeboy bench --rig <id> --baseline` to ratchet a single rig.".to_string(),
     );
-    hints.push("Full options: homeboy docs commands/bench".to_string());
+    hints.push("Full options: homeboy self docs commands/bench".to_string());
 
     (
         BenchComparisonOutput {

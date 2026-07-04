@@ -2,7 +2,7 @@
 
 Homeboy embeds markdown files from `docs/` into the CLI binary at build time.
 
-In addition, `homeboy docs` reads documentation provided by installed extensions. For each installed extension, it looks under:
+In addition, `homeboy self docs` reads documentation provided by installed extensions. For each installed extension, it looks under:
 
 - `dirs::config_dir()/homeboy/extensions/<extension_id>/docs/`
 
@@ -20,11 +20,11 @@ Examples:
 
 - `docs/index.md` → key `index`
 - `docs/changelog.md` → key `changelog`
-- `docs/commands/docs.md` → key `commands/docs`
+- `docs/commands/self.md` → key `commands/self`
 
-## `homeboy docs <topic...>` normalization
+## `homeboy self docs <topic...>` normalization
 
-`homeboy docs` accepts a topic as trailing arguments. Resolution:
+`homeboy self docs` accepts a topic as trailing arguments. Resolution:
 
 - No topic args → `(topic_label="index", key="index")`
 - Each arg is split on `/` and each segment is normalized.
@@ -34,7 +34,7 @@ Examples:
 
 If normalization yields no segments (for example: topic args are only whitespace or only `/`), the command behaves as if no topic was provided (defaults to `index`). In this case `topic_label` is set to `"unknown"` (the resolved key still becomes `index`).
 
-If the resolved key does not exist in embedded core docs or extension docs, `homeboy docs` returns an error (`config_missing_key("docs.<topic>")`).
+If the resolved key does not exist in embedded core docs or extension docs, `homeboy self docs` returns an error (`config_missing_key("docs.<topic>")`).
 
 Note: the internal resolver now returns an error directly instead of returning an empty `ResolvedDoc`.
 
@@ -52,5 +52,5 @@ Topics are sorted lexicographically.
 
 ## Related
 
-- [Docs command](../commands/docs.md)
+- [Self command](../commands/self.md)
 - [Changelog command](../commands/changelog.md)

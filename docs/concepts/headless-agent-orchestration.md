@@ -10,7 +10,7 @@ Agent work breaks down when every repo has a different way to test, review, benc
 homeboy review --changed-since origin/main --output review.json
 homeboy runs show <run-id>
 homeboy agent-task review <run-id>
-homeboy manifest
+homeboy contract manifest
 ```
 
 The terminal output stays useful for humans. The JSON and run artifacts stay useful for agents, CI, dashboards, and scheduled automation.

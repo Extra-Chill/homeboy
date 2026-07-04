@@ -902,12 +902,7 @@ mod tests {
                 host: Some("example.test".to_string()),
             },
         });
-        let response = cli_response_for_json_result_for_command(
-            &Err(err),
-            20,
-            "deploy",
-            None,
-        );
+        let response = cli_response_for_json_result_for_command(&Err(err), 20, "deploy", None);
         let value = serde_json::to_value(response).expect("response json");
 
         assert_eq!(
@@ -927,8 +922,8 @@ mod tests {
     #[test]
     fn failed_run_payload_includes_evidence_failure_digest() {
         crate::test_support::with_isolated_home(|_home| {
-            let store = homeboy::core::observation::ObservationStore::open_initialized()
-                .expect("store");
+            let store =
+                homeboy::core::observation::ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(
                     homeboy::core::observation::NewRunRecord::builder("test")
@@ -961,7 +956,10 @@ mod tests {
             );
             let value = serde_json::to_value(response).expect("response json");
 
-            assert_eq!(value["diagnostics"]["failure_digest"]["summary"], "fixture failure (exit 1)");
+            assert_eq!(
+                value["diagnostics"]["failure_digest"]["summary"],
+                "fixture failure (exit 1)"
+            );
             assert_eq!(
                 value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
                 format!("homeboy runs evidence {}", run.id)

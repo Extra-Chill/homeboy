@@ -180,8 +180,8 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["manifest"] => {}
-        ["docs", "map"] => {
+        ["contract", "manifest"] => {}
+        ["self", "docs", "map"] => {
             metadata.mutates = true;
             metadata.output_notes =
                 "default JSON output is non-mutating; pass --write to write markdown docs to disk";
@@ -448,7 +448,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "reports by default or with --dry-run; apply/merge flags mutate PR state";
             metadata.dangerous_flags = vec!["--apply", "--delete-branch"];
         }
-        ["issues", "reconcile"] | ["issues", "reconcile-run"] => {
+        ["runs", "findings", "reconcile"] | ["runs", "findings", "reconcile-run"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
@@ -653,7 +653,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "executes extension-owned actions that may mutate the target system";
             metadata.dangerous_flags = vec!["extension action"];
         }
-        ["undo", "delete"] => {
+        ["refactor", "undo", "delete"] => {
             metadata.mutates = true;
             metadata.output_notes = "deletes an undo snapshot without restoring it";
         }

@@ -219,14 +219,6 @@ const fn command_spec_with_representative_argv(
     }
 }
 
-const fn manifest_command_spec() -> CommandSpec {
-    CommandSpec {
-        output_notes:
-            "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope",
-        ..command_spec("manifest", CommandJsonFamily::Workspace)
-    }
-}
-
 const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
@@ -526,12 +518,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec_with_output_notes(
         "contract",
         CommandJsonFamily::Workspace,
-        "lists, shows, exports constants, exports schemas, validates, and normalizes Homeboy-owned contract metadata through the central contract surface",
-    ),
-    command_spec_with_output_notes(
-        "artifact-postprocess",
-        CommandJsonFamily::Workspace,
-        "runs a Homeboy artifact-postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract",
+        "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface",
     ),
     command_spec("daemon", CommandJsonFamily::Ops),
     command_spec_with_representative_argv(
@@ -544,8 +531,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ),
     ),
     command_spec("status", CommandJsonFamily::Ops),
-    command_spec("docs", CommandJsonFamily::Workspace),
-    manifest_command_spec(),
     command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
@@ -559,7 +544,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
     ),
     command_spec("git", CommandJsonFamily::Ops),
-    command_spec("issues", CommandJsonFamily::Ops),
     command_spec("build", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "release",
@@ -601,12 +585,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                 "refactor",
                 CommandJsonFamily::Workspace,
                 "portable Lab offload is available for refactor source runs",
-                "refactor subcommands can rewrite source files; use planning/dry-run modes where available",
+                "refactor subcommands can rewrite source files, inspect references, or restore undo snapshots; use planning/dry-run modes where available",
                 REFACTOR_LAB_SUPPORT,
             ),
         )
     },
-    command_spec("refs", CommandJsonFamily::Workspace),
     command_spec_with_representative_argv(
         &["homeboy", "rig", "check", "example-rig"],
         lab_command_spec_with_summary(
@@ -659,15 +642,17 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             TUNNEL_LAB_SUPPORT,
         ),
     ),
-    command_spec("runs", CommandJsonFamily::Workspace),
-    command_spec("self", CommandJsonFamily::Ops),
-    command_spec("stack", CommandJsonFamily::Workspace),
-    command_spec_with_output_notes_and_safety(
-        "undo",
+    command_spec_with_output_notes(
+        "runs",
         CommandJsonFamily::Workspace,
-        "restores files from the latest or selected undo snapshot",
-        mutating_safety(),
+        "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
     ),
+    command_spec_with_output_notes(
+        "self",
+        CommandJsonFamily::Ops,
+        "inspects the active Homeboy runtime and renders built-in CLI documentation",
+    ),
+    command_spec("stack", CommandJsonFamily::Workspace),
     command_spec("api", CommandJsonFamily::Ops),
     command_spec_with_output_notes_and_safety(
         "upgrade",

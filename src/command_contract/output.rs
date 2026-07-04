@@ -166,15 +166,13 @@ impl Commands {
             Commands::File(args) if file::is_raw_read(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
-            Commands::Docs(args) => workspace_descriptor(
-                if crate::commands::docs::is_json_mode(args) {
-                    CommandResponseMode::Json
-                } else {
-                    CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-                },
-                output_file_mode,
-                CommandOutputContractKind::JsonEnvelope,
-            ),
+            Commands::SelfCmd(args) if crate::commands::self_cmd::is_docs_markdown(args) => {
+                workspace_descriptor(
+                    CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
+                    output_file_mode,
+                    CommandOutputContractKind::JsonEnvelope,
+                )
+            }
             Commands::Release(args) if args.is_changelog_markdown() => workspace_descriptor(
                 CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
@@ -218,11 +216,6 @@ impl Commands {
             Commands::AuditBaseline(_) | Commands::Refactor(_) => {
                 registered_json_envelope_descriptor(self, output_file_mode)
             }
-            Commands::Refs(_) => workspace_descriptor(
-                CommandResponseMode::Json,
-                output_file_mode,
-                CommandOutputContractKind::JsonEnvelope,
-            ),
             Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Contract(_) => {
                 crate::commands::contract::adapter(output_file_mode).output_descriptor()
@@ -235,9 +228,7 @@ impl Commands {
             | Commands::Project(_)
             | Commands::Component(_)
             | Commands::Config(_)
-            | Commands::ArtifactPostprocess(_)
             | Commands::Extension(_)
-            | Commands::Manifest(_)
             | Commands::Cleanup(_)
             | Commands::Build(_)
             | Commands::Report(_)
@@ -245,8 +236,7 @@ impl Commands {
             | Commands::Runtime(_)
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
-            | Commands::Stack(_)
-            | Commands::Undo(_) => registered_json_envelope_descriptor(self, output_file_mode),
+            | Commands::Stack(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Rig(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Status(_)
             | Commands::Ci(_)
@@ -258,7 +248,6 @@ impl Commands {
             | Commands::Deploy(_)
             | Commands::Daemon(_)
             | Commands::Git(_)
-            | Commands::Issues(_)
             | Commands::SelfCmd(_)
             | Commands::Api(_)
             | Commands::Upgrade(_)

@@ -100,11 +100,11 @@ pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput>
         }) => run_map(&component_id, source_dirs, include_private, write, &output_dir),
         None => Err(homeboy::core::Error::validation_invalid_argument(
             "command",
-            "JSON output requires the map subcommand. Use `homeboy docs <topic>` for topic display.",
+            "JSON output requires the map subcommand. Use `homeboy self docs <topic>` for topic display.",
             None,
             Some(vec![
-                "homeboy docs map <component-id>".to_string(),
-                "homeboy docs commands/deploy".to_string(),
+                "homeboy self docs map <component-id>".to_string(),
+                "homeboy self docs commands/deploy".to_string(),
             ]),
         )),
     }

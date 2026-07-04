@@ -7,9 +7,7 @@ use homeboy::core::deploy::{
 };
 
 use super::utils::resolve::{infer_project_for_components, resolve_project_components};
-use super::utils::response::{
-    CommandActionableMetadata, CommandNextAction, CommandNextActionKind,
-};
+use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
 const DEPLOY_RECIPES: &[&str] = &[
@@ -95,7 +93,10 @@ pub struct DeployOutput {
     pub force: bool,
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<CommandActionableMetadata>,
 }
 
@@ -109,7 +110,10 @@ pub struct MultiProjectDeployOutput {
     pub dry_run: bool,
     pub check: bool,
     pub force: bool,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<CommandActionableMetadata>,
 }
 
@@ -372,8 +376,11 @@ fn run_multi_output(
 
 fn deploy_actionable(project_id: &str) -> CommandActionableMetadata {
     CommandActionableMetadata::default().with_next_action(
-        CommandNextAction::new("check deployment", format!("homeboy deploy {project_id} --check"))
-            .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            "check deployment",
+            format!("homeboy deploy {project_id} --check"),
+        )
+        .with_kind(CommandNextActionKind::Show),
     )
 }
 

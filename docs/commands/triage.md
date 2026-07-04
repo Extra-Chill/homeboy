@@ -121,5 +121,5 @@ homeboy triage component homeboy --path ./homeboy --failing-checks
 ## Related
 
 - [status](status.md)
-- [issues](issues.md)
+- [runs](runs.md)
 - [review](review.md)

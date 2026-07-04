@@ -79,7 +79,10 @@ pub struct ReviewCommandOutput {
     pub test: ReviewStage<TestCommandOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_profile: Option<ReviewStage<CiRunOutput>>,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<Value>,
 }
 

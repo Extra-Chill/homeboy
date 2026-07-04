@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{CmdResult, GlobalArgs};
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct ArtifactPostprocessArgs {
     /// Artifact postprocess plan JSON file, @file spec, or - for stdin.
     #[arg(value_name = "PLAN")]
@@ -61,7 +61,7 @@ pub fn run(
 
     Ok((
         ArtifactPostprocessCommandOutput {
-            command: "artifact-postprocess",
+            command: "runs.artifact.postprocess",
             plan_file: args.plan,
             artifact_root_id: args.artifact_root_id,
             input_root_id: args.input_root_id,

@@ -58,7 +58,10 @@ pub struct BenchCommandOutput {
     /// find the full evidence without scraping the `hints` array.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persisted_run: Option<BenchPersistedRun>,
-    #[serde(rename = "_homeboy_actionable", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actionable: Option<Value>,
 }
 

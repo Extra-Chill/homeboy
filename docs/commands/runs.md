@@ -21,9 +21,13 @@ homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
 homeboy runs artifact get <run-id> <artifact-id> [--runner <runner-id>] [--output <path>]
+homeboy runs artifact postprocess [OPTIONS] <PLAN>
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
 homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <fingerprint>] [--limit 100]
+homeboy runs findings reconcile <component> [--findings <path>|--from-output <command=path>] [--apply]
+homeboy runs findings reconcile-run <component> [--output-dir <dir>] [--apply]
+homeboy runs findings build --from-output <command=path> [--run-url <url>]
 homeboy runs finding <finding-id>
 homeboy runs latest-finding [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--tool <tool>] [--file <path>]
 homeboy runs export --run <run-id> --output <dir>
@@ -78,6 +82,8 @@ for generic runner, static HTML, and matrix examples.
 
 `homeboy runs artifact cleanup-persisted` plans cleanup for persisted local run artifacts and their database records. By default it is a dry run; pass `--apply` to delete planned artifact files/directories and remove their database rows.
 
+`homeboy runs artifact postprocess <PLAN>` runs a generic artifact postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract. The plan can be a JSON file, `@file` spec, or `-` for stdin. Use `--artifact-root-id` and `--input-root-id` to select named roots from the plan, and `--result <path>` to write the bare postprocess result contract to disk.
+
 `homeboy runs reconcile` marks orphaned `running` observation records stale. Treat it as a mutating maintenance command, not a reader.
 
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
@@ -87,7 +93,10 @@ or finding that matches the provided filters. `latest-run` is useful when automa
 starts from component/kind/status context instead of a known run id.
 
 `homeboy runs findings` lists recorded findings for a run, while `homeboy runs
-finding` reads one finding by id.
+finding` reads one finding by id. The `runs findings reconcile`, `reconcile-run`,
+and `build` subcommands normalize finding streams and reconcile them against an
+issue tracker from the evidence pillar. They default to dry-run planning; pass
+`--apply` on reconcile commands to mutate tracker state.
 
 `homeboy runs query` projects JSONPath expressions over imported run artifact
 rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or

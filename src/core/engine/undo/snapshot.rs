@@ -2,7 +2,7 @@
 //!
 //! Before any `--write` operation (audit fix, refactor rename/move/transform/decompose),
 //! callers snapshot all files that will be modified or created. After the operation,
-//! `homeboy undo` restores the snapshot — even if the working tree had uncommitted changes.
+//! `homeboy refactor undo` restores the snapshot — even if the working tree had uncommitted changes.
 //!
 //! Snapshots are stored at `~/.cache/homeboy/snapshots/<id>/` with a manifest.json
 //! and copies of original file contents. Created files are recorded with `original: null`

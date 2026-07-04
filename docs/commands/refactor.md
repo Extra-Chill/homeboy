@@ -6,6 +6,10 @@
 homeboy refactor <COMPONENT> --from <SOURCE>... [OPTIONS]
 homeboy refactor <COMPONENT> --all [OPTIONS]
 homeboy refactor <COMMAND>
+homeboy refactor refs <symbol> [--component <id>...] [--path <path>]
+homeboy refactor undo [--id <ID>]
+homeboy refactor undo list
+homeboy refactor undo delete <ID>
 ```
 
 ## Description
@@ -47,6 +51,29 @@ The refactor planner is source-driven and generic; CI is just one consumer of th
 ## Subcommands
 
 The following subcommands remain available for targeted refactors:
+
+### `refs`
+
+```sh
+homeboy refactor refs <symbol> [--component <id>...] [--components <id,id>] [--path <path>]
+homeboy refactor refs <symbol> [--scope code|config|all] [--context key|variable|parameter|all]
+```
+
+Read-only reference discovery for a symbol or term. The output separates code,
+docs, strings, and comments, and marks generated Homeboy-owned references such as
+`CHANGELOG.md` separately from actionable references.
+
+### `undo`
+
+```sh
+homeboy refactor undo [--id <ID>]
+homeboy refactor undo list
+homeboy refactor undo delete <ID>
+```
+
+Restore files from the latest or selected undo snapshot, list available
+snapshots, or delete a snapshot without restoring it. This is the snapshot
+restore path used by refactor/audit-fix flows.
 
 ### `rename`
 
@@ -187,5 +214,5 @@ In addition to content edits, the engine detects files and directories whose nam
 ## Related
 
 - [component](component.md)
-- [docs](docs.md) — embedded documentation topics and codebase maps
+- [self](self.md) — embedded documentation topics and codebase maps
 - [JSON output contract](../architecture/output-system.md)

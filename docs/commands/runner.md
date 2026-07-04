@@ -388,6 +388,8 @@ reports transport success and the endpoint payload always lives under
 `data.body`; runner clients require that shape and do not parse legacy direct
 `data` payloads.
 
+### `lifecycle`
+
 Runner lifecycle output is transport-neutral even when the underlying route is a
 direct daemon tunnel or a reverse broker. JSON consumers should prefer these
 generic contracts:

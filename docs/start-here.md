@@ -69,9 +69,9 @@ That JSON is the handoff point for CI, scheduled automation, and coding agents.
 The same docs are embedded in the binary:
 
 ```bash
-homeboy docs list
-homeboy docs index
-homeboy docs commands/commands-index
+homeboy self docs list
+homeboy self docs index
+homeboy self docs commands/commands-index
 ```
 
 ## What To Read Next

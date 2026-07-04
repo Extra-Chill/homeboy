@@ -5,8 +5,8 @@ Homeboy documentation is organized by reader intent. If you are new, start with 
 These docs are also embedded in the `homeboy` binary:
 
 ```bash
-homeboy docs list
-homeboy docs <topic>
+homeboy self docs list
+homeboy self docs <topic>
 ```
 
 ## Start Here

@@ -422,7 +422,7 @@ pub fn run_main_test_workflow(
         hints.push("Pass args to test runner: homeboy test <component> -- [args]".to_string());
     }
 
-    hints.push("Full options: homeboy docs commands/test".to_string());
+    hints.push("Full options: homeboy self docs commands/test".to_string());
 
     let hints = if hints.is_empty() { None } else { Some(hints) };
     let test_exit_code = match status {

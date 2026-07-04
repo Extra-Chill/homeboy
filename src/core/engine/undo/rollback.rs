@@ -1,6 +1,6 @@
 //! In-memory file rollback for per-chunk undo within a single operation.
 //!
-//! Unlike `UndoSnapshot` (which persists to disk for `homeboy undo`), this is
+//! Unlike `UndoSnapshot` (which persists to disk for `homeboy refactor undo`), this is
 //! ephemeral — used by the fixer's chunk verifier to rollback individual chunks
 //! that fail verification without affecting the persistent undo stack.
 //!

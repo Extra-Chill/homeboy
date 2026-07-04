@@ -725,7 +725,9 @@ fn map_execution(result: CmdResult<RunnerExecOutput>) -> CmdResult<RunnerCommand
     })
 }
 
-fn runner_exec_command_output(output: RunnerExecOutput) -> super::types::RunnerExecutionCommandOutput {
+fn runner_exec_command_output(
+    output: RunnerExecOutput,
+) -> super::types::RunnerExecutionCommandOutput {
     let actionable = output
         .mirror_run_id
         .as_ref()
@@ -738,14 +740,18 @@ fn runner_exec_command_output(output: RunnerExecOutput) -> super::types::RunnerE
         })
         .or_else(|| {
             output.job_id.as_ref().map(|job_id| {
-                let mut metadata = crate::commands::utils::response::CommandActionableMetadata::default();
-                metadata.refs.jobs.push(crate::commands::utils::response::CommandJobRef {
-                    id: job_id.clone(),
-                    kind: "runner_job".to_string(),
-                    source: "homeboy-runner-exec".to_string(),
-                    status_command: format!("homeboy activity show {job_id}"),
-                    watch_command: Some(format!("homeboy activity watch {job_id}")),
-                });
+                let mut metadata =
+                    crate::commands::utils::response::CommandActionableMetadata::default();
+                metadata
+                    .refs
+                    .jobs
+                    .push(crate::commands::utils::response::CommandJobRef {
+                        id: job_id.clone(),
+                        kind: "runner_job".to_string(),
+                        source: "homeboy-runner-exec".to_string(),
+                        status_command: format!("homeboy activity show {job_id}"),
+                        watch_command: Some(format!("homeboy activity watch {job_id}")),
+                    });
                 metadata.next_actions.push(
                     crate::commands::utils::response::CommandNextAction::new(
                         "show activity",

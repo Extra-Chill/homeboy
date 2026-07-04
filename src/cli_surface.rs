@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, artifact_postprocess, audit, audit_baseline, bench, build, ci,
-    cleanup, component, config, contract, daemon, db, deploy, extension, file, fleet, fuzz, git,
-    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
-    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
-    upgrade, worktree,
+    activity, agent_task, api, audit, audit_baseline, bench, build, ci, cleanup, component, config,
+    contract, daemon, db, deploy, extension, file, fleet, fuzz, git, lint, logs, observe, project,
+    refactor, release, report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack,
+    status, test, trace, triage, tunnel, upgrade, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -131,25 +130,16 @@ pub enum Commands {
     Config(config::ConfigArgs),
     /// Inspect, export, validate, and normalize Homeboy contract metadata
     Contract(contract::ContractArgs),
-    /// Run a generic artifact postprocess plan over persisted artifact roots
-    #[command(name = "artifact-postprocess")]
-    ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessArgs),
     /// Run the local-only HTTP API daemon
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
     Extension(extension::ExtensionArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
-    /// Display CLI documentation
-    Docs(crate::commands::docs::DocsArgs),
-    /// Print the recursive command safety, docs, and output manifest
-    Manifest(manifest::ManifestArgs),
     /// Remove declared reconstructable artifacts from managed worktrees
     Cleanup(cleanup::CleanupArgs),
     /// Git operations for components
     Git(git::GitArgs),
-    /// Reconcile findings against an issue tracker
-    Issues(issues::IssuesArgs),
     /// Run a local build quality gate for a component
     Build(build::BuildArgs),
     /// Plan release workflows
@@ -165,8 +155,6 @@ pub enum Commands {
     AuditBaseline(audit_baseline::AuditBaselineArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
-    /// Read-only reference discovery for a symbol or term
-    Refs(refs::RefsArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
@@ -184,8 +172,6 @@ pub enum Commands {
     SelfCmd(self_cmd::SelfArgs),
     /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
     Stack(stack::StackArgs),
-    /// Undo the last write operation (audit fix, refactor, etc.)
-    Undo(undo::UndoArgs),
     /// Make API requests to a project
     Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
@@ -573,15 +559,11 @@ mod entry_command_impls {
                 Commands::Component(_) => "component",
                 Commands::Config(_) => "config",
                 Commands::Contract(_) => "contract",
-                Commands::ArtifactPostprocess(_) => "artifact-postprocess",
                 Commands::Daemon(_) => "daemon",
                 Commands::Extension(_) => "extension",
                 Commands::Status(_) => "status",
-                Commands::Docs(_) => "docs",
-                Commands::Manifest(_) => "manifest",
                 Commands::Cleanup(_) => "cleanup",
                 Commands::Git(_) => "git",
-                Commands::Issues(_) => "issues",
                 Commands::Build(_) => "build",
                 Commands::Release(_) => "release",
                 Commands::Report(_) => "report",
@@ -589,7 +571,6 @@ mod entry_command_impls {
                 Commands::Audit(_) => "audit",
                 Commands::AuditBaseline(_) => "audit-baseline",
                 Commands::Refactor(_) => "refactor",
-                Commands::Refs(_) => "refs",
                 Commands::Rig(_) => "rig",
                 Commands::Runner(_) => "runner",
                 Commands::Runtime(_) => "runtime",
@@ -598,7 +579,6 @@ mod entry_command_impls {
                 Commands::Runs(_) => "runs",
                 Commands::SelfCmd(_) => "self",
                 Commands::Stack(_) => "stack",
-                Commands::Undo(_) => "undo",
                 Commands::Api(_) => "api",
                 Commands::Upgrade(_) => "upgrade",
             }

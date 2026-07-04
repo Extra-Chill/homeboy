@@ -4,7 +4,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
 use super::utils::{response as output, tty};
-use super::{docs, file, release, report, review, runner, runs, runtime, trace, GlobalArgs};
+use super::{file, release, report, review, runner, runs, runtime, self_cmd, trace, GlobalArgs};
 
 pub enum RawExecution {
     Handled(i32),
@@ -82,7 +82,7 @@ pub fn run(
 
 fn run_markdown(command: Commands, global: &GlobalArgs) -> RawCommandRun {
     match command {
-        Commands::Docs(args) => raw_stdout_only(docs::run_markdown(args)),
+        Commands::SelfCmd(args) => raw_stdout_only(self_cmd::run_docs_markdown(args)),
         Commands::Release(args) => match args.markdown_changelog_args() {
             Some(changelog_args) => {
                 raw_stdout_only(release::changelog::run_markdown(changelog_args))
@@ -167,7 +167,11 @@ mod tests {
     #[test]
     fn interactive_passthrough_has_no_raw_text_result() {
         let result = run(
-            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            Commands::Contract(crate::commands::contract::ContractArgs {
+                command: crate::commands::contract::ContractCommand::Manifest(
+                    crate::commands::manifest::ManifestArgs {},
+                ),
+            }),
             &GlobalArgs {},
             CommandRawOutputMode::InteractivePassthrough,
         );
@@ -178,7 +182,11 @@ mod tests {
     #[test]
     fn unsupported_plain_text_command_returns_output_mode_error() {
         let result = run(
-            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            Commands::Contract(crate::commands::contract::ContractArgs {
+                command: crate::commands::contract::ContractCommand::Manifest(
+                    crate::commands::manifest::ManifestArgs {},
+                ),
+            }),
             &GlobalArgs {},
             CommandRawOutputMode::PlainText,
         )

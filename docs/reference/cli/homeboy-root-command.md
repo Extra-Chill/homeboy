@@ -56,5 +56,5 @@ Automation that needs command safety, docs, output, and Lab metadata should use
 the first-class recursive manifest surface:
 
 ```sh
-homeboy manifest
+homeboy contract manifest
 ```

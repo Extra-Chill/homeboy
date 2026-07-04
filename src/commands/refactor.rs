@@ -254,6 +254,12 @@ enum RefactorCommand {
         #[command(flatten)]
         write_mode: WriteModeArgs,
     },
+
+    /// Read-only reference discovery for a symbol or term
+    Refs(crate::commands::refs::RefsArgs),
+
+    /// Undo the last write operation snapshot
+    Undo(crate::commands::undo::UndoArgs),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -404,6 +410,16 @@ pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResu
             target,
             write_mode,
         }) => operations_command::run_decompose(&file, &strategy, &target, write_mode.write),
+
+        Some(RefactorCommand::Refs(args)) => {
+            let (output, exit_code) = crate::commands::refs::run(args, _global)?;
+            Ok((RefactorOutput::Refs(output), exit_code))
+        }
+
+        Some(RefactorCommand::Undo(args)) => {
+            let (output, exit_code) = crate::commands::undo::run(args, _global)?;
+            Ok((RefactorOutput::Undo(output), exit_code))
+        }
     }
 }
 
@@ -528,6 +544,12 @@ pub enum RefactorOutput {
         dry_run: bool,
         applied: bool,
     },
+
+    #[serde(rename = "refactor.refs")]
+    Refs(crate::commands::refs::RefsOutput),
+
+    #[serde(rename = "refactor.undo")]
+    Undo(crate::commands::undo::UndoOutput),
 
     #[serde(rename = "refactor.bulk")]
     Bulk {

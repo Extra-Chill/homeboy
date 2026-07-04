@@ -28,7 +28,7 @@ Only update what needs correction. Preserve accurate existing content. Do not re
 
 ### 1. Build Source Context
 ```sh
-homeboy docs map <component>
+homeboy self docs map <component>
 ```
 
 Use the map output plus targeted source reads to understand the current code shape before editing documentation.

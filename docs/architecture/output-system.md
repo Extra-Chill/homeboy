@@ -4,8 +4,8 @@ Homeboy prints JSON to stdout for most commands.
 
 Exceptions:
 
-- `homeboy docs` prints raw markdown (or newline-delimited topic names for `homeboy docs list`).
-- `homeboy release changelog show` prints raw markdown by default; in JSON mode it returns JSON with a `content` field containing the markdown.
+- `homeboy self docs` prints raw markdown (or newline-delimited topic names for `homeboy self docs list`).
+- `homeboy changelog` (default show) prints raw markdown by default; in JSON mode it returns JSON with a `content` field containing the markdown.
 - `homeboy review --report pr-comment` prints a raw markdown PR-comment report.
 - `homeboy trace --report markdown` prints a raw markdown trace report.
 - `homeboy runs compare` prints raw markdown unless `--output` is provided.
@@ -299,5 +299,5 @@ Commands using this primitive:
 ## Related
 
 - [CI result JSON contract](ci-results-contract.md)
-- [Docs command JSON](../commands/docs.md)
+- [Self docs command JSON](../commands/self.md)
 - [Changelog command JSON](../commands/changelog.md)

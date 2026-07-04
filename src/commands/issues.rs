@@ -1,4 +1,4 @@
-//! `homeboy issues reconcile` — finding-stream → tracker reconciliation.
+//! `homeboy runs findings reconcile` — finding-stream → tracker reconciliation.
 //!
 //! See homeboy issue #1551 for the architectural framing. This is the CLI
 //! surface that the action's `auto-file-categorized-issues.sh` collapses
@@ -21,14 +21,14 @@ use homeboy::core::issues::{
 use super::parse_key_val;
 use super::CmdResult;
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct IssuesArgs {
     #[command(subcommand)]
-    command: IssuesCommand,
+    pub(crate) command: IssuesCommand,
 }
 
-#[derive(Subcommand)]
-enum IssuesCommand {
+#[derive(Subcommand, Clone)]
+pub(crate) enum IssuesCommand {
     /// Reconcile a finding stream against an issue tracker.
     ///
     /// Reads structured findings (from `homeboy audit --json-summary` or
@@ -144,6 +144,7 @@ enum IssuesCommand {
     },
 
     /// Convert native command output into the canonical reconcile input shape.
+    #[command(name = "build")]
     BuildFindings {
         /// Native Homeboy command output to normalize. Repeatable as
         /// `--from-output audit=/tmp/audit.json`.
@@ -164,7 +165,7 @@ pub enum IssuesCommandOutput {
     BuildFindings(ReconcileFindingsInput),
 }
 
-/// What the CLI emits for `homeboy issues reconcile`. Both dry-run and
+/// What the CLI emits for `homeboy runs findings reconcile`. Both dry-run and
 /// apply runs share this shape; `applied = false` means dry-run, no
 /// tracker calls were made.
 #[derive(Serialize)]
@@ -465,7 +466,7 @@ fn run_reconcile_run(
     }
 
     Ok(ReconcileRunOutput {
-        command: "issues.reconcile-run".to_string(),
+        command: "runs.findings.reconcile-run".to_string(),
         component_id,
         output_dir: output_dir.display().to_string(),
         applied: apply,
@@ -1033,7 +1034,7 @@ mod tests {
     #[test]
     fn reconcile_run_output_serializes_structured_json() {
         let output = ReconcileRunOutput {
-            command: "issues.reconcile-run".to_string(),
+            command: "runs.findings.reconcile-run".to_string(),
             component_id: "homeboy".to_string(),
             output_dir: "/tmp/homeboy-output".to_string(),
             applied: true,
@@ -1067,7 +1068,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "command": "issues.reconcile-run",
+                "command": "runs.findings.reconcile-run",
                 "component_id": "homeboy",
                 "output_dir": "/tmp/homeboy-output",
                 "applied": true,

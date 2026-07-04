@@ -79,6 +79,8 @@ pub enum ContractCommand {
     Normalize(ContractNormalizeArgs),
     /// Materialize generic contract envelopes from declarative inputs.
     Materialize(ContractMaterializeArgs),
+    /// Print the recursive command safety, docs, and output manifest.
+    Manifest(crate::commands::manifest::ManifestArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -103,6 +105,7 @@ pub enum ContractOutput {
     Validate(ContractValidateOutput),
     Normalize(ContractNormalizeOutput),
     Materialize(ContractMaterializeOutput),
+    Manifest(crate::commands::manifest::ManifestOutput),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -419,6 +422,8 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Materialize(args) => {
             Ok((ContractOutput::Materialize(materialize(args)?), 0))
         }
+        ContractCommand::Manifest(args) => crate::commands::manifest::run(args, _global)
+            .map(|(output, code)| (ContractOutput::Manifest(output), code)),
     }
 }
 
@@ -1277,7 +1282,7 @@ fn runner_workload_example() -> Value {
 fn runner_handoff_example() -> Value {
     json!({
         "schema": RUNNER_HANDOFF_ENVELOPE_SCHEMA,
-        "status": "handoff_complete",
+        "status": "succeeded",
         "execution_location": "runner:runner-1",
         "identity": {
             "runner_id": "runner-1",
@@ -1292,6 +1297,17 @@ fn runner_handoff_example() -> Value {
         "persisted_run_id": "run-1",
         "mirror_run_id": "run-1",
         "remote_cwd": "/home/runner/workspace",
+        "path_materialization_plan": {
+            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+            "entries": [{
+                "role": "primary_workspace",
+                "owner": "runner_exec.source_snapshot",
+                "local_path": "/local/project",
+                "remote_path": "/home/runner/workspace",
+                "materialization_mode": "snapshot",
+                "validation_status": "materialized"
+            }]
+        },
         "artifact_manifest": {
             "schema": RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
             "manifest_schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
@@ -1300,7 +1316,7 @@ fn runner_handoff_example() -> Value {
         "run_location_index": run_location_index_example(),
         "evidence": {
             "schema": "homeboy/runner-handoff-evidence/v1",
-            "status": "handoff_complete",
+            "status": "succeeded",
             "runner_id": "runner-1",
             "runner_job_id": "job-1",
             "run_id": "run-1",

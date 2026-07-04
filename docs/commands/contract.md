@@ -17,6 +17,7 @@ homeboy contract <COMMAND>
 - `validate <schema-id> --file <path>` - validate a JSON file against a registered contract
 - `normalize <kind>` - validate and normalize contract values from JSON input
 - `materialize <kind>` - assemble generic contract envelopes from declarative JSON input
+- `manifest` - print the recursive command safety, docs, output, and Lab metadata manifest
 
 ## Constants
 
@@ -50,6 +51,16 @@ homeboy contract export --dir ./contracts
 
 Writes contract registry, public output variants, and schema catalog JSON files
 for cross-language contract tests and automation.
+
+## Manifest
+
+```sh
+homeboy contract manifest
+```
+
+Prints the recursive command safety, docs, output, and Lab metadata manifest in
+the standard JSON envelope. Agents and automation should use this path when they
+need command safety metadata.
 
 ## Validate
 
