@@ -69,7 +69,7 @@ pub fn reconcile_runs(args: RunsReconcileArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
-pub(super) fn reconcile_owned_stale_running_runs(
+pub(crate) fn reconcile_owned_stale_running_runs(
     store: &ObservationStore,
     limit: i64,
 ) -> homeboy::core::Result<Vec<ReconciledRunSummary>> {
@@ -139,6 +139,10 @@ where
 }
 
 fn ownerless_running_is_stale(run: &RunRecord) -> bool {
+    if runner_backed_run(run) {
+        return false;
+    }
+
     chrono::DateTime::parse_from_rfc3339(&run.started_at)
         .map(|started_at| {
             chrono::Utc::now()
@@ -147,6 +151,28 @@ fn ownerless_running_is_stale(run: &RunRecord) -> bool {
                 >= OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
         })
         .unwrap_or(false)
+}
+
+fn runner_backed_run(run: &RunRecord) -> bool {
+    metadata_string(&run.metadata_json, &["runner_job_id", "job_id"]).is_some()
+        || run
+            .metadata_json
+            .get("identity")
+            .and_then(|identity| metadata_string(identity, &["runner_job_id", "job_id"]))
+            .is_some()
+        || run
+            .metadata_json
+            .get("lab")
+            .and_then(|lab| lab.get("remote_job"))
+            .and_then(|remote_job| metadata_string(remote_job, &["id", "job_id"]))
+            .is_some()
+}
+
+fn metadata_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
 }
 
 pub fn running_status_note(run: &RunRecord) -> Option<String> {

@@ -31,7 +31,7 @@ mod latest;
 mod loop_sync;
 mod proof;
 mod query;
-mod reconcile;
+pub(crate) mod reconcile;
 mod refs;
 mod remote;
 mod remote_artifact;

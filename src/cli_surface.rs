@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    agent_task, api, artifact_postprocess, audit, audit_baseline, auth, bench, build, changelog,
-    changes, ci, cleanup, component, config, contract, daemon, db, deploy, extension, file, fleet,
-    fuzz, git, http, issues, lint, logs, manifest, observe, project, refactor, refs, release,
-    report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace,
-    triage, tunnel, undo, upgrade, version, worktree,
+    activity, agent_task, api, artifact_postprocess, audit, audit_baseline, auth, bench, build,
+    changelog, changes, ci, cleanup, component, config, contract, daemon, db, deploy, extension,
+    file, fleet, fuzz, git, http, issues, lint, logs, manifest, observe, project, refactor, refs,
+    release, report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status,
+    test, trace, triage, tunnel, undo, upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -83,6 +83,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Unified view of active and recently finished Homeboy work
+    Activity(activity::ActivityArgs),
     /// Run generic agent task plans
     #[command(name = "agent-task")]
     AgentTask(agent_task::AgentTaskArgs),
@@ -559,6 +561,7 @@ mod entry_command_impls {
     impl Commands {
         pub fn top_level_name(&self) -> &'static str {
             match self {
+                Commands::Activity(_) => "activity",
                 Commands::AgentTask(_) => "agent-task",
                 Commands::Project(_) => "project",
                 Commands::Ssh(_) => "ssh",
