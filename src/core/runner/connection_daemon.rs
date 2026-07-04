@@ -18,6 +18,12 @@ use crate::core::runner::daemon_freshness::repair_or_fail;
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
+struct DaemonVersionResponse {
+    body: Value,
+    raw_body: String,
+}
+
 pub(super) fn connect_remote_daemon(
     server: &Server,
     client: &SshClient,
@@ -168,35 +174,43 @@ pub(super) fn normalize_homeboy_version_owned(version: &str) -> String {
 }
 
 pub(super) fn daemon_http_identity(local_url: &str) -> std::result::Result<String, String> {
-    let body = daemon_http_body(local_url)?;
-    daemon_identity_from_body(&body)
+    let response = daemon_http_body(local_url)?;
+    daemon_identity_from_body(&response.body)
         .filter(|identity| !identity.trim().is_empty())
         .map(|identity| identity.trim().to_string())
         .ok_or_else(|| {
-            "remote daemon version response did not include a build identity".to_string()
+            format!(
+                "remote daemon version response did not include a build identity; raw body: {}",
+                response_body_excerpt(&response.raw_body)
+            )
         })
 }
 
 pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String, String> {
-    let body = daemon_http_body(local_url)?;
-    daemon_version_from_body(&body)
+    let response = daemon_http_body(local_url)?;
+    daemon_version_from_body(&response.body)
         .filter(|version| !version.trim().is_empty())
         .map(|version| version.trim().to_string())
-        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
+        .ok_or_else(|| {
+            format!(
+                "remote daemon version response did not include a version; raw body: {}",
+                response_body_excerpt(&response.raw_body)
+            )
+        })
 }
 
 pub(super) fn daemon_http_runtime_stale_paths(
     local_url: &str,
 ) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
-    let body = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_stale_paths_from_body(&body))
+    let response = daemon_http_body(local_url)?;
+    Ok(daemon_runtime_stale_paths_from_body(&response.body))
 }
 
 pub(super) fn daemon_http_runtime_loaded_paths(
     local_url: &str,
 ) -> std::result::Result<BTreeMap<String, String>, String> {
-    let body = daemon_http_body(local_url)?;
-    Ok(daemon_runtime_loaded_paths_from_body(&body))
+    let response = daemon_http_body(local_url)?;
+    Ok(daemon_runtime_loaded_paths_from_body(&response.body))
 }
 
 pub(super) fn daemon_http_freshness(
@@ -207,7 +221,7 @@ pub(super) fn daemon_http_freshness(
     daemon_freshness_report(local_url, expected_version, expected_identity)
 }
 
-fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
+fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionResponse, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -220,24 +234,47 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<Value, String> {
     let body_text = response
         .text()
         .map_err(|err| format!("read remote daemon version response: {err}"))?;
-    let body: Value = parse_json_from_mixed_stdout(&body_text)
-        .map_err(|err| format!("parse remote daemon version response: {err}"))?;
+    let body: Value = parse_json_from_mixed_stdout(&body_text).map_err(|err| {
+        format!(
+            "parse remote daemon version response: {err}; raw body: {}",
+            response_body_excerpt(&body_text)
+        )
+    })?;
     if status_code >= 400 {
         return Err(format!(
             "remote daemon version request failed with HTTP {}: {}",
             status_code, body
         ));
     }
-    Ok(body)
+    Ok(DaemonVersionResponse {
+        body,
+        raw_body: body_text,
+    })
 }
 
 pub(super) fn daemon_version_from_body(body: &Value) -> Option<&str> {
-    body.get("version").and_then(Value::as_str)
+    body.get("version")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/data/version").and_then(Value::as_str))
 }
 
 pub(super) fn daemon_identity_from_body(body: &Value) -> Option<&str> {
     body.pointer("/build_identity/display")
         .and_then(Value::as_str)
+        .or_else(|| {
+            body.pointer("/data/build_identity/display")
+                .and_then(Value::as_str)
+        })
+}
+
+fn response_body_excerpt(body: &str) -> String {
+    const LIMIT: usize = 2000;
+    let trimmed = body.trim();
+    if trimmed.len() <= LIMIT {
+        return trimmed.to_string();
+    }
+    let excerpt: String = trimmed.chars().take(LIMIT).collect();
+    format!("{excerpt}...<truncated>")
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,11 +327,16 @@ fn daemon_freshness_report(
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    let body = daemon_http_body(local_url)?;
+    let DaemonVersionResponse { body, raw_body } = daemon_http_body(local_url)?;
     if let Some(report) = daemon_freshness_from_body(&body) {
         if report.fresh
-            && daemon_version_identity_mismatch(&body, expected_version, expected_identity)?
-                .is_none()
+            && daemon_version_identity_mismatch(
+                &body,
+                &raw_body,
+                expected_version,
+                expected_identity,
+            )?
+            .is_none()
         {
             return Ok(report);
         }
@@ -307,7 +349,8 @@ fn daemon_freshness_report(
         }
         return Ok(report);
     }
-    let mismatch = daemon_version_identity_mismatch(&body, expected_version, expected_identity)?;
+    let mismatch =
+        daemon_version_identity_mismatch(&body, &raw_body, expected_version, expected_identity)?;
     Ok(DaemonFreshnessReport {
         fresh: mismatch.is_none(),
         stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
@@ -322,29 +365,38 @@ fn daemon_freshness_report(
 
 fn daemon_version_identity_mismatch(
     body: &Value,
+    raw_body: &str,
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<Option<String>, String> {
-    if daemon_lease_id_from_body(&body).is_none() {
+    if daemon_lease_id_from_body(body).is_none() {
         return Ok(Some(
             "remote daemon version response did not include a session lease".to_string(),
         ));
     }
-    let running_version = daemon_version_from_body(&body)
+    let running_version = daemon_version_from_body(body)
         .filter(|version| !version.trim().is_empty())
         .map(|version| version.trim().to_string())
-        .ok_or_else(|| "remote daemon version response did not include a version".to_string())?;
+        .ok_or_else(|| {
+            format!(
+                "remote daemon version response did not include a version; raw body: {}",
+                response_body_excerpt(raw_body)
+            )
+        })?;
     if !versions_match(&running_version, expected_version) {
         return Ok(Some(format!(
             "version {running_version} != configured runner version {expected_version}"
         )));
     }
 
-    let running_identity = daemon_identity_from_body(&body)
+    let running_identity = daemon_identity_from_body(body)
         .filter(|identity| !identity.trim().is_empty())
         .map(|identity| identity.trim().to_string())
         .ok_or_else(|| {
-            "remote daemon version response did not include a build identity".to_string()
+            format!(
+                "remote daemon version response did not include a build identity; raw body: {}",
+                response_body_excerpt(raw_body)
+            )
         })?;
     if !versions_match(&running_identity, expected_identity) {
         return Ok(Some(format!(
