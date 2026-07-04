@@ -46,7 +46,7 @@ impl SharedAssetDeclaration {
 }
 
 pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
-    let declared = std::fs::read_to_string(source_root.join("homeboy-extension-root.json"))
+    std::fs::read_to_string(source_root.join("homeboy-extension-root.json"))
         .ok()
         .and_then(|raw| serde_json::from_str::<ExtensionRootManifest>(&raw).ok())
         .map(|manifest| {
@@ -58,18 +58,7 @@ pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
                 .filter(|path| !path.is_empty())
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
-    if !declared.is_empty() {
-        return declared;
-    }
-
-    vec![
-        "scripts/lib".to_string(),
-        "dependency-adapters".to_string(),
-        "agent-runtimes".to_string(),
-        "runtime-agent-ci".to_string(),
-        "agent-task-contracts".to_string(),
-    ]
+        .unwrap_or_default()
 }
 
 pub(super) fn install_configured_extension(
@@ -263,11 +252,9 @@ enum SharedAssetMode {
     /// back to.
     Copy,
     /// Symlink the install target to its live source tree. Used for linked/dev
-    /// installs (local-path source): edits to the shared monorepo assets
-    /// (`agent-runtimes`, `runtime-agent-ci`, `scripts/lib`,
-    /// `dependency-adapters`, `agent-task-contracts`) in the source worktree
-    /// are visible to the live install immediately, with no reinstall or
-    /// release. See #6396 / #1954.
+    /// installs (local-path source): edits to declared shared monorepo assets
+    /// in the source worktree are visible to the live install immediately, with
+    /// no reinstall or release. See #6396 / #1954.
     Symlink,
 }
 
@@ -375,11 +362,9 @@ fn symlink_shared_asset(source: &Path, target: &Path, shared_dir: &str) -> Resul
 
 /// Materialize shared monorepo assets for a linked (local-path) install.
 ///
-/// Linked installs symlink the shared trees to their live source so that edits
-/// to `agent-runtimes`, `runtime-agent-ci`, `scripts/lib`,
-/// `dependency-adapters`, and `agent-task-contracts` in the source worktree
-/// take effect immediately, enabling rapid local iteration without a reinstall
-/// or release.
+/// Linked installs symlink declared shared trees to their live source so edits
+/// in the source worktree take effect immediately, enabling rapid local
+/// iteration without a reinstall or release.
 pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,

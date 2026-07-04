@@ -255,6 +255,20 @@ fn copy_shared_refresh_assets(source_root: Option<&Path>, durable_root: &Path) -
         return Ok(());
     };
 
+    let root_manifest = source_root.join("homeboy-extension-root.json");
+    if root_manifest.is_file() {
+        std::fs::copy(
+            &root_manifest,
+            durable_root.join("homeboy-extension-root.json"),
+        )
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("copy extension root manifest for durable refresh".to_string()),
+            )
+        })?;
+    }
+
     for shared_dir in install_sources::shared_assets_for_root(source_root) {
         let source = source_root.join(&shared_dir);
         if source.is_dir() {
@@ -450,6 +464,39 @@ mod tests {
             ),
         )
         .expect("component config");
+    }
+
+    fn write_shared_asset_manifest(root: &Path, paths: &[&str]) {
+        let shared_assets = paths
+            .iter()
+            .map(|path| format!(r#"    {{ "path": "{}" }}"#, path))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        fs::write(
+            root.join("homeboy-extension-root.json"),
+            format!(
+                r#"{{
+  "shared_assets": [
+{}
+  ]
+}}"#,
+                shared_assets
+            ),
+        )
+        .expect("extension root manifest");
+    }
+
+    fn write_declared_runtime_shared_assets(root: &Path) {
+        write_shared_asset_manifest(
+            root,
+            &[
+                "agent-runtimes",
+                "runtime-agent-ci",
+                "agent-task-contracts",
+                "dependency-adapters",
+            ],
+        );
+        write_shared_runtime_fixture(root);
     }
 
     fn write_shared_runtime_fixture(root: &Path) {
@@ -749,7 +796,7 @@ exec '{}' "$@"
             let home = home.path();
             let lab_source = home.join("Developer/_lab_workspaces/run-123");
             write_extension_fixture(&lab_source, "alpha");
-            write_shared_runtime_fixture(&lab_source);
+            write_declared_runtime_shared_assets(&lab_source);
 
             let result = refresh(
                 &lab_source.join("alpha").to_string_lossy(),
@@ -940,12 +987,13 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn cloned_monorepo_install_materializes_shared_scripts() {
+    fn cloned_monorepo_install_materializes_declared_shared_scripts() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "rust");
+            write_shared_asset_manifest(&source, &["scripts/lib"]);
             let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
             fs::create_dir_all(shared_helper.parent().expect("helper parent"))
                 .expect("shared scripts dir");
@@ -972,13 +1020,13 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn cloned_monorepo_install_materializes_shared_agent_runtimes() {
+    fn cloned_monorepo_install_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
             let remote = match prepare_git_repo(&source) {
                 Some(remote) => remote,
                 None => return,
@@ -1014,7 +1062,7 @@ exec '{}' "$@"
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
             let remote = match prepare_git_repo(&source) {
                 Some(remote) => remote,
                 None => return,
@@ -1036,7 +1084,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn extracted_monorepo_update_materializes_shared_agent_runtimes() {
+    fn extracted_monorepo_update_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1049,11 +1097,8 @@ exec '{}' "$@"
 
             install(&remote_url.to_string_lossy(), Some("wordpress"))
                 .expect("install cloned extension");
-            assert!(!home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
-                .exists());
 
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
             assert!(commit_all(&source, "add runtime package"));
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
 
@@ -1075,12 +1120,13 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_monorepo_install_materializes_shared_scripts() {
+    fn linked_monorepo_install_materializes_declared_shared_scripts() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
+            write_shared_asset_manifest(&source, &["scripts/lib"]);
             let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
             fs::create_dir_all(shared_helper.parent().expect("helper parent"))
                 .expect("shared scripts dir");
@@ -1106,13 +1152,13 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_monorepo_install_materializes_shared_agent_runtimes() {
+    fn linked_monorepo_install_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
 
             install(
                 &source.join("wordpress").to_string_lossy(),
@@ -1142,6 +1188,16 @@ exec '{}' "$@"
             write_extension_fixture(&source, "wordpress");
             write_shared_runtime_fixture(&source);
             let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
+            write_shared_asset_manifest(
+                &source,
+                &[
+                    "agent-runtimes",
+                    "runtime-agent-ci",
+                    "agent-task-contracts",
+                    "dependency-adapters",
+                    "scripts/lib",
+                ],
+            );
             fs::create_dir_all(shared_helper.parent().expect("helper parent"))
                 .expect("shared scripts dir");
             fs::write(&shared_helper, "noop() { :; }\n").expect("shared helper");
@@ -1201,7 +1257,7 @@ exec '{}' "$@"
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
 
             install(
                 &source.join("wordpress").to_string_lossy(),
@@ -1232,13 +1288,13 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_monorepo_root_install_with_id_materializes_shared_agent_runtimes() {
+    fn linked_monorepo_root_install_with_id_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
             write_extension_fixture(&source, "wordpress");
-            write_shared_runtime_fixture(&source);
+            write_declared_runtime_shared_assets(&source);
 
             install(&source.to_string_lossy(), Some("wordpress"))
                 .expect("install linked extension from monorepo root");

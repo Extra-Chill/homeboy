@@ -525,6 +525,31 @@ mod tests {
         .expect("runtime agent ci helper");
     }
 
+    fn write_shared_asset_manifest(root: &Path, paths: &[&str]) {
+        let shared_assets = paths
+            .iter()
+            .map(|path| format!(r#"    {{ "path": "{}" }}"#, path))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        fs::write(
+            root.join("homeboy-extension-root.json"),
+            format!(
+                r#"{{
+  "shared_assets": [
+{}
+  ]
+}}"#,
+                shared_assets
+            ),
+        )
+        .expect("extension root manifest");
+    }
+
+    fn write_declared_runtime_shared_assets(root: &Path) {
+        write_shared_asset_manifest(root, &["agent-runtimes", "runtime-agent-ci"]);
+        write_shared_runtime_fixture(root);
+    }
+
     fn run_git(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")
             .args(args)
@@ -725,14 +750,14 @@ mod tests {
     }
 
     #[test]
-    fn relink_materializes_shared_agent_runtimes() {
+    fn relink_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
             let new_source = home.join("new-source");
             write_extension_fixture(&old_source, "wordpress");
             write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
-            write_shared_runtime_fixture(&new_source);
+            write_declared_runtime_shared_assets(&new_source);
 
             install(
                 &old_source.join("wordpress").to_string_lossy(),
@@ -753,14 +778,14 @@ mod tests {
     }
 
     #[test]
-    fn replace_from_monorepo_root_with_id_materializes_shared_agent_runtimes() {
+    fn replace_from_monorepo_root_with_id_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
             let new_source = home.join("new-source");
             write_extension_fixture(&old_source, "wordpress");
             write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
-            write_shared_runtime_fixture(&new_source);
+            write_declared_runtime_shared_assets(&new_source);
 
             install(
                 &old_source.join("wordpress").to_string_lossy(),
