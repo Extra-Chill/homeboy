@@ -120,6 +120,55 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
 }
 
 #[test]
+fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
+    crate::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-ttl","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-ttl",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        let metadata_path = Path::new(&synced.remote_path).join(".homeboy/runner-workspace.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                .expect("metadata json");
+        metadata["resource_lifecycle"]["cleanup_policy"] = serde_json::json!("delete_after_ttl");
+        metadata["resource_lifecycle"]["ttl"] = serde_json::json!("2020-01-01T00:00:00Z");
+        fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-ttl",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates[0].remote_path, synced.remote_path);
+        assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
+        assert!(Path::new(&synced.remote_path).exists());
+        assert!(source.exists());
+    });
+}
+
+#[test]
 fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

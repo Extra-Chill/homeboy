@@ -7,8 +7,8 @@ use base64::Engine;
 use crate::core::engine::temp;
 use crate::core::error::{Error, Result};
 use crate::core::resource_lifecycle_index::{
-    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycle, ResourceLifecycleRecord,
-    ResourceLifecycleResourceStatus,
+    resource_lifecycle_path_ttl_expired_at, ResourceCleanupPolicy, ResourceEvidenceRetention,
+    ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
 
 use super::super::validation_dependencies::{
@@ -1173,9 +1173,10 @@ fn classify_local_candidate(
     let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
         return Ok(None);
     };
-    if Path::new(source_path).exists() {
+    let reason = prune_candidate_reason(&metadata, path, source_path)?;
+    let Some(reason) = reason else {
         return Ok(None);
-    }
+    };
     Ok(Some(RunnerWorkspacePruneEntry {
         remote_path: path.display().to_string(),
         source_path: source_path.to_string(),
@@ -1197,8 +1198,44 @@ fn classify_local_candidate(
             .map(str::to_string),
         age_seconds,
         bytes: directory_size(path)?,
-        reason: "source_path_missing".to_string(),
+        reason,
     }))
+}
+
+fn prune_candidate_reason(
+    metadata: &serde_json::Value,
+    path: &Path,
+    source_path: &str,
+) -> Result<Option<String>> {
+    if let Some(resource) = metadata.get("resource_lifecycle") {
+        let resource: ResourceLifecycleRecord =
+            serde_json::from_value(resource.clone()).map_err(|err| {
+                Error::internal_json(err.to_string(), Some(path.display().to_string()))
+            })?;
+        if matches!(
+            resource.cleanup_policy,
+            ResourceCleanupPolicy::DeleteAfterTtl
+        ) {
+            if let Some(ttl) = resource.ttl.as_deref() {
+                let modified = fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some("read workspace mtime".to_string()),
+                        )
+                    })?;
+                if resource_lifecycle_path_ttl_expired_at(ttl, modified, chrono::Utc::now()) {
+                    return Ok(Some("resource_ttl_expired".to_string()));
+                }
+            }
+        }
+    }
+
+    if !Path::new(source_path).exists() {
+        return Ok(Some("source_path_missing".to_string()));
+    }
+    Ok(None)
 }
 
 fn prune_candidates_ssh(
@@ -1234,9 +1271,10 @@ fn prune_candidates_ssh(
         let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
             continue;
         };
-        if Path::new(source_path).exists() {
+        let reason = prune_candidate_reason_from_decoded_metadata(&metadata, age_seconds);
+        let Some(reason) = reason else {
             continue;
-        }
+        };
         candidates.push(RunnerWorkspacePruneEntry {
             remote_path,
             source_path: source_path.to_string(),
@@ -1258,7 +1296,7 @@ fn prune_candidates_ssh(
                 .map(str::to_string),
             age_seconds,
             bytes,
-            reason: "source_path_missing".to_string(),
+            reason,
         });
     }
     candidates.sort_by(|a, b| {
@@ -1267,6 +1305,32 @@ fn prune_candidates_ssh(
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
     });
     Ok(candidates)
+}
+
+fn prune_candidate_reason_from_decoded_metadata(
+    metadata: &serde_json::Value,
+    age_seconds: u64,
+) -> Option<String> {
+    if let Some(resource) = metadata.get("resource_lifecycle") {
+        if resource
+            .get("cleanup_policy")
+            .and_then(|value| value.as_str())
+            == Some("delete_after_ttl")
+        {
+            if let Some(ttl) = resource.get("ttl").and_then(|value| value.as_str()) {
+                let modified = std::time::SystemTime::now()
+                    .checked_sub(std::time::Duration::from_secs(age_seconds))?;
+                if resource_lifecycle_path_ttl_expired_at(ttl, modified, chrono::Utc::now()) {
+                    return Some("resource_ttl_expired".to_string());
+                }
+            }
+        }
+    }
+
+    let source_path = metadata
+        .get("local_path")
+        .and_then(|value| value.as_str())?;
+    (!Path::new(source_path).exists()).then(|| "source_path_missing".to_string())
 }
 
 pub(crate) fn prune_scan_command(root: &str, min_age: u64) -> String {

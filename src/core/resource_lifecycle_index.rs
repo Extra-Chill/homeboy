@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,13 @@ pub fn resource_lifecycle_record_is_actionable(record: &ResourceLifecycleRecord)
 }
 
 pub fn resource_lifecycle_record_is_cleanup_eligible(record: &ResourceLifecycleRecord) -> bool {
+    resource_lifecycle_record_is_cleanup_eligible_at(record, chrono::Utc::now())
+}
+
+pub fn resource_lifecycle_record_is_cleanup_eligible_at(
+    record: &ResourceLifecycleRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
     if matches!(record.status, ResourceLifecycleResourceStatus::Cleaned) {
         return false;
     }
@@ -179,15 +187,71 @@ pub fn resource_lifecycle_record_is_cleanup_eligible(record: &ResourceLifecycleR
         return true;
     }
 
+    if matches!(record.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl) {
+        return resource_lifecycle_ttl_expired_at(record, now).unwrap_or(false);
+    }
+
     matches!(
         record.status,
         ResourceLifecycleResourceStatus::CleanupPending
     ) || matches!(
         record.cleanup_policy,
-        ResourceCleanupPolicy::DeleteAfterTtl
-            | ResourceCleanupPolicy::DeleteOnSuccess
-            | ResourceCleanupPolicy::DeleteOnTerminal
+        ResourceCleanupPolicy::DeleteOnSuccess | ResourceCleanupPolicy::DeleteOnTerminal
     )
+}
+
+pub fn resource_lifecycle_ttl_expired_at(
+    record: &ResourceLifecycleRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<bool> {
+    let ttl = record.ttl.as_deref()?;
+    if let Ok(deadline) = chrono::DateTime::parse_from_rfc3339(ttl) {
+        return Some(now >= deadline.with_timezone(&chrono::Utc));
+    }
+
+    let ttl_seconds = parse_resource_lifecycle_ttl_seconds(ttl)?;
+    let modified = fs::metadata(&record.path)
+        .and_then(|metadata| metadata.modified())
+        .ok()?;
+    let modified = chrono::DateTime::<chrono::Utc>::from(modified);
+    Some(now.signed_duration_since(modified).num_seconds() >= ttl_seconds as i64)
+}
+
+pub fn resource_lifecycle_path_ttl_expired_at(
+    ttl: &str,
+    modified: SystemTime,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if let Ok(deadline) = chrono::DateTime::parse_from_rfc3339(ttl) {
+        return now >= deadline.with_timezone(&chrono::Utc);
+    }
+    let Some(ttl_seconds) = parse_resource_lifecycle_ttl_seconds(ttl) else {
+        return false;
+    };
+    let modified = chrono::DateTime::<chrono::Utc>::from(modified);
+    now.signed_duration_since(modified).num_seconds() >= ttl_seconds as i64
+}
+
+fn parse_resource_lifecycle_ttl_seconds(ttl: &str) -> Option<u64> {
+    let ttl = ttl.trim();
+    if ttl.is_empty() {
+        return None;
+    }
+    if let Some(seconds) = ttl.strip_suffix('s').or_else(|| ttl.strip_suffix('S')) {
+        return seconds.parse::<u64>().ok();
+    }
+    let value = ttl.strip_prefix('P')?;
+    if let Some(days) = value.strip_suffix('D') {
+        return days.parse::<u64>().ok().map(|days| days * 24 * 60 * 60);
+    }
+    let time = value.strip_prefix('T')?;
+    if let Some(hours) = time.strip_suffix('H') {
+        return hours.parse::<u64>().ok().map(|hours| hours * 60 * 60);
+    }
+    if let Some(minutes) = time.strip_suffix('M') {
+        return minutes.parse::<u64>().ok().map(|minutes| minutes * 60);
+    }
+    time.strip_suffix('S')?.parse::<u64>().ok()
 }
 
 pub fn resource_lifecycle_cleanup_path(
@@ -341,6 +405,7 @@ pub fn resource_lifecycle_index_from_artifacts(
 pub fn transition_preserved_runner_workspaces_to_cleanup_pending(
     index: &mut ResourceLifecycleIndex,
     run_id: &str,
+    default_ttl: &str,
 ) {
     for record in &mut index.resources {
         if record.run_id == run_id
@@ -350,7 +415,8 @@ pub fn transition_preserved_runner_workspaces_to_cleanup_pending(
             && matches!(record.status, ResourceLifecycleResourceStatus::Active)
         {
             record.cleanup_policy = ResourceCleanupPolicy::DeleteAfterTtl;
-            record.ttl.get_or_insert_with(|| "P7D".to_string());
+            record.ttl.get_or_insert_with(|| default_ttl.to_string());
+            record.cleanup_intent = ResourceCleanupIntent::Apply;
             record.status = ResourceLifecycleResourceStatus::CleanupPending;
         }
     }
@@ -422,7 +488,7 @@ mod tests {
             path: "/tmp/homeboy/run-1/workspace".to_string(),
             root_bound: None,
             kind: "workspace".to_string(),
-            ttl: Some("P7D".to_string()),
+            ttl: Some("2020-01-01T00:00:00Z".to_string()),
             cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
             evidence_retention: ResourceEvidenceRetention::Manifest,
             cleanup_intent: ResourceCleanupIntent::DryRun,
@@ -544,7 +610,7 @@ mod tests {
             &index.resources[0]
         ));
 
-        transition_preserved_runner_workspaces_to_cleanup_pending(&mut index, "run-1");
+        transition_preserved_runner_workspaces_to_cleanup_pending(&mut index, "run-1", "P7D");
 
         assert_eq!(
             index.resources[0].cleanup_policy,
@@ -552,11 +618,39 @@ mod tests {
         );
         assert_eq!(index.resources[0].ttl.as_deref(), Some("P7D"));
         assert_eq!(
+            index.resources[0].cleanup_intent,
+            ResourceCleanupIntent::Apply
+        );
+        assert_eq!(
             index.resources[0].status,
             ResourceLifecycleResourceStatus::CleanupPending
         );
         assert!(resource_lifecycle_record_is_cleanup_eligible(
             &index.resources[0]
+        ));
+    }
+
+    #[test]
+    fn delete_after_ttl_is_cleanup_eligible_only_after_path_age_expires() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let resource_path = tempdir.path().join("resource");
+        std::fs::write(&resource_path, "generated").expect("resource");
+        let resource = ResourceLifecycleRecord {
+            path: resource_path.display().to_string(),
+            ttl: Some("P1D".to_string()),
+            cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
+            status: ResourceLifecycleResourceStatus::CleanupPending,
+            ..record()
+        };
+        let now = chrono::Utc::now();
+
+        assert!(!resource_lifecycle_record_is_cleanup_eligible_at(
+            &resource, now
+        ));
+        assert!(resource_lifecycle_path_ttl_expired_at(
+            "P1D",
+            SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60),
+            now
         ));
     }
 

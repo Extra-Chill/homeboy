@@ -498,11 +498,23 @@ fn apply_terminal_workspace_transitions(
             continue;
         };
         if is_terminal_run_status(&run.status) {
-            transition_preserved_runner_workspaces_to_cleanup_pending(index, &run_id);
+            transition_preserved_runner_workspaces_to_cleanup_pending(
+                index,
+                &run_id,
+                default_runner_workspace_ttl().as_str(),
+            );
         }
     }
 
     Ok(())
+}
+
+fn default_runner_workspace_ttl() -> String {
+    homeboy::core::defaults::load_config()
+        .lab
+        .runner_workspace_ttl
+        .filter(|ttl| !ttl.trim().is_empty())
+        .unwrap_or_else(|| "P7D".to_string())
 }
 
 fn is_terminal_run_status(status: &str) -> bool {
@@ -570,7 +582,7 @@ fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
             path: "/tmp/homeboy/sample-run-1/workspace".to_string(),
             root_bound: Some("/tmp/homeboy/sample-run-1".to_string()),
             kind: "workspace".to_string(),
-            ttl: Some("P7D".to_string()),
+            ttl: Some("2020-01-01T00:00:00Z".to_string()),
             cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
             evidence_retention: ResourceEvidenceRetention::Manifest,
             cleanup_intent: Default::default(),
@@ -602,7 +614,7 @@ mod tests {
             path: "/tmp/resource".to_string(),
             root_bound: None,
             kind: "workspace".to_string(),
-            ttl: Some("P1D".to_string()),
+            ttl: Some("2020-01-01T00:00:00Z".to_string()),
             cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
             evidence_retention: ResourceEvidenceRetention::Metadata,
             cleanup_intent: ResourceCleanupIntent::DryRun,
@@ -988,6 +1000,7 @@ mod tests {
             ResourceCleanupPolicy::DeleteAfterTtl
         );
         assert_eq!(transitioned.ttl.as_deref(), Some("P7D"));
+        assert_eq!(transitioned.cleanup_intent, ResourceCleanupIntent::Apply);
         assert_eq!(
             transitioned.status,
             ResourceLifecycleResourceStatus::CleanupPending
