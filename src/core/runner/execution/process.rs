@@ -4,7 +4,9 @@ use std::path::Path;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::redaction::{redact_argv, RedactionPolicy};
-use crate::core::runner_execution_envelope::PATH_MATERIALIZATION_MODE_EXISTING_REMOTE;
+use crate::core::runner_execution_envelope::{
+    PathMaterializationPlan, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+};
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
@@ -30,6 +32,7 @@ pub(super) fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutpu
         plan.command,
         output,
         Some(plan.source_snapshot),
+        None,
         plan.require_paths,
         &plan.env,
         &[],
@@ -43,6 +46,7 @@ pub(super) fn exec_diagnostic_ssh(
     env: HashMap<String, String>,
     secret_env_names: &[String],
     require_paths: Vec<String>,
+    path_materialization_plan: Option<PathMaterializationPlan>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -88,6 +92,7 @@ pub(super) fn exec_diagnostic_ssh(
             capture: None,
         },
         Some(source_snapshot),
+        path_materialization_plan,
         require_paths,
         &redaction_env,
         &[],
@@ -505,6 +510,7 @@ pub(super) fn exec_output(
     command: Vec<String>,
     output: ProcessOutput,
     source_snapshot: Option<SourceSnapshot>,
+    path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
     redaction_env: &HashMap<String, String>,
     secret_env_names: &[String],
@@ -532,6 +538,7 @@ pub(super) fn exec_output(
         None,
         None,
         source_snapshot.as_ref(),
+        path_materialization_plan,
         &require_paths,
         &provenance_extensions,
         &[],

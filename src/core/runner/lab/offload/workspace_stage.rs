@@ -4,6 +4,7 @@ use super::*;
 use crate::core::rig;
 use crate::core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan,
+    PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 
@@ -14,6 +15,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) synced: RunnerWorkspaceSyncOutput,
     pub(crate) remote_cwd: String,
     pub(crate) workspace_mapping: Vec<LabWorkspaceMappingEntry>,
+    pub(crate) path_materialization_plan: PathMaterializationPlan,
     pub(crate) source_snapshot: SourceSnapshot,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
@@ -474,6 +476,8 @@ fn prepare_lab_offload_workspace_stage_inner(
             .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
+    let path_materialization_plan =
+        lab_execution_path_materialization_plan(sync_mode, &workspace_mapping);
 
     Ok(LabOffloadWorkspaceStage {
         plan,
@@ -482,6 +486,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         synced,
         remote_cwd,
         workspace_mapping,
+        path_materialization_plan,
         source_snapshot,
         remapped_args,
         agent_task_run_id,
@@ -495,6 +500,22 @@ fn prepare_lab_offload_workspace_stage_inner(
         runtime_overlay_env,
         runtime_overlay_metadata,
     })
+}
+
+pub(crate) fn lab_execution_path_materialization_plan(
+    sync_mode: RunnerWorkspaceSyncMode,
+    workspace_mapping: &[LabWorkspaceMappingEntry],
+) -> PathMaterializationPlan {
+    PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
+        PathMaterializationEntry::new(
+            entry.role(),
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            Some(entry.local_path().to_string()),
+            entry.remote_path(),
+            sync_mode.label(),
+            PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+        )
+    }))
 }
 
 fn preflight_agent_task_secret_env_before_workspace_stage(
@@ -1704,6 +1725,31 @@ mod tests {
             "/runner/workspaces/provider-runtime"
         );
         assert_eq!(plan.entries[0].materialization_mode, "git");
+    }
+
+    #[test]
+    fn lab_execution_path_materialization_plan_projects_standard_workspace_mappings() {
+        let synced = test_synced_workspace(
+            "/controller/workspaces/homeboy",
+            "/runner/workspaces/homeboy",
+        );
+        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+
+        let plan = lab_execution_path_materialization_plan(
+            RunnerWorkspaceSyncMode::Snapshot,
+            &workspace_mapping,
+        );
+
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].role, "primary");
+        assert_eq!(plan.entries[0].owner, "lab.execution_context");
+        assert_eq!(
+            plan.entries[0].local_path.as_deref(),
+            Some("/controller/workspaces/homeboy")
+        );
+        assert_eq!(plan.entries[0].remote_path, "/runner/workspaces/homeboy");
+        assert_eq!(plan.entries[0].materialization_mode, "snapshot");
+        assert_eq!(plan.entries[0].validation_status, "materialized");
     }
 
     #[test]

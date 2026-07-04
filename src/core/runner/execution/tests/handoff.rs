@@ -383,6 +383,7 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
             Vec::new(),
             false,
             None,
+            None,
             Vec::new(),
             None,
             Some(stable_run_id.to_string()),
@@ -463,6 +464,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             ],
             SourceSnapshot::existing_remote("lab", "/srv/homeboy/project", Some("/srv/homeboy")),
             job,
+            None,
             Vec::new(),
             Some("agent-task-run-6454".to_string()),
         );
@@ -648,6 +650,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
         "job-123",
         "/srv/homeboy/project".to_string(),
         None,
+        None,
         "2026-06-30T15:58:00Z".to_string(),
     );
     let json = serde_json::to_value(&envelope).expect("serialize handoff envelope");
@@ -799,6 +802,7 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             Vec::new(),
             false,
             None,
+            None,
             Vec::new(),
             None,
             None,
@@ -919,6 +923,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
         Default::default(),
         Vec::new(),
         false,
+        None,
         None,
         Vec::new(),
         None,
@@ -1128,6 +1133,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         Default::default(),
         Vec::new(),
         false,
+        None,
         None,
         Vec::new(),
         None,

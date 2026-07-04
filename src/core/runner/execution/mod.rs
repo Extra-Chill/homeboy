@@ -111,6 +111,7 @@ pub struct RunnerExecOptions {
     pub capture_patch: bool,
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
+    pub path_materialization_plan: Option<PathMaterializationPlan>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
     pub require_paths: Vec<String>,
@@ -186,6 +187,7 @@ fn runner_execution_record_for_output(
     job_id: Option<String>,
     mirror_run_id: Option<String>,
     source_snapshot: Option<&SourceSnapshot>,
+    path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: &[String],
     required_extensions: &[String],
     artifacts: &[JobArtifactMetadata],
@@ -216,7 +218,10 @@ fn runner_execution_record_for_output(
         exit_code,
     )
     .with_mirror_run_id(mirror_run_id)
-    .with_path_materialization_plan(path_materialization_plan(source_snapshot, require_paths))
+    .with_path_materialization_plan(
+        path_materialization_plan
+            .or_else(|| fallback_path_materialization_plan(source_snapshot, require_paths)),
+    )
     .with_orchestration_provenance(orchestration_target_provenance(
         runner,
         None,
@@ -232,7 +237,7 @@ fn runner_execution_record_for_output(
     record
 }
 
-fn path_materialization_plan(
+fn fallback_path_materialization_plan(
     source_snapshot: Option<&SourceSnapshot>,
     require_paths: &[String],
 ) -> Option<PathMaterializationPlan> {
@@ -607,6 +612,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             request_env,
             &secret_env_names,
             options.require_paths,
+            options.path_materialization_plan,
         );
     }
 
@@ -642,6 +648,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 secret_env_names,
                 options.capture_patch,
                 Some(plan.source_snapshot),
+                options.path_materialization_plan,
                 options.require_paths,
                 options.runner_workload,
                 options.run_id,
@@ -662,6 +669,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 secret_env_names,
                 options.capture_patch,
                 Some(plan.source_snapshot),
+                options.path_materialization_plan,
                 options.require_paths,
                 options.runner_workload,
                 options.run_id,
@@ -678,6 +686,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             request_env,
             &secret_env_names,
             options.require_paths,
+            options.path_materialization_plan,
         ),
         RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
             "runner",

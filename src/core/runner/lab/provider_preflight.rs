@@ -270,6 +270,7 @@ fn probe_agent_task_providers_on_runner(
             capture_patch: false,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
+            path_materialization_plan: None,
             capability_preflight,
             required_extensions,
             require_paths: Vec::new(),

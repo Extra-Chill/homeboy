@@ -101,6 +101,7 @@ pub(super) fn exec(
             capture_patch,
             raw_exec: true,
             source_snapshot,
+            path_materialization_plan: None,
             capability_preflight: Some(runner::RunnerCapabilityPreflight {
                 command: "runner.exec".to_string(),
                 required_commands,

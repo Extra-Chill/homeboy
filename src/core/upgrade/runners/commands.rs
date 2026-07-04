@@ -155,6 +155,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         capture_patch: false,
         raw_exec: false,
         source_snapshot: None,
+        path_materialization_plan: None,
         capability_preflight: Some(runner_upgrade_capability_plan()),
         required_extensions: Vec::new(),
         require_paths: Vec::new(),

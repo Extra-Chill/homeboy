@@ -11,7 +11,10 @@ pub type RunsEvidenceOutput = RunEvidenceReport<RunSummary>;
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &run.id)?;
+    let mut artifacts = runs_service::list_artifacts_for_run(&store, &run.id)?;
+    artifacts.extend(runs_service::related_lab_artifacts_for_runner_job(
+        &store, &run,
+    )?);
     let artifact_root = homeboy::core::artifacts::root()?;
     let disk_budget = disk::disk_budget(
         &artifact_root,
@@ -587,7 +590,6 @@ mod tests {
                     serde_json::json!({
                         "exit_code": 1,
                         "lab": {
-                            "runner": { "id": "lab-runner" },
                             "remote_job_id": remote_job_id
                         }
                     }),

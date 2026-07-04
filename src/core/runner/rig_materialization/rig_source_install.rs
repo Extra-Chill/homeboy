@@ -78,6 +78,7 @@ fn exec_runner_rig_sources_command(
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),

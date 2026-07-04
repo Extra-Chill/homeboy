@@ -23,7 +23,11 @@ const RAW_FUZZ_RESULT_KINDS: &[&str] = &["fuzz_results", "fuzz_result_envelope"]
 /// artifacts that share the same `remote_job_id`.
 pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzInspectOutput> {
     let store = ObservationStore::open_initialized()?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, &args.run_id)?;
+    let run = runs_service::require_run(&store, &args.run_id)?;
+    let mut artifacts = runs_service::list_artifacts_for_run(&store, &run.id)?;
+    artifacts.extend(runs_service::related_lab_artifacts_for_runner_job(
+        &store, &run,
+    )?);
 
     let mut candidates: Vec<&ArtifactRecord> = RAW_FUZZ_RESULT_KINDS
         .iter()
@@ -256,7 +260,6 @@ mod tests {
                     serde_json::json!({
                         "exit_code": 1,
                         "lab": {
-                            "runner": { "id": "lab-runner" },
                             "remote_job_id": remote_job_id
                         }
                     }),

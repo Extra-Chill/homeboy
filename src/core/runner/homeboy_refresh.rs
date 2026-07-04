@@ -259,6 +259,7 @@ pub fn refresh_homeboy_binary(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: Some(RunnerCapabilityPreflight {
                 command: "runner.refresh-homeboy".to_string(),
                 required_commands,
@@ -420,6 +421,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
@@ -637,6 +639,7 @@ fn sync_extension_overlay_source(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),

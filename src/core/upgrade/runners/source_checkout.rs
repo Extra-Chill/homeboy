@@ -127,6 +127,7 @@ pub fn runner_source_checkout_prepare_options(
         capture_patch: false,
         raw_exec: false,
         source_snapshot: None,
+        path_materialization_plan: None,
         capability_preflight: Some(RunnerCapabilityPreflight {
             command: "prepare source checkout for homeboy upgrade".to_string(),
             required_tools: vec![RunnerRequiredTool::git()],

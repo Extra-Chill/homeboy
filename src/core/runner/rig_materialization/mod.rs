@@ -269,6 +269,7 @@ pub(super) fn sync_lab_offload_rigs(
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 // Validate remote capability parity before dispatch: the install
                 // is executed by the runner-side `homeboy` binary, so require
                 // that tool on the runner. `exec` no-ops this gate for local and

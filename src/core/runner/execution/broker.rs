@@ -26,6 +26,7 @@ pub(super) fn exec_via_reverse_broker(
     secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
     runner_workload: Option<RunnerWorkload>,
     run_id: Option<String>,
@@ -54,6 +55,7 @@ pub(super) fn exec_via_reverse_broker(
         env_materialization: None,
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
+        path_materialization_plan: path_materialization_plan.clone(),
         runner_workload: runner_workload.clone(),
         metadata: Some(runner_exec_request_metadata(
             run_id.as_deref(),
@@ -102,6 +104,7 @@ pub(super) fn exec_via_reverse_broker(
             command,
             source_snapshot,
             job,
+            path_materialization_plan,
             require_paths,
             persisted_run_id,
         ));
@@ -212,6 +215,7 @@ pub(super) fn exec_via_reverse_broker(
         Some(job.id.to_string()),
         mirror_run_id.clone(),
         Some(&source_snapshot),
+        path_materialization_plan,
         &require_paths,
         &provenance_extensions,
         &artifacts,

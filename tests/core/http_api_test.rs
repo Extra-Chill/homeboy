@@ -312,6 +312,7 @@ fn runs_list_includes_active_runner_jobs() {
                 env_materialization: None,
                 capture_patch: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 require_paths: Vec::new(),
                 runner_workload: None,
                 lifecycle: None,

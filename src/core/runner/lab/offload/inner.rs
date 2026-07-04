@@ -487,6 +487,7 @@ pub(crate) fn run_lab_offload_inner(
         synced,
         remote_cwd,
         workspace_mapping,
+        path_materialization_plan,
         source_snapshot,
         remapped_args,
         agent_task_run_id,
@@ -501,6 +502,11 @@ pub(crate) fn run_lab_offload_inner(
         runtime_overlay_metadata,
     } = workspace_stage;
     plan = next_plan;
+    let execution_context = LabExecutionContext::new(
+        remote_cwd.clone(),
+        Some(source_snapshot.clone()),
+        path_materialization_plan,
+    );
 
     // Run-scoped RAII ownership of the materialized remote workspace (#6678).
     // Historically every offloaded run left its `_lab_workspaces/<snapshot>`
@@ -604,7 +610,8 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&synced.materialization_plan).unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&execution_context.path_materialization_plan)
+            .unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -657,7 +664,7 @@ pub(crate) fn run_lab_offload_inner(
         status: "offloaded",
         remote_workspace: Some(&remote_cwd),
         fallback_reason: None,
-        workspace_mapping_ref: Some("workspace_mapping"),
+        workspace_mapping_ref: execution_context.workspace_mapping_ref(),
         proof_id: lab_metadata
             .get("proof")
             .and_then(|proof| proof.get("id"))
@@ -807,6 +814,7 @@ pub(crate) fn run_lab_offload_inner(
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
+            path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
             capability_preflight,
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
