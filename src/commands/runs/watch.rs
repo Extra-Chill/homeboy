@@ -85,8 +85,9 @@ struct StorePoller<'a> {
 impl RunPoller for StorePoller<'_> {
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
         reconcile::reconcile_owned_stale_running_runs(self.store, 1000)?;
-        runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
-        runs_service::require_run(self.store, run_id)
+        let run = runs_service::require_run(self.store, run_id)?;
+        runs_service::refresh_mirrored_daemon_evidence_best_effort(&run.id);
+        runs_service::require_run(self.store, &run.id)
     }
 }
 
