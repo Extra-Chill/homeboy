@@ -1,6 +1,7 @@
 use crate::core::engine::local_files;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
+use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -20,7 +21,6 @@ pub const RESOLVE_CONTEXT_ENV: &str = "HOMEBOY_RUNTIME_RESOLVE_CONTEXT";
 pub const DISPOSABLE_LOCAL_DB_ENV: &str = "HOMEBOY_RUNTIME_DISPOSABLE_LOCAL_DB";
 pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
 pub const BENCH_HELPER_JS_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_JS";
-pub const BENCH_HELPER_PHP_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_PHP";
 
 struct RuntimeHelper {
     filename: &'static str,
@@ -108,13 +108,16 @@ const HELPERS: &[RuntimeHelper] = &[
         env_var: BENCH_HELPER_JS_ENV,
         legacy_fallback: true,
     },
-    RuntimeHelper {
-        filename: "bench-helper.php",
-        content: assets::BENCH_HELPER_PHP,
-        env_var: BENCH_HELPER_PHP_ENV,
-        legacy_fallback: true,
-    },
 ];
+
+#[derive(Debug, Deserialize)]
+struct DeclaredRuntimeHelper {
+    filename: String,
+    source: String,
+    env_var: String,
+    #[serde(default)]
+    legacy_fallback: bool,
+}
 
 /// Write a single runtime helper to disk if it's missing or stale.
 fn ensure_helper(runtime_dir: &std::path::Path, helper: &RuntimeHelper) -> Result<PathBuf> {
@@ -130,6 +133,43 @@ fn ensure_helper(runtime_dir: &std::path::Path, helper: &RuntimeHelper) -> Resul
     }
 
     Ok(helper_path)
+}
+
+fn ensure_declared_helper(
+    runtime_dir: &std::path::Path,
+    helper: &DeclaredRuntimeHelper,
+) -> Result<PathBuf> {
+    let source = PathBuf::from(&helper.source);
+    let content = fs::read_to_string(&source).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read declared runtime helper {}", source.display())),
+        )
+    })?;
+    let helper_path = runtime_dir.join(&helper.filename);
+    let current = fs::read_to_string(&helper_path).ok();
+    if current.as_deref() != Some(content.as_str()) {
+        local_files::write_file_atomic(
+            &helper_path,
+            &content,
+            &format!("write declared runtime helper {}", helper.filename),
+        )?;
+    }
+    Ok(helper_path)
+}
+
+fn declared_helpers() -> Result<Vec<DeclaredRuntimeHelper>> {
+    let Ok(raw) = env::var("HOMEBOY_RUNTIME_HELPERS_JSON") else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&raw).map_err(|e| {
+        Error::validation_invalid_argument(
+            "HOMEBOY_RUNTIME_HELPERS_JSON",
+            format!("declared runtime helpers JSON is invalid: {e}"),
+            None,
+            None,
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -181,38 +221,40 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
         ));
     }
 
+    for helper in declared_helpers()? {
+        let path = ensure_declared_helper(&runtime_dir, &helper)?;
+        if helper.legacy_fallback {
+            if let Some(ref legacy_dir) = legacy_runtime_dir {
+                ensure_declared_helper(legacy_dir, &helper)?;
+            }
+        }
+        env_pairs.push((helper.env_var, path.to_string_lossy().to_string()));
+    }
+
     Ok(env_pairs)
 }
 
 pub fn helper_path(name: &str) -> Result<PathBuf> {
     let normalized = name.trim();
-    let helper = HELPERS
-        .iter()
-        .find(|helper| helper.filename == normalized || helper.env_var == normalized)
+    let pairs = ensure_all_helpers()?;
+    let path = pairs
+        .into_iter()
+        .find_map(|(key, path)| {
+            let filename = PathBuf::from(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string);
+            (normalized == key || filename.as_deref() == Some(normalized)).then(|| PathBuf::from(path))
+        })
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "helper",
                 format!("unknown runtime helper `{normalized}`"),
                 None,
-                Some(vec![format!(
-                    "Known helpers: {}",
-                    HELPERS
-                        .iter()
-                        .map(|helper| helper.filename)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )]),
+                Some(vec![
+                    "Known helpers are built-in helpers plus HOMEBOY_RUNTIME_HELPERS_JSON declarations".to_string(),
+                ]),
             )
-        })?;
-
-    let pairs = ensure_all_helpers()?;
-    let path = pairs
-        .into_iter()
-        .find_map(|(key, path)| (key == helper.env_var).then(|| PathBuf::from(path)))
-        .ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "runtime helper `{normalized}` was not materialized"
-            ))
         })?;
 
     if !path.is_file() {

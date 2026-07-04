@@ -57,10 +57,6 @@ fn ensure_all_helpers_writes_all_files() {
             pairs.iter().any(|(k, _)| k == BENCH_HELPER_JS_ENV),
             "bench JS helper should be in pairs"
         );
-        assert!(
-            pairs.iter().any(|(k, _)| k == BENCH_HELPER_PHP_ENV),
-            "bench PHP helper should be in pairs"
-        );
     });
 }
 
@@ -589,7 +585,6 @@ fn ensure_all_helpers_writes_legacy_bench_fallbacks() {
         for filename in [
             "bench-helper.sh".to_string(),
             "bench-helper.mjs".to_string(),
-            ["bench-helper.", "p", "hp"].concat(),
         ] {
             let path = home.path().join(".homeboy").join("runtime").join(filename);
             assert!(
@@ -979,13 +974,6 @@ if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
 }
 
 #[test]
-fn bench_php_helper_documents_inventory_selection_and_artifact_helpers() {
-    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_selected"));
-    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_scenario_inventory_envelope"));
-    assert!(assets::BENCH_HELPER_PHP.contains("function homeboy_bench_artifact_ref"));
-}
-
-#[test]
 fn bench_js_helper_emits_compact_progress_to_stderr() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("bench-helper.mjs");
@@ -1047,7 +1035,6 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
 fn bench_runtime_helpers_document_shared_contract() {
     for content in [
         assets::BENCH_HELPER_JS,
-        assets::BENCH_HELPER_PHP,
         assets::BENCH_HELPER_SH,
     ] {
         assert!(
