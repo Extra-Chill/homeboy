@@ -5,16 +5,50 @@ use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupSort, ResourceCleanupOptions,
 };
 use homeboy::core::defaults;
+use homeboy::core::engine;
+use homeboy::core::observation::runs_service::{
+    self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
+};
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
+use homeboy::core::runners::{
+    self as runner, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+};
+use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
+use serde::Serialize;
 use serde_json::Value;
 
+use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOutput};
+use super::utils::response::{CommandActionableMetadata, CommandNextAction};
 use super::CmdResult;
 
 #[derive(Args)]
 pub struct CleanupArgs {
+    /// Apply cleanup across the selected categories. Omit for inventory dry-run output.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Include only these cleanup categories. Comma-separated or repeatable.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub include: Vec<CleanupCategoryArg>,
+
+    /// Exclude these cleanup categories. Comma-separated or repeatable.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub exclude: Vec<CleanupCategoryArg>,
+
     #[command(subcommand)]
-    pub command: CleanupCommand,
+    pub command: Option<CleanupCommand>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum CleanupCategoryArg {
+    RepoArtifacts,
+    TaskWorktrees,
+    PersistedRunArtifacts,
+    RunnerDownloads,
+    RemoteLabWorkspaces,
+    RuntimeTmp,
 }
 
 #[derive(Subcommand)]
@@ -82,7 +116,7 @@ pub struct CleanupWorktreesArgs {
 
 pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
     match args.command {
-        CleanupCommand::Artifacts(args) => cleanup::cleanup_resources_from_config(
+        Some(CleanupCommand::Artifacts(args)) => cleanup::cleanup_resources_from_config(
             ResourceCleanupOptions {
                 intent: cleanup_intent(args.apply),
                 artifacts: Some(ArtifactCleanupOptions {
@@ -110,7 +144,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
             })
         })
         .map(|output| (output, 0)),
-        CleanupCommand::Worktrees(args) => cleanup::cleanup_resources_from_config(
+        Some(CleanupCommand::Worktrees(args)) => cleanup::cleanup_resources_from_config(
             ResourceCleanupOptions {
                 intent: cleanup_intent(args.apply),
                 artifacts: None,
@@ -131,6 +165,401 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
             })
         })
         .map(|output| (output, 0)),
+        None => cleanup_inventory(args).map(|output| (output, 0)),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupInventoryOutput {
+    pub command: &'static str,
+    pub mode: &'static str,
+    pub category_count: usize,
+    pub candidate_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub estimated_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub categories: Vec<CleanupInventoryCategory>,
+    #[serde(rename = "_homeboy_actionable")]
+    pub actionable: CommandActionableMetadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupInventoryCategory {
+    pub category: &'static str,
+    pub specialist_command: String,
+    pub included: bool,
+    pub skipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    pub candidate_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub estimated_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub output: Value,
+}
+
+fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
+    let selected = CleanupCategorySelection::new(args.include, args.exclude);
+    let apply = args.apply;
+    let mut categories = Vec::new();
+
+    if selected.includes(CleanupCategoryArg::RepoArtifacts) {
+        let output = cleanup::cleanup_artifacts(ArtifactCleanupOptions {
+            path: None,
+            apply,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            sort: ArtifactCleanupSort::Discovery,
+            limit: None,
+            merged_only: false,
+        })?;
+        categories.push(category_from_output(
+            "repo_artifacts",
+            if apply {
+                "homeboy cleanup artifacts --apply"
+            } else {
+                "homeboy cleanup artifacts"
+            },
+            output.candidate_count,
+            output.applied_count,
+            output.skipped_count,
+            output.estimated_bytes,
+            output.reclaimed_bytes,
+            output,
+        )?);
+    }
+
+    if selected.includes(CleanupCategoryArg::TaskWorktrees) {
+        let output = worktree::cleanup(WorktreeCleanupOptions {
+            force: false,
+            dry_run: !apply,
+            cleanup_branches: apply,
+            allow_unmerged_branches: false,
+        })?;
+        categories.push(task_worktrees_category(output, apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::PersistedRunArtifacts) {
+        let persisted =
+            runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
+                apply,
+                older_than_days: 30,
+                run_id: None,
+                kind: None,
+                artifact_type: None,
+                run_kind: None,
+                component_id: None,
+                limit: 1000,
+            })?;
+        let resources = runs_resources(RunsResourcesArgs {
+            cleanup_plan: true,
+            apply: false,
+            cleanup_root: None,
+            limit: 1000,
+            ..RunsResourcesArgs::default()
+        })?
+        .0;
+        let RunsOutput::Resources(resources) = resources else {
+            return Err(homeboy::core::Error::internal_unexpected(
+                "runs resources returned unexpected output",
+            ));
+        };
+        categories.push(persisted_artifacts_category(persisted, resources, apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::RunnerDownloads) {
+        let output = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
+            apply,
+            runner: None,
+            run_id: None,
+        })?;
+        categories.push(category_from_output(
+            "runner_downloads",
+            if apply {
+                "homeboy runs artifact cleanup-downloads --apply"
+            } else {
+                "homeboy runs artifact cleanup-downloads"
+            },
+            output.file_count + output.directory_count,
+            usize::from(output.removed),
+            0,
+            output.size_bytes,
+            if output.removed { output.size_bytes } else { 0 },
+            output,
+        )?);
+    }
+
+    if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
+        categories.extend(remote_lab_workspace_categories(apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::RuntimeTmp) {
+        let output = engine::temp::cleanup_runtime_tmp(apply, 7, None, 1000)?;
+        categories.push(category_from_output(
+            "runtime_tmp",
+            if apply {
+                "homeboy self cleanup-runtime-tmp --apply"
+            } else {
+                "homeboy self cleanup-runtime-tmp"
+            },
+            output.planned_count,
+            output.removed_count,
+            output.skipped_count,
+            output.totals.planned_size_bytes,
+            output.totals.removed_size_bytes,
+            output,
+        )?);
+    }
+
+    let candidate_count = categories
+        .iter()
+        .map(|category| category.candidate_count)
+        .sum();
+    let applied_count = categories
+        .iter()
+        .map(|category| category.applied_count)
+        .sum();
+    let skipped_count = categories
+        .iter()
+        .map(|category| category.skipped_count)
+        .sum();
+    let estimated_bytes = categories
+        .iter()
+        .map(|category| category.estimated_bytes)
+        .sum();
+    let reclaimed_bytes = categories
+        .iter()
+        .map(|category| category.reclaimed_bytes)
+        .sum();
+    let actionable = cleanup_actionable(&categories, apply);
+    serde_json::to_value(CleanupInventoryOutput {
+        command: "cleanup.inventory",
+        mode: if apply { "apply" } else { "dry_run" },
+        category_count: categories.len(),
+        candidate_count,
+        applied_count,
+        skipped_count,
+        estimated_bytes,
+        reclaimed_bytes,
+        categories,
+        actionable,
+    })
+    .map_err(|err| {
+        homeboy::core::Error::internal_json(err.to_string(), Some("cleanup inventory".to_string()))
+    })
+}
+
+struct CleanupCategorySelection {
+    include: Vec<CleanupCategoryArg>,
+    exclude: Vec<CleanupCategoryArg>,
+}
+
+impl CleanupCategorySelection {
+    fn new(include: Vec<CleanupCategoryArg>, exclude: Vec<CleanupCategoryArg>) -> Self {
+        Self { include, exclude }
+    }
+
+    fn includes(&self, category: CleanupCategoryArg) -> bool {
+        (self.include.is_empty() || self.include.contains(&category))
+            && !self.exclude.contains(&category)
+    }
+}
+
+fn category_from_output<T: Serialize>(
+    category: &'static str,
+    specialist_command: &str,
+    candidate_count: usize,
+    applied_count: usize,
+    skipped_count: usize,
+    estimated_bytes: u64,
+    reclaimed_bytes: u64,
+    output: T,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    Ok(CleanupInventoryCategory {
+        category,
+        specialist_command: specialist_command.to_string(),
+        included: true,
+        skipped: false,
+        skip_reason: None,
+        candidate_count,
+        applied_count,
+        skipped_count,
+        estimated_bytes,
+        reclaimed_bytes,
+        output: serde_json::to_value(output).map_err(|err| {
+            homeboy::core::Error::internal_json(err.to_string(), Some(category.to_string()))
+        })?,
+    })
+}
+
+fn task_worktrees_category(
+    output: WorktreeCleanupOutput,
+    apply: bool,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    category_from_output(
+        "task_worktrees",
+        if apply {
+            "homeboy worktree cleanup --cleanup-branches"
+        } else {
+            "homeboy worktree cleanup --dry-run --cleanup-branches"
+        },
+        output.counts.candidates,
+        output.counts.removed + output.counts.branches_deleted,
+        output.counts.skipped,
+        0,
+        0,
+        output,
+    )
+}
+
+fn persisted_artifacts_category(
+    persisted: runs_service::PersistedArtifactCleanupOutcome,
+    resources: RunsResourcesOutput,
+    apply: bool,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    let resource_cleanup_candidates = resources
+        .cleanup
+        .as_ref()
+        .map(|cleanup| cleanup.candidate_count)
+        .unwrap_or(0);
+    let output = serde_json::json!({
+        "persisted_artifacts": persisted,
+        "resource_lifecycle": resources,
+    });
+    Ok(CleanupInventoryCategory {
+        category: "persisted_run_artifacts",
+        specialist_command: if apply {
+            "homeboy runs artifact cleanup-persisted --apply"
+        } else {
+            "homeboy runs artifact cleanup-persisted"
+        }
+        .to_string(),
+        included: true,
+        skipped: false,
+        skip_reason: None,
+        candidate_count: persisted.planned_record_count + resource_cleanup_candidates,
+        applied_count: persisted.removed_record_count,
+        skipped_count: persisted.skipped_count,
+        estimated_bytes: persisted.totals.planned_size_bytes,
+        reclaimed_bytes: persisted.totals.removed_size_bytes,
+        output,
+    })
+}
+
+fn remote_lab_workspace_categories(
+    apply: bool,
+) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
+    let mut categories = Vec::new();
+    for status in runner::statuses()? {
+        if status.runner_id == "local" || !status.connected {
+            categories.push(CleanupInventoryCategory {
+                category: "remote_lab_workspaces",
+                specialist_command: format!(
+                    "homeboy runner workspace prune {}",
+                    shell_quote(&status.runner_id)
+                ),
+                included: true,
+                skipped: true,
+                skip_reason: Some("runner is not connected".to_string()),
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 1,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                output: serde_json::json!({ "runner_id": status.runner_id, "connected": status.connected }),
+            });
+            continue;
+        }
+        let output = match runner::prune_workspaces(
+            &status.runner_id,
+            RunnerWorkspacePruneOptions {
+                apply,
+                min_age_hours: 24,
+                limit: 25,
+                passes: if apply { 10 } else { 1 },
+            },
+        ) {
+            Ok((output, _)) => output,
+            Err(error) => {
+                categories.push(CleanupInventoryCategory {
+                    category: "remote_lab_workspaces",
+                    specialist_command: format!(
+                        "homeboy runner workspace prune {}",
+                        shell_quote(&status.runner_id)
+                    ),
+                    included: true,
+                    skipped: true,
+                    skip_reason: Some(error.message),
+                    candidate_count: 0,
+                    applied_count: 0,
+                    skipped_count: 1,
+                    estimated_bytes: 0,
+                    reclaimed_bytes: 0,
+                    output: serde_json::json!({ "runner_id": status.runner_id }),
+                });
+                continue;
+            }
+        };
+        categories.push(remote_workspace_category(output, apply)?);
+    }
+    Ok(categories)
+}
+
+fn remote_workspace_category(
+    output: RunnerWorkspacePruneOutput,
+    apply: bool,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    let command = if apply {
+        format!(
+            "homeboy runner workspace prune {} --apply --passes 10",
+            shell_quote(&output.runner_id)
+        )
+    } else {
+        format!(
+            "homeboy runner workspace prune {}",
+            shell_quote(&output.runner_id)
+        )
+    };
+    category_from_output(
+        "remote_lab_workspaces",
+        &command,
+        output.total_candidate_count,
+        output.removed.len(),
+        output.skipped.len(),
+        output.total_candidate_bytes,
+        output.total_removed_bytes,
+        output,
+    )
+}
+
+fn cleanup_actionable(
+    categories: &[CleanupInventoryCategory],
+    apply: bool,
+) -> CommandActionableMetadata {
+    let mut actionable = CommandActionableMetadata::default();
+    for category in categories {
+        if category.skipped || category.candidate_count == 0 {
+            continue;
+        }
+        actionable.next_actions.push(CommandNextAction::new(
+            format!("{} cleanup", category.category.replace('_', " ")),
+            if apply {
+                category.specialist_command.clone()
+            } else {
+                apply_command(&category.specialist_command)
+            },
+        ));
+    }
+    actionable
+}
+
+fn apply_command(command: &str) -> String {
+    if command.contains(" --apply") {
+        command.to_string()
+    } else {
+        format!("{command} --apply")
     }
 }
 
@@ -402,12 +831,67 @@ mod tests {
         let Commands::Cleanup(args) = cli.command else {
             panic!("expected cleanup command");
         };
-        let CleanupCommand::Artifacts(args) = args.command else {
+        let Some(CleanupCommand::Artifacts(args)) = args.command else {
             panic!("expected cleanup artifacts command");
         };
         assert!(matches!(args.sort, CleanupArtifactsSortArg::Size));
         assert_eq!(args.limit, Some(7));
         assert!(args.merged_only);
+    }
+
+    #[test]
+    fn cleanup_front_door_accepts_include_exclude_without_subcommand() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "cleanup",
+            "--include",
+            "repo-artifacts,task-worktrees",
+            "--exclude",
+            "runtime-tmp",
+            "--apply",
+        ]);
+
+        let Commands::Cleanup(args) = cli.command else {
+            panic!("expected cleanup command");
+        };
+        assert!(args.apply);
+        assert!(args.command.is_none());
+        assert_eq!(args.include.len(), 2);
+        assert!(args.include.contains(&CleanupCategoryArg::RepoArtifacts));
+        assert!(args.include.contains(&CleanupCategoryArg::TaskWorktrees));
+        assert_eq!(args.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
+    }
+
+    #[test]
+    fn cleanup_category_selection_is_table_driven() {
+        let cases = [
+            (vec![], vec![], CleanupCategoryArg::RepoArtifacts, true),
+            (
+                vec![CleanupCategoryArg::TaskWorktrees],
+                vec![],
+                CleanupCategoryArg::RepoArtifacts,
+                false,
+            ),
+            (
+                vec![CleanupCategoryArg::TaskWorktrees],
+                vec![],
+                CleanupCategoryArg::TaskWorktrees,
+                true,
+            ),
+            (
+                vec![],
+                vec![CleanupCategoryArg::RuntimeTmp],
+                CleanupCategoryArg::RuntimeTmp,
+                false,
+            ),
+        ];
+
+        for (include, exclude, category, expected) in cases {
+            assert_eq!(
+                CleanupCategorySelection::new(include, exclude).includes(category),
+                expected
+            );
+        }
     }
 
     #[test]

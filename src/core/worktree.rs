@@ -23,6 +23,30 @@ mod types {
         PreserveOnFailure,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BranchCleanupIntent {
+        DeleteWhenMerged,
+        Preserve,
+    }
+
+    impl Default for BranchCleanupIntent {
+        fn default() -> Self {
+            Self::DeleteWhenMerged
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BranchCleanupStatus {
+        Merged,
+        Unmerged,
+        Missing,
+        Preserved,
+        Unknown,
+        Deleted,
+    }
+
     impl CleanupPolicy {
         pub(super) fn default_for_run(run_id: Option<&str>) -> Self {
             if run_id.is_some() {
@@ -46,6 +70,8 @@ mod types {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub run_id: Option<String>,
         pub cleanup_policy: CleanupPolicy,
+        #[serde(default)]
+        pub branch_cleanup_intent: BranchCleanupIntent,
         pub created_at: String,
         pub state: TaskWorktreeState,
     }
@@ -141,6 +167,7 @@ mod types {
     pub struct WorktreeRemoveOutput {
         pub record: TaskWorktreeRecord,
         pub safety: WorktreeSafetyReport,
+        pub branch_cleanup: WorktreeBranchCleanupReport,
         pub removed: bool,
     }
 
@@ -158,12 +185,29 @@ mod types {
         pub candidates: usize,
         pub removed: usize,
         pub skipped: usize,
+        pub branch_delete_candidates: usize,
+        pub branches_deleted: usize,
+        pub unmerged_branches: usize,
     }
 
     #[derive(Debug, Clone, Serialize)]
     pub struct WorktreeCleanupCandidate {
         pub record: TaskWorktreeRecord,
         pub safety: WorktreeSafetyReport,
+        pub branch_cleanup: WorktreeBranchCleanupReport,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct WorktreeBranchCleanupReport {
+        pub branch: String,
+        pub base_ref: String,
+        pub intent: BranchCleanupIntent,
+        pub status: BranchCleanupStatus,
+        pub safe_delete: bool,
+        pub deleted: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub reason: Option<String>,
+        pub cleanup_command: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -196,12 +240,16 @@ mod types {
     pub struct WorktreeRemoveOptions {
         pub id: String,
         pub force: bool,
+        pub cleanup_branch: bool,
+        pub allow_unmerged_branch: bool,
     }
 
     #[derive(Debug, Clone)]
     pub struct WorktreeCleanupOptions {
         pub force: bool,
         pub dry_run: bool,
+        pub cleanup_branches: bool,
+        pub allow_unmerged_branches: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -261,8 +309,9 @@ mod types {
 }
 
 pub use types::{
-    AdoptedWorkspaceRecord, CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState,
-    WorkspaceRefRecord, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupCandidate,
+    AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
+    TaskWorktreeRecord, TaskWorktreeState, WorkspaceRefRecord, WorktreeAdoptOptions,
+    WorktreeAdoptOutput, WorktreeBranchCleanupReport, WorktreeCleanupCandidate,
     WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupSkipped,
     WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeQueueCreateOptions,
     WorktreeQueueCreateOutput, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
@@ -376,6 +425,8 @@ mod store_ops {
                     continue;
                 }
             };
+            let branch_cleanup = branch_cleanup_report(&record)
+                .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
             let skip_reasons = cleanup_skip_reasons(&safety, options.force);
             if !skip_reasons.is_empty() {
                 skipped.push(WorktreeCleanupSkipped {
@@ -389,6 +440,7 @@ mod store_ops {
             candidates.push(WorktreeCleanupCandidate {
                 record: record.clone(),
                 safety: safety.clone(),
+                branch_cleanup: branch_cleanup.clone(),
             });
 
             if !options.dry_run {
@@ -396,15 +448,32 @@ mod store_ops {
                     WorktreeRemoveOptions {
                         id: record.id,
                         force: options.force,
+                        cleanup_branch: options.cleanup_branches,
+                        allow_unmerged_branch: options.allow_unmerged_branches,
                     },
                     store,
                 )?);
             }
         }
+        let branch_delete_candidates = candidates
+            .iter()
+            .filter(|candidate| candidate.branch_cleanup.safe_delete)
+            .count();
+        let unmerged_branches = candidates
+            .iter()
+            .filter(|candidate| candidate.branch_cleanup.status == BranchCleanupStatus::Unmerged)
+            .count();
+        let branches_deleted = removed
+            .iter()
+            .filter(|output| output.branch_cleanup.deleted)
+            .count();
         let counts = WorktreeCleanupCounts {
             candidates: candidates.len() + skipped.len(),
             removed: removed.len(),
             skipped: skipped.len(),
+            branch_delete_candidates,
+            branches_deleted,
+            unmerged_branches,
         };
         Ok(WorktreeCleanupOutput {
             dry_run: options.dry_run,
@@ -501,6 +570,7 @@ mod store_ops {
             cleanup_policy: options
                 .cleanup_policy
                 .unwrap_or_else(|| CleanupPolicy::default_for_run(options.run_id.as_deref())),
+            branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
             created_at: chrono::Utc::now().to_rfc3339(),
             state: TaskWorktreeState::Active,
         };
@@ -569,13 +639,160 @@ mod store_ops {
                 "git worktree remove",
             )?;
         }
+        let mut branch_cleanup = branch_cleanup_report(&record)
+            .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
+        if options.cleanup_branch {
+            branch_cleanup =
+                apply_branch_cleanup(&record, branch_cleanup, options.allow_unmerged_branch)?;
+        }
         record.state = TaskWorktreeState::Removed;
         write_record(store_dir, &record)?;
         Ok(WorktreeRemoveOutput {
             record,
             safety,
+            branch_cleanup,
             removed: true,
         })
+    }
+
+    pub(super) fn branch_cleanup_report(
+        record: &TaskWorktreeRecord,
+    ) -> Result<WorktreeBranchCleanupReport> {
+        let cleanup_command = format!(
+            "homeboy worktree remove {} --cleanup-branch",
+            shell_arg(&record.id)
+        );
+        if record.branch_cleanup_intent == BranchCleanupIntent::Preserve {
+            return Ok(WorktreeBranchCleanupReport {
+                branch: record.branch.clone(),
+                base_ref: record.base_ref.clone(),
+                intent: record.branch_cleanup_intent.clone(),
+                status: BranchCleanupStatus::Preserved,
+                safe_delete: false,
+                deleted: false,
+                reason: Some("branch cleanup intent preserves this branch".to_string()),
+                cleanup_command,
+            });
+        }
+        let source = resolved_source_checkout(record)?;
+        let branch = record.branch.as_str();
+        let exists = git::run_git(
+            &source,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+            "git show-ref branch",
+        )
+        .is_ok();
+        if !exists {
+            return Ok(WorktreeBranchCleanupReport {
+                branch: record.branch.clone(),
+                base_ref: record.base_ref.clone(),
+                intent: record.branch_cleanup_intent.clone(),
+                status: BranchCleanupStatus::Missing,
+                safe_delete: false,
+                deleted: false,
+                reason: Some("local branch is already missing".to_string()),
+                cleanup_command,
+            });
+        }
+        let base_ref = branch_cleanup_base_ref(record);
+        let merged = git::run_git(
+            &source,
+            &["merge-base", "--is-ancestor", branch, &base_ref],
+            "git merge-base branch cleanup",
+        )
+        .is_ok();
+        Ok(WorktreeBranchCleanupReport {
+            branch: record.branch.clone(),
+            base_ref,
+            intent: record.branch_cleanup_intent.clone(),
+            status: if merged {
+                BranchCleanupStatus::Merged
+            } else {
+                BranchCleanupStatus::Unmerged
+            },
+            safe_delete: merged,
+            deleted: false,
+            reason: if merged {
+                Some("branch is merged into the cleanup base ref".to_string())
+            } else {
+                Some("branch is not merged into the cleanup base ref".to_string())
+            },
+            cleanup_command,
+        })
+    }
+
+    fn apply_branch_cleanup(
+        record: &TaskWorktreeRecord,
+        mut report: WorktreeBranchCleanupReport,
+        allow_unmerged_branch: bool,
+    ) -> Result<WorktreeBranchCleanupReport> {
+        if report.status == BranchCleanupStatus::Missing || report.deleted {
+            return Ok(report);
+        }
+        if !report.safe_delete && !allow_unmerged_branch {
+            return Ok(report);
+        }
+        let source = resolved_source_checkout(record)?;
+        let delete_flag = if report.safe_delete { "-d" } else { "-D" };
+        git::run_git(
+            &source,
+            &["branch", delete_flag, &record.branch],
+            "git branch delete task worktree branch",
+        )?;
+        report.deleted = true;
+        report.status = BranchCleanupStatus::Deleted;
+        report.reason = Some(if report.safe_delete {
+            "merged branch deleted".to_string()
+        } else {
+            "unmerged branch deleted by explicit allow flag".to_string()
+        });
+        Ok(report)
+    }
+
+    fn branch_cleanup_unknown(
+        record: &TaskWorktreeRecord,
+        reason: String,
+    ) -> WorktreeBranchCleanupReport {
+        WorktreeBranchCleanupReport {
+            branch: record.branch.clone(),
+            base_ref: record.base_ref.clone(),
+            intent: record.branch_cleanup_intent.clone(),
+            status: BranchCleanupStatus::Unknown,
+            safe_delete: false,
+            deleted: false,
+            reason: Some(reason),
+            cleanup_command: format!(
+                "homeboy worktree remove {} --cleanup-branch",
+                shell_arg(&record.id)
+            ),
+        }
+    }
+
+    fn branch_cleanup_base_ref(record: &TaskWorktreeRecord) -> String {
+        let trimmed = record.base_ref.trim();
+        if trimmed.is_empty() || trimmed == "HEAD" {
+            return "HEAD".to_string();
+        }
+        trimmed
+            .strip_prefix("origin/")
+            .unwrap_or(trimmed)
+            .to_string()
+    }
+
+    fn shell_arg(value: &str) -> String {
+        if value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '@' | ':'))
+        {
+            value.to_string()
+        } else {
+            format!("'{}'", value.replace('\'', "'\\''"))
+        }
     }
 
     pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
@@ -1073,6 +1290,7 @@ mod tests {
             task_url: Some("https://example.com/task".to_string()),
             run_id: None,
             cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+            branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             state: TaskWorktreeState::Active,
         }
@@ -1188,6 +1406,8 @@ mod tests {
             WorktreeCleanupOptions {
                 force: false,
                 dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
             },
             &store,
         )
@@ -1201,6 +1421,80 @@ mod tests {
         assert!(output.removed[0].removed);
         assert!(output.removed[0].safety.worktree_missing);
         assert_eq!(updated.state, TaskWorktreeState::Removed);
+    }
+
+    #[test]
+    fn cleanup_deletes_merged_task_branch_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        run_git(source.path(), &["branch", "task"]);
+        let worktree = sibling_worktree_path(source.path(), "merged-branch-cleanup");
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), &worktree);
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+                cleanup_branches: true,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(output.counts.branch_delete_candidates, 1);
+        assert_eq!(output.counts.branches_deleted, 1);
+        assert_eq!(
+            output.removed[0].branch_cleanup.status,
+            BranchCleanupStatus::Deleted
+        );
+        assert!(std::process::Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/task"])
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .code()
+            .is_some_and(|code| code != 0));
+    }
+
+    #[test]
+    fn cleanup_reports_unmerged_task_branch_without_deleting_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        run_git(source.path(), &["checkout", "-q", "-b", "task"]);
+        fs::write(source.path().join("task.txt"), "task\n").unwrap();
+        run_git(source.path(), &["add", "."]);
+        run_git(source.path(), &["commit", "-q", "-m", "task"]);
+        run_git(source.path(), &["checkout", "-q", "-"]);
+        let worktree = sibling_worktree_path(source.path(), "unmerged-branch-cleanup");
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), &worktree);
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+                cleanup_branches: true,
+                allow_unmerged_branches: false,
+            },
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(output.counts.branch_delete_candidates, 0);
+        assert_eq!(output.counts.branches_deleted, 0);
+        assert_eq!(output.counts.unmerged_branches, 1);
+        assert_eq!(
+            output.removed[0].branch_cleanup.status,
+            BranchCleanupStatus::Unmerged
+        );
+        run_git(
+            source.path(),
+            &["show-ref", "--verify", "--quiet", "refs/heads/task"],
+        );
     }
 
     #[test]
@@ -1282,6 +1576,8 @@ mod tests {
                 WorktreeCleanupOptions {
                     force: false,
                     dry_run: false,
+                    cleanup_branches: false,
+                    allow_unmerged_branches: false,
                 },
                 &store,
             )
@@ -1330,6 +1626,8 @@ mod tests {
             WorktreeCleanupOptions {
                 force: false,
                 dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
             },
             &store,
         )
@@ -1361,6 +1659,8 @@ mod tests {
             WorktreeCleanupOptions {
                 force: true,
                 dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
             },
             &store,
         )
@@ -1401,6 +1701,8 @@ mod tests {
             WorktreeCleanupOptions {
                 force: false,
                 dry_run: true,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
             },
             &store,
         )
@@ -1441,6 +1743,8 @@ mod tests {
             WorktreeCleanupOptions {
                 force: true,
                 dry_run: false,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
             },
             &store,
         )
