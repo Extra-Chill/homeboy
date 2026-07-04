@@ -24,6 +24,61 @@ fn run_list_uses_rig_default_component_and_workloads() {
 }
 
 #[test]
+fn run_list_includes_rig_profiles() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_rig_with_profiles(
+            home,
+            "studio-bfb",
+            "studio",
+            component_dir.path(),
+            r#"{ "smoke": ["rig-extra"], "full": ["rig-extra", "rig-slow"] }"#,
+        );
+
+        let (output, exit_code) = run_list(&list_args(None, vec!["studio-bfb".to_string()]))
+            .expect("rig bench list should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.count, 2);
+                assert_eq!(result.profiles.len(), 2);
+                assert_eq!(result.profiles[0].id, "full");
+                assert_eq!(result.profiles[1].id, "smoke");
+                assert_eq!(result.profiles[1].scenarios, vec!["rig-extra"]);
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+}
+
+#[test]
+fn run_list_hints_at_compatible_rig_when_component_scenarios_are_empty() {
+    with_isolated_home(|home| {
+        write_empty_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_registered_component(home, "studio", component_dir.path());
+        write_rig(home, "studio-bfb", "studio", component_dir.path());
+
+        let (output, exit_code) =
+            run_list(&list_args(Some("studio"), Vec::new())).expect("plain bench list should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::List(result) => {
+                assert_eq!(result.count, 0);
+                assert!(result.hints.iter().any(|hint| {
+                    hint.contains("studio-bfb")
+                        && hint.contains("homeboy bench list studio --rig studio-bfb")
+                }));
+            }
+            _ => panic!("expected list output"),
+        }
+    });
+}
+
+#[test]
 fn run_list_serializes_installed_rig_package_evidence() {
     with_isolated_home(|home| {
         write_bench_extension(home);
@@ -189,4 +244,47 @@ fn run_list_requires_rig_default_component_when_component_omitted() {
             message
         );
     });
+}
+
+fn write_empty_bench_extension(home: &TempDir) {
+    let extension_dir = home
+        .path()
+        .join(".config")
+        .join("homeboy")
+        .join("extensions")
+        .join("fixture-bench");
+    fs::create_dir_all(&extension_dir).expect("mkdir extension");
+    fs::write(
+        extension_dir.join("fixture-bench.json"),
+        r#"{
+                "name": "Fixture Bench",
+                "version": "0.0.0",
+                "bench": { "extension_script": "bench-runner.sh" }
+            }"#,
+    )
+    .expect("write extension manifest");
+
+    let script_path = extension_dir.join("bench-runner.sh");
+    fs::write(
+        &script_path,
+        r#"#!/bin/sh
+cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
+{
+  "component_id": "$HOMEBOY_COMPONENT_ID",
+  "iterations": 0,
+  "scenarios": []
+}
+JSON
+"#,
+    )
+    .expect("write bench script");
+
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod script");
+    }
 }

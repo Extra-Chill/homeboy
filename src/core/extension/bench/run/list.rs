@@ -46,6 +46,7 @@ pub fn run_bench_list_workflow(
             results_file,
             &args.scenario_ids,
             args.rig_package,
+            args.profiles,
         );
     }
 
@@ -100,6 +101,7 @@ pub fn run_bench_list_workflow(
         results_file,
         &args.scenario_ids,
         args.rig_package,
+        args.profiles,
     )
 }
 
@@ -126,6 +128,7 @@ pub(crate) fn bench_list_result(
     results_file: PathBuf,
     scenario_ids: &[String],
     rig_package: Option<crate::core::extension::bench::parsing::RigPackageEvidence>,
+    profiles: Vec<super::types::BenchListProfile>,
 ) -> Result<BenchListWorkflowResult> {
     let mut parsed = parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?;
     normalize_workload_json_scenario_ids(&mut parsed);
@@ -137,6 +140,8 @@ pub(crate) fn bench_list_result(
         component_id: parsed.component_id,
         scenarios: parsed.scenarios,
         count,
+        profiles,
+        hints: Vec::new(),
         rig_package,
     })
 }
