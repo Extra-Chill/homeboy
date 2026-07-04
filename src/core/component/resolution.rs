@@ -887,7 +887,7 @@ mod tests {
         assert!(err
             .hints
             .iter()
-            .any(|hint| hint.message.contains("Use --path")));
+            .any(|hint| hint.message.contains("--path <component-dir>")));
     }
 
     #[test]
