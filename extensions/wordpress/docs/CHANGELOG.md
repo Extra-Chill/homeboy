@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.28] - 2026-07-04
+
+### Changed
+- Converge shell runners on shared harness
+
 ## [3.23.27] - 2026-07-04
 
 ### Changed
