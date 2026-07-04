@@ -2,10 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --component-alias COMPONENT_PATH --sidecar-writer
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/test-failures-adapter.sh"
+homeboy_runner_harness_init --component-alias COMPONENT_PATH --sidecar-writer
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -48,8 +54,7 @@ if [ "$TEST_TYPE" = "xcodebuild" ]; then
     WORKSPACE=$(find "$COMPONENT_PATH" -maxdepth 1 -name "*.xcworkspace" | head -1)
     PROJECT=$(find "$COMPONENT_PATH" -maxdepth 1 -name "*.xcodeproj" | head -1)
 
-    XCODE_OUTPUT="$(mktemp)"
-    trap 'rm -f "$XCODE_OUTPUT"' EXIT
+    homeboy_runner_harness_temp XCODE_OUTPUT "homeboy-swift-xcode.XXXXXX"
     if [ -n "$WORKSPACE" ]; then
         set +e
         xcodebuild test -workspace "$WORKSPACE" -scheme "$(basename "$WORKSPACE" .xcworkspace)" -destination 'platform=macOS' "$@" 2>&1 | tee "$XCODE_OUTPUT"
@@ -65,12 +70,8 @@ if [ "$TEST_TYPE" = "xcodebuild" ]; then
         exit 1
     fi
 
-    if [ "$XCODE_EXIT" -ne 0 ] && [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-        if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
-            exit 1
-        fi
-        TEST_FAILURES_TMP="$(mktemp)"
+    if [ "$XCODE_EXIT" -ne 0 ] && homeboy_test_failures_enabled; then
+        homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-swift-xcode-failures.XXXXXX"
         python3 - "$COMPONENT_PATH" "$XCODE_OUTPUT" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
@@ -121,17 +122,15 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
-        homeboy_merge_test_failures "$TEST_FAILURES_TMP"
-        rm -f "$TEST_FAILURES_TMP"
+        homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
     fi
     exit "$XCODE_EXIT"
 else
     # Script mode - run .swift files directly
     TESTS_RUN=0
     TESTS_FAILED=0
-    FAILURES_FILE="$(mktemp)"
+    homeboy_runner_harness_temp FAILURES_FILE "homeboy-swift-script-failures.XXXXXX"
     : > "$FAILURES_FILE"
-    trap 'rm -f "$FAILURES_FILE"' EXIT
 
     for test_file in "$TEST_DIR"/*.swift; do
         if [ -f "$test_file" ]; then
@@ -139,7 +138,7 @@ else
             TEST_NAME=$(basename "$test_file")
             echo "Running: $TEST_NAME"
 
-            TEST_OUTPUT="$(mktemp)"
+            homeboy_runner_harness_temp TEST_OUTPUT "homeboy-swift-script-output.XXXXXX"
             if swift "$test_file" "$TEST_DIR" > "$TEST_OUTPUT" 2>&1; then
                 cat "$TEST_OUTPUT"
                 echo "  PASS"
@@ -162,12 +161,8 @@ else
     echo "Results: $((TESTS_RUN - TESTS_FAILED))/$TESTS_RUN tests passed"
 
     if [ $TESTS_FAILED -gt 0 ]; then
-        if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-            if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
-                echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
-                exit 1
-            fi
-            TEST_FAILURES_TMP="$(mktemp)"
+        if homeboy_test_failures_enabled; then
+            homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-swift-script-failures-json.XXXXXX"
             python3 - "$FAILURES_FILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
@@ -202,8 +197,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
-            homeboy_merge_test_failures "$TEST_FAILURES_TMP"
-            rm -f "$TEST_FAILURES_TMP"
+            homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
         fi
         while IFS=$'\t' read -r _ output_path; do
             [ -n "$output_path" ] && rm -f "$output_path"

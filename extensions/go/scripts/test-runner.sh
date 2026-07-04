@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --sidecar-writer
-OUTPUT_FILE="$(mktemp)"
-trap 'rm -f "$OUTPUT_FILE"' EXIT
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/test-failures-adapter.sh"
+homeboy_runner_harness_init --sidecar-writer
+homeboy_runner_harness_temp OUTPUT_FILE "homeboy-go-test.XXXXXX"
 
 set +e
 (cd "$PROJECT_PATH" && go test -json ./...) 2>&1 | tee "$OUTPUT_FILE"
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
-if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-    if ! type homeboy_merge_test_failures >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
-        exit 1
-    fi
-    TEST_FAILURES_TMP="$(mktemp)"
+if homeboy_test_failures_enabled; then
+    homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-go-test-failures.XXXXXX"
     python3 - "$PROJECT_PATH" "$OUTPUT_FILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
@@ -91,8 +91,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_merge_test_failures "$TEST_FAILURES_TMP"
-    rm -f "$TEST_FAILURES_TMP"
+    homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
 fi
 
 exit "$TEST_EXIT"

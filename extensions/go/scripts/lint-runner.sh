@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
 fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+homeboy_runner_harness_init --sidecar-writer
 
 write_lint_findings() {
     local gofmt_file="$1"
@@ -16,13 +21,8 @@ write_lint_findings() {
         return 0
     fi
 
-    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-        return 1
-    fi
-
     local findings_file
-    findings_file="$(mktemp)"
+    homeboy_runner_harness_temp findings_file "homeboy-go-lint-findings.XXXXXX"
 
     python3 - "$PROJECT_PATH" "$gofmt_file" "$govet_file" "$findings_file" <<'PY'
 import hashlib
@@ -103,13 +103,11 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_merge_lint_findings "$findings_file"
-    rm -f "$findings_file"
+    homeboy_lint_findings_merge_file "$findings_file"
 }
 
-GOFMT_FILE="$(mktemp)"
-GOVET_FILE="$(mktemp)"
-trap 'rm -f "$GOFMT_FILE" "$GOVET_FILE"' EXIT
+homeboy_runner_harness_temp GOFMT_FILE "homeboy-go-gofmt.XXXXXX"
+homeboy_runner_harness_temp GOVET_FILE "homeboy-go-vet.XXXXXX"
 
 find "$PROJECT_PATH" -name '*.go' -not -path '*/vendor/*' -not -path '*/.git/*' -print0 | while IFS= read -r -d '' file; do
     gofmt -l "$file"

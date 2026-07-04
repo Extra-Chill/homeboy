@@ -2,15 +2,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-}"
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+if [ -n "$RESOLVE_CONTEXT_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "$RESOLVE_CONTEXT_HELPER"
+    homeboy_resolve_context
+else
+    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
 fi
+homeboy_runner_harness_source_if_file "$SIDECAR_WRITER_HELPER"
 
 echo "Running Swift lint for: $(basename "$COMPONENT_PATH")"
 
@@ -21,13 +31,8 @@ write_swiftlint_findings() {
         return 0
     fi
 
-    if ! type homeboy_merge_lint_findings >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-        return 1
-    fi
-
     local findings_file
-    findings_file="$(mktemp)"
+    homeboy_runner_harness_temp findings_file "homeboy-swift-lint-findings.XXXXXX"
 
     python3 - "$COMPONENT_PATH" "$input_file" "$findings_file" <<'PY'
 import hashlib
@@ -88,13 +93,11 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_merge_lint_findings "$findings_file"
-    rm -f "$findings_file"
+    homeboy_lint_findings_merge_file "$findings_file"
 }
 
 if command -v swiftlint >/dev/null 2>&1; then
-    SWIFTLINT_JSON="$(mktemp)"
-    trap 'rm -f "$SWIFTLINT_JSON"' EXIT
+    homeboy_runner_harness_temp SWIFTLINT_JSON "homeboy-swiftlint.XXXXXX"
     set +e
     swiftlint lint --path "$COMPONENT_PATH" --reporter json > "$SWIFTLINT_JSON"
     SWIFTLINT_EXIT=$?

@@ -23,14 +23,19 @@ set -euo pipefail
 #   HOMEBOY_FIX_RESULTS_FILE — JSON sidecar receiving applied fix records
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:?HOMEBOY_RUNTIME_COMMAND_CAPTURE is required}"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../scripts/lib/fix-results.sh}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SHARED_LIB_DIR}/fix-results.sh}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --steps --failure-trap --sidecar-writer
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
-source "${COMMAND_CAPTURE_HELPER}"
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+homeboy_runner_harness_init --steps --failure-trap --sidecar-writer
+# shellcheck source=/dev/null
+homeboy_runner_harness_source_command_capture
 # shellcheck source=../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 
@@ -78,13 +83,8 @@ write_lint_findings_from_output() {
         return 0
     fi
 
-    if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-        return 1
-    fi
-
     local findings_file
-    findings_file="$(mktemp)"
+    homeboy_runner_harness_temp findings_file "homeboy-rust-lint-findings.XXXXXX"
 
     python3 - "$PROJECT_PATH" "$tool" "$output_file" "$findings_file" <<'PY'
 import hashlib
@@ -179,8 +179,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(findings, handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_sidecar_merge lint.findings "$findings_file"
-    rm -f "$findings_file"
+    homeboy_lint_findings_merge_file "$findings_file"
 }
 
 trap write_fix_results_sidecar EXIT

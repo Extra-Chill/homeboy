@@ -11,12 +11,18 @@ set -euo pipefail
 # flows go through `homeboy refactor --from lint --write` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+homeboy_runner_harness_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
 
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../../scripts/lib/fix-results.sh}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SHARED_LIB_DIR}/fix-results.sh}"
 # shellcheck source=../../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 
@@ -89,42 +95,13 @@ fi
 
 homeboy_mktemp() {
     local template="$1"
-    local tmpdir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
-
-    if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
-        mktemp "${tmpdir%/}/${template}" 2>/dev/null && return 0
-    fi
-
-    mktemp 2>/dev/null
+    homeboy_runner_harness_mktemp "$template"
 }
 
 merge_findings_into_sidecar() {
     local extra_file="$1"
     [ ! -f "$extra_file" ] && return 0
-
-    if type homeboy_sidecar_merge >/dev/null 2>&1; then
-        homeboy_sidecar_merge lint.findings "$extra_file"
-        return $?
-    fi
-
-    if type homeboy_merge_lint_findings >/dev/null 2>&1; then
-        homeboy_merge_lint_findings "$extra_file"
-        return $?
-    fi
-
-    if type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
-        homeboy_sidecar_merge_json_array "${HOMEBOY_LINT_FINDINGS_FILE:-}" "$extra_file"
-        return $?
-    fi
-
-    # The findings sidecar is Homeboy observability output, not a lint result.
-    # If the sidecar writer is unavailable (e.g. a standalone run that did not
-    # export HOMEBOY_RUNTIME_SIDECAR_WRITER), skip writing it rather than
-    # failing the lint step — a missing writer must never masquerade as a lint
-    # finding (homeboy-extensions#1402). The real pass/fail signal comes from
-    # phpcs/eslint/phpstan exit codes below.
-    echo "Warning: sidecar writer unavailable (HOMEBOY_RUNTIME_SIDECAR_WRITER unset); skipping lint findings sidecar" >&2
-    return 0
+    homeboy_lint_findings_merge_file "$extra_file"
 }
 
 write_lint_producers_sidecar() {

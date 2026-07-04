@@ -90,7 +90,7 @@ HOMEBOY_STEP="none" \
 
 assert_contains "$TMP_DIR/lint.out" "Linting passed"
 
-assert_contains "$RUNNER" 'homeboy_runner_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH'
+assert_contains "$RUNNER" 'homeboy_runner_harness_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH'
 assert_contains "$RUNNER" "*/vendor_prefixed/*"
 assert_contains "$RUNNER" "*/tools/*"
 assert_contains "$RUNNER" "*/scoper.inc.php"

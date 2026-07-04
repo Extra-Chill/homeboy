@@ -17,14 +17,19 @@ set -euo pipefail
 # Passthrough args after -- are forwarded to cargo test.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:?HOMEBOY_RUNTIME_COMMAND_CAPTURE is required}"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
-SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SCRIPT_DIR}/../../scripts/lib/settings.sh}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../scripts/lib" && pwd)}"
+SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-${SHARED_LIB_DIR}/settings.sh}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --steps --failure-trap --sidecar-writer
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
-source "${COMMAND_CAPTURE_HELPER}"
+source "${SHARED_LIB_DIR}/test-failures-adapter.sh"
+homeboy_runner_harness_init --steps --failure-trap --sidecar-writer
+# shellcheck source=/dev/null
+homeboy_runner_harness_source_command_capture
 # shellcheck source=../../scripts/lib/settings.sh
 source "${SETTINGS_HELPER}"
 
@@ -388,12 +393,8 @@ else
         echo "$SUMMARY"
     fi
 
-    if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ]; then
-        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write test failures" >&2
-            exit 1
-        fi
-        TEST_FAILURES_TMP="$(mktemp)"
+    if homeboy_test_failures_enabled; then
+        homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-rust-test-failures.XXXXXX"
         python3 - "$PROJECT_PATH" "$TEST_TMPFILE" "$TEST_FAILURES_TMP" <<'PY'
 import hashlib
 import json
@@ -451,8 +452,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump(failures, handle, indent=2)
     handle.write("\n")
 PY
-        homeboy_sidecar_merge test.failures "$TEST_FAILURES_TMP"
-        rm -f "$TEST_FAILURES_TMP"
+        homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
     fi
 
     FAILED_STEP="$COMMAND_LABEL"

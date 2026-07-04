@@ -21,19 +21,30 @@ fi
 
 # Resolve execution context (shared helper)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-}"
 # Homeboy core provides the sidecar writer via HOMEBOY_RUNTIME_SIDECAR_WRITER.
 # When it is genuinely unavailable, the findings/annotation sidecar writes
 # below degrade to no-ops — they are observability output, not lint results, so
 # they must never fail the lint gate (homeboy-extensions#1402).
 SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=/dev/null
-source "${RESOLVE_CONTEXT_HELPER}"
-homeboy_resolve_context --component-alias PLUGIN_PATH
+source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+if [ -n "$RESOLVE_CONTEXT_HELPER" ]; then
+    # shellcheck source=/dev/null
+    source "${RESOLVE_CONTEXT_HELPER}"
+    homeboy_resolve_context --component-alias PLUGIN_PATH
+else
+    PLUGIN_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 fi
+homeboy_runner_harness_source_if_file "$SIDECAR_WRITER_HELPER"
 
 write_eslint_findings_sidecar() {
     local target="$1"
@@ -42,16 +53,11 @@ write_eslint_findings_sidecar() {
     [ -z "$target" ] && return 0
     [ ! -s "$source" ] && return 0
 
-    if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
-        # The findings sidecar is Homeboy observability output, not a result.
-        # Skip writing it when the writer is unavailable rather than failing the
-        # lint step (homeboy-extensions#1402).
-        echo "Warning: sidecar writer unavailable; skipping ESLint lint findings sidecar" >&2
-        return 0
-    fi
-
     rm -f "$target"
-    homeboy_sidecar_merge_json_array "$target" "$source"
+    local previous_target="${HOMEBOY_LINT_FINDINGS_FILE:-}"
+    HOMEBOY_LINT_FINDINGS_FILE="$target"
+    homeboy_lint_findings_merge_file "$source"
+    HOMEBOY_LINT_FINDINGS_FILE="$previous_target"
 }
 
 # Check if component has JavaScript files
@@ -207,7 +213,7 @@ set -e
 # and PHPStan findings. Direct ESLint runs may write HOMEBOY_LINT_FINDINGS_FILE.
 ESLINT_FINDINGS_FILE="${_HOMEBOY_ESLINT_FINDINGS_FILE:-${HOMEBOY_LINT_FINDINGS_FILE:-}}"
 if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &> /dev/null; then
-    ESLINT_FINDINGS_TMPFILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-eslint-findings.XXXXXX")
+    homeboy_runner_harness_temp ESLINT_FINDINGS_TMPFILE "homeboy-eslint-findings.XXXXXX"
     node -e '
         const fs = require("fs");
         const path = require("path");
@@ -261,7 +267,6 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
     ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_TMPFILE" 2>/dev/null || true
     # Best-effort observability; never fail the gate on a sidecar write.
     write_eslint_findings_sidecar "$ESLINT_FINDINGS_FILE" "$ESLINT_FINDINGS_TMPFILE" || true
-    rm -f "$ESLINT_FINDINGS_TMPFILE"
 fi
 
 # Parse JSON and print summary header (only if issues exist)

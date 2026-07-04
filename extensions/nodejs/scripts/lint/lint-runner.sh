@@ -22,11 +22,17 @@ set -euo pipefail
 # empty unless we recognize the format."
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
-FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SCRIPT_DIR}/../../../scripts/lib/fix-results.sh}"
+SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
+if [ -z "$SHARED_LIB_DIR" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+    SHARED_LIB_DIR="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+fi
+SHARED_LIB_DIR="${SHARED_LIB_DIR:-$(cd "${SCRIPT_DIR}/../../../scripts/lib" && pwd)}"
+FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SHARED_LIB_DIR}/fix-results.sh}"
 # shellcheck source=/dev/null
-source "$RUNNER_PRELUDE"
-homeboy_runner_init --bash 4 --sidecar-writer --failure-trap
+source "${SHARED_LIB_DIR}/runner-harness.sh"
+# shellcheck source=/dev/null
+source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
+homeboy_runner_harness_init --bash 4 --sidecar-writer --failure-trap
 # shellcheck source=../../../scripts/lib/fix-results.sh
 source "$FIX_RESULTS_HELPER"
 # shellcheck source=../lib/node-helpers.sh
@@ -37,10 +43,7 @@ homeboy_detect_package_manager
 FIX_MODE="${HOMEBOY_FIX_ONLY:-0}"
 FINDINGS_FILE="${HOMEBOY_LINT_FINDINGS_FILE:-${PROJECT_PATH}/.node-lint-findings.json}"
 export HOMEBOY_LINT_FINDINGS_FILE="$FINDINGS_FILE"
-if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-    echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-    exit 1
-fi
+homeboy_lint_findings_require_writer
 
 # Detect if eslint is available locally (vendored in node_modules) — that's
 # our preferred runner because we can ask for JSON output.
@@ -68,7 +71,7 @@ if [ -n "${HOMEBOY_NODE_LINT_COMMAND:-}" ]; then
         else
             FAILED_STEP="No typecheck script defined"
             FAILURE_OUTPUT="CI job requested typecheck, but package.json does not define scripts.typecheck. Set HOMEBOY_NODE_LINT_COMMAND to a project-specific command or add scripts.typecheck."
-            homeboy_sidecar_write lint.findings
+            homeboy_lint_findings_write_empty
             exit 1
         fi
     else
@@ -92,7 +95,7 @@ elif [ $HAS_ESLINT_CONFIG -eq 1 ]; then
         # clear message rather than silently npx-installing it.
         FAILED_STEP="eslint config found but eslint not installed"
         FAILURE_OUTPUT="Run: npm i -D eslint (or your package manager equivalent) in ${PROJECT_PATH}"
-        homeboy_sidecar_write lint.findings
+        homeboy_lint_findings_write_empty
         exit 1
     fi
 else
@@ -101,7 +104,7 @@ else
     echo "⚠ No lint surface detected (no scripts.lint, no eslint config)."
     echo "  Skipping lint — emitting empty findings."
     echo ""
-    homeboy_sidecar_write lint.findings
+    homeboy_lint_findings_write_empty
     exit 0
 fi
 
@@ -118,10 +121,10 @@ echo ""
 
 cd "$PROJECT_PATH"
 
-OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint.XXXXXX")
+homeboy_runner_harness_temp OUTPUT_FILE "homeboy-node-lint.XXXXXX"
 FIX_BEFORE=""
 if [ "$FIX_MODE" = "1" ]; then
-    FIX_BEFORE=$(mktemp "${TMPDIR:-/tmp}/homeboy-node-lint-before.XXXXXX")
+    homeboy_runner_harness_temp FIX_BEFORE "homeboy-node-lint-before.XXXXXX"
     homeboy_fix_results_capture "$FIX_BEFORE" "$PROJECT_PATH"
 fi
 set +e
@@ -139,7 +142,6 @@ set -e
 
 if [ "$FIX_MODE" = "1" ] && [ -n "$FIX_BEFORE" ]; then
     homeboy_fix_results_append_changed "nodejs_lint" "rewrite" "$FIX_BEFORE" "" "$PROJECT_PATH"
-    rm -f "$FIX_BEFORE"
     homeboy_fix_results_write
 fi
 
@@ -152,7 +154,7 @@ if [ $USE_ESLINT_JSON -eq 1 ] && [ -s "$OUTPUT_FILE" ]; then
     # only if HOMEBOY_LINT_INCLUDE_WARNINGS=1 (matches Rust extension's
     # ratchet-friendly default).
     INCLUDE_WARNINGS="${HOMEBOY_LINT_INCLUDE_WARNINGS:-0}"
-    FINDINGS_TMP="$(mktemp)"
+    homeboy_runner_harness_temp FINDINGS_TMP "homeboy-node-lint-findings.XXXXXX"
     node - "$OUTPUT_FILE" "$FINDINGS_TMP" "$INCLUDE_WARNINGS" "$PROJECT_PATH" <<'NODEJS'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -234,14 +236,11 @@ for (const file of report) {
 
 fs.writeFileSync(outputFile, JSON.stringify(findings, null, 2));
 NODEJS
-    homeboy_sidecar_merge lint.findings "$FINDINGS_TMP"
-    rm -f "$FINDINGS_TMP"
+    homeboy_lint_findings_merge_file "$FINDINGS_TMP"
 else
     # Unknown runner output — emit empty findings, rely on exit code.
-    homeboy_sidecar_write lint.findings
+    homeboy_lint_findings_write_empty
 fi
-
-rm -f "$OUTPUT_FILE"
 
 if [ "$FIX_MODE" = "1" ]; then
     # In fix mode the engine runs validation separately. Just report exit.
