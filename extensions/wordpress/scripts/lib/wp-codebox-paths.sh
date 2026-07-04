@@ -53,6 +53,17 @@ homeboy_wp_codebox_resolve_bin() {
     local candidates=()
 
     if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
+        bin=$(printf '%s' "$settings_json" | jq -r '.runtime_bin // empty' 2>/dev/null || true)
+    fi
+    if [ -n "$bin" ]; then
+        candidates+=("$bin")
+    fi
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] && candidates+=("$candidate")
+    done < <(homeboy_wp_codebox_managed_cli_candidates)
+
+    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
     fi
     if [ -n "$bin" ]; then
@@ -126,6 +137,12 @@ homeboy_wp_codebox_global_cli_candidates() {
             "${root}/@automattic/wp-codebox-cli/dist/index.js" \
             "${root}/wp-codebox-workspace/node_modules/@automattic/wp-codebox-cli/dist/index.js"
     done
+}
+
+homeboy_wp_codebox_managed_cli_candidates() {
+    local install_dir="${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-${HOME}/.cache/homeboy/wp-codebox}"
+
+    printf '%s\n' "${install_dir}/source/packages/cli/dist/index.js"
 }
 
 homeboy_wp_codebox_bin_is_runnable() {

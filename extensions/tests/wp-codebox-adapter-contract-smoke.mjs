@@ -51,8 +51,9 @@ assert.deepEqual(cliDescriptor.commands, {
 	run_agent_task: 'run-agent-task',
 	recipe_run: 'recipe-run',
 });
-assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
-assert.equal(wpCodeboxBin({ settings: { wp_codebox_bin: '/settings/wp-codebox' } }), '/settings/wp-codebox');
+const emptyManagedInstallDir = path.join(tmpdir(), 'homeboy-wp-codebox-empty-managed');
+assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyManagedInstallDir, HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
+assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyManagedInstallDir }, settings: { wp_codebox_bin: '/settings/wp-codebox' } }), '/settings/wp-codebox');
 assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.mjs'), { command: process.execPath, args: ['/tmp/wp-codebox.mjs'] });
 
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-bin-'));
@@ -93,6 +94,21 @@ try {
 	assert.equal(
 		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, executable: '' }),
 		managedCli
+	);
+	assert.equal(
+		wpCodeboxBin({
+			env: {
+				HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed'),
+				HOMEBOY_WP_CODEBOX_BIN: '/stale/env/wp-codebox',
+			},
+			settings: { wp_codebox_bin: '/stale/settings/wp-codebox' },
+			executable: '',
+		}),
+		managedCli
+	);
+	assert.equal(
+		wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(fixtureRoot, 'managed') }, runtime_bin: '/fresh/runtime/wp-codebox', executable: '' }),
+		'/fresh/runtime/wp-codebox'
 	);
 } finally {
 	rmSync(fixtureRoot, { recursive: true, force: true });

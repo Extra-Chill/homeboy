@@ -23,40 +23,8 @@ Environment:
 USAGE
 }
 
-settings_wp_codebox_bin() {
-    [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] || return 0
-    [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ] || return 0
-
-    if command -v jq >/dev/null 2>&1; then
-        printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true
-        return 0
-    fi
-
-    if command -v node >/dev/null 2>&1; then
-        node -e '
-const input = process.env.HOMEBOY_SETTINGS_JSON || "{}";
-try {
-  const value = JSON.parse(input).wp_codebox_bin;
-  if (typeof value === "string") process.stdout.write(value);
-} catch {}
-' 2>/dev/null || true
-    fi
-}
-
-resolve_wp_codebox_bin() {
-    local bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
-    if [ -z "$bin" ]; then
-        bin="$(settings_wp_codebox_bin)"
-    fi
-    bin="${bin:-wp-codebox}"
-
-    if [[ "$bin" = */* ]]; then
-        printf '%s\n' "$bin"
-        return 0
-    fi
-
-    command -v "$bin" 2>/dev/null || printf '%s\n' "$bin"
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 
 MODE="doctor"
 if [ "$#" -gt 0 ]; then
@@ -72,5 +40,6 @@ if [ "$#" -gt 0 ]; then
     esac
 fi
 
-WP_CODEBOX_BIN="$(resolve_wp_codebox_bin)"
-exec "$WP_CODEBOX_BIN" "$MODE" "$@"
+WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")"
+homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
+exec "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "$MODE" "$@"

@@ -16,6 +16,9 @@ cat > "$FAKE_BIN" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
 case "$1" in
+    commands)
+        printf 'doctor\ncleanup\n'
+        ;;
     doctor)
         printf 'WP Codebox doctor: warning\n'
         ;;
@@ -31,6 +34,7 @@ SH
 chmod +x "$FAKE_BIN"
 
 output=$(WP_CODEBOX_CALLS="$CALLS" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/empty-install" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_BIN" \
     bash "$DOCTOR" doctor --fix --stale-after-seconds 1 --archive-root "$ARCHIVE_ROOT" --json 2>&1)
 
@@ -41,6 +45,7 @@ if [[ "$output" != *"WP Codebox doctor: warning"* ]]; then
 fi
 
 cleanup_output=$(WP_CODEBOX_CALLS="$CALLS" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/empty-install" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_BIN" \
     bash "$DOCTOR" cleanup --stale-after-seconds 0 --archive-root "$ARCHIVE_ROOT" 2>&1)
 
@@ -67,17 +72,86 @@ cat > "$SETTINGS_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
-printf 'settings wp-codebox %s\n' "$1"
+case "$1" in
+    commands)
+        printf 'doctor\ncleanup\n'
+        ;;
+    *)
+        printf 'settings wp-codebox %s\n' "$1"
+        ;;
+esac
 SH
 chmod +x "$SETTINGS_BIN"
 
 settings_output=$(WP_CODEBOX_CALLS="$CALLS" \
+    HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/empty-install" \
     HOMEBOY_SETTINGS_JSON="{\"wp_codebox_bin\":\"$SETTINGS_BIN\"}" \
     bash "$DOCTOR" --json 2>&1)
 
 if [[ "$settings_output" != *"settings wp-codebox doctor"* ]]; then
     echo "Expected settings wp_codebox_bin to be used" >&2
     echo "$settings_output" >&2
+    exit 1
+fi
+
+MANAGED_HOME="${TMPDIR}/managed-home"
+MANAGED_BIN="${MANAGED_HOME}/.cache/homeboy/wp-codebox/source/packages/cli/dist/index.js"
+STALE_BIN="${TMPDIR}/stale-wp-codebox"
+RUNTIME_BIN="${TMPDIR}/runtime-wp-codebox"
+mkdir -p "$(dirname "$MANAGED_BIN")"
+
+cat > "$MANAGED_BIN" <<'NODE'
+#!/usr/bin/env node
+const fs = require('node:fs');
+fs.appendFileSync(process.env.WP_CODEBOX_CALLS, `${process.argv.slice(2).join(' ')}\n`);
+switch (process.argv[2]) {
+  case 'commands': process.exit(0);
+  case 'doctor': console.log('managed wp-codebox doctor'); break;
+  default: process.exit(64);
+}
+NODE
+chmod +x "$MANAGED_BIN"
+
+cat > "$STALE_BIN" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'stale wp-codebox should not run\n' >&2
+exit 65
+SH
+chmod +x "$STALE_BIN"
+
+managed_output=$(WP_CODEBOX_CALLS="$CALLS" \
+    HOME="$MANAGED_HOME" \
+    HOMEBOY_WP_CODEBOX_BIN="$STALE_BIN" \
+    HOMEBOY_SETTINGS_JSON="{\"wp_codebox_bin\":\"$STALE_BIN\"}" \
+    bash "$DOCTOR" --json 2>&1)
+
+if [[ "$managed_output" != *"managed wp-codebox doctor"* ]]; then
+    echo "Expected managed WP Codebox cache to outrank stale legacy env/settings" >&2
+    echo "$managed_output" >&2
+    exit 1
+fi
+
+cat > "$RUNTIME_BIN" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$WP_CODEBOX_CALLS"
+case "$1" in
+    commands) exit 0 ;;
+    doctor) printf 'runtime wp-codebox doctor\n' ;;
+    *) exit 64 ;;
+esac
+SH
+chmod +x "$RUNTIME_BIN"
+
+runtime_output=$(WP_CODEBOX_CALLS="$CALLS" \
+    HOME="$MANAGED_HOME" \
+    HOMEBOY_SETTINGS_JSON="{\"runtime_bin\":\"$RUNTIME_BIN\"}" \
+    bash "$DOCTOR" --json 2>&1)
+
+if [[ "$runtime_output" != *"runtime wp-codebox doctor"* ]]; then
+    echo "Expected generic runtime_bin to outrank managed WP Codebox cache" >&2
+    echo "$runtime_output" >&2
     exit 1
 fi
 
