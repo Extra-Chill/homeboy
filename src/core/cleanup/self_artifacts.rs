@@ -361,8 +361,16 @@ fn cargo_manifest_package_is_homeboy(cargo_toml: &Path) -> Result<bool> {
 }
 
 fn default_self_temp_roots() -> Vec<PathBuf> {
-    let temp_dir = std::env::temp_dir();
-    vec![temp_dir.clone(), temp_dir.join("opencode")]
+    let mut roots = vec![std::env::temp_dir()];
+    if let Ok(raw) = std::env::var("HOMEBOY_TRANSIENT_WORKSPACE_ROOTS") {
+        roots.extend(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    roots
 }
 
 fn is_detached_homeboy_temp_artifact(path: &Path) -> bool {

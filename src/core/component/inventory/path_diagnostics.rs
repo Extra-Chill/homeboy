@@ -1,4 +1,5 @@
 use crate::core::component::Component;
+use crate::core::transient_workspace_policy::TransientWorkspacePolicy;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -33,7 +34,7 @@ pub(super) fn local_path_diagnostic_for(
     } else {
         Some(match status.as_str() {
             "temp_checkout" => format!(
-                "Component '{id}' local_path points at a temporary/opencode checkout: {local_path}"
+                "Component '{id}' local_path points at a transient workspace checkout: {local_path}"
             ),
             "missing" => format!("Component '{id}' local_path does not exist: {local_path}"),
             "non_git" => format!("Component '{id}' local_path is not a git checkout: {local_path}"),
@@ -104,27 +105,11 @@ pub(super) fn stable_workspace_roots(path: &Path) -> Vec<PathBuf> {
 }
 
 fn stable_root_before_temp_marker(path: &Path) -> Option<PathBuf> {
-    let segments = crate::core::paths::path_component_strings(path);
-    let mut root = PathBuf::new();
-    for segment in segments {
-        if segment == "opencode" || segment == "tmp" || segment == "Temp" || segment == "T" {
-            return if root.as_os_str().is_empty() {
-                None
-            } else {
-                Some(root)
-            };
-        }
-        root.push(&segment);
-    }
-    None
+    TransientWorkspacePolicy::current().stable_root_before_marker(path)
 }
 
 pub(super) fn is_temp_checkout_path(path: &Path) -> bool {
-    let rendered = path.to_string_lossy();
-    rendered.contains("/opencode/")
-        || rendered.contains("/tmp/opencode/")
-        || rendered.contains("/Temp/")
-        || rendered.contains("/T/opencode/")
+    TransientWorkspacePolicy::current().is_transient_path(path)
 }
 
 pub(super) fn detect_git_root(path: &Path) -> Option<PathBuf> {
