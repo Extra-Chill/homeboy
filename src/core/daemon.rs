@@ -70,11 +70,49 @@ pub struct DaemonStatus {
     pub running: bool,
     pub fresh: bool,
     pub reachable: bool,
+    pub freshness: DaemonFreshnessReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonStaleReasonCode {
+    LeaseMissing,
+    LeaseCorrupt,
+    LeaseSchemaMismatch,
+    PidDead,
+    BuildIdentityMismatch,
+    BinaryHashMismatch,
+    VersionMismatch,
+    RuntimePathsDrift,
+    TransportUnreachable,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonRepairStep {
+    pub code: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonFreshnessReport {
+    pub fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason_code: Option<DaemonStaleReasonCode>,
+    pub restartable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_paths: Option<DaemonRuntimeSnapshot>,
+    pub active_jobs: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_plan: Vec<DaemonRepairStep>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -119,15 +157,15 @@ struct DaemonOperationLock {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonRuntimeSnapshot {
-    loaded_at: String,
-    paths: Vec<DaemonRuntimePathSnapshot>,
+    pub loaded_at: String,
+    pub paths: Vec<DaemonRuntimePathSnapshot>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonRuntimePathSnapshot {
-    env: String,
-    path: String,
-    fingerprint: String,
+    pub env: String,
+    pub path: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +175,7 @@ struct DaemonLeaseValidation {
     fresh: bool,
     reachable: bool,
     stale_reason: Option<String>,
+    stale_reason_code: Option<DaemonStaleReasonCode>,
     invalid_pid: Option<u32>,
 }
 
@@ -225,6 +264,7 @@ pub fn read_status() -> Result<DaemonStatus> {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
         reachable: validation.reachable,
+        freshness: freshness_report_from_validation(&validation, 0),
         stale_reason: validation.stale_reason,
         state: validation.state,
         state_path,
@@ -238,6 +278,7 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
             fresh: false,
             reachable: false,
             stale_reason: None,
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
             state: None,
             invalid_pid: None,
         });
@@ -253,6 +294,7 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
                 fresh: false,
                 reachable: false,
                 stale_reason: Some(format!("invalid daemon lease: {error}")),
+                stale_reason_code: Some(DaemonStaleReasonCode::LeaseCorrupt),
                 state: None,
                 invalid_pid: serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
@@ -267,11 +309,17 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         return Ok(stale_lease(
             state,
             running,
+            DaemonStaleReasonCode::LeaseSchemaMismatch,
             "unsupported daemon lease schema",
         ));
     }
     if !running {
-        return Ok(stale_lease(state, false, "daemon lease pid is not running"));
+        return Ok(stale_lease(
+            state,
+            false,
+            DaemonStaleReasonCode::PidDead,
+            "daemon lease pid is not running",
+        ));
     }
     let current_identity = build_identity::current();
     if state.build_identity.version != current_identity.version
@@ -280,6 +328,7 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         return Ok(stale_lease(
             state,
             true,
+            DaemonStaleReasonCode::VersionMismatch,
             "daemon build identity does not match current Homeboy binary",
         ));
     }
@@ -287,11 +336,17 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         return Ok(stale_lease(
             state,
             true,
+            DaemonStaleReasonCode::BinaryHashMismatch,
             "daemon binary hash does not match current Homeboy binary",
         ));
     }
     if let Some(reason) = runtime_snapshot_stale_reason(&state.runtime_paths) {
-        return Ok(stale_lease(state, true, reason));
+        return Ok(stale_lease(
+            state,
+            true,
+            DaemonStaleReasonCode::RuntimePathsDrift,
+            reason,
+        ));
     }
 
     Ok(DaemonLeaseValidation {
@@ -300,6 +355,7 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         reachable: true,
         state: Some(state),
         stale_reason: None,
+        stale_reason_code: None,
         invalid_pid: None,
     })
 }
@@ -307,6 +363,7 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
 fn stale_lease(
     state: DaemonState,
     running: bool,
+    code: DaemonStaleReasonCode,
     reason: impl Into<String>,
 ) -> DaemonLeaseValidation {
     DaemonLeaseValidation {
@@ -314,8 +371,46 @@ fn stale_lease(
         fresh: false,
         reachable: running,
         stale_reason: Some(reason.into()),
+        stale_reason_code: Some(code),
         state: Some(state),
         invalid_pid: None,
+    }
+}
+
+fn freshness_report_from_validation(
+    validation: &DaemonLeaseValidation,
+    active_jobs: usize,
+) -> DaemonFreshnessReport {
+    let state = validation.state.as_ref();
+    let restartable = !validation.fresh
+        && active_jobs == 0
+        && !matches!(
+            validation.stale_reason_code,
+            Some(DaemonStaleReasonCode::LeaseCorrupt | DaemonStaleReasonCode::TransportUnreachable)
+        );
+    let repair_plan = if restartable {
+        vec![
+            DaemonRepairStep {
+                code: "daemon_stop".to_string(),
+                command: "homeboy daemon stop".to_string(),
+            },
+            DaemonRepairStep {
+                code: "daemon_start".to_string(),
+                command: "homeboy daemon start".to_string(),
+            },
+        ]
+    } else {
+        Vec::new()
+    };
+    DaemonFreshnessReport {
+        fresh: validation.fresh,
+        stale_reason_code: validation.stale_reason_code,
+        restartable,
+        lease_id: state.map(|state| state.lease_id.clone()),
+        binary_hash: state.and_then(|state| state.binary_sha256.clone()),
+        runtime_paths: state.map(|state| state.runtime_paths.clone()),
+        active_jobs,
+        repair_plan,
     }
 }
 
@@ -608,6 +703,7 @@ where
                 "version": VERSION,
                 "build_identity": build_identity::current(),
                 "lease": heartbeat_lease().ok(),
+                "freshness": daemon_freshness_report(job_store).ok(),
             }),
             artifact: None,
         },
@@ -618,6 +714,7 @@ where
                 "build_identity": build_identity::current(),
                 "runtime_paths": daemon_runtime_paths_body(),
                 "lease": heartbeat_lease().ok(),
+                "freshness": daemon_freshness_report(job_store).ok(),
             }),
             artifact: None,
         },
@@ -676,6 +773,17 @@ where
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
+    let path = state_path()?;
+    let validation = validate_lease_file(&path)?;
+    let active_jobs = job_store
+        .list()
+        .into_iter()
+        .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+        .count();
+    Ok(freshness_report_from_validation(&validation, active_jobs))
 }
 
 fn create_runner_file_directory(

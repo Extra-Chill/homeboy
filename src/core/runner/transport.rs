@@ -518,6 +518,7 @@ mod tests {
             state: RunnerSessionState::Connected,
             session: Some(session),
             stale_daemon: None,
+            daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,

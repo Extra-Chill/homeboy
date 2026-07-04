@@ -1127,6 +1127,7 @@ mod tests {
                 Some("homeboy 0.259.0+daemon".to_string()),
                 Some("homeboy 0.262.0+binary".to_string()),
             )),
+            daemon_freshness: None,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),

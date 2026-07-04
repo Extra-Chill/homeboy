@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::daemon::DaemonFreshnessReport;
+
 use crate::core::redaction::redact_argv_display;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
@@ -498,6 +500,8 @@ pub struct RunnerStatusReport {
     pub session: Option<RunnerSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_daemon: Option<RunnerStaleDaemonWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_freshness: Option<DaemonFreshnessReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

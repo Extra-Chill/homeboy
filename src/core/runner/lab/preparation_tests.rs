@@ -2,6 +2,7 @@ use super::super::lab_selection::{
     prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
+use crate::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use crate::core::runner::{
     RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
 };
@@ -25,6 +26,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -90,6 +92,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -128,6 +131,7 @@ fn lab_runner_preparation_refreshes_stale_default_daemon_version() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
+                daemon_freshness: Some(restartable_daemon_freshness()),
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -166,6 +170,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_runtime_path_warning(runner_id)),
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -209,6 +214,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
+                daemon_freshness: Some(restartable_daemon_freshness()),
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -271,6 +277,7 @@ fn lab_runner_preparation_refreshes_stale_explicit_daemon_version() {
                     Some("http://127.0.0.1:1234"),
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
+                daemon_freshness: Some(restartable_daemon_freshness()),
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -306,6 +313,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 state: super::super::RunnerSessionState::Connected,
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -346,6 +354,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 state: super::super::RunnerSessionState::Connected,
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -391,6 +400,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -448,6 +458,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 state: super::super::RunnerSessionState::Disconnected,
                 session: None,
                 stale_daemon: None,
+                daemon_freshness: None,
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
@@ -564,6 +575,19 @@ fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
         Some("homeboy 0.218.0+old".to_string()),
         Some("homeboy 0.219.0+new".to_string()),
     )
+}
+
+fn restartable_daemon_freshness() -> DaemonFreshnessReport {
+    DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: Some("lease".to_string()),
+        binary_hash: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        repair_plan: Vec::new(),
+    }
 }
 
 fn stale_runtime_path_warning(runner_id: &str) -> RunnerStaleDaemonWarning {

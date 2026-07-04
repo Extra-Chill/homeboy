@@ -29,7 +29,9 @@ const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
-use connection_daemon::{connect_remote_daemon, daemon_http_version, versions_match};
+use connection_daemon::{
+    connect_remote_daemon, daemon_http_freshness, daemon_http_version, versions_match,
+};
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_stale_paths};
 
@@ -266,6 +268,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
+    let daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
@@ -314,6 +317,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         state,
         session,
         stale_daemon,
+        daemon_freshness,
         active_jobs,
         active_runner_jobs,
         stale_runner_jobs,
@@ -324,6 +328,28 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_error,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn runner_daemon_freshness(
+    runner: &Runner,
+    session: Option<&RunnerSession>,
+    connected: bool,
+) -> Result<Option<crate::core::daemon::DaemonFreshnessReport>> {
+    if !connected || runner.kind != RunnerKind::Ssh {
+        return Ok(None);
+    }
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let Some(local_url) = session.local_url.as_deref() else {
+        return Ok(None);
+    };
+    Ok(daemon_http_freshness(
+        local_url,
+        &session.homeboy_version,
+        session.homeboy_build_identity.as_deref().unwrap_or(""),
+    )
+    .ok())
 }
 
 fn active_runner_job_source(session: &RunnerSession) -> Option<RunnerActiveJobSource> {

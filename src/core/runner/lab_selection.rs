@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
 use crate::core::{Error, ErrorCode, Result};
 
+use super::daemon_freshness::repair_or_fail;
 use super::{
     default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
     RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
@@ -295,10 +296,9 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
             if status
-                .stale_daemon
+                .daemon_freshness
                 .as_ref()
-                .is_some_and(|warning| !stale_daemon_runtime_paths_changed(warning))
-                && status_tunnel_mode(&status) == RunnerTunnelMode::DirectSsh
+                .is_some_and(|report| repair_or_fail(report).is_ok())
             {
                 eprintln!(
                     "Lab offload: connected runner `{}` daemon is stale; attempting automatic refresh.",
@@ -322,7 +322,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                         "Lab offload runner `{}` has a stale daemon and automatic refresh failed",
                         selection.runner_id
                     ),
-                    stale_daemon_repair_command(&selection.runner_id, &status),
+                    daemon_repair_command(&selection.runner_id, &status),
                 );
             }
             return automatic_fallback_or_explicit_error(
@@ -332,10 +332,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                     "Lab offload runner `{}` is connected but is not ready for remote execution",
                     selection.runner_id
                 ),
-                format!(
-                    "Run `homeboy runner connect {}` to refresh the runner daemon session.",
-                    selection.runner_id
-                ),
+                daemon_repair_command(&selection.runner_id, &status),
             );
         }
         eprintln!(
@@ -415,7 +412,7 @@ fn connected_runner_not_ready_reason(
     status: &RunnerStatusReport,
 ) -> Option<String> {
     if let Some(warning) = status.stale_daemon.as_ref() {
-        let restart = stale_daemon_repair_command(runner_id, status);
+        let restart = daemon_repair_command(runner_id, status);
         if !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty() {
             return Some(format!(
                 "connected runner `{runner_id}` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `{restart}`"
@@ -445,11 +442,17 @@ fn connected_runner_not_ready_reason(
     }
 }
 
-fn stale_daemon_runtime_paths_changed(warning: &super::RunnerStaleDaemonWarning) -> bool {
-    !warning.stale_runtime_paths.is_empty() || !warning.changed_runtime_paths.is_empty()
-}
-
-fn stale_daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
+fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
+    if let Some(report) = status.daemon_freshness.as_ref() {
+        let commands: Vec<_> = report
+            .repair_plan
+            .iter()
+            .map(|step| step.command.clone())
+            .collect();
+        if !commands.is_empty() {
+            return commands.join(" && ");
+        }
+    }
     let restart = status
         .stale_daemon
         .as_ref()
