@@ -80,6 +80,7 @@ settings_json=$(jq -nc \
     }')
 
 run_runner() {
+    local settings_for_run="${HOMEBOY_SETTINGS_JSON_OVERRIDE:-$settings_json}"
     HOMEBOY_COMPONENT_ID="sample-plugin" \
     HOMEBOY_COMPONENT_PATH="$PLUGIN_DIR" \
     HOMEBOY_PROJECT_PATH="$PLUGIN_DIR" \
@@ -88,7 +89,7 @@ run_runner() {
     HOMEBOY_RUNTIME_RUNNER_STEPS="${TMPDIR}/missing-runner-steps.sh" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_BIN" \
     HOMEBOY_WP_CODEBOX_PHPUNIT_RECIPE_BUILDER="$FAKE_BUILDER" \
-    HOMEBOY_SETTINGS_JSON="$settings_json" \
+    HOMEBOY_SETTINGS_JSON="$settings_for_run" \
     WP_CODEBOX_RAN_FILE="$WP_CODEBOX_RAN_FILE" \
     bash "$RUNNER"
 }
@@ -105,6 +106,28 @@ fi
 if [ ! -f "$WP_CODEBOX_RAN_FILE" ]; then
     echo "Expected WP Codebox to run after valid profile recipe generation" >&2
     echo "$valid_output" >&2
+    exit 1
+fi
+
+rm -f "$WP_CODEBOX_RAN_FILE"
+settings_without_no_test_policy=$(printf '%s' "$settings_json" | jq -c 'del(.phpunit_no_tests)')
+set +e
+default_policy_output=$(HOMEBOY_SETTINGS_JSON_OVERRIDE="$settings_without_no_test_policy" run_runner 2>&1)
+default_policy_status=$?
+set -e
+if [ "$default_policy_status" -eq 0 ]; then
+    echo "Expected explicit PHPUnit profile with zero discovered tests to fail by default" >&2
+    echo "$default_policy_output" >&2
+    exit 1
+fi
+if [ ! -f "$WP_CODEBOX_RAN_FILE" ]; then
+    echo "Expected WP Codebox to run before default no-test policy failure" >&2
+    echo "$default_policy_output" >&2
+    exit 1
+fi
+if [[ "$default_policy_output" != *"Explicit PHPUnit test scope/config was requested"* ]]; then
+    echo "Expected explicit PHPUnit no-test diagnostic" >&2
+    echo "$default_policy_output" >&2
     exit 1
 fi
 

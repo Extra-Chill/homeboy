@@ -57,14 +57,35 @@ settings_json="${HOMEBOY_SETTINGS_JSON:-}"
 [ -n "$settings_json" ] || settings_json="{}"
 
 PHPUNIT_NO_TESTS="skipped"
+PHPUNIT_NO_TESTS_CONFIGURED=0
 WP_CODEBOX_PHPUNIT_TEST_ROOT=""
+WP_CODEBOX_PHPUNIT_CONFIG=""
 if [ "$settings_json" != "{}" ]; then
     extracted=$(printf '%s' "$settings_json" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PHPUNIT_NO_TESTS="$extracted"
+        PHPUNIT_NO_TESTS_CONFIGURED=1
+    fi
 
     extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_phpunit_test_root // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHPUNIT_TEST_ROOT="$extracted"
+
+    extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_phpunit_config // empty' 2>/dev/null || true)
+    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHPUNIT_CONFIG="$extracted"
 fi
+
+phpunit_no_tests_is_failure_policy() {
+    [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]
+}
+
+phpunit_no_tests_allows_skip() {
+    [ "$PHPUNIT_NO_TESTS_CONFIGURED" -eq 1 ] || return 1
+    [ "$PHPUNIT_NO_TESTS" = "skipped" ] || [ "$PHPUNIT_NO_TESTS" = "skip" ]
+}
+
+phpunit_has_explicit_scope_request() {
+    [ -n "$WP_CODEBOX_PHPUNIT_TEST_ROOT" ] || [ -n "$WP_CODEBOX_PHPUNIT_CONFIG" ]
+}
 
 WP_CODEBOX_SOURCE_ROOT=""
 WP_CODEBOX_SOURCE_SUBPATH=""
@@ -361,7 +382,7 @@ if ! guard_component_path; then
 fi
 
 TEST_DIR="${PLUGIN_PATH}/tests"
-if [ ! -d "$TEST_DIR" ] && [ -z "$WP_CODEBOX_PHPUNIT_TEST_ROOT" ]; then
+if [ ! -d "$TEST_DIR" ] && ! phpunit_has_explicit_scope_request; then
     if component_has_composer_test_script; then
         run_composer_test_script
         exit $?
@@ -372,7 +393,7 @@ if [ ! -d "$TEST_DIR" ] && [ -z "$WP_CODEBOX_PHPUNIT_TEST_ROOT" ]; then
         exit $?
     fi
 
-    if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]; then
+    if phpunit_no_tests_is_failure_policy; then
         echo ""
         echo "NO PHPUNIT TEST DIRECTORY DISCOVERED"
         echo "  Expected: ${TEST_DIR}"
@@ -768,7 +789,6 @@ PHPUNIT_ENV_JSON="{}"
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
 WP_CODEBOX_PHPUNIT_MOUNTS_JSON="[]"
 WP_CODEBOX_PHPUNIT_TEST_ROOT=""
-WP_CODEBOX_PHPUNIT_CONFIG=""
 WP_CODEBOX_PHPUNIT_CWD=""
 WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON="[]"
 WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="null"
@@ -797,7 +817,10 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
+    if [ -n "$extracted" ] && [ "$extracted" != "null" ]; then
+        PHPUNIT_NO_TESTS="$extracted"
+        PHPUNIT_NO_TESTS_CONFIGURED=1
+    fi
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
@@ -1425,11 +1448,13 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
         exit $?
     fi
 
-    if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ] || [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ]; then
+    if phpunit_no_tests_is_failure_policy || [ -f "${PLUGIN_PATH}/phpunit.xml" ] || [ -f "${PLUGIN_PATH}/phpunit.xml.dist" ] || { phpunit_has_explicit_scope_request && ! phpunit_no_tests_allows_skip; }; then
         dump_diagnostics "NO PHPUNIT TEST FILES DISCOVERED"
         echo ""
-        if [ "$PHPUNIT_NO_TESTS" = "failed" ] || [ "$PHPUNIT_NO_TESTS" = "fail" ]; then
+        if phpunit_no_tests_is_failure_policy; then
             echo "PHPUnit no-test discovery is configured as failure, and no files matched the WordPress runner discovery contract."
+        elif phpunit_has_explicit_scope_request; then
+            echo "Explicit PHPUnit test scope/config was requested, but no files matched the WordPress runner discovery contract."
         else
             echo "PHPUnit config exists, but no files matched the WordPress runner discovery contract."
         fi

@@ -12,6 +12,7 @@ PLUGIN_DIR="${MONOREPO_DIR}/plugins/sample-plugin"
 FAKE_BIN="${TMPDIR}/wp-codebox"
 RESOLVE_CONTEXT_HELPER="${TMPDIR}/resolve-context-helper.sh"
 CAPTURED_RECIPE="${TMPDIR}/recipe.json"
+RUNNER_OUTPUT="${TMPDIR}/runner-output.txt"
 CORE_MODULE="${ROOT_DIR}/tests/fixtures/wp-codebox-core-recipe-builder.mjs"
 
 mkdir -p "${PLUGIN_DIR}/tests"
@@ -34,6 +35,11 @@ PHP
 cat > "$FAKE_BIN" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [ "${1:-}" = "commands" ]; then
+    printf '%s\n' 'recipe-run'
+    exit 0
+fi
 
 recipe=""
 while [ "$#" -gt 0 ]; do
@@ -67,6 +73,7 @@ homeboy_resolve_context() {
 SH
 chmod +x "$RESOLVE_CONTEXT_HELPER"
 
+set +e
 HOMEBOY_COMPONENT_ID="sample-plugin" \
 HOMEBOY_COMPONENT_PATH="$PLUGIN_DIR" \
 HOMEBOY_PROJECT_PATH="$PLUGIN_DIR" \
@@ -79,7 +86,13 @@ HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_ROOT="$MONOREPO_DIR" \
 HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_SUBPATH="plugins/sample-plugin" \
 CAPTURED_RECIPE="$CAPTURED_RECIPE" \
 HOMEBOY_SETTINGS_JSON="{\"phpunit_no_tests\":\"skip\"}" \
-bash "$RUNNER" >/dev/null
+bash "$RUNNER" >"$RUNNER_OUTPUT" 2>&1
+runner_status=$?
+set -e
+if [ "$runner_status" -ne 0 ]; then
+    cat "$RUNNER_OUTPUT" >&2
+    exit "$runner_status"
+fi
 
 node - "$CAPTURED_RECIPE" "$MONOREPO_DIR" <<'NODE'
 const assert = require('node:assert/strict');
