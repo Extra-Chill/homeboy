@@ -131,6 +131,13 @@ pub struct BenchListWorkflowArgs {
     pub extra_workloads: Vec<PathBuf>,
     pub env_provider_extensions: Vec<String>,
     pub rig_package: Option<RigPackageEvidence>,
+    pub profiles: Vec<BenchListProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BenchListProfile {
+    pub id: String,
+    pub scenarios: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +146,10 @@ pub struct BenchListWorkflowResult {
     pub component_id: String,
     pub scenarios: Vec<BenchScenario>,
     pub count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<BenchListProfile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_package: Option<RigPackageEvidence>,
 }

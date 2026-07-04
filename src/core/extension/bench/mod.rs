@@ -69,7 +69,7 @@ pub use report::{
     MetricDelta as ReportMetricDelta, RigBenchEntry,
 };
 pub use run::{
-    run_bench_list_workflow, run_main_bench_workflow, BenchListWorkflowArgs,
+    run_bench_list_workflow, run_main_bench_workflow, BenchListProfile, BenchListWorkflowArgs,
     BenchListWorkflowResult, BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
 

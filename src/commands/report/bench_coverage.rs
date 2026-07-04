@@ -145,6 +145,7 @@ fn component_report(
             extra_workloads: Vec::new(),
             env_provider_extensions: Vec::new(),
             rig_package: None,
+            profiles: Vec::new(),
         },
         &run_dir,
     );

@@ -9,8 +9,8 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::bench as extension_bench;
 use homeboy::core::extension::bench::{
     aggregate_comparison_with_axes, BenchCommandOutput, BenchComparisonOutput,
-    BenchComparisonSummaryOutput, BenchListWorkflowArgs, BenchListWorkflowResult, RigBenchEntry,
-    DEFAULT_REGRESSION_THRESHOLD_PERCENT,
+    BenchComparisonSummaryOutput, BenchListProfile, BenchListWorkflowArgs, BenchListWorkflowResult,
+    RigBenchEntry, DEFAULT_REGRESSION_THRESHOLD_PERCENT,
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::rig::{self, RigSpec};
@@ -904,13 +904,116 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
             rig_package: rig_context
                 .as_ref()
                 .and_then(|context| rig::package_evidence(&context.spec.id)),
+            profiles: rig_spec.map(bench_list_profiles).unwrap_or_default(),
         },
         &run_dir,
     );
     resource_run.write_to_run_dir(&run_dir)?;
-    let output = output?;
+    let mut output = output?;
+    if output.count == 0 {
+        output.hints = bench_list_empty_hints(args, rig_spec, &output.component_id);
+    }
 
     Ok((BenchOutput::List(output), 0))
+}
+
+fn bench_list_profiles(spec: &RigSpec) -> Vec<BenchListProfile> {
+    let mut profiles = spec
+        .bench_profiles
+        .iter()
+        .map(|(id, scenarios)| BenchListProfile {
+            id: id.clone(),
+            scenarios: scenarios.clone(),
+        })
+        .collect::<Vec<_>>();
+    profiles.sort_by(|a, b| a.id.cmp(&b.id));
+    profiles
+}
+
+fn bench_list_empty_hints(
+    args: &BenchListArgs,
+    rig_spec: Option<&RigSpec>,
+    component_id: &str,
+) -> Vec<String> {
+    if let Some(spec) = rig_spec {
+        let mut hints = Vec::new();
+        if !spec.bench_workloads.is_empty() {
+            hints.push(format!(
+                "rig '{}' declares bench workloads; verify its workload extension matches this component or pass the component id from the rig spec",
+                spec.id
+            ));
+        }
+        let profiles = bench_list_profiles(spec);
+        if !profiles.is_empty() {
+            hints.push(format!(
+                "rig '{}' declares bench profiles: {}; run `homeboy bench --rig {} --profile <profile>`",
+                spec.id,
+                profiles
+                    .iter()
+                    .map(|profile| profile.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                spec.id
+            ));
+        }
+        return hints;
+    }
+
+    if args.comp.id().is_none() {
+        return Vec::new();
+    }
+
+    compatible_bench_rig_hints(component_id)
+}
+
+fn compatible_bench_rig_hints(component_id: &str) -> Vec<String> {
+    let Ok(rigs) = rig::list() else {
+        return Vec::new();
+    };
+
+    rigs.into_iter()
+        .filter(|spec| rig_matches_bench_component(spec, component_id))
+        .filter(|spec| !spec.bench_workloads.is_empty() || !spec.bench_profiles.is_empty())
+        .take(5)
+        .map(|spec| {
+            let profiles = bench_list_profiles(&spec);
+            let discovery = match (spec.bench_workloads.is_empty(), profiles.is_empty()) {
+                (false, false) => "bench workloads and profiles",
+                (false, true) => "bench workloads",
+                (true, false) => "bench profiles",
+                (true, true) => "bench discovery",
+            };
+            let profile_hint = if profiles.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; profiles: {}",
+                    profiles
+                        .iter()
+                        .map(|profile| profile.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "compatible rig '{}' declares {}{}; try `homeboy bench list {} --rig {}`",
+                spec.id, discovery, profile_hint, component_id, spec.id
+            )
+        })
+        .collect()
+}
+
+fn rig_matches_bench_component(spec: &RigSpec, component_id: &str) -> bool {
+    spec.components.contains_key(component_id)
+        || spec
+            .bench
+            .as_ref()
+            .map(|bench| {
+                matrix::bench_component_ids(bench)
+                    .iter()
+                    .any(|id| id == component_id)
+            })
+            .unwrap_or(false)
 }
 
 pub(crate) fn filter_component_conventional_bench_workloads(

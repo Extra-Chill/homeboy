@@ -10,8 +10,8 @@ mod types;
 mod workflow;
 
 pub use types::{
-    BenchListWorkflowArgs, BenchListWorkflowResult, BenchRunFailure, BenchRunWorkflowArgs,
-    BenchRunWorkflowResult,
+    BenchListProfile, BenchListWorkflowArgs, BenchListWorkflowResult, BenchRunFailure,
+    BenchRunWorkflowArgs, BenchRunWorkflowResult,
 };
 
 pub use list::run_bench_list_workflow;
@@ -311,6 +311,7 @@ mod tests {
             extra_workloads: Vec::new(),
             env_provider_extensions: Vec::new(),
             rig_package: None,
+            profiles: Vec::new(),
         })
         .expect("component-script list env");
 
@@ -341,6 +342,7 @@ mod tests {
             extra_workloads: Vec::new(),
             env_provider_extensions: Vec::new(),
             rig_package: None,
+            profiles: Vec::new(),
         })
         .expect("component-script list env");
 
@@ -851,6 +853,8 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
             component: "homeboy".to_string(),
             component_id: "homeboy".to_string(),
             count: 1,
+            profiles: Vec::new(),
+            hints: Vec::new(),
             rig_package: None,
             scenarios: vec![BenchScenario {
                 id: "audit-self".to_string(),
