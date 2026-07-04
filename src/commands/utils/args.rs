@@ -181,7 +181,17 @@ fn arg_takes_value(arg: &Arg) -> bool {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    mark_explicit_passthrough(args)
+    mark_explicit_passthrough(normalize_review_audit_baseline(args))
+}
+
+fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
+    if matches!(args.get(1).map(String::as_str), Some("review"))
+        && matches!(args.get(2).map(String::as_str), Some("audit"))
+        && matches!(args.get(3).map(String::as_str), Some("baseline"))
+    {
+        args.splice(2..4, ["audit-baseline".to_string()]);
+    }
+    args
 }
 
 // ============================================================================
@@ -329,6 +339,26 @@ mod normalize_tests {
             ".homeboy/experiments/change",
         ]));
 
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
+
+    #[test]
+    fn review_audit_baseline_uses_hidden_parse_target() {
+        let args = normalize(argv(&[
+            "homeboy", "review", "audit", "baseline", "refresh", "--path", ".",
+        ]));
+
+        assert_eq!(
+            args,
+            argv(&[
+                "homeboy",
+                "review",
+                "audit-baseline",
+                "refresh",
+                "--path",
+                ".",
+            ])
+        );
         assert!(Cli::try_parse_from(args).is_ok());
     }
 

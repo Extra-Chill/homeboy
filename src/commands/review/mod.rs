@@ -98,6 +98,9 @@ pub struct ReviewArgs {
 pub enum ReviewCommand {
     /// Audit code conventions and detect architectural drift
     Audit(ReviewAuditArgs),
+    /// Internal target for normalized `review audit baseline ...` invocations
+    #[command(name = "audit-baseline", hide = true)]
+    AuditBaseline(audit_baseline::AuditBaselineArgs),
     /// Lint a component
     Lint(lint::LintArgs),
     /// Run tests for a component
@@ -110,17 +113,8 @@ pub enum ReviewCommand {
 
 #[derive(Args)]
 pub struct ReviewAuditArgs {
-    #[command(subcommand)]
-    pub command: Option<ReviewAuditCommand>,
-
     #[command(flatten)]
     pub audit: audit::AuditArgs,
-}
-
-#[derive(Subcommand)]
-pub enum ReviewAuditCommand {
-    /// Refresh and merge generated audit baseline data
-    Baseline(audit_baseline::AuditBaselineArgs),
 }
 
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
@@ -129,7 +123,7 @@ impl ReviewArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if let Some(command) = &self.command {
             return match command {
-                ReviewCommand::Audit(args) if args.command.is_none() => args
+                ReviewCommand::Audit(args) => args
                     .audit
                     .lab_contract()
                     .map(|contract| contract.with_hot_label("review audit")),
@@ -139,12 +133,12 @@ impl ReviewArgs {
                 ReviewCommand::Test(args) => {
                     Some(args.lab_contract().with_hot_label("review test"))
                 }
-                ReviewCommand::Audit(_) | ReviewCommand::Build(_) | ReviewCommand::Ci(_) => {
-                    Some(LabCommandContract::local_only(
-                        REVIEW_LAB_LABEL,
-                        "this nested review subcommand has no portable Lab contract",
-                    ))
-                }
+                ReviewCommand::AuditBaseline(_)
+                | ReviewCommand::Build(_)
+                | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
+                    REVIEW_LAB_LABEL,
+                    "this nested review subcommand has no portable Lab contract",
+                )),
             };
         }
         if self.changed_since.is_some() || self.changed_only {
@@ -280,10 +274,8 @@ fn dispatch_review_plan_step(
 
 pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => match args.command {
-            Some(ReviewAuditCommand::Baseline(args)) => to_value(audit_baseline::run(args, global)),
-            None => to_value(audit::run(args.audit, global)),
-        },
+        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit, global)),
+        Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args, global)),
         Some(ReviewCommand::Lint(args)) => to_value(lint::run(args, global)),
         Some(ReviewCommand::Test(args)) => to_value(test::run(args, global)),
         Some(ReviewCommand::Build(args)) => to_value(build::run(args, global)),
