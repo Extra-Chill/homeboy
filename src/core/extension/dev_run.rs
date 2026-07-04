@@ -252,6 +252,7 @@ pub(crate) fn run_extension_dev_run_with(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: Some(source_snapshot.clone()),
+            path_materialization_plan: None,
             capability_preflight: Some(RunnerCapabilityPreflight {
                 command: "extension.dev-run.install".to_string(),
                 required_commands: vec!["homeboy".to_string()],
@@ -312,6 +313,7 @@ pub(crate) fn run_extension_dev_run_with(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: Some(source_snapshot),
+            path_materialization_plan: None,
             capability_preflight: Some(RunnerCapabilityPreflight {
                 command: "extension.dev-run".to_string(),
                 required_commands: plan.command.first().cloned().into_iter().collect(),
@@ -553,6 +555,7 @@ fn probe_runner_extension_state(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: Some(RunnerCapabilityPreflight {
                 command: "extension.dev-run.probe".to_string(),
                 required_commands: vec!["homeboy".to_string()],

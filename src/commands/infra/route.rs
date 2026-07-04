@@ -663,6 +663,7 @@ fn run_rig_source_management_on_runner(
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),

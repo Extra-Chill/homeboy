@@ -13,8 +13,8 @@ use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
 use crate::core::runner_execution_envelope::{
-    RunnerExecutionDispatch, RunnerExecutionEnvelope, RunnerExecutionLifecycle,
-    RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
+    PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,
+    RunnerExecutionLifecycle, RunnerExecutionMutationPolicy, RunnerExecutionResultRefs,
 };
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -76,6 +76,8 @@ pub struct RemoteRunnerJobRequest {
     pub capture_patch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,12 +160,20 @@ impl RemoteRunnerJobRequest {
             source_snapshot: request.source_snapshot,
             require_paths: request.require_paths,
         });
+        if let Some(path_materialization_plan) = request.path_materialization_plan {
+            envelope.metadata = merge_metadata_value(
+                request.metadata.take().unwrap_or(Value::Null),
+                "path_materialization_plan",
+                serde_json::to_value(path_materialization_plan).unwrap_or(Value::Null),
+            );
+        } else {
+            envelope.metadata = request.metadata.unwrap_or(Value::Null);
+        }
         envelope.lifecycle = request.lifecycle.map(RunnerExecutionLifecycle::from);
         envelope.mutation_policy = RunnerExecutionMutationPolicy {
             capture_patch: request.capture_patch,
             ..envelope.mutation_policy.clone()
         };
-        envelope.metadata = request.metadata.unwrap_or(Value::Null);
         if envelope.result_refs.run_id.is_none() {
             envelope.result_refs.run_id = envelope
                 .lifecycle
@@ -222,6 +232,16 @@ fn metadata_run_id(metadata: &Value) -> Option<String> {
     metadata
         .get("run_id")
         .and_then(|run_id| non_empty_string(run_id.as_str()))
+}
+
+fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
+    if !metadata.is_object() {
+        metadata = Value::Object(Default::default());
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(key.to_string(), value);
+    }
+    metadata
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

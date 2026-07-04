@@ -1,5 +1,48 @@
 use super::*;
+use crate::core::runner_execution_envelope::{
+    PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+    PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+};
 use serde_json::json;
+
+#[test]
+fn runner_execution_record_uses_dispatched_path_materialization_plan() {
+    let dispatched_plan = PathMaterializationPlan::new([PathMaterializationEntry::new(
+        "primary_workspace",
+        PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+        Some("/controller/worktree".to_string()),
+        "/runner/context-plan",
+        PATH_MATERIALIZATION_MODE_GIT,
+        PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    )]);
+    let snapshot = SourceSnapshot::existing_remote("lab", "/runner/source-snapshot", Some("/srv"));
+    let (output, _) = exec_output(
+        &ssh_runner(),
+        RunnerExecMode::Daemon,
+        "/runner/context-plan".to_string(),
+        vec!["homeboy".to_string(), "test".to_string()],
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            metrics: None,
+            capture: None,
+        },
+        Some(snapshot),
+        Some(dispatched_plan.clone()),
+        vec!["/runner/required-path".to_string()],
+        &Default::default(),
+        &[],
+    );
+
+    assert_eq!(
+        output
+            .execution_record
+            .expect("execution record")
+            .path_materialization_plan,
+        Some(dispatched_plan)
+    );
+}
 
 #[test]
 fn remote_daemon_secret_env_refs_forward_controller_secrets_and_keep_runner_refs_local() {
@@ -486,6 +529,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -531,6 +575,7 @@ fn test_exec_runs_local_runner_command() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -608,6 +653,7 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -649,6 +695,7 @@ fn test_exec_preserves_explicit_request_env() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -704,6 +751,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+            path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -766,6 +814,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: vec![missing.display().to_string()],
@@ -814,6 +863,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: vec![required_path.display().to_string()],
@@ -873,6 +923,7 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
@@ -916,6 +967,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         capture_patch: false,
         raw_exec: true,
         source_snapshot: None,
+        path_materialization_plan: None,
         capability_preflight: None,
         required_extensions: Vec::new(),
         require_paths: Vec::new(),

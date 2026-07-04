@@ -481,6 +481,7 @@ pub(super) fn bootstrap_source_cli_dependencies(
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             // Validate remote capability parity before dispatch. Concrete command
             // requirements are supplied declaratively by the workspace provider.
             capability_preflight: Some(source_cli_bootstrap_capability_preflight()),

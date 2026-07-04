@@ -484,7 +484,7 @@ fn artifacts_command_reports_url_artifacts() {
 }
 
 #[test]
-fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
+fn runner_job_artifact_listing_includes_related_sibling_lab_run_artifacts() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -542,7 +542,7 @@ fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
 }
 
 #[test]
-fn runner_job_artifact_listing_excludes_related_lab_run_artifacts() {
+fn runner_job_artifact_listing_includes_related_lab_run_artifacts() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");

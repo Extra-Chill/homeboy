@@ -145,4 +145,5 @@ pub(crate) use metadata::*;
 pub(crate) use overhead::*;
 pub(crate) use resident::*;
 pub(crate) use telemetry::*;
+pub(crate) use types::LabExecutionContext;
 pub(crate) use workspace_stage::*;

@@ -107,6 +107,7 @@ pub(super) fn exec_worker_local_with_process_output(
         plan.command,
         output,
         Some(plan.source_snapshot),
+        options.path_materialization_plan,
         plan.require_paths,
         &plan.env,
         &[],

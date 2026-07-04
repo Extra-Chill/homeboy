@@ -114,6 +114,7 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
                 // it raw to the runner exactly as the provider produced it.
                 raw_exec: true,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),

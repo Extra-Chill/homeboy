@@ -394,7 +394,14 @@ mod artifact_links {
         if run.kind != "runner-exec" {
             return Ok(Vec::new());
         }
-        let Some((_runner_id, job_id)) = crate::core::runners::mirrored_runner_job_identity(run)
+        let Some(job_id) = crate::core::runners::mirrored_runner_job_identity(run)
+            .map(|(_runner_id, job_id)| job_id)
+            .or_else(|| {
+                run.metadata_json
+                    .pointer("/lab/remote_job_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
         else {
             return Ok(Vec::new());
         };

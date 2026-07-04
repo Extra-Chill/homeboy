@@ -1,6 +1,10 @@
 //! Runner-resident Lab offload path and managed-source refresh.
 
 use super::*;
+use crate::core::runner_execution_envelope::{
+    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+    PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT, PATH_MATERIALIZATION_STATUS_VALIDATED,
+};
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
 #[allow(clippy::too_many_arguments)]
@@ -87,6 +91,11 @@ pub(crate) fn run_runner_resident_lab_offload(
     );
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
+    let execution_context = LabExecutionContext::new(
+        runner_workspace_root.to_string(),
+        None,
+        runner_resident_path_materialization_plan(runner_workspace_root, &source_syncs),
+    );
 
     if !request.read_only_polling {
         eprintln!(
@@ -112,13 +121,36 @@ pub(crate) fn run_runner_resident_lab_offload(
         "runner_cwd": runner_workspace_root,
         "command_paths": "runner_side",
     });
+    lab_metadata["workspace_materialization_plan"] =
+        serde_json::to_value(&execution_context.path_materialization_plan)
+            .unwrap_or(serde_json::json!(null));
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(
         &contract.secret_env_sources,
         &remapped_args,
         Default::default(),
     )?;
+    let mut runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
+        plan: &plan,
+        command: &contract,
+        capture_patch: request.capture_patch,
+        mutation_flag: request.mutation_flag,
+        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        runner_id,
+        runner_mode: status_tunnel_mode(runner_status).metadata_value(),
+        assignment_source: selection.source.metadata_value(),
+        status: "offloaded",
+        remote_workspace: Some(&execution_context.remote_cwd),
+        fallback_reason: None,
+        workspace_mapping_ref: execution_context.workspace_mapping_ref(),
+        proof_id: None,
+    });
+    runner_workload.agent_task =
+        runner_workload_agent_task_from_command(&remapped_args, agent_task_run_id.as_deref());
+    runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
+    lab_metadata["runner_workload"] =
+        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
     let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
         LabEnvResolutionLayer {
@@ -175,10 +207,11 @@ pub(crate) fn run_runner_resident_lab_offload(
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: None,
+            path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
             capability_preflight: None,
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
-            runner_workload: None,
+            runner_workload: Some(runner_workload),
             run_id: agent_task_run_id,
             detach_after_handoff: false,
             mirror_evidence,
@@ -245,6 +278,26 @@ fn runner_resident_exec_noise_policy(read_only_polling: bool) -> (bool, bool) {
     (!read_only_polling, !read_only_polling)
 }
 
+pub(crate) fn runner_resident_path_materialization_plan(
+    runner_workspace_root: &str,
+    source_syncs: &[ManagedRunnerSourceRefreshOutput],
+) -> PathMaterializationPlan {
+    let mut entries = vec![PathMaterializationEntry::primary_workspace_existing_remote(
+        runner_workspace_root,
+    )];
+    entries.extend(source_syncs.iter().map(|source| {
+        PathMaterializationEntry::new(
+            format!("managed_source:{}", source.id),
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            None,
+            source.path.clone(),
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+            PATH_MATERIALIZATION_STATUS_VALIDATED,
+        )
+    }));
+    PathMaterializationPlan::new(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +310,37 @@ mod tests {
     #[test]
     fn runner_resident_execution_preserves_runner_exec_evidence() {
         assert_eq!(runner_resident_exec_noise_policy(false), (true, true));
+    }
+
+    #[test]
+    fn runner_resident_path_materialization_plan_marks_existing_remote_sources() {
+        let source_syncs = vec![ManagedRunnerSourceRefreshOutput {
+            id: "runtime-agent-ci".to_string(),
+            label: "Runtime Agent CI".to_string(),
+            path: "/srv/homeboy/managed/runtime-agent-ci".to_string(),
+            remote_url: Some("git@example.com:repo/runtime-agent-ci.git".to_string()),
+            git_ref: Some("main".to_string()),
+            stdout: String::new(),
+            stderr: String::new(),
+        }];
+
+        let plan = runner_resident_path_materialization_plan(
+            "/srv/homeboy/resident/homeboy",
+            &source_syncs,
+        );
+
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].role, "primary_workspace");
+        assert_eq!(plan.entries[0].remote_path, "/srv/homeboy/resident/homeboy");
+        assert_eq!(plan.entries[0].materialization_mode, "existing_remote");
+        assert_eq!(plan.entries[0].validation_status, "validated");
+        assert_eq!(plan.entries[1].role, "managed_source:runtime-agent-ci");
+        assert_eq!(
+            plan.entries[1].remote_path,
+            "/srv/homeboy/managed/runtime-agent-ci"
+        );
+        assert_eq!(plan.entries[1].materialization_mode, "existing_remote");
+        assert_eq!(plan.entries[1].validation_status, "validated");
     }
 
     #[test]
@@ -334,6 +418,7 @@ pub(crate) fn refresh_managed_runner_sources(
                 capture_patch: false,
                 raw_exec: false,
                 source_snapshot: None,
+                path_materialization_plan: None,
                 capability_preflight: None,
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),

@@ -36,6 +36,7 @@ pub(super) fn exec_via_daemon(
     secret_env_names: Vec<String>,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
+    path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
     runner_workload: Option<RunnerWorkload>,
     run_id: Option<String>,
@@ -68,6 +69,7 @@ pub(super) fn exec_via_daemon(
         "secret_env_names": secret_env_names,
         "capture_patch": capture_patch,
         "source_snapshot": source_snapshot.clone(),
+        "path_materialization_plan": path_materialization_plan.clone(),
         "require_paths": require_paths.clone(),
         "runner_workload": runner_workload.clone(),
         "metadata": runner_exec_request_metadata(run_id.as_deref(), "daemon"),
@@ -120,6 +122,7 @@ pub(super) fn exec_via_daemon(
             command,
             source_snapshot,
             job,
+            path_materialization_plan,
             require_paths,
             persisted_run_id,
         ));
@@ -231,6 +234,7 @@ pub(super) fn exec_via_daemon(
         Some(job.id.to_string()),
         mirror_run_id.clone(),
         Some(&source_snapshot),
+        path_materialization_plan,
         &require_paths,
         &provenance_extensions,
         &artifacts,
@@ -301,10 +305,14 @@ pub(super) fn detached_handoff_output(
     command: Vec<String>,
     source_snapshot: SourceSnapshot,
     job: Job,
+    path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
     mirror_run_id: Option<String>,
 ) -> (RunnerExecOutput, i32) {
     let job_id = job.id.to_string();
+    let record_path_materialization_plan = path_materialization_plan
+        .clone()
+        .or_else(|| fallback_path_materialization_plan(Some(&source_snapshot), &require_paths));
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
@@ -316,6 +324,7 @@ pub(super) fn detached_handoff_output(
         &runner.id,
         &job_id,
         cwd.clone(),
+        record_path_materialization_plan.clone(),
         mirror_run_id.clone(),
         job_timestamp_ms_to_rfc3339(job.updated_at_ms),
     );
@@ -350,10 +359,7 @@ pub(super) fn detached_handoff_output(
         RunnerExecutionRecord::in_flight(job_id.clone(), runner.id.clone(), transport.to_string())
             .with_job_id(job_id.clone())
             .with_mirror_run_id(mirror_run_id.clone())
-            .with_path_materialization_plan(path_materialization_plan(
-                Some(&source_snapshot),
-                &require_paths,
-            ))
+            .with_path_materialization_plan(record_path_materialization_plan)
             .with_orchestration_provenance(orchestration_target_provenance(
                 runner,
                 None,

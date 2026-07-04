@@ -1474,6 +1474,7 @@ mod tests {
                 "/srv/extrachill",
                 Some("/srv"),
             )),
+            path_materialization_plan: None,
             require_paths: Vec::new(),
             runner_workload: None,
             lifecycle: None,

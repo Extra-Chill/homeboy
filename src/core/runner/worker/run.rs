@@ -414,6 +414,7 @@ fn runner_exec_options_from_envelope(
         capture_patch: envelope.mutation_policy.capture_patch,
         raw_exec: false,
         source_snapshot: dispatch.source_snapshot,
+        path_materialization_plan: None,
         capability_preflight,
         required_extensions,
         require_paths: dispatch.require_paths,

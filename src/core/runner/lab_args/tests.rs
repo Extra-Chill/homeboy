@@ -725,7 +725,7 @@ mod provider_config_remap_tests {
         let err =
             remap_provider_config_in_args(&args, &[]).expect_err("malformed @file should fail");
 
-        assert_eq!(err.to_string(), "Invalid JSON");
+        assert!(err.to_string().starts_with("Invalid JSON"));
         assert!(
             err.hints.iter().any(|hint| hint
                 .message

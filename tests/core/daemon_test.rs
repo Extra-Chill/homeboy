@@ -1445,6 +1445,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
+            path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
