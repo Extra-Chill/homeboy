@@ -1,11 +1,18 @@
+use std::fs;
+use std::time::Duration;
+
+use base64::Engine;
+use reqwest::blocking::Client;
+use serde::Deserialize;
 use serde_json::json;
+use serde_json::Value;
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::server::{self, SshClient};
 
 use super::session::{RunnerSession, RunnerStatusReport, RunnerTunnelMode};
-use super::{Runner, RunnerKind};
+use super::{broker_auth, broker_http, Runner, RunnerKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunnerSessionHandle {
@@ -37,6 +44,10 @@ pub(crate) enum RunnerTransport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunnerFileTransferCapability {
+    DaemonHttp {
+        endpoint_url: String,
+        broker: bool,
+    },
     DirectSsh {
         server_id: String,
     },
@@ -49,7 +60,28 @@ pub(crate) enum RunnerFileTransferCapability {
 
 pub(crate) struct RunnerFileTransfer {
     runner_id: String,
-    client: SshClient,
+    channel: RunnerFileChannel,
+}
+
+enum RunnerFileChannel {
+    DirectSsh(SshClient),
+    DaemonHttp {
+        client: Client,
+        endpoint_url: String,
+        broker_token: Option<String>,
+    },
+    BrokerHttp {
+        client: Client,
+        endpoint_url: String,
+        broker_token: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpFileEnvelope {
+    success: bool,
+    data: Option<Value>,
+    error: Option<Value>,
 }
 
 impl RunnerFileTransferCapability {
@@ -58,19 +90,21 @@ impl RunnerFileTransferCapability {
         status: Option<&RunnerStatusReport>,
     ) -> RunnerFileTransferCapability {
         match select_runner_transport(runner, status, false) {
-            RunnerTransport::ReverseBroker(handle) => RunnerFileTransferCapability::Unsupported {
-                transport: "reverse_broker",
-                reason: "Lab runner file transfer over the reverse broker is not implemented yet",
-                broker_url: Some(handle.endpoint_url().to_string()),
+            RunnerTransport::ReverseBroker(handle) => RunnerFileTransferCapability::DaemonHttp {
+                endpoint_url: handle.endpoint_url().to_string(),
+                broker: true,
             },
             RunnerTransport::Local => RunnerFileTransferCapability::Unsupported {
                 transport: "local",
                 reason: "Lab runner file transfer requires a remote runner transport",
                 broker_url: None,
             },
-            RunnerTransport::DirectDaemon(_)
-            | RunnerTransport::DiagnosticSsh
-            | RunnerTransport::Unavailable => match (runner.kind.clone(), runner.server_id.clone()) {
+            RunnerTransport::DirectDaemon(handle) => RunnerFileTransferCapability::DaemonHttp {
+                endpoint_url: handle.endpoint_url().to_string(),
+                broker: false,
+            },
+            RunnerTransport::DiagnosticSsh | RunnerTransport::Unavailable => {
+                match (runner.kind.clone(), runner.server_id.clone()) {
                 (RunnerKind::Ssh, Some(server_id)) => {
                     RunnerFileTransferCapability::DirectSsh { server_id }
                 }
@@ -84,13 +118,15 @@ impl RunnerFileTransferCapability {
                     reason: "Lab runner file transfer requires a remote runner transport",
                     broker_url: None,
                 },
-            },
+                }
+            }
         }
     }
 
-    pub(crate) fn ensure_supported(&self, runner_id: &str) -> Result<&str> {
+    pub(crate) fn ensure_supported(&self, runner_id: &str) -> Result<()> {
         match self {
-            RunnerFileTransferCapability::DirectSsh { server_id } => Ok(server_id.as_str()),
+            RunnerFileTransferCapability::DaemonHttp { .. }
+            | RunnerFileTransferCapability::DirectSsh { .. } => Ok(()),
             RunnerFileTransferCapability::Unsupported {
                 transport,
                 reason,
@@ -111,56 +147,235 @@ impl RunnerFileTransfer {
         status: Option<&RunnerStatusReport>,
     ) -> Result<RunnerFileTransfer> {
         let capability = RunnerFileTransferCapability::for_runner(runner, status);
-        let server_id = capability.ensure_supported(&runner.id)?;
-        let server = server::load(server_id)?;
-        let mut client = SshClient::from_server(&server, server_id)?;
-        client.env.extend(runner.env.clone());
+        capability.ensure_supported(&runner.id)?;
+        let channel = match capability {
+            RunnerFileTransferCapability::DaemonHttp {
+                endpoint_url,
+                broker,
+            } => {
+                let mut client_builder = Client::builder().timeout(Duration::from_secs(30));
+                if !broker {
+                    client_builder = client_builder.no_proxy();
+                }
+                let client = client_builder.build().map_err(|err| {
+                    Error::internal_unexpected(format!("build runner file HTTP client: {err}"))
+                })?;
+                let broker_token = broker_auth::broker_token_from_env();
+                if broker {
+                    RunnerFileChannel::BrokerHttp {
+                        client,
+                        endpoint_url,
+                        broker_token,
+                    }
+                } else {
+                    RunnerFileChannel::DaemonHttp {
+                        client,
+                        endpoint_url,
+                        broker_token,
+                    }
+                }
+            }
+            RunnerFileTransferCapability::DirectSsh { server_id } => {
+                let server = server::load(&server_id)?;
+                let mut client = SshClient::from_server(&server, &server_id)?;
+                client.env.extend(runner.env.clone());
+                RunnerFileChannel::DirectSsh(client)
+            }
+            RunnerFileTransferCapability::Unsupported { .. } => unreachable!("checked above"),
+        };
         Ok(RunnerFileTransfer {
             runner_id: runner.id.clone(),
-            client,
+            channel,
         })
     }
 
     pub(crate) fn ensure_directory(&self, remote_dir: &str) -> Result<()> {
-        let mkdir = self
-            .client
-            .execute(&format!("mkdir -p {}", shell::quote_arg(remote_dir)));
-        if !mkdir.success {
-            return Err(file_transfer_operation_error(
-                &self.runner_id,
-                "mkdir",
-                remote_dir,
-                mkdir.stderr,
-            ));
+        match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(remote_dir)));
+                if !mkdir.success {
+                    return Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "mkdir",
+                        remote_dir,
+                        mkdir.stderr,
+                        "direct_ssh",
+                    ));
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
+                self.http_post_json(
+                    "/files/mkdir",
+                    json!({ "runner_id": &self.runner_id, "path": remote_dir }),
+                    "mkdir",
+                    remote_dir,
+                )?;
+            }
         }
         Ok(())
     }
 
     pub(crate) fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
-        let upload = self.client.upload_file(local_path, remote_path);
-        if !upload.success {
-            return Err(file_transfer_operation_error(
-                &self.runner_id,
-                "upload",
-                remote_path,
-                upload.stderr,
-            ));
+        match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let upload = client.upload_file(local_path, remote_path);
+                if !upload.success {
+                    return Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "upload",
+                        remote_path,
+                        upload.stderr,
+                        "direct_ssh",
+                    ));
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
+                let content = fs::read(local_path).map_err(|err| {
+                    Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
+                })?;
+                self.http_post_json(
+                    "/files/upload",
+                    json!({
+                        "runner_id": &self.runner_id,
+                        "path": remote_path,
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+                    }),
+                    "upload",
+                    remote_path,
+                )?;
+            }
         }
         Ok(())
     }
 
     pub(crate) fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
-        let download = self.client.download_file(remote_path, local_path);
-        if !download.success {
-            return Err(file_transfer_operation_error(
-                &self.runner_id,
-                "download",
-                remote_path,
-                download.stderr,
-            ));
+        match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let download = client.download_file(remote_path, local_path);
+                if !download.success {
+                    return Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "download",
+                        remote_path,
+                        download.stderr,
+                        "direct_ssh",
+                    ));
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
+                let body = self.http_post_json(
+                    "/files/download",
+                    json!({ "runner_id": &self.runner_id, "path": remote_path }),
+                    "download",
+                    remote_path,
+                )?;
+                let encoded = body
+                    .get("content_base64")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("runner file download missing content_base64")
+                    })?;
+                let content = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|err| {
+                        Error::internal_json(
+                            err.to_string(),
+                            Some("decode runner file download".to_string()),
+                        )
+                    })?;
+                fs::write(local_path, content).map_err(|err| {
+                    Error::internal_io(err.to_string(), Some(format!("write {local_path}")))
+                })?;
+            }
         }
         Ok(())
     }
+
+    fn http_post_json(
+        &self,
+        path: &str,
+        body: Value,
+        operation: &str,
+        remote_path: &str,
+    ) -> Result<Value> {
+        match &self.channel {
+            RunnerFileChannel::DirectSsh(_) => unreachable!("direct SSH does not use HTTP"),
+            RunnerFileChannel::BrokerHttp {
+                client,
+                endpoint_url,
+                broker_token,
+            } => broker_http::post_json(
+                client,
+                endpoint_url,
+                path,
+                body,
+                "runner file broker request",
+                broker_token.as_deref(),
+            )
+            .map_err(|err| {
+                http_file_transfer_error(
+                    &self.runner_id,
+                    operation,
+                    remote_path,
+                    err,
+                    "reverse_broker",
+                )
+            }),
+            RunnerFileChannel::DaemonHttp {
+                client,
+                endpoint_url,
+                broker_token,
+            } => daemon_file_post_json(client, endpoint_url, path, body, broker_token.as_deref())
+                .map_err(|err| {
+                    http_file_transfer_error(
+                        &self.runner_id,
+                        operation,
+                        remote_path,
+                        err,
+                        "daemon_http",
+                    )
+                }),
+        }
+    }
+}
+
+fn daemon_file_post_json(
+    client: &Client,
+    base_url: &str,
+    path: &str,
+    body: Value,
+    token: Option<&str>,
+) -> Result<Value> {
+    let mut request = client
+        .post(format!("{}{}", base_url.trim_end_matches('/'), path))
+        .json(&body);
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = request
+            .header(broker_auth::BROKER_TOKEN_HEADER, token)
+            .bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("runner file daemon request: {err}")))?;
+    let status_code = response.status().as_u16();
+    let envelope: HttpFileEnvelope = response.json().map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse runner file daemon response".to_string()),
+        )
+    })?;
+    if status_code >= 400 || !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "runner file daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data"))?;
+    data.get("body")
+        .cloned()
+        .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data.body"))
 }
 
 pub(crate) fn select_runner_transport(
@@ -230,6 +445,7 @@ fn file_transfer_operation_error(
     operation: &str,
     remote_path: &str,
     stderr: String,
+    transport: &str,
 ) -> Error {
     let mut error = Error::new(
         ErrorCode::RunnerLabTransportFailure,
@@ -242,7 +458,32 @@ fn file_transfer_operation_error(
             "operation": operation,
             "remote_path": remote_path,
             "stderr": stderr,
-            "transport": "direct_ssh",
+            "transport": transport,
+        }),
+    );
+    error.retryable = Some(true);
+    error
+}
+
+fn http_file_transfer_error(
+    runner_id: &str,
+    operation: &str,
+    remote_path: &str,
+    source: Error,
+    transport: &str,
+) -> Error {
+    let mut error = Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
+            source.message
+        ),
+        json!({
+            "runner_id": runner_id,
+            "operation": operation,
+            "remote_path": remote_path,
+            "transport": transport,
+            "source": source.details,
         }),
     );
     error.retryable = Some(true);
@@ -360,21 +601,34 @@ mod tests {
     }
 
     #[test]
-    fn file_transfer_errors_for_reverse_broker_with_actionable_metadata() {
+    fn file_transfer_selects_reverse_broker_http_when_connected() {
         let runner = runner(RunnerKind::Ssh);
         let mut session = session(RunnerTunnelMode::Reverse);
         session.broker_url = Some("https://broker.example".to_string());
         let capability = RunnerFileTransferCapability::for_runner(&runner, Some(&status(session)));
-        let err = capability
-            .ensure_supported("test-runner")
-            .expect_err("reverse broker file transfer should be unsupported");
 
-        assert_eq!(err.code, ErrorCode::RunnerLabTransportFailure);
-        assert_eq!(err.details["transport"], "reverse_broker");
-        assert_eq!(err.details["broker_url"], "https://broker.example");
-        assert_eq!(err.details["missing_capability"], "runner_file_transfer");
-        assert!(err
-            .message
-            .contains("does not currently support controller file transfer"));
+        assert_eq!(
+            capability,
+            RunnerFileTransferCapability::DaemonHttp {
+                endpoint_url: "https://broker.example".to_string(),
+                broker: true,
+            }
+        );
+    }
+
+    #[test]
+    fn file_transfer_selects_direct_daemon_http_when_connected() {
+        let runner = runner(RunnerKind::Ssh);
+        let mut session = session(RunnerTunnelMode::DirectSsh);
+        session.local_url = Some("http://127.0.0.1:1234".to_string());
+        let capability = RunnerFileTransferCapability::for_runner(&runner, Some(&status(session)));
+
+        assert_eq!(
+            capability,
+            RunnerFileTransferCapability::DaemonHttp {
+                endpoint_url: "http://127.0.0.1:1234".to_string(),
+                broker: false,
+            }
+        );
     }
 }
