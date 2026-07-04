@@ -356,6 +356,11 @@ impl RenameSpec {
     /// or language-specific class prefixes, without teaching the rename engine
     /// what those conventions mean.
     pub fn with_explicit_variants(mut self, variants: Vec<(String, String)>) -> Self {
+        let explicit_froms: std::collections::HashSet<&str> =
+            variants.iter().map(|(from, _)| from.as_str()).collect();
+        self.variants
+            .retain(|variant| !explicit_froms.contains(variant.from.as_str()));
+
         for (from, to) in variants {
             self.variants.push(CaseVariant {
                 from,
@@ -370,7 +375,7 @@ impl RenameSpec {
 
 pub(super) fn deduplicate_variants(variants: &mut Vec<CaseVariant>) {
     // Sort by from length descending first so longer matches take priority.
-    variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+    variants.sort_by_key(|variant| std::cmp::Reverse(variant.from.len()));
     let mut seen = std::collections::HashSet::new();
     variants.retain(|variant| seen.insert(variant.from.clone()));
 }
