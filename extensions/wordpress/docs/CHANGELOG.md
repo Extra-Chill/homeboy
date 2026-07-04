@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.27] - 2026-07-04
+
+### Changed
+- Consolidate runtime helper smoke coverage
+
 ## [3.23.26] - 2026-07-04
 
 ### Changed
