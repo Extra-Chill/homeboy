@@ -110,7 +110,9 @@ use super::super::{
     WorkspaceCleanupPolicy,
 };
 
-use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
+use super::super::workload::{
+    build_runner_workload, runner_workload_agent_task_from_command, RunnerWorkloadBuildInput,
+};
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
     lab_pre_dispatch_failure_message, mirror_agent_task_run_plan_lifecycle,

@@ -1,4 +1,6 @@
-use crate::command_contract::AgentTaskDispatchIdentity;
+use crate::command_contract::{
+    AgentTaskDispatchIdentity, RunnerWorkload, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+};
 use crate::core::agent_tasks::scheduler::AgentTaskAggregate;
 use crate::core::api_jobs::{JobEvent, JobEventKind};
 use crate::core::{Error, Result};
@@ -113,4 +115,64 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_value(
     value
         .get("data")
         .and_then(agent_task_run_plan_lifecycle_event_from_value)
+}
+
+pub(crate) fn agent_task_run_plan_lifecycle_event_from_workload_result(
+    workload: Option<&RunnerWorkload>,
+    runner_id: &str,
+    runner_job_id: &str,
+    result: &serde_json::Value,
+) -> Result<Option<AgentTaskRunPlanLifecycleEvent>> {
+    let Some(agent_task) = workload.and_then(|workload| workload.agent_task.as_ref()) else {
+        return Ok(None);
+    };
+    if agent_task.lifecycle_mirror_policy
+        != RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+    {
+        return Ok(None);
+    }
+    if let Some(event) = agent_task_run_plan_lifecycle_event_from_value(result) {
+        return Ok(Some(event));
+    }
+
+    let aggregate =
+        if let Some(aggregate) = result.get("data").and_then(agent_task_aggregate_from_value) {
+            aggregate
+        } else if let Some(stdout) = result.get("stdout").and_then(serde_json::Value::as_str) {
+            match agent_task_run_plan_lifecycle_event_from_output(
+                AgentTaskDispatchIdentity {
+                    runner_id: runner_id.to_string(),
+                    runner_job_id: runner_job_id.to_string(),
+                    run_id: Some(agent_task.run_id.clone()),
+                    ..AgentTaskDispatchIdentity::default()
+                },
+                stdout,
+            )? {
+                Some(event) => return Ok(Some(event)),
+                None => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        };
+
+    Ok(Some(AgentTaskRunPlanLifecycleEvent {
+        schema: AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA.to_string(),
+        identity: AgentTaskDispatchIdentity {
+            runner_id: runner_id.to_string(),
+            runner_job_id: runner_job_id.to_string(),
+            run_id: Some(agent_task.run_id.clone()),
+            ..AgentTaskDispatchIdentity::default()
+        },
+        aggregate,
+    }))
+}
+
+fn agent_task_aggregate_from_value(value: &serde_json::Value) -> Option<AgentTaskAggregate> {
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        == Some("homeboy/agent-task-aggregate/v1")
+        || value.get("plan_id").is_some()
+    {
+        return serde_json::from_value(value.clone()).ok();
+    }
+    None
 }

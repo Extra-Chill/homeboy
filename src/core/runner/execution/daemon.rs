@@ -11,6 +11,7 @@ use crate::core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::redaction::redact_argv;
+use crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
 use crate::core::source_snapshot::SourceSnapshot;
 
 use super::super::capabilities::{
@@ -142,7 +143,7 @@ pub(super) fn exec_via_daemon(
         })?;
     }
     let job_id = job.id.to_string();
-    let events = match fetch_daemon_events(&client, local_url, &job_id) {
+    let mut events = match fetch_daemon_events(&client, local_url, &job_id) {
         Ok(events) => redact_runner_job_events(&events, &env, &secret_env_names),
         Err(err) => {
             return Err(lab_terminal_result_transport_error(
@@ -150,6 +151,12 @@ pub(super) fn exec_via_daemon(
             ));
         }
     };
+    append_agent_task_lifecycle_workload_event(
+        &mut events,
+        runner_workload.as_ref(),
+        &runner.id,
+        &job_id,
+    )?;
 
     let RunnerJobResultFields {
         result,
@@ -759,6 +766,44 @@ pub(crate) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .rev()
         .find(|event| matches!(event.kind, crate::core::api_jobs::JobEventKind::Result))
         .and_then(|event| event.data.clone())
+}
+
+fn append_agent_task_lifecycle_workload_event(
+    events: &mut Vec<JobEvent>,
+    runner_workload: Option<&RunnerWorkload>,
+    runner_id: &str,
+    runner_job_id: &str,
+) -> Result<()> {
+    let Some(result) = result_event_data(events) else {
+        return Ok(());
+    };
+    let Some(event) = agent_task_run_plan_lifecycle_event_from_workload_result(
+        runner_workload,
+        runner_id,
+        runner_job_id,
+        &result,
+    )?
+    else {
+        return Ok(());
+    };
+    events.push(JobEvent {
+        sequence: events
+            .last()
+            .map(|event| event.sequence.saturating_add(1))
+            .unwrap_or(1),
+        job_id: events
+            .last()
+            .map(|event| event.job_id)
+            .unwrap_or_else(uuid::Uuid::nil),
+        kind: crate::core::api_jobs::JobEventKind::Progress,
+        timestamp_ms: events.last().map(|event| event.timestamp_ms).unwrap_or(0),
+        message: Some("agent-task lifecycle event".to_string()),
+        data: Some(json!({
+            "schema": "homeboy/runner-workload-agent-task-lifecycle-event/v1",
+            "agent_task_lifecycle_event": event,
+        })),
+    });
+    Ok(())
 }
 
 /// Stream + metric fields derived from a runner job's terminal result event.

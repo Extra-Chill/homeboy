@@ -10,6 +10,9 @@
 
 use std::fs;
 
+use crate::command_contract::{
+    RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+};
 use crate::core::agent_task::AgentTaskEvidenceRef;
 use crate::core::agent_task_lifecycle::{
     AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
@@ -107,6 +110,41 @@ pub(super) fn sync_inline_agent_task_file(
 
 pub(super) fn mirror_agent_task_run_plan_lifecycle(
     args: &[String],
+    agent_task: Option<&RunnerWorkloadAgentTask>,
+    stdout: &str,
+    output_file_content: Option<&str>,
+    job_events: Option<&[JobEvent]>,
+) -> Result<()> {
+    if let Some(agent_task) = agent_task {
+        return mirror_typed_agent_task_run_plan_lifecycle(agent_task, job_events);
+    }
+
+    mirror_legacy_agent_task_run_plan_lifecycle(args, stdout, output_file_content, job_events)
+}
+
+fn mirror_typed_agent_task_run_plan_lifecycle(
+    agent_task: &RunnerWorkloadAgentTask,
+    job_events: Option<&[JobEvent]>,
+) -> Result<()> {
+    if agent_task.lifecycle_mirror_policy
+        != RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate
+    {
+        return Ok(());
+    }
+    let Some(plan_spec) = agent_task.plan_ref.as_deref() else {
+        return Ok(());
+    };
+    if plan_spec == "-" {
+        return Ok(());
+    }
+    let Some(event) = agent_task_run_plan_lifecycle_event_from_job_events(job_events) else {
+        return Ok(());
+    };
+    mirror_agent_task_run_plan_aggregate(plan_spec, &agent_task.run_id, event.aggregate)
+}
+
+fn mirror_legacy_agent_task_run_plan_lifecycle(
+    args: &[String],
     stdout: &str,
     output_file_content: Option<&str>,
     job_events: Option<&[JobEvent]>,
@@ -137,16 +175,24 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(
             })?
         }
     };
-    let raw_plan = config::read_json_spec_to_string(&plan_spec)?;
+    mirror_agent_task_run_plan_aggregate(&plan_spec, &run_id, aggregate)
+}
+
+fn mirror_agent_task_run_plan_aggregate(
+    plan_spec: &str,
+    run_id: &str,
+    aggregate: AgentTaskAggregate,
+) -> Result<()> {
+    let raw_plan = config::read_json_spec_to_string(plan_spec)?;
     let plan: AgentTaskPlan = serde_json::from_str(&raw_plan).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("read agent-task plan {plan_spec}")),
         )
     })?;
-    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
-    agent_task_lifecycle::mark_running(&run_id)?;
-    agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
+    agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+    agent_task_lifecycle::mark_running(run_id)?;
+    agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     Ok(())
 }
 
@@ -885,8 +931,97 @@ mod tests {
         ];
         let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
 
-        mirror_agent_task_run_plan_lifecycle(&args, stdout, None, None)
+        mirror_agent_task_run_plan_lifecycle(&args, None, stdout, None, None)
             .expect("ignore non-aggregate output");
+    }
+
+    #[test]
+    fn typed_run_plan_lifecycle_mirror_uses_workload_event_without_stdout_parsing() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let plan_path = temp.path().join("plan.json");
+            fs::write(
+                &plan_path,
+                r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-typed","tasks":[]}"#,
+            )
+            .expect("write plan");
+            let agent_task = RunnerWorkloadAgentTask {
+                run_id: "run-typed-workload".to_string(),
+                plan_ref: Some(format!("@{}", plan_path.display())),
+                dispatch_kind:
+                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                lifecycle_mirror_policy:
+                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            };
+            let events = vec![JobEvent {
+                sequence: 1,
+                job_id: uuid::Uuid::nil(),
+                kind: JobEventKind::Progress,
+                timestamp_ms: 1,
+                message: None,
+                data: Some(serde_json::json!({
+                    "schema": "homeboy/runner-workload-agent-task-lifecycle-event/v1",
+                    "agent_task_lifecycle_event": {
+                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                        "identity": {
+                            "runner_id": "lab-default",
+                            "runner_job_id": "job-typed",
+                            "run_id": "run-typed-workload"
+                        },
+                        "aggregate": {
+                            "schema":"homeboy/agent-task-aggregate/v1",
+                            "plan_id":"plan-typed",
+                            "status":"succeeded",
+                            "totals":{"skipped":0,"succeeded":0,"failed":0},
+                            "outcomes":[]
+                        }
+                    }
+                })),
+            }];
+
+            mirror_agent_task_run_plan_lifecycle(
+                &[],
+                Some(&agent_task),
+                "not json and should not be parsed",
+                None,
+                Some(&events),
+            )
+            .expect("typed mirror uses job event");
+        });
+    }
+
+    #[test]
+    fn legacy_run_plan_lifecycle_fallback_still_uses_argv_and_stdout() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let plan_path = temp.path().join("plan.json");
+            fs::write(
+                &plan_path,
+                r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-legacy","tasks":[]}"#,
+            )
+            .expect("write plan");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "run-plan".to_string(),
+                "--plan".to_string(),
+                format!("@{}", plan_path.display()),
+                "--record-run-id".to_string(),
+                "run-legacy-workload".to_string(),
+            ];
+            let stdout = concat!(
+                "runner chatter\n",
+                "{\"success\":true,\"data\":{",
+                "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
+                "\"plan_id\":\"plan-legacy\",",
+                "\"status\":\"succeeded\",",
+                "\"totals\":{\"skipped\":0,\"succeeded\":0,\"failed\":0},",
+                "\"outcomes\":[]}}"
+            );
+
+            mirror_agent_task_run_plan_lifecycle(&args, None, stdout, None, None)
+                .expect("legacy mirror uses stdout fallback");
+        });
     }
 
     #[test]
