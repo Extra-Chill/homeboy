@@ -6,28 +6,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Deserialize;
+
 use super::install::read_source_metadata;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::RigSpec;
 use crate::core::error::{Error, Result};
 
-/// Directories the rig package lint never descends into.
-///
-/// This MUST stay the union of the directories the downstream
-/// `homeboy-rigs` linter ignores (`scripts/lint-rig-packages.mjs`) so a rig
-/// package can never pass one linter and fail the other. `.sampleplugin` holds
-/// generated WP Codebox sample-plugin scaffolds; `.datamachine` is the
-/// top-level Data Machine working directory the homeboy-rigs package carries.
-const IGNORED_DIRECTORIES: &[&str] = &[
-    ".git",
-    ".homeboy",
-    ".claude",
-    ".sampleplugin",
-    ".datamachine",
-    ".opencode",
-    "node_modules",
-    "vendor",
-];
+/// Structural directories the generic rig package lint never descends into.
+const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[".git", ".homeboy"];
 
 pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
     let Some(root) = package_lint_root(rig) else {
@@ -38,6 +25,13 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
 }
 
 pub fn run_package_lint_at(root: &Path) -> Result<PipelineOutcome> {
+    run_package_lint_at_with_ignores(root, &[])
+}
+
+pub fn run_package_lint_at_with_ignores(
+    root: &Path,
+    package_ignores: &[String],
+) -> Result<PipelineOutcome> {
     if !root.is_dir() {
         return Err(Error::validation_invalid_argument(
             "source",
@@ -48,7 +42,10 @@ pub fn run_package_lint_at(root: &Path) -> Result<PipelineOutcome> {
     }
 
     let mut files = Vec::new();
-    collect_files(root, &mut files)?;
+    let mut declared_ignores = package_ignores.to_vec();
+    declared_ignores.extend(package_manifest_ignores(root)?);
+    let ignore_policy = IgnorePolicy::new(&declared_ignores);
+    collect_files(root, &mut files, &ignore_policy)?;
 
     let conflict_failures = conflict_marker_failures(root, &files)?;
     let json_failures = json_parse_failures(root, &files)?;
@@ -138,16 +135,23 @@ fn package_lint_root(rig: &RigSpec) -> Option<PathBuf> {
         .filter(|path| path.is_dir())
 }
 
-fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    if let Some(authored_files) = collect_git_authored_files(root)? {
+fn collect_files(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+    ignore_policy: &IgnorePolicy,
+) -> Result<()> {
+    if let Some(authored_files) = collect_git_authored_files(root, ignore_policy)? {
         files.extend(authored_files);
         return Ok(());
     }
 
-    collect_files_inner(root, files, "read rig package directory")
+    collect_files_inner(root, files, "read rig package directory", ignore_policy)
 }
 
-fn collect_git_authored_files(root: &Path) -> Result<Option<Vec<PathBuf>>> {
+fn collect_git_authored_files(
+    root: &Path,
+    ignore_policy: &IgnorePolicy,
+) -> Result<Option<Vec<PathBuf>>> {
     let Some(git_root) = crate::core::git::repo_root(root) else {
         return Ok(None);
     };
@@ -184,7 +188,7 @@ fn collect_git_authored_files(root: &Path) -> Result<Option<Vec<PathBuf>>> {
         .filter_map(|entry| std::str::from_utf8(entry).ok())
         .map(|entry| git_root.join(entry))
         .filter(|path| path.is_file())
-        .filter(|path| !has_ignored_directory(root.as_path(), path))
+        .filter(|path| !has_ignored_directory(root.as_path(), path, ignore_policy))
         .collect();
     Ok(Some(files))
 }
@@ -193,6 +197,7 @@ fn collect_files_inner(
     directory: &Path,
     files: &mut Vec<PathBuf>,
     context: &'static str,
+    ignore_policy: &IgnorePolicy,
 ) -> Result<()> {
     let entries = fs::read_dir(directory)
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
@@ -204,8 +209,8 @@ fn collect_files_inner(
             .file_type()
             .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
         if file_type.is_dir() {
-            if !ignored_directory(entry.file_name().as_os_str()) {
-                collect_files_inner(&path, files, context)?;
+            if !ignore_policy.ignored_directory(entry.file_name().as_os_str()) {
+                collect_files_inner(&path, files, context, ignore_policy)?;
             }
         } else if file_type.is_file() {
             files.push(path);
@@ -214,20 +219,68 @@ fn collect_files_inner(
     Ok(())
 }
 
-fn ignored_directory(name: &OsStr) -> bool {
-    IGNORED_DIRECTORIES
-        .iter()
-        .any(|ignored| name == OsStr::new(ignored))
+struct IgnorePolicy {
+    directories: BTreeSet<String>,
 }
 
-fn has_ignored_directory(root: &Path, path: &Path) -> bool {
+#[derive(Debug, Deserialize)]
+struct RigPackageLintManifest {
+    #[serde(default)]
+    lint_ignore_directories: Vec<String>,
+}
+
+fn package_manifest_ignores(root: &Path) -> Result<Vec<String>> {
+    let manifest = root.join("homeboy-rig-package.json");
+    if !manifest.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(&manifest).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read {}", manifest.display())),
+        )
+    })?;
+    let parsed: RigPackageLintManifest = serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            "homeboy-rig-package.json",
+            format!("rig package lint manifest is invalid: {error}"),
+            Some(manifest.to_string_lossy().to_string()),
+            None,
+        )
+    })?;
+    Ok(parsed.lint_ignore_directories)
+}
+
+impl IgnorePolicy {
+    fn new(package_ignores: &[String]) -> Self {
+        let mut directories = STRUCTURAL_IGNORED_DIRECTORIES
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<BTreeSet<_>>();
+        directories.extend(
+            package_ignores
+                .iter()
+                .filter(|value| !value.trim().is_empty())
+                .cloned(),
+        );
+        Self { directories }
+    }
+
+    fn ignored_directory(&self, name: &OsStr) -> bool {
+        self.directories
+            .iter()
+            .any(|ignored| name == OsStr::new(ignored))
+    }
+}
+
+fn has_ignored_directory(root: &Path, path: &Path, ignore_policy: &IgnorePolicy) -> bool {
     path.strip_prefix(root)
         .unwrap_or(path)
         .parent()
         .map(|parent| {
             parent
                 .components()
-                .any(|component| ignored_directory(component.as_os_str()))
+                .any(|component| ignore_policy.ignored_directory(component.as_os_str()))
         })
         .unwrap_or(false)
 }
@@ -745,7 +798,7 @@ mod tests {
 
     #[test]
     fn lint_ignores_homeboy_metadata_directory() {
-        assert!(ignored_directory(OsStr::new(".homeboy")));
+        assert!(IgnorePolicy::new(&[]).ignored_directory(OsStr::new(".homeboy")));
     }
 
     #[test]
