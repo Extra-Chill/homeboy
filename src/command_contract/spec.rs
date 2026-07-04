@@ -531,7 +531,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ),
     ),
     command_spec("status", CommandJsonFamily::Ops),
-    command_spec("changelog", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
@@ -545,7 +544,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
     ),
     command_spec("git", CommandJsonFamily::Ops),
-    command_spec("version", CommandJsonFamily::Workspace),
     command_spec("build", CommandJsonFamily::Workspace),
     command_spec_with_output_notes_and_safety(
         "release",
@@ -655,7 +653,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "inspects the active Homeboy runtime and renders built-in CLI documentation",
     ),
     command_spec("stack", CommandJsonFamily::Workspace),
-    command_spec("auth", CommandJsonFamily::Ops),
     command_spec("api", CommandJsonFamily::Ops),
     command_spec_with_output_notes_and_safety(
         "upgrade",

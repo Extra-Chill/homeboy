@@ -4,7 +4,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
 use super::utils::{response as output, tty};
-use super::{changelog, file, report, review, runner, runs, runtime, self_cmd, trace, GlobalArgs};
+use super::{file, release, report, review, runner, runs, runtime, self_cmd, trace, GlobalArgs};
 
 pub enum RawExecution {
     Handled(i32),
@@ -83,7 +83,12 @@ pub fn run(
 fn run_markdown(command: Commands, global: &GlobalArgs) -> RawCommandRun {
     match command {
         Commands::SelfCmd(args) => raw_stdout_only(self_cmd::run_docs_markdown(args)),
-        Commands::Changelog(args) => raw_stdout_only(changelog::run_markdown(args)),
+        Commands::Release(args) => match args.markdown_changelog_args() {
+            Some(changelog_args) => {
+                raw_stdout_only(release::changelog::run_markdown(changelog_args))
+            }
+            None => raw_stdout_only(unsupported_output("markdown")),
+        },
         Commands::Review(args) => review::raw_output::run_markdown_with_json(args, global),
         Commands::Trace(args) => trace::run_markdown_with_json_artifact(args, global),
         Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args, global)),

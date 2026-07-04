@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci,
-    cleanup, component, config, contract, daemon, db, deploy, extension, file, fleet, fuzz, git,
-    http, lint, logs, observe, project, refactor, release, report, review, rig, runner, runs,
-    runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, upgrade, version,
-    worktree,
+    activity, agent_task, api, audit, audit_baseline, bench, build, ci, cleanup, component, config,
+    contract, daemon, db, deploy, extension, file, fleet, fuzz, git, lint, logs, observe, project,
+    refactor, release, report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack,
+    status, test, trace, triage, tunnel, upgrade, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -137,14 +136,10 @@ pub enum Commands {
     Extension(extension::ExtensionArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
-    /// Changelog operations
-    Changelog(changelog::ChangelogArgs),
     /// Remove declared reconstructable artifacts from managed worktrees
     Cleanup(cleanup::CleanupArgs),
     /// Git operations for components
     Git(git::GitArgs),
-    /// Version management for components
-    Version(version::VersionArgs),
     /// Run a local build quality gate for a component
     Build(build::BuildArgs),
     /// Plan release workflows
@@ -177,8 +172,6 @@ pub enum Commands {
     SelfCmd(self_cmd::SelfArgs),
     /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
     Stack(stack::StackArgs),
-    /// Authenticate with a project's API
-    Auth(auth::AuthArgs),
     /// Make API requests to a project
     Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
@@ -569,10 +562,8 @@ mod entry_command_impls {
                 Commands::Daemon(_) => "daemon",
                 Commands::Extension(_) => "extension",
                 Commands::Status(_) => "status",
-                Commands::Changelog(_) => "changelog",
                 Commands::Cleanup(_) => "cleanup",
                 Commands::Git(_) => "git",
-                Commands::Version(_) => "version",
                 Commands::Build(_) => "build",
                 Commands::Release(_) => "release",
                 Commands::Report(_) => "report",
@@ -588,7 +579,6 @@ mod entry_command_impls {
                 Commands::Runs(_) => "runs",
                 Commands::SelfCmd(_) => "self",
                 Commands::Stack(_) => "stack",
-                Commands::Auth(_) => "auth",
                 Commands::Api(_) => "api",
                 Commands::Upgrade(_) => "upgrade",
             }

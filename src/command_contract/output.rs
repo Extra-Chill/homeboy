@@ -173,7 +173,7 @@ impl Commands {
                     CommandOutputContractKind::JsonEnvelope,
                 )
             }
-            Commands::Changelog(args) if changelog::is_show_markdown(args) => workspace_descriptor(
+            Commands::Release(args) if args.is_changelog_markdown() => workspace_descriptor(
                 CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
@@ -216,7 +216,7 @@ impl Commands {
             Commands::AuditBaseline(_) | Commands::Refactor(_) => {
                 registered_json_envelope_descriptor(self, output_file_mode)
             }
-            Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
+            Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Contract(_) => {
                 crate::commands::contract::adapter(output_file_mode).output_descriptor()
             }
@@ -229,7 +229,6 @@ impl Commands {
             | Commands::Component(_)
             | Commands::Config(_)
             | Commands::Extension(_)
-            | Commands::Changelog(_)
             | Commands::Cleanup(_)
             | Commands::Build(_)
             | Commands::Report(_)
