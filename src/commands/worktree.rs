@@ -104,6 +104,12 @@ enum WorktreeCommand {
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
+        /// Delete the local task branch after removing the worktree when branch safety allows it.
+        #[arg(long)]
+        cleanup_branch: bool,
+        /// Permit deleting an unmerged task branch. Requires --cleanup-branch.
+        #[arg(long, requires = "cleanup_branch")]
+        allow_unmerged_branch: bool,
     },
     /// Remove cleanup-eligible task worktrees after safety checks
     Cleanup {
@@ -116,6 +122,12 @@ enum WorktreeCommand {
         /// Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary.
         #[arg(long)]
         cleanup_artifacts: bool,
+        /// Delete merged task branches for removed cleanup candidates.
+        #[arg(long)]
+        cleanup_branches: bool,
+        /// Permit deleting unmerged task branches. Requires --cleanup-branches.
+        #[arg(long, requires = "cleanup_branches")]
+        allow_unmerged_branches: bool,
     },
 }
 
@@ -212,15 +224,30 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         })?),
         WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
         WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),
-        WorktreeCommand::Remove { id, force } => {
-            WorktreeOutput::Remove(worktree::remove(WorktreeRemoveOptions { id, force })?)
-        }
+        WorktreeCommand::Remove {
+            id,
+            force,
+            cleanup_branch,
+            allow_unmerged_branch,
+        } => WorktreeOutput::Remove(worktree::remove(WorktreeRemoveOptions {
+            id,
+            force,
+            cleanup_branch,
+            allow_unmerged_branch,
+        })?),
         WorktreeCommand::Cleanup {
             force,
             dry_run,
             cleanup_artifacts,
+            cleanup_branches,
+            allow_unmerged_branches,
         } => {
-            let worktrees = worktree::cleanup(WorktreeCleanupOptions { force, dry_run })?;
+            let worktrees = worktree::cleanup(WorktreeCleanupOptions {
+                force,
+                dry_run,
+                cleanup_branches,
+                allow_unmerged_branches,
+            })?;
             let artifact_cleanup = if cleanup_artifacts {
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {

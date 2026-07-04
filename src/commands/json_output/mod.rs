@@ -307,8 +307,8 @@ fn bench_summary_eligible(args: &crate::commands::bench::BenchArgs) -> bool {
 fn cleanup_summary_eligible(args: &crate::commands::cleanup::CleanupArgs) -> bool {
     matches!(
         args.command,
-        crate::commands::cleanup::CleanupCommand::Artifacts(_)
-            | crate::commands::cleanup::CleanupCommand::Worktrees(_)
+        Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
+            | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
     ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
@@ -406,7 +406,10 @@ mod tests {
     #[test]
     fn cleanup_artifacts_summary_is_eligible_for_operator_stdout() {
         let args = crate::commands::cleanup::CleanupArgs {
-            command: crate::commands::cleanup::CleanupCommand::Artifacts(
+            apply: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            command: Some(crate::commands::cleanup::CleanupCommand::Artifacts(
                 crate::commands::cleanup::CleanupArtifactsArgs {
                     apply: false,
                     self_artifacts: false,
@@ -416,7 +419,7 @@ mod tests {
                     limit: None,
                     merged_only: false,
                 },
-            ),
+            )),
         };
 
         assert!(cleanup_summary_eligible(&args));

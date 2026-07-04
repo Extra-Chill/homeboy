@@ -66,7 +66,7 @@ pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
 pub use dossier::{runs_dossier, RunsDossierOutput};
-pub use resources::{RunsResourcesArgs, RunsResourcesOutput};
+pub use resources::{runs_resources, RunsResourcesArgs, RunsResourcesOutput};
 
 // Test-only helpers consumed by sibling test modules via `super::runs::*` / `super::*`.
 #[cfg(test)]
