@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.3] - 2026-07-04
+
+### Changed
+- Converge shell runners on shared harness
+
 ## [1.23.2] - 2026-07-04
 
 ### Changed
