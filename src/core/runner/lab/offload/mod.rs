@@ -43,12 +43,13 @@ pub use types::{
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::command_contract::lab_runner_support_summary;
+use crate::command_contract::{lab_runner_support_summary, RunnerWorkload};
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
@@ -103,11 +104,11 @@ use super::super::{
     lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
     preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
     prepare_lab_runner_capability, remote_runner_homeboy_path, rig_materialization, status,
-    sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, RunnerCapabilityPreflight,
-    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest, RunnerExecOptions,
-    RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    WorkspaceCleanupPolicy,
+    sync_workspace, LabRunnerGateDecision, MaterializedWorkspace, Runner,
+    RunnerCapabilityPreflight, RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest,
+    RunnerExecOptions, RunnerFileTransfer, RunnerStatusReport, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
 
 use super::super::workload::{

@@ -169,6 +169,441 @@ pub(crate) fn preflight_lab_offload_remote_dispatch_paths(
     )
 }
 
+pub(crate) struct LabProviderPreflightContext {
+    pub(crate) command_prefix_argv: Vec<String>,
+    pub(crate) runner_homeboy: serde_json::Value,
+}
+
+pub(crate) struct LabDispatchExecutionContext<'a> {
+    pub(crate) request: &'a LabOffloadRequest<'a>,
+    pub(crate) selection: &'a LabRunnerSelection,
+    pub(crate) contract: &'a LabOffloadCommand,
+    pub(crate) runner: Option<&'a Runner>,
+    pub(crate) runner_id: &'a str,
+    pub(crate) runner_status: &'a RunnerStatusReport,
+    pub(crate) source_path: std::path::PathBuf,
+    pub(crate) remote_cwd: String,
+    pub(crate) command: Vec<String>,
+    pub(crate) remote_command: Vec<String>,
+    pub(crate) remapped_args: Vec<String>,
+    pub(crate) secret_preflight_args: Vec<String>,
+    pub(crate) agent_task_run_id: Option<String>,
+    pub(crate) runner_workload: Option<RunnerWorkload>,
+    pub(crate) lab_metadata: serde_json::Value,
+    pub(crate) env_resolution_layers: Vec<LabEnvResolutionLayer>,
+    pub(crate) secret_env_handoff: super::super::secrets::LabSecretEnvHandoffPlan,
+    pub(crate) source_snapshot: Option<SourceSnapshot>,
+    pub(crate) path_materialization_plan: Option<PathMaterializationPlan>,
+    pub(crate) capability_preflight: Option<RunnerCapabilityPreflight>,
+    pub(crate) provider_preflight: Option<LabProviderPreflightContext>,
+    pub(crate) path_remaps: Vec<LabPathRemap>,
+    pub(crate) workspace_mapping_metadata: serde_json::Value,
+    pub(crate) materialized_workspace: Option<MaterializedWorkspace>,
+    pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
+    pub(crate) remote_output_file: Option<String>,
+    pub(crate) host_telemetry: Option<LabHostTelemetryCapture>,
+    pub(crate) plan: HomeboyPlan,
+    pub(crate) messages: Vec<String>,
+    pub(crate) overhead: LabOffloadOverhead,
+    pub(crate) mirror_evidence: bool,
+    pub(crate) print_handoff: bool,
+    pub(crate) detach_after_handoff: bool,
+}
+
+pub(crate) fn exec_lab_context(
+    mut context: LabDispatchExecutionContext<'_>,
+) -> Result<LabOffloadOutcome> {
+    let request = context.request;
+    let selection = context.selection;
+    let contract = context.contract;
+    let runner_id = context.runner_id;
+    let remote_cwd = context.remote_cwd.clone();
+    let source_path = context.source_path.clone();
+    let agent_task_workload = context
+        .runner_workload
+        .as_ref()
+        .and_then(|workload| workload.agent_task.clone());
+
+    let base_env = build_lab_offload_env_with_passthroughs(&context.lab_metadata);
+    context.lab_metadata["env_resolution"] = lab_env_resolution_report(
+        std::iter::once(LabEnvResolutionLayer {
+            source: "lab_metadata_and_passthroughs",
+            env: base_env,
+            secret_names: Vec::new(),
+        })
+        .chain(context.env_resolution_layers)
+        .chain(std::iter::once(LabEnvResolutionLayer {
+            source: "job_override",
+            env: request.job_overrides.env.clone(),
+            secret_names: request.job_overrides.secret_env_names.clone(),
+        }))
+        .collect(),
+    );
+    let mut env = build_lab_offload_env_with_passthroughs(&context.lab_metadata);
+    env.extend(context.secret_env_handoff.env_delta.clone());
+    for (name, value) in &request.job_overrides.env {
+        env.insert(name.clone(), value.clone());
+    }
+    let mut secret_env_names = context
+        .secret_env_handoff
+        .secret_env_plan
+        .secret_env_names();
+    secret_env_names.extend(request.job_overrides.secret_env_names.clone());
+    secret_env_names.sort();
+    secret_env_names.dedup();
+
+    let pre_dispatch_started = std::time::Instant::now();
+    preflight_lab_secret_env_handoff(runner_id, context.runner, &env, &context.secret_env_handoff)?;
+    if let Some(runner) = context.runner {
+        preflight_agent_task_runner_secret_env_plan(
+            runner_id,
+            runner,
+            &context.secret_preflight_args,
+            &env,
+            &context.secret_env_handoff.secret_env_plan,
+        )?;
+    }
+    if let (Some(provider), Some(runner), Some(source_snapshot)) = (
+        context.provider_preflight.as_ref(),
+        context.runner,
+        context.source_snapshot.as_ref(),
+    ) {
+        preflight_agent_task_provider_on_runner(
+            runner_id,
+            &provider.command_prefix_argv,
+            &context.remote_cwd,
+            &context.source_path,
+            &context.remapped_args,
+            env.clone(),
+            source_snapshot.clone(),
+            contract.required_extensions.clone(),
+            context.capability_preflight.clone(),
+            &provider.runner_homeboy,
+            context.runner_status,
+        )?;
+        let _ = runner;
+    }
+    preflight_lab_offload_remote_dispatch_paths(
+        runner_id,
+        &context.command,
+        &env,
+        &source_path,
+        &remote_cwd,
+        &context.path_remaps,
+    )?;
+    context
+        .overhead
+        .record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
+
+    let remote_exec_started = std::time::Instant::now();
+    let exec_result = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(context.remote_cwd.clone()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: context.command.clone(),
+            env,
+            secret_env_names,
+            secret_env_plan: Some(context.secret_env_handoff.secret_env_plan.clone()),
+            env_materialization: None,
+            capture_patch: request.capture_patch,
+            raw_exec: false,
+            source_snapshot: context.source_snapshot.clone(),
+            path_materialization_plan: context.path_materialization_plan.clone(),
+            capability_preflight: context.capability_preflight.clone(),
+            required_extensions: contract.required_extensions.clone(),
+            require_paths: Vec::new(),
+            runner_workload: context.runner_workload.clone(),
+            run_id: context.agent_task_run_id.clone(),
+            detach_after_handoff: context.detach_after_handoff,
+            mirror_evidence: context.mirror_evidence,
+            print_handoff: context.print_handoff,
+        },
+    );
+    context
+        .overhead
+        .record(LabOffloadPhase::RemoteExec, remote_exec_started.elapsed());
+    let (exec_output, exit_code) = match exec_result {
+        Ok(output) => output,
+        Err(err) => {
+            if let Some(workspace) = context.materialized_workspace.as_mut() {
+                workspace.preserve();
+            }
+            if let Some(health) = runner_daemon_health_failure(&err) {
+                let reason = health.reason.clone();
+                context.plan = with_step(
+                    context.plan,
+                    PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Failed)
+                        .skip_reason(reason.clone())
+                        .build(),
+                );
+                if let Some(job_id) = health.job_id.as_deref() {
+                    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                        return Ok(in_flight_daemon_disconnect_outcome(
+                            context.plan,
+                            runner_id,
+                            job_id,
+                            run_id,
+                            &reason,
+                            &err,
+                        ));
+                    }
+                    return Err(in_flight_daemon_disconnect_error(
+                        runner_id, job_id, None, &reason, &err,
+                    ));
+                }
+                return match selection.source {
+                    LabRunnerSelectionSource::Default => {
+                        if request.local_policy.deny_local_execution() {
+                            Err(local_execution_denied_error(&reason, Some(runner_id)))
+                        } else if !request.local_policy.allow_local_fallback() {
+                            Err(selected_runner_fallback_error(
+                                selection,
+                                "Lab offload selected a runner but its daemon did not respond",
+                                &reason,
+                                vec![format!(
+                                    "Reconnect runner `{runner_id}` before retrying Lab offload."
+                                )],
+                            ))
+                        } else {
+                            Ok(LabOffloadOutcome::RunLocal {
+                                metadata: Some(lab_offload_metadata_with_workspace_mapping(
+                                    &context.plan,
+                                    selection.source.metadata_value(),
+                                    Some(runner_id),
+                                    Some(status_tunnel_mode(context.runner_status).metadata_value()),
+                                    "fallback",
+                                    Some(&remote_cwd),
+                                    Some(&reason),
+                                    Some(&context.workspace_mapping_metadata),
+                                )),
+                                plan: context.plan,
+                                messages: vec![format!("Lab offload: {reason}; running locally.")],
+                            })
+                        }
+                    }
+                    LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
+                        "runner",
+                        format!(
+                            "Lab offload runner `{runner_id}` is connected but its daemon did not respond: {}",
+                            err.message
+                        ),
+                        Some(runner_id.to_string()),
+                        Some(vec![
+                            format!("Reconnect runner `{runner_id}` before retrying Lab offload."),
+                            "Use --force-hot to run the command locally instead of offloading."
+                                .to_string(),
+                        ]),
+                    )),
+                };
+            }
+            return Err(err);
+        }
+    };
+
+    context.plan = with_step(
+        context.plan,
+        PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Success).build(),
+    );
+    let dependency_cache_save_outputs =
+        save_dependency_caches(runner_id, &context.dependency_cache_saves)?;
+    if !dependency_cache_save_outputs.is_empty() {
+        context.plan = with_step(
+            context.plan,
+            PlanStep::ready("lab.save_dependency_caches", "lab.save_dependency_caches")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", dependency_cache_save_outputs.len())
+                        .json("caches", &dependency_cache_save_outputs),
+                )
+                .build(),
+        );
+    }
+    if exec_output.mirror_run_id.is_some() {
+        context.plan = with_step(
+            context.plan,
+            PlanStep::builder(
+                "lab.mirror_evidence",
+                "lab.mirror_evidence",
+                PlanStepStatus::Success,
+            )
+            .build(),
+        );
+    }
+    if context.detach_after_handoff {
+        if let Some(workspace) = context.materialized_workspace.as_mut() {
+            workspace.preserve();
+        }
+        if let (Some(run_id), Some(job_id)) = (
+            context.agent_task_run_id.as_deref(),
+            exec_output.job_id.as_deref(),
+        ) {
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id,
+                    runner_job_id: job_id,
+                    remote_workspace: &remote_cwd,
+                    remote_command: &context.remote_command,
+                },
+            )?;
+        }
+        let mut stderr = String::new();
+        for message in context.messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
+        stderr.push_str(&exec_output.stderr);
+        return Ok(LabOffloadOutcome::InFlight {
+            plan: context.plan,
+            stdout: exec_output.stdout.clone(),
+            stderr,
+            exit_code,
+            output_file_content: Some(exec_output.stdout),
+        });
+    }
+
+    let output_parse_started = std::time::Instant::now();
+    let mut applied_mutation_files = Vec::new();
+    if request.capture_patch && exit_code == 0 {
+        let apply_output = apply_lab_offload_patch(&exec_output)?;
+        let Some(apply_output) = apply_output else {
+            return Err(missing_mutation_patch_error(
+                request.normalized_args,
+                request.mutation_flag,
+                &exec_output,
+            ));
+        };
+        applied_mutation_files = apply_output.result.modified_files.clone();
+        context.plan = with_lab_apply_patch_step(context.plan, Some(apply_output));
+    }
+    context
+        .overhead
+        .record(LabOffloadPhase::OutputParse, output_parse_started.elapsed());
+
+    let artifact_import_started = std::time::Instant::now();
+    let mut output_file_content = match context.remote_output_file.as_deref() {
+        Some(path) => Some(download_lab_output_file(runner_id, path)?),
+        None => None,
+    };
+    context.overhead.record(
+        LabOffloadPhase::ArtifactImport,
+        artifact_import_started.elapsed(),
+    );
+    if let Some(host_telemetry) = context.host_telemetry {
+        let host_telemetry = host_telemetry.finish();
+        eprintln!(
+            "Lab offload host telemetry: {}",
+            host_telemetry.to_metadata()
+        );
+    }
+    ensure_lab_offload_streams_not_truncated(
+        &exec_output,
+        lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
+    )?;
+    let mut stdout = exec_output.stdout.clone();
+    if !applied_mutation_files.is_empty() {
+        stdout = reconcile_lab_mutation_output(&stdout, &applied_mutation_files);
+        if let Some(content) = output_file_content.as_mut() {
+            *content = reconcile_lab_mutation_output(content, &applied_mutation_files);
+        }
+    }
+
+    mirror_agent_task_run_plan_lifecycle(
+        request.normalized_args,
+        agent_task_workload.as_ref(),
+        &stdout,
+        output_file_content.as_deref(),
+        exec_output.job_events.as_deref(),
+    )?;
+
+    let mut stderr = String::new();
+    if !request.read_only_polling {
+        for message in context.messages {
+            stderr.push_str(&message);
+            stderr.push('\n');
+        }
+    }
+    stderr.push_str(&exec_output.stderr);
+    if exit_code != 0 {
+        stderr.push_str(&format!(
+            "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
+        ));
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            contract,
+            runner_id,
+            &remote_cwd,
+            &exec_output.stdout,
+            &exec_output.stderr,
+        );
+        append_runner_failure_context_summary(&mut stderr, &exec_output);
+        if let Some(run_id) = context.agent_task_run_id.as_deref() {
+            if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
+                &exec_output.stdout,
+                &exec_output.stderr,
+            )? {
+                if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
+                    agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
+                        identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
+                        local_command: redact_argv(request.normalized_args),
+                        remote_command: redact_argv(&context.remote_command),
+                        remote_workspace: &remote_cwd,
+                        stdout: &exec_output.stdout,
+                        stderr: &exec_output.stderr,
+                        exit_code,
+                    },
+                    &handoff.envelope,
+                )? {
+                    stderr.push_str(&format!(
+                        "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                        record.run_id, record.run_id, record.run_id
+                    ));
+                    return Ok(LabOffloadOutcome::Offloaded {
+                        plan: context.plan,
+                        stdout: exec_output.stdout,
+                        stderr,
+                        exit_code,
+                        output_file_content,
+                    });
+                }
+            }
+            let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
+                .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
+                .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
+            stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
+            let record = agent_task_lifecycle::record_pre_dispatch_failure(
+                agent_task_lifecycle::AgentTaskPreDispatchFailure {
+                    identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
+                    local_command: redact_argv(request.normalized_args),
+                    remote_command: redact_argv(&context.remote_command),
+                    remote_workspace: &remote_cwd,
+                    failure_message: &failure_message,
+                    stdout: &exec_output.stdout,
+                    stderr: &exec_output.stderr,
+                    exit_code,
+                },
+            )?;
+            stderr.push_str(&format!(
+                "Persisted agent-task pre-dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                record.run_id, record.run_id, record.run_id
+            ));
+        }
+    }
+
+    if let Some(workspace) = context.materialized_workspace.as_mut() {
+        workspace.set_success(exit_code == 0);
+    }
+    Ok(LabOffloadOutcome::Offloaded {
+        plan: context.plan,
+        stdout,
+        stderr,
+        exit_code,
+        output_file_content,
+    })
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -508,22 +943,6 @@ pub(crate) fn run_lab_offload_inner(
         path_materialization_plan,
     );
 
-    // Run-scoped RAII ownership of the materialized remote workspace (#6678).
-    // Historically every offloaded run left its `_lab_workspaces/<snapshot>`
-    // checkout and sibling artifact directory on the lab; the only teardown was
-    // the operator-driven `runner workspace prune`. This handle reaps the run's
-    // workspace on the success path while the default `PreserveOnFailure` policy
-    // keeps it on failure so post-mortem evidence survives. Paths that hand the
-    // workspace off to a still-running remote job (detach, in-flight daemon
-    // disconnect) call `preserve()` so the live job keeps its checkout. The
-    // artifact sibling is only created when the run requested `--output`, so it
-    // is only tracked for reaping in that case.
-    //
-    // Durable agent-task runs are inspected post-hoc (`agent-task
-    // status/logs/artifacts`) and an operator may need to exec back into the
-    // run's checkout, so those preserve the workspace regardless of outcome and
-    // rely on the operator-driven prune; ephemeral cooks/bench/lint runs reap on
-    // success and preserve on failure.
     let cleanup_policy = if agent_task_run_id.is_some() {
         WorkspaceCleanupPolicy::PreserveAlways
     } else {
@@ -535,7 +954,7 @@ pub(crate) fn run_lab_offload_inner(
     } else {
         crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess
     };
-    let mut materialized_workspace = MaterializedWorkspace::new(
+    let materialized_workspace = MaterializedWorkspace::new(
         runner_id.to_string(),
         remote_cwd.clone(),
         remote_output_file
@@ -544,21 +963,10 @@ pub(crate) fn run_lab_offload_inner(
         cleanup_policy,
     );
 
-    // The structured-output file lives in a Homeboy-owned artifact directory
-    // that is a sibling of the synced checkout (#6219), so it is never created
-    // by workspace sync. Create it explicitly before dispatch so the remote
-    // command can write its `--output` target outside the git tree.
     if let Some(output_file) = remote_output_file.as_deref() {
         ensure_remote_lab_artifact_dir(runner_id, output_file)?;
     }
 
-    // Dependency hydration (#7366): the snapshot sync excludes built dependency
-    // trees (vendor/, node_modules/, target/), so the materialized runner
-    // workspace has manifests/lockfiles but no installed dependencies. Before
-    // the executor starts, run the detected provider install (composer install,
-    // npm ci, ...) in the workspace root so the agent/task workspace is ready
-    // without depending on model cooperation. Only agent-task exec jobs run
-    // agent/task work in the workspace; patch-only/read paths skip hydration.
     let dependency_hydration = hydrate_for_agent_task_exec(
         agent_task_run_id.is_some(),
         request.skip_deps_hydration,
@@ -672,7 +1080,6 @@ pub(crate) fn run_lab_offload_inner(
     });
     runner_workload.agent_task =
         runner_workload_agent_task_from_command(&remapped_args, agent_task_run_id.as_deref());
-    let agent_task_workload = runner_workload.agent_task.clone();
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["runner_workload"] =
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
@@ -699,410 +1106,72 @@ pub(crate) fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
-    // Snapshot the setup overhead (selection + preflight + workspace sync)
-    // gathered so far into the metadata embedded in the runner env (#3001), so
-    // reports reading the offload metadata can separate `lab_overhead_ms` from
-    // the workload command duration. Post-exec phases (remote_exec, output
-    // parse, artifact import) are refreshed into the returned/captured metadata
-    // after the run completes below.
     attach_lab_offload_overhead(&mut lab_metadata, &overhead);
-    // Embed the host-telemetry opening snapshot + runner machine identity into
-    // the metadata handed to the runner (#3258). The before/after delta is
-    // emitted controller-side after the run, but recording the pre-run host
-    // state and machine id here keeps the embedded metadata self-describing.
     lab_metadata["lab_host_telemetry"] = host_telemetry.before_metadata();
-    let base_env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     let secret_env_delta = secret_env_handoff
         .env_delta
         .iter()
         .filter(|(name, value)| env_delta_before_secret_handoff.get(*name) != Some(*value))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    lab_metadata["env_resolution"] = lab_env_resolution_report(vec![
-        LabEnvResolutionLayer {
-            source: "lab_metadata_and_passthroughs",
-            env: base_env,
-            secret_names: Vec::new(),
-        },
-        LabEnvResolutionLayer {
-            source: "env_delta",
-            env: env_delta_before_runtime_overlay,
-            secret_names: Vec::new(),
-        },
-        LabEnvResolutionLayer {
-            source: "runtime_overlay",
-            env: runtime_overlay_env.iter().cloned().collect(),
-            secret_names: Vec::new(),
-        },
-        LabEnvResolutionLayer {
-            source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
-            env: secret_env_delta,
-            secret_names: secret_env_handoff.secret_env_names.clone(),
-        },
-        LabEnvResolutionLayer {
-            source: "job_override",
-            env: request.job_overrides.env.clone(),
-            secret_names: request.job_overrides.secret_env_names.clone(),
-        },
-    ]);
-    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    env.extend(secret_env_handoff.env_delta.clone());
-    for (name, value) in &request.job_overrides.env {
-        env.insert(name.clone(), value.clone());
-    }
-    let mut secret_env_names = secret_env_handoff.secret_env_plan.secret_env_names();
-    secret_env_names.extend(request.job_overrides.secret_env_names.clone());
-    secret_env_names.sort();
-    secret_env_names.dedup();
-    // The remaining pre-dispatch checks (secret-env, provider, path translation)
-    // are still runner setup overhead before the workload executes.
-    let pre_dispatch_started = std::time::Instant::now();
-    preflight_lab_secret_env_handoff(runner_id, Some(&runner), &env, &secret_env_handoff)?;
-    preflight_agent_task_runner_secret_env_plan(
-        runner_id,
-        &runner,
-        &changed_since_preflight.args,
-        &env,
-        &secret_env_handoff.secret_env_plan,
-    )?;
-    preflight_agent_task_provider_on_runner(
-        runner_id,
-        &command_prefix.argv,
-        &remote_cwd,
-        &source_path,
-        &remapped_args,
-        env.clone(),
-        source_snapshot.clone(),
-        contract.required_extensions.clone(),
-        capability_preflight.clone(),
-        &runner_homeboy,
-        &runner_status,
-    )?;
-    // Path-translation preflight: the argv has already been routed through the
-    // `rewrite_lab_offload_args` / `remap_*` translation pipeline above. Assert
-    // that no controller-local source-checkout path survived un-translated
-    // before we dispatch the command to the remote runner, so a missed remap
-    // fails loudly here instead of corrupting the remote run.
     let path_remaps = path_remaps_from_workspace_mapping(
         &workspace_mapping,
         Some(&source_path),
         Some(&remote_cwd),
     );
-    preflight_lab_offload_remote_dispatch_paths(
+    exec_lab_context(LabDispatchExecutionContext {
+        request: &request,
+        selection: &selection,
+        contract: &contract,
+        runner: Some(&runner),
         runner_id,
-        &command,
-        &env,
-        &source_path,
-        &remote_cwd,
-        &path_remaps,
-    )?;
-    overhead.record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
-    // Time the workload command itself (kept separate from overhead so reports
-    // can subtract `lab_overhead_ms` from the workload duration).
-    let remote_exec_started = std::time::Instant::now();
-    let exec_result = exec(
-        runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_cwd.clone()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command,
-            env,
-            secret_env_names,
-            secret_env_plan: Some(secret_env_handoff.secret_env_plan.clone()),
-            env_materialization: None,
-            capture_patch: request.capture_patch,
-            raw_exec: false,
-            source_snapshot: Some(source_snapshot),
-            path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
-            capability_preflight,
-            required_extensions: contract.required_extensions.clone(),
-            require_paths: Vec::new(),
-            runner_workload: Some(runner_workload),
-            run_id: agent_task_run_id.clone(),
-            detach_after_handoff: request.detach_after_handoff,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
-    );
-    overhead.record(LabOffloadPhase::RemoteExec, remote_exec_started.elapsed());
-    let (exec_output, exit_code) = match exec_result {
-        Ok(output) => output,
-        Err(err) => {
-            // The remote exec failed: preserve the materialized workspace for
-            // post-mortem evidence, and — when the daemon disconnected with a
-            // job still in flight — so the live remote job keeps its checkout.
-            materialized_workspace.preserve();
-            if let Some(health) = runner_daemon_health_failure(&err) {
-                let reason = health.reason.clone();
-                plan = with_step(
-                    plan,
-                    PlanStep::builder("lab.exec", "lab.exec", PlanStepStatus::Failed)
-                        .skip_reason(reason.clone())
-                        .build(),
-                );
-                if let Some(job_id) = health.job_id.as_deref() {
-                    if let Some(run_id) = agent_task_run_id.as_deref() {
-                        return Ok(in_flight_daemon_disconnect_outcome(
-                            plan, runner_id, job_id, run_id, &reason, &err,
-                        ));
-                    }
-                    return Err(in_flight_daemon_disconnect_error(
-                        runner_id, job_id, None, &reason, &err,
-                    ));
-                }
-                return match selection.source {
-                    LabRunnerSelectionSource::Default => {
-                        if request.local_policy.deny_local_execution() {
-                            Err(local_execution_denied_error(&reason, Some(runner_id)))
-                        } else if !request.local_policy.allow_local_fallback() {
-                            Err(selected_runner_fallback_error(
-                                &selection,
-                                "Lab offload selected a runner but its daemon did not respond",
-                                &reason,
-                                vec![format!(
-                                    "Reconnect runner `{runner_id}` before retrying Lab offload."
-                                )],
-                            ))
-                        } else {
-                            Ok(LabOffloadOutcome::RunLocal {
-                                metadata: Some(lab_offload_metadata_with_workspace_mapping(
-                                    &plan,
-                                    selection.source.metadata_value(),
-                                    Some(runner_id),
-                                    Some(status_tunnel_mode(&runner_status).metadata_value()),
-                                    "fallback",
-                                    Some(&remote_cwd),
-                                    Some(&reason),
-                                    Some(&workspace_mapping_metadata),
-                                )),
-                                plan,
-                                messages: vec![format!(
-                                    "Lab offload: {reason}; running locally."
-                                )],
-                            })
-                        }
-                    }
-                    LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-                        "runner",
-                        format!(
-                            "Lab offload runner `{runner_id}` is connected but its daemon did not respond: {}",
-                            err.message
-                        ),
-                        Some(runner_id.to_string()),
-                        Some(vec![
-                            format!("Reconnect runner `{runner_id}` before retrying Lab offload."),
-                            "Use --force-hot to run the command locally instead of offloading."
-                                .to_string(),
-                        ]),
-                    )),
-                };
-            }
-
-            return Err(err);
-        }
-    };
-
-    let add_success_step = |plan, id| {
-        with_step(
-            plan,
-            PlanStep::builder(id, id, PlanStepStatus::Success).build(),
-        )
-    };
-    plan = add_success_step(plan, "lab.exec");
-    let dependency_cache_save_outputs = save_dependency_caches(runner_id, &dependency_cache_saves)?;
-    if !dependency_cache_save_outputs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.save_dependency_caches", "lab.save_dependency_caches")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", dependency_cache_save_outputs.len())
-                        .json("caches", &dependency_cache_save_outputs),
-                )
-                .build(),
-        );
-    }
-    if exec_output.mirror_run_id.is_some() {
-        plan = add_success_step(plan, "lab.mirror_evidence");
-    }
-    if request.detach_after_handoff {
-        // The remote run continues detached and still owns its workspace; hand
-        // ownership off so the RAII handle never reaps it out from under the
-        // live job.
-        materialized_workspace.preserve();
-        if let (Some(run_id), Some(job_id)) =
-            (agent_task_run_id.as_deref(), exec_output.job_id.as_deref())
-        {
-            agent_task_lifecycle::record_detached_lab_run(
-                agent_task_lifecycle::DetachedLabRunRecord {
-                    run_id,
-                    runner_id,
-                    runner_job_id: job_id,
-                    remote_workspace: &remote_cwd,
-                    remote_command: &remote_command,
-                },
-            )?;
-        }
-        let mut stderr = String::new();
-        for message in messages {
-            stderr.push_str(&message);
-            stderr.push('\n');
-        }
-        stderr.push_str(&exec_output.stderr);
-        return Ok(LabOffloadOutcome::InFlight {
-            plan,
-            stdout: exec_output.stdout.clone(),
-            stderr,
-            exit_code,
-            output_file_content: Some(exec_output.stdout),
-        });
-    }
-    // Parsing/applying the remote command output (patch extraction) is post-
-    // workload overhead, not workload time.
-    let output_parse_started = std::time::Instant::now();
-    let mut applied_mutation_files = Vec::new();
-    if request.capture_patch && exit_code == 0 {
-        let apply_output = apply_lab_offload_patch(&exec_output)?;
-        let Some(apply_output) = apply_output else {
-            return Err(missing_mutation_patch_error(
-                request.normalized_args,
-                request.mutation_flag,
-                &exec_output,
-            ));
-        };
-        applied_mutation_files = apply_output.result.modified_files.clone();
-        plan = with_lab_apply_patch_step(plan, Some(apply_output));
-    }
-    overhead.record(LabOffloadPhase::OutputParse, output_parse_started.elapsed());
-    // Importing the structured-output artifact back from the runner is overhead.
-    let artifact_import_started = std::time::Instant::now();
-    let mut output_file_content = match remote_output_file.as_deref() {
-        Some(path) => Some(download_lab_output_file(runner_id, path)?),
-        None => None,
-    };
-    overhead.record(
-        LabOffloadPhase::ArtifactImport,
-        artifact_import_started.elapsed(),
-    );
-    // The workload + artifact import are done: take the closing host snapshot
-    // and surface the before/after delta controller-side (#3258). Best-effort
-    // diagnostic only — it never affects the run outcome.
-    let host_telemetry = host_telemetry.finish();
-    eprintln!(
-        "Lab offload host telemetry: {}",
-        host_telemetry.to_metadata()
-    );
-    ensure_lab_offload_streams_not_truncated(
-        &exec_output,
-        lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
-    )?;
-    let mut stdout = exec_output.stdout.clone();
-    if !applied_mutation_files.is_empty() {
-        stdout = reconcile_lab_mutation_output(&stdout, &applied_mutation_files);
-        if let Some(content) = output_file_content.as_mut() {
-            *content = reconcile_lab_mutation_output(content, &applied_mutation_files);
-        }
-    }
-
-    mirror_agent_task_run_plan_lifecycle(
-        request.normalized_args,
-        agent_task_workload.as_ref(),
-        &stdout,
-        output_file_content.as_deref(),
-        exec_output.job_events.as_deref(),
-    )?;
-
-    let mut stderr = String::new();
-    for message in messages {
-        stderr.push_str(&message);
-        stderr.push('\n');
-    }
-    stderr.push_str(&exec_output.stderr);
-    if exit_code != 0 {
-        // Remote-failure clarity (#3815): a non-zero offloaded exit can be
-        // confusing because the failure surfaces controller-side as if it ran
-        // locally. Lead with an explicit banner that names the runner and
-        // remote workspace so a controller-vs-runner mismatch (a path/file that
-        // exists locally but not on the runner, a missing remote dependency,
-        // etc.) is obviously a remote failure, not a bug in the command itself.
-        // This runs for every offloaded failure, including plain cooks that
-        // have no agent-task run id.
-        stderr.push_str(&format!(
-            "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
-        ));
-        append_runner_component_registry_repair_hint(
-            &mut stderr,
-            &contract,
-            runner_id,
-            &remote_cwd,
-            &exec_output.stdout,
-            &exec_output.stderr,
-        );
-        append_runner_failure_context_summary(&mut stderr, &exec_output);
-        if let Some(run_id) = agent_task_run_id.as_deref() {
-            if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
-                &exec_output.stdout,
-                &exec_output.stderr,
-            )? {
-                if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
-                    agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
-                        identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                        local_command: redact_argv(request.normalized_args),
-                        remote_command: redact_argv(&remote_command),
-                        remote_workspace: &remote_cwd,
-                        stdout: &exec_output.stdout,
-                        stderr: &exec_output.stderr,
-                        exit_code,
-                    },
-                    &handoff.envelope,
-                )? {
-                    stderr.push_str(&format!(
-                        "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
-                        record.run_id, record.run_id, record.run_id
-                    ));
-                    return Ok(LabOffloadOutcome::Offloaded {
-                        plan,
-                        stdout: exec_output.stdout,
-                        stderr,
-                        exit_code,
-                        output_file_content,
-                    });
-                }
-            }
-            let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
-                .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
-                .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
-            stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
-            let record = agent_task_lifecycle::record_pre_dispatch_failure(
-                agent_task_lifecycle::AgentTaskPreDispatchFailure {
-                    identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                    local_command: redact_argv(request.normalized_args),
-                    remote_command: redact_argv(&remote_command),
-                    remote_workspace: &remote_cwd,
-                    failure_message: &failure_message,
-                    stdout: &exec_output.stdout,
-                    stderr: &exec_output.stderr,
-                    exit_code,
-                },
-            )?;
-            stderr.push_str(&format!(
-                "Persisted agent-task pre-dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
-                record.run_id, record.run_id, record.run_id
-            ));
-        }
-    }
-
-    // Synchronous offload complete: reap the run-scoped workspace on success
-    // (exit 0); a non-zero remote exit preserves it for post-mortem evidence
-    // under the default `PreserveOnFailure` cleanup policy.
-    materialized_workspace.set_success(exit_code == 0);
-    Ok(LabOffloadOutcome::Offloaded {
+        runner_status: &runner_status,
+        source_path,
+        remote_cwd,
+        command,
+        remote_command,
+        remapped_args,
+        secret_preflight_args: changed_since_preflight.args,
+        agent_task_run_id,
+        runner_workload: Some(runner_workload),
+        lab_metadata,
+        env_resolution_layers: vec![
+            LabEnvResolutionLayer {
+                source: "env_delta",
+                env: env_delta_before_runtime_overlay,
+                secret_names: Vec::new(),
+            },
+            LabEnvResolutionLayer {
+                source: "runtime_overlay",
+                env: runtime_overlay_env.iter().cloned().collect(),
+                secret_names: Vec::new(),
+            },
+            LabEnvResolutionLayer {
+                source: SECRET_ENV_PLAN_ENV_DELTA_SOURCE,
+                env: secret_env_delta,
+                secret_names: secret_env_handoff.secret_env_names.clone(),
+            },
+        ],
+        secret_env_handoff,
+        source_snapshot: Some(source_snapshot),
+        path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
+        capability_preflight,
+        provider_preflight: Some(LabProviderPreflightContext {
+            command_prefix_argv: command_prefix.argv,
+            runner_homeboy,
+        }),
+        path_remaps,
+        workspace_mapping_metadata,
+        materialized_workspace: Some(materialized_workspace),
+        dependency_cache_saves,
+        remote_output_file,
+        host_telemetry: Some(host_telemetry),
         plan,
-        stdout,
-        stderr,
-        exit_code,
-        output_file_content,
+        messages,
+        overhead,
+        mirror_evidence: true,
+        print_handoff: true,
+        detach_after_handoff: request.detach_after_handoff,
     })
 }
 
