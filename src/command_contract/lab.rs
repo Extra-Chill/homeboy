@@ -654,6 +654,8 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON: &str =
     "agent-task cook finalization commits, pushes, and opens/updates GitHub PRs from the trusted controller; use --no-finalize for Lab patch evidence and finalize from the controller";
+const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
+    "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -805,7 +807,22 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
+                        command:
+                            agent_task::AgentTaskFanoutCommand::CookBatch(
+                                agent_task::AgentTaskFanoutCookBatchArgs { dry_run: true, .. },
+                            ),
+                    }),
+            }) => LabCommandContract::local_only(
+                AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
+                AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command:
+                            agent_task::AgentTaskFanoutCommand::CookBatch(
+                                agent_task::AgentTaskFanoutCookBatchArgs { dry_run: false, .. },
+                            ),
                     }),
             }) => LabCommandContract::portable(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
