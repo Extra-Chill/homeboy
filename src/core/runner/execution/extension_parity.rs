@@ -1,6 +1,7 @@
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
 use crate::core::extension;
+use crate::core::output::MergeOutput;
 use crate::core::server::{self, SshClient};
 
 use serde_json::Value;
@@ -9,7 +10,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::super::remote_runner_homeboy_path;
+use super::super::{load, merge, remote_runner_homeboy_path};
+use super::super::{
+    materialize_runner_extension, RunnerExtensionMaterializationRequest,
+    RunnerExtensionMaterializationSource,
+};
 use super::{Runner, RunnerKind};
 
 pub(super) fn required_extensions_for_command(
@@ -406,7 +411,7 @@ fn missing_runner_extension_error(
 fn sync_runner_extension_revision(
     runner_id: &str,
     runner: &Runner,
-    cwd: &str,
+    _cwd: &str,
     homeboy_path: &str,
     extension_id: &str,
     parity_error: Error,
@@ -423,41 +428,81 @@ fn sync_runner_extension_revision(
             err,
         )
     })?;
-    if let Some(local_source_path) = controller_local_source_path(&source.url) {
-        return Err(local_source_runner_sync_error(
+    let materialization_source =
+        if let Some(local_source_path) = controller_local_source_path(&source.url) {
+            RunnerExtensionMaterializationSource::ControllerSnapshot {
+                local_path: local_source_path,
+            }
+        } else if !looks_like_remote_source(&source.url) {
+            RunnerExtensionMaterializationSource::RunnerPath {
+                path: source.url.clone(),
+            }
+        } else {
+            RunnerExtensionMaterializationSource::RemoteGit {
+                url: source.url.clone(),
+                git_ref: local_revision.clone(),
+            }
+        };
+    let records_dev_overlay = matches!(
+        &materialization_source,
+        RunnerExtensionMaterializationSource::ControllerSnapshot { .. }
+    );
+    let provenance = materialize_runner_extension(
+        runner,
+        homeboy_path,
+        &RunnerExtensionMaterializationRequest {
+            id: extension_id.to_string(),
+            revision: local_revision,
+            source: materialization_source,
+        },
+    )
+    .map_err(|err| {
+        runner_extension_materialization_error(
             runner_id,
             homeboy_path,
             extension_id,
-            &source.url,
-            &local_source_path,
-            &local_revision,
+            err,
             parity_error,
-        ));
+        )
+    })?;
+    if records_dev_overlay {
+        record_materialized_extension_overlay(runner_id, provenance)?;
     }
-    let command = runner_extension_sync_command(
-        cwd,
-        homeboy_path,
-        &source.url,
-        extension_id,
-        &local_revision,
-    );
-    let output = execute_runner_command(runner, &command)?;
-    if output.success {
-        return Ok(());
-    }
+    Ok(())
+}
 
-    Err(Error::validation_invalid_argument(
-        "runner_extension",
-        format!(
-            "Runner '{runner_id}' could not auto-sync stale extension parity for '{extension_id}' before command execution"
-        ),
-        Some(extension_id.to_string()),
-        Some(vec![
-            format!("Local extension source_revision: {local_revision}"),
-            format!("Runner sync command failed: {homeboy_path} extension refresh <source> --id {extension_id} --ref {local_revision}"),
-            extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
-        ]),
-    ))
+fn record_materialized_extension_overlay(
+    runner_id: &str,
+    provenance: impl serde::Serialize,
+) -> Result<()> {
+    let mut runner = load(runner_id)?;
+    let mut dev_sync = runner
+        .resources
+        .remove("dev_sync")
+        .unwrap_or_else(|| serde_json::json!({ "schema": "homeboy/runner-dev-sync/v1" }));
+    let mut extensions = dev_sync
+        .get("extensions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let provenance_value = serde_json::to_value(provenance)
+        .map_err(|err| Error::internal_json(err.to_string(), None))?;
+    let extension_id = provenance_value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    extensions
+        .retain(|entry| entry.get("id").and_then(Value::as_str) != Some(extension_id.as_str()));
+    extensions.push(provenance_value);
+    dev_sync["extensions"] = Value::Array(extensions);
+    runner.resources.insert("dev_sync".to_string(), dev_sync);
+    let patch = serde_json::json!({ "resources": runner.resources });
+    let _updated = matches!(
+        merge(Some(runner_id), &patch.to_string(), &[])?,
+        MergeOutput::Single(_)
+    );
+    Ok(())
 }
 
 fn controller_extension_metadata_required_error(
@@ -505,55 +550,41 @@ fn controller_extension_metadata_required_error(
     )
 }
 
-fn local_source_runner_sync_error(
+fn runner_extension_materialization_error(
     runner_id: &str,
     homeboy_path: &str,
     extension_id: &str,
-    source_url: &str,
-    local_source_path: &Path,
-    local_revision: &str,
+    materialization_error: Error,
     parity_error: Error,
 ) -> Error {
     Error::new(
         ErrorCode::ValidationInvalidArgument,
         format!(
-            "Invalid argument 'runner_extension': Runner '{runner_id}' cannot auto-sync stale extension parity for '{extension_id}' from a controller-local source before command execution"
+            "Invalid argument 'runner_extension': Runner '{runner_id}' could not auto-materialize stale extension parity for '{extension_id}' before command execution"
         ),
         serde_json::json!({
             "field": "runner_extension",
-            "problem": "controller_local_source_unresolvable",
+            "problem": "runner_extension_materialization_failed",
             "id": extension_id,
             "diagnostic": {
-                "code": "runner_extension.controller_local_source_unresolvable",
+                "code": "runner_extension.materialization_failed",
                 "runner_id": runner_id,
                 "extension_id": extension_id,
                 "homeboy_path": homeboy_path,
-                "source_url": source_url,
-                "controller_local_source_path": local_source_path.display().to_string(),
-                "local_source_revision": local_revision,
                 "original_error": parity_error.message,
+                "materialization_error": {
+                    "code": materialization_error.code.as_str(),
+                    "message": materialization_error.message,
+                    "details": materialization_error.details,
+                },
                 "next_commands": [
                     format!("{homeboy_path} extension diff-installed {extension_id}"),
-                    format!("{homeboy_path} extension refresh <runner-resolvable-source> --id {extension_id} --ref {local_revision}")
-                ],
-                "issue_acceptance_criteria": [
-                    "Declare a runner-resolvable extension source or materialization plan for controller-local sources.",
-                    "Runner parity preflight can sync the extension without reading controller-local paths directly.",
-                    "The runner reports the same extension source_revision as the controller before command execution."
+                    format!("{homeboy_path} extension show {extension_id}")
                 ]
             },
             "tried": [
-                format!("Local extension source_revision: {local_revision}"),
-                format!("Local extension source: {source_url}"),
-                format!(
-                    "Resolved controller-local source path: {}",
-                    local_source_path.display()
-                ),
-                "Controller-local extension sources are not runner-resolvable by source URL/ref during automatic parity sync.",
-                format!(
-                    "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension refresh <runner-resolvable-source> --id {extension_id} --ref {local_revision}"
-                ),
-                format!("Inspect local installed-extension freshness: {homeboy_path} extension diff-installed {extension_id}"),
+                "Runner extension parity was stale before dispatch.",
+                "Homeboy attempted to materialize the controller extension source on the runner automatically.",
                 format!("Original parity error: {}", parity_error.message),
             ]
         }),
@@ -587,6 +618,7 @@ fn execute_runner_command(runner: &Runner, command: &str) -> Result<server::Comm
     }
 }
 
+#[cfg(test)]
 fn runner_extension_sync_command(
     cwd: &str,
     homeboy_path: &str,
@@ -915,12 +947,11 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
-        local_source_runner_sync_error, remote_extension_core_compatibility,
-        remote_extension_ready_status, remote_extension_setting_ids,
-        remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_runner_extension_core_compatibility,
-        validate_runner_extension_ready, validate_runner_extension_revision,
-        validate_runner_extension_settings,
+        remote_extension_core_compatibility, remote_extension_ready_status,
+        remote_extension_setting_ids, remote_extension_source_revision,
+        requested_setting_keys_for_command, runner_extension_sync_command,
+        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
+        validate_runner_extension_revision, validate_runner_extension_settings,
     };
     use crate::test_support::with_isolated_home;
 
@@ -1331,42 +1362,14 @@ mod tests {
     }
 
     #[test]
-    fn parity_auto_sync_rejects_controller_local_source_paths() {
+    fn parity_auto_sync_classifies_controller_local_source_paths_for_snapshot() {
         let tempdir = tempfile::tempdir().expect("creates temp extension source");
         let local_source = tempdir.path().canonicalize().expect("canonical tempdir");
-        let parity_error = crate::core::error::Error::validation_invalid_argument(
-            "runner_extension",
-            "Runner 'homeboy-lab' has stale extension parity for 'rust' before command execution",
-            Some("rust".to_string()),
-            None,
-        );
 
-        let err = local_source_runner_sync_error(
-            "homeboy-lab",
-            "homeboy",
-            "rust",
-            tempdir.path().to_str().unwrap(),
-            &local_source,
-            "abc1234",
-            parity_error,
-        );
-
-        assert!(err.to_string().contains("controller-local source"));
-        let tried = err.details["tried"].to_string();
-        assert!(tried.contains(tempdir.path().to_str().unwrap()));
-        assert!(tried.contains("not runner-resolvable"));
-        assert!(tried.contains("abc1234"));
-        assert!(
-            tried.contains("extension refresh <runner-resolvable-source> --id rust --ref abc1234")
-        );
         assert_eq!(
-            err.details["diagnostic"]["code"].as_str(),
-            Some("runner_extension.controller_local_source_unresolvable")
+            controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
+            Some(local_source.as_path())
         );
-        assert!(err.details["diagnostic"]["next_commands"]
-            .to_string()
-            .contains("extension diff-installed rust"));
-        assert!(err.details["diagnostic"]["issue_acceptance_criteria"].is_array());
     }
 
     #[test]

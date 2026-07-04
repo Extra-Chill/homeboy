@@ -1,8 +1,12 @@
 use super::super::types::RunnerExtensionSyncEntry;
 use super::*;
 use crate::core::runner;
+use crate::core::runner::materialize_runner_extension_with_exec;
 use crate::core::runner::Runner;
 use crate::core::runner::RunnerExecOptions;
+use crate::core::runner::{
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+};
 use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
 
@@ -37,37 +41,17 @@ pub fn sync_runner_extensions(
             continue;
         }
 
-        let exists =
-            match runner_extension_exists(runner, homeboy_path, &extension.extension_id, exec) {
-                Ok(exists) => exists,
-                Err(detail) => {
-                    failed.push(RunnerExtensionSyncEntry {
-                        extension_id: extension.extension_id.clone(),
-                        source_revision: source_revision.to_string(),
-                        synced: false,
-                        detail: Some(detail),
-                        recovery_commands: runner_extension_recovery_commands(runner, homeboy_path),
-                    });
-                    continue;
-                }
-            };
-        let mut command = vec![
-            homeboy_path.to_string(),
-            "extension".to_string(),
-            "install".to_string(),
-            source_url.to_string(),
-            "--id".to_string(),
-            extension.extension_id.clone(),
-            "--ref".to_string(),
-            source_revision.to_string(),
-        ];
-        if exists {
-            command.push("--replace".to_string());
-        }
-
-        let result = exec(&runner.id, runner_exec_options(runner, command.clone()));
+        let request = RunnerExtensionMaterializationRequest {
+            id: extension.extension_id.clone(),
+            revision: source_revision.to_string(),
+            source: RunnerExtensionMaterializationSource::RemoteGit {
+                url: source_url.to_string(),
+                git_ref: source_revision.to_string(),
+            },
+        };
+        let result = materialize_runner_extension_with_exec(runner, homeboy_path, &request, exec);
         match result {
-            Ok((output, 0)) => {
+            Ok(_provenance) => {
                 crate::log_status!(
                     "upgrade",
                     "  {} extension {} synced at {}",
@@ -75,7 +59,6 @@ pub fn sync_runner_extensions(
                     extension.extension_id,
                     source_revision
                 );
-                let _ = output;
                 synced.push(RunnerExtensionSyncEntry {
                     extension_id: extension.extension_id.clone(),
                     source_revision: source_revision.to_string(),
@@ -84,26 +67,21 @@ pub fn sync_runner_extensions(
                     recovery_commands: Vec::new(),
                 });
             }
-            Ok((output, exit_code)) => {
-                failed.push(RunnerExtensionSyncEntry {
-                    extension_id: extension.extension_id.clone(),
-                    source_revision: source_revision.to_string(),
-                    synced: false,
-                    detail: Some(format!(
-                        "sync failed with exit code {}: {}",
-                        exit_code,
-                        runner_upgrade_detail(&output)
-                    )),
-                    recovery_commands: runner_exec_recovery_commands(runner, &command),
-                });
-            }
             Err(err) => {
                 failed.push(RunnerExtensionSyncEntry {
                     extension_id: extension.extension_id.clone(),
                     source_revision: source_revision.to_string(),
                     synced: false,
                     detail: Some(format!("sync failed: {}", err.message)),
-                    recovery_commands: runner_exec_recovery_commands(runner, &command),
+                    recovery_commands: runner_exec_recovery_commands(
+                        runner,
+                        &runner_extension_install_recovery_command(
+                            homeboy_path,
+                            source_url,
+                            &extension.extension_id,
+                            source_revision,
+                        ),
+                    ),
                 });
             }
         }
@@ -145,46 +123,21 @@ pub fn defer_extension_failures_for_path_drift(
     }));
 }
 
-pub fn runner_extension_exists(
-    runner: &Runner,
+fn runner_extension_install_recovery_command(
     homeboy_path: &str,
+    source_url: &str,
     extension_id: &str,
-    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-) -> std::result::Result<bool, String> {
-    let result = exec(
-        &runner.id,
-        runner_exec_options(
-            runner,
-            vec![
-                homeboy_path.to_string(),
-                "extension".to_string(),
-                "show".to_string(),
-                extension_id.to_string(),
-            ],
-        ),
-    );
-
-    match result {
-        Ok((_output, 0)) => Ok(true),
-        Ok((_output, 4)) => Ok(false),
-        Ok((output, exit_code)) => Err(format!(
-            "extension {} lookup failed with exit code {}: {}",
-            extension_id,
-            exit_code,
-            runner_upgrade_detail(&output)
-        )),
-        Err(err) => Err(format!(
-            "extension {} lookup failed: {}",
-            extension_id, err.message
-        )),
-    }
-}
-
-pub fn runner_extension_recovery_commands(runner: &Runner, homeboy_path: &str) -> Vec<String> {
-    let command = vec![
+    source_revision: &str,
+) -> Vec<String> {
+    vec![
         homeboy_path.to_string(),
         "extension".to_string(),
-        "list".to_string(),
-    ];
-    runner_exec_recovery_commands(runner, &command)
+        "install".to_string(),
+        source_url.to_string(),
+        "--id".to_string(),
+        extension_id.to_string(),
+        "--ref".to_string(),
+        source_revision.to_string(),
+        "--replace".to_string(),
+    ]
 }
