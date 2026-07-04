@@ -97,16 +97,27 @@ pub(super) fn spawn_cancelling_after_claim_broker(
 
 pub(super) fn spawn_cancelling_on_second_snapshot_broker(
     store: JobStore,
-    expected_requests: usize,
+    max_requests: usize,
     seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-) -> (String, std::thread::JoinHandle<()>) {
+) -> (String, MockBrokerHandle) {
     let snapshots = Arc::new(std::sync::Mutex::new(0_u8));
-    spawn_custom_broker(
-        store,
-        expected_requests,
-        seen_paths,
-        move |store, request| {
-            if let Some(job_id) = request.path.strip_prefix("/jobs/") {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let broker_url = format!("http://{addr}");
+    let handle = std::thread::spawn(move || {
+        for _ in 0..max_requests {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let request = read_request(&mut stream);
+            if request.path == "/__shutdown" {
+                break;
+            }
+            if let Some(seen_paths) = &seen_paths {
+                seen_paths
+                    .lock()
+                    .expect("record request path")
+                    .push(request.path.clone());
+            }
+            let response = if let Some(job_id) = request.path.strip_prefix("/jobs/") {
                 let job_id = uuid::Uuid::parse_str(job_id).expect("job id");
                 let mut snapshots = snapshots.lock().expect("snapshot count");
                 *snapshots += 1;
@@ -114,14 +125,35 @@ pub(super) fn spawn_cancelling_on_second_snapshot_broker(
                     store.cancel(job_id, "user requested").expect("cancel job");
                 }
                 let job = store.get(job_id).expect("job");
-                return serde_json::json!({
+                serde_json::json!({
                     "success": true,
                     "data": { "body": { "job": job } }
-                });
-            }
-            handle_request(store, request)
-        },
-    )
+                })
+            } else {
+                handle_request(&store, &request)
+            };
+            write_response(&mut stream, response);
+        }
+    });
+    (broker_url.clone(), MockBrokerHandle { broker_url, handle })
+}
+
+pub(super) struct MockBrokerHandle {
+    broker_url: String,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl MockBrokerHandle {
+    pub(super) fn join(self) -> std::thread::Result<()> {
+        let _ = send_shutdown_request(&self.broker_url);
+        self.handle.join()
+    }
+}
+
+fn send_shutdown_request(broker_url: &str) -> std::io::Result<()> {
+    let addr = broker_url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    stream.write_all(b"GET /__shutdown HTTP/1.1\r\nHost: mock\r\nContent-Length: 0\r\n\r\n")
 }
 
 fn spawn_custom_broker<F>(
