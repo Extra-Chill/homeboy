@@ -189,6 +189,107 @@ fn generate_renames_detects_file_renames() {
 }
 
 #[test]
+fn path_renames_include_skipped_content_files_in_renamed_directory() {
+    let dir = std::env::temp_dir().join("homeboy_refactor_skipped_path_move_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let old_dir = dir.join("plugins/host/studio-native/build/assets/preview");
+    std::fs::create_dir_all(&old_dir).unwrap();
+
+    std::fs::write(old_dir.join("studio-native-preview.png"), b"png bytes").unwrap();
+    std::fs::write(old_dir.join("preview.js.map"), b"{\"version\":3}").unwrap();
+    std::fs::write(
+        dir.join("plugins/host/studio-native/.npmrc"),
+        b"legacy-peer-deps=true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        old_dir.join("studio-native-preview.js"),
+        "studioNative();\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::literal("studio-native", "wp-build", RenameScope::All);
+    let mut result = generate_renames(&spec, &dir);
+
+    assert!(result.file_renames.iter().any(|rename| {
+        rename.from == "plugins/host/studio-native/build/assets/preview/studio-native-preview.png"
+            && rename.to == "plugins/host/wp-build/build/assets/preview/wp-build-preview.png"
+    }));
+    assert!(result.file_renames.iter().any(|rename| {
+        rename.from == "plugins/host/studio-native/build/assets/preview/preview.js.map"
+            && rename.to == "plugins/host/wp-build/build/assets/preview/preview.js.map"
+    }));
+    assert!(result.file_renames.iter().any(|rename| {
+        rename.from == "plugins/host/studio-native/.npmrc"
+            && rename.to == "plugins/host/wp-build/.npmrc"
+    }));
+
+    apply_renames(&mut result, &dir).unwrap();
+
+    assert!(dir
+        .join("plugins/host/wp-build/build/assets/preview/wp-build-preview.png")
+        .exists());
+    assert!(dir
+        .join("plugins/host/wp-build/build/assets/preview/preview.js.map")
+        .exists());
+    assert!(dir.join("plugins/host/wp-build/.npmrc").exists());
+    assert!(!dir
+        .join("plugins/host/studio-native/build/assets/preview/studio-native-preview.png")
+        .exists());
+    assert!(!dir
+        .join("plugins/host/studio-native/build/assets/preview/preview.js.map")
+        .exists());
+    assert!(!dir.join("plugins/host/studio-native/.npmrc").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn path_renames_preserve_intermediate_segments_under_renamed_ancestor() {
+    let dir = std::env::temp_dir().join("homeboy_refactor_nested_path_segment_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let dist = dir.join("plugins/host/studio-native/modules/agentic-ui-block/dist");
+    std::fs::create_dir_all(&dist).unwrap();
+
+    std::fs::write(
+        dist.join("studio-native-agentic-ui-block.js"),
+        "studioNativeAgenticUiBlock();\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::literal("studio-native", "wp-build", RenameScope::All);
+    let mut result = generate_renames(&spec, &dir);
+
+    let rename = result
+        .file_renames
+        .iter()
+        .find(|rename| rename.from.ends_with("studio-native-agentic-ui-block.js"))
+        .unwrap();
+    assert_eq!(
+        rename.from,
+        "plugins/host/studio-native/modules/agentic-ui-block/dist/studio-native-agentic-ui-block.js"
+    );
+    assert_eq!(
+        rename.to,
+        "plugins/host/wp-build/modules/agentic-ui-block/dist/wp-build-agentic-ui-block.js"
+    );
+
+    apply_renames(&mut result, &dir).unwrap();
+
+    assert!(dir
+        .join("plugins/host/wp-build/modules/agentic-ui-block/dist/wp-build-agentic-ui-block.js")
+        .exists());
+    assert!(!dir
+        .join("plugins/host/wp-build/modules/agentic-ui-block/wp-build-agentic-ui-block.js")
+        .exists());
+    assert!(!dir
+        .join("plugins/host/studio-native/modules/agentic-ui-block/dist/studio-native-agentic-ui-block.js")
+        .exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn word_boundary_no_false_positives() {
     let dir = std::env::temp_dir().join("homeboy_refactor_boundary_test");
     let _ = std::fs::create_dir_all(&dir);

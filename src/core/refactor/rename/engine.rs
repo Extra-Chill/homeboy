@@ -13,6 +13,7 @@ use super::types::{
     CaseVariant, FileEdit, FileRename, Reference, RenameContext, RenameResult, RenameScope,
     RenameSpec, RenameTargeting,
 };
+use std::cmp::Reverse;
 
 // Boundary matching and literal matching are provided by crate::core::engine::codebase_scan.
 // See: find_boundary_matches(), find_literal_matches()
@@ -41,6 +42,17 @@ fn scan_config_for_scope(scope: &RenameScope) -> ScanConfig {
 
     ScanConfig {
         extensions,
+        ..ScanConfig::default()
+    }
+}
+
+/// Build a ScanConfig for path moves.
+///
+/// Path renames must include files that are intentionally skipped for content
+/// edits (images, sourcemaps, dotfiles) so renamed directory trees move intact.
+fn scan_config_for_path_renames() -> ScanConfig {
+    ScanConfig {
+        extensions: ExtensionFilter::All,
         ..ScanConfig::default()
     }
 }
@@ -123,7 +135,7 @@ pub fn find_references_with_targeting(
     let mut references = Vec::new();
 
     // Sort variants longest-first to prevent partial overlap
-    all_variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+    all_variants.sort_by_key(|variant| Reverse(variant.from.len()));
 
     let use_literal = spec.literal;
 
@@ -227,10 +239,15 @@ pub fn generate_renames_with_targeting(
     let references = find_references_with_targeting(spec, root, targeting);
     let config = scan_config_for_scope(&spec.scope);
     let files = target_files(codebase_scan::walk_files(root, &config), root, targeting);
+    let path_rename_files = target_files(
+        codebase_scan::walk_files(root, &scan_config_for_path_renames()),
+        root,
+        targeting,
+    );
 
     // Sort variants longest-first to prevent partial matches
     let mut sorted_variants = spec.variants.clone();
-    sorted_variants.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+    sorted_variants.sort_by_key(|variant| Reverse(variant.from.len()));
 
     // Generate file content edits using reverse-offset replacement
     let mut edits = Vec::new();
@@ -282,7 +299,7 @@ pub fn generate_renames_with_targeting(
 
             // Sort by position descending so we can replace from end to start
             // without invalidating earlier offsets
-            all_matches.sort_by(|a, b| b.0.cmp(&a.0));
+            all_matches.sort_by_key(|(start, _, _)| Reverse(*start));
 
             let mut new_content = content;
             for (start, end, replacement) in &all_matches {
@@ -301,18 +318,14 @@ pub fn generate_renames_with_targeting(
     // Generate file/directory renames
     let mut file_renames = Vec::new();
     if targeting.rename_files {
-        for file_path in &files {
+        for file_path in &path_rename_files {
             let relative = file_path
                 .strip_prefix(root)
                 .unwrap_or(file_path)
                 .to_string_lossy()
                 .to_string();
 
-            let mut new_relative = relative.clone();
-            for variant in &sorted_variants {
-                // Replace in path segments (word-boundary aware in file names)
-                new_relative = new_relative.replace(&variant.from, &variant.to);
-            }
+            let new_relative = rename_path_segments(&relative, &sorted_variants);
 
             if new_relative != relative {
                 file_renames.push(FileRename {
@@ -324,6 +337,7 @@ pub fn generate_renames_with_targeting(
     }
 
     // Deduplicate file renames
+    file_renames.sort_by(|a, b| a.from.cmp(&b.from));
     file_renames.dedup_by(|a, b| a.from == b.from);
 
     let total_references = references.len();
@@ -342,6 +356,19 @@ pub fn generate_renames_with_targeting(
         total_files,
         applied: false,
     }
+}
+
+fn rename_path_segments(path: &str, variants: &[CaseVariant]) -> String {
+    path.split('/')
+        .map(|segment| {
+            let mut renamed = segment.to_string();
+            for variant in variants {
+                renamed = renamed.replace(&variant.from, &variant.to);
+            }
+            renamed
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn target_files(files: Vec<PathBuf>, root: &Path, targeting: &RenameTargeting) -> Vec<PathBuf> {
