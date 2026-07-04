@@ -19,6 +19,15 @@ pub(crate) fn execute_action(
     payload: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let extension = load_extension(extension_id)?;
+    crate::core::extension::validate_core_compatibility(
+        "extension",
+        extension_id,
+        extension
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
+        crate::core::extension::read_source_revision(extension_id),
+    )?;
 
     if extension.actions.is_empty() {
         return Err(Error::validation_invalid_argument(

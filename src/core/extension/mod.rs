@@ -3,6 +3,7 @@ pub mod build;
 mod capability;
 mod compiler_warning_contract;
 pub mod component_script;
+mod core_compat;
 mod dev_run;
 mod env_provider;
 mod execution;
@@ -47,6 +48,11 @@ pub(crate) use capability::{extension_guidance_hints, stderr_tail};
 pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
+};
+pub use core_compat::{
+    core_incompatible_error, evaluate_core_compatibility, installed_homeboy_version,
+    validate_core_compatibility, CoreCompatibilityReport, CORE_COMPAT_REMEDIATION_COMMAND,
+    CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
 pub use dev_run::{
     plan_extension_dev_run, run_extension_dev_run, ExtensionDevRunOutput, ExtensionDevRunPlan,

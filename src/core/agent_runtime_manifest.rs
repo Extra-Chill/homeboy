@@ -10,7 +10,9 @@ use crate::core::agent_task_provider::{
     AgentTaskProviderWorkspaceMaterialization,
 };
 use crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA;
-use crate::core::extension::{load_all_extensions, load_extension, ExtensionManifest};
+use crate::core::extension::{
+    self, load_all_extensions, load_extension, ExtensionManifest, RequirementsConfig,
+};
 use crate::core::{config, paths, Error, Result};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
@@ -49,6 +51,8 @@ pub struct AgentRuntimeManifest {
         skip_serializing_if = "AgentRuntimeMaterializationContract::is_empty"
     )]
     pub materialization: AgentRuntimeMaterializationContract,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<RequirementsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +396,18 @@ fn load_standalone_agent_runtime_manifest(
     manifest.extension_id = None;
     manifest.extension_path = None;
     manifest.runtime_path = Some(path.to_string_lossy().to_string());
+    if let Some(diagnostic) = agent_runtime_core_incompatible_diagnostic(
+        &manifest.id,
+        None,
+        manifest.runtime_path.as_deref(),
+        manifest
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
+        None,
+    ) {
+        return StandaloneAgentRuntimeManifestLoad::Invalid(diagnostic);
+    }
     StandaloneAgentRuntimeManifestLoad::Loaded(manifest)
 }
 
@@ -402,6 +418,16 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
     let mut diagnostics = Vec::new();
     for extension in extensions {
         for runtime in &extension.agent_runtimes {
+            if let Some(diagnostic) = agent_runtime_core_incompatible_diagnostic(
+                &runtime.id,
+                Some(&extension.id),
+                extension.extension_path.as_deref(),
+                runtime_core_constraint(runtime, extension),
+                extension::read_source_revision(&extension.id),
+            ) {
+                diagnostics.push(diagnostic);
+                continue;
+            }
             let provider_catalog = parse_agent_task_executor_provider_catalog(
                 &runtime.agent_task_executors,
                 &runtime.id,
@@ -427,13 +453,14 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 )
                 .unwrap_or_default(),
                 extension_id: Some(extension.id.clone()),
+                requires: runtime_requires(runtime, extension),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
                 extra: runtime
                     .extra
                     .clone()
                     .into_iter()
-                    .filter(|(key, _)| key != "materialization")
+                    .filter(|(key, _)| key != "materialization" && key != "requires")
                     .collect(),
             });
         }
@@ -442,6 +469,61 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
         manifests: runtime_manifests,
         diagnostics,
     }
+}
+
+fn runtime_requires(
+    runtime: &crate::core::extension::AgentRuntimeManifestConfig,
+    extension: &ExtensionManifest,
+) -> Option<RequirementsConfig> {
+    runtime
+        .extra
+        .get("requires")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| extension.requires.clone())
+}
+
+fn runtime_core_constraint<'a>(
+    runtime: &'a crate::core::extension::AgentRuntimeManifestConfig,
+    extension: &'a ExtensionManifest,
+) -> Option<&'a str> {
+    runtime
+        .extra
+        .get("requires")
+        .and_then(|value| value.get("homeboy"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            extension
+                .requires
+                .as_ref()
+                .and_then(|requires| requires.homeboy.as_deref())
+        })
+}
+
+fn agent_runtime_core_incompatible_diagnostic(
+    runtime_id: &str,
+    extension_id: Option<&str>,
+    path: Option<&str>,
+    requires_homeboy: Option<&str>,
+    source_revision: Option<String>,
+) -> Option<AgentRuntimeDiscoveryDiagnostic> {
+    let report = extension::evaluate_core_compatibility(requires_homeboy, source_revision).ok()?;
+    (report.status == "incompatible").then(|| AgentRuntimeDiscoveryDiagnostic {
+        class: "agent_runtime_manifest.core_incompatible".to_string(),
+        message: format!(
+            "Agent runtime manifest '{}' requires homeboy {}, but installed homeboy is {} (source_revision: {}). Run `{}` and retry.",
+            runtime_id,
+            report.requires_homeboy.as_deref().unwrap_or("<undeclared>"),
+            report.installed_homeboy,
+            report.source_revision.as_deref().unwrap_or("<missing>"),
+            report
+                .remediation_command
+                .as_deref()
+                .unwrap_or(extension::CORE_COMPAT_REMEDIATION_COMMAND)
+        ),
+        runtime_id: Some(runtime_id.to_string()),
+        extension_id: extension_id.map(str::to_string),
+        path: path.map(str::to_string),
+    })
 }
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
@@ -913,6 +995,78 @@ mod tests {
     }
 
     #[test]
+    fn standalone_runtime_manifest_with_satisfied_core_constraint_loads() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("compatible-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("compatible-runtime.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "ignored-on-disk",
+                    "requires": { "homeboy": format!(">={}", extension::installed_homeboy_version()) },
+                    "agent_task_executors": [provider_json("compatible.default", "compatible")]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let catalog = discover_standalone_agent_runtime_catalog();
+
+            assert!(catalog.diagnostics.is_empty());
+            assert_eq!(catalog.manifests.len(), 1);
+            let expected = format!(">={}", extension::installed_homeboy_version());
+            assert_eq!(
+                catalog.manifests[0]
+                    .requires
+                    .as_ref()
+                    .and_then(|requires| requires.homeboy.as_deref()),
+                Some(expected.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn standalone_runtime_manifest_with_unsatisfied_core_constraint_reports_diagnostic() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("future-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("future-runtime.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "ignored-on-disk",
+                    "requires": { "homeboy": ">=999.0.0" },
+                    "agent_task_executors": [provider_json("future.default", "future")]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let catalog = discover_standalone_agent_runtime_catalog();
+
+            assert!(catalog.manifests.is_empty());
+            assert_eq!(catalog.diagnostics.len(), 1);
+            assert_eq!(
+                catalog.diagnostics[0].class,
+                "agent_runtime_manifest.core_incompatible"
+            );
+            assert_eq!(
+                catalog.diagnostics[0].runtime_id.as_deref(),
+                Some("future-runtime")
+            );
+            assert!(catalog.diagnostics[0].message.contains("homeboy upgrade"));
+            assert!(catalog.diagnostics[0].message.contains(">=999.0.0"));
+        });
+    }
+
+    #[test]
     fn standalone_runtime_catalog_reports_invalid_manifests() {
         crate::test_support::with_isolated_home(|home| {
             let runtime_dir = home
@@ -968,6 +1122,56 @@ mod tests {
             catalog.diagnostics[0].extension_id.as_deref(),
             Some("runtime-extension")
         );
+    }
+
+    #[test]
+    fn extension_runtime_manifest_with_unsatisfied_core_constraint_reports_diagnostic() {
+        let mut extension = extension("runtime-extension");
+        extension.requires = Some(
+            serde_json::from_value(json!({
+                "homeboy": ">=999.0.0"
+            }))
+            .expect("requires"),
+        );
+        extension.agent_runtimes.push(
+            serde_json::from_value(json!({
+                "id": "future-runtime",
+                "agent_task_executors": [provider_json("future.default", "future")]
+            }))
+            .expect("runtime manifest"),
+        );
+
+        let catalog = discover_agent_runtime_catalog_from_extensions(&[extension]);
+
+        assert!(catalog.manifests.is_empty());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(
+            catalog.diagnostics[0].class,
+            "agent_runtime_manifest.core_incompatible"
+        );
+        assert_eq!(
+            catalog.diagnostics[0].extension_id.as_deref(),
+            Some("runtime-extension")
+        );
+        assert!(catalog.diagnostics[0].message.contains("homeboy upgrade"));
+    }
+
+    #[test]
+    fn extension_runtime_manifest_without_core_constraint_behaves_as_before() {
+        let mut extension = extension("runtime-extension");
+        extension.agent_runtimes.push(
+            serde_json::from_value(json!({
+                "id": "example-runtime",
+                "agent_task_executors": [provider_json("example.default", "example")]
+            }))
+            .expect("runtime manifest"),
+        );
+
+        let catalog = discover_agent_runtime_catalog_from_extensions(&[extension]);
+
+        assert!(catalog.diagnostics.is_empty());
+        assert_eq!(catalog.manifests.len(), 1);
+        assert!(catalog.manifests[0].requires.is_none());
     }
 
     #[test]

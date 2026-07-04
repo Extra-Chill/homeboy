@@ -433,6 +433,7 @@ pub struct ExtensionDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     pub runtime: String,
+    pub core_compatibility: homeboy::core::extension::CoreCompatibilityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_requirements: Option<homeboy::core::extension::RuntimeRequirementsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -501,6 +502,8 @@ pub struct ActionDetail {
 
 #[derive(Serialize)]
 pub struct RequiresDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homeboy: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -888,11 +891,19 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         .collect();
 
     let requires = extension.requires.as_ref().map(|r| RequiresDetail {
+        homeboy: r.homeboy.clone(),
         extensions: r.extensions.clone(),
         components: r.components.clone(),
     });
 
     let source_revision = homeboy::core::extension::read_source_revision(&extension.id);
+    let core_compatibility = homeboy::core::extension::evaluate_core_compatibility(
+        extension
+            .requires
+            .as_ref()
+            .and_then(|requires| requires.homeboy.as_deref()),
+        source_revision.clone(),
+    )?;
 
     let detail = ExtensionDetail {
         id: extension.id.clone(),
@@ -907,6 +918,7 @@ fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
         } else {
             "platform".to_string()
         },
+        core_compatibility,
         runtime_requirements: extension.runtime.clone(),
         has_setup,
         has_ready_check,
@@ -1563,6 +1575,7 @@ mod tests {
             description: String::new(),
             runtime: "platform".to_string(),
             compatible: true,
+            core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(None),
             ready: true,
             ready_reason: None,
             ready_detail: None,
@@ -1617,6 +1630,9 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
+                core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(
+                    None,
+                ),
                 ready: true,
                 ready_reason: None,
                 ready_detail: None,
@@ -1660,6 +1676,9 @@ mod tests {
                 description: String::new(),
                 runtime: "platform".to_string(),
                 compatible: true,
+                core_compatibility: homeboy::core::extension::CoreCompatibilityReport::undeclared(
+                    None,
+                ),
                 ready: true,
                 ready_reason: None,
                 ready_detail: None,

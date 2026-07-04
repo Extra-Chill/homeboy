@@ -112,6 +112,12 @@ fn validate_runner_extension(
             &output.stdout,
             requested_setting_keys,
         )?;
+        validate_runner_extension_core_compatibility(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &output.stdout,
+        )?;
         if let Err(err) = validate_runner_extension_revision(
             runner_id,
             runner,
@@ -144,6 +150,12 @@ fn validate_runner_extension(
                     extension_id,
                     &refreshed.stdout,
                     requested_setting_keys,
+                )?;
+                validate_runner_extension_core_compatibility(
+                    runner_id,
+                    homeboy_path,
+                    extension_id,
+                    &refreshed.stdout,
                 )?;
                 return Ok(());
             }
@@ -226,6 +238,63 @@ fn runner_extension_setting_declared(declared: &BTreeMap<String, String>, key: &
     };
 
     matches!(declared.get(parent).map(String::as_str), Some("object"))
+}
+
+fn validate_runner_extension_core_compatibility(
+    runner_id: &str,
+    homeboy_path: &str,
+    extension_id: &str,
+    remote_stdout: &str,
+) -> Result<()> {
+    let Some(report) = remote_extension_core_compatibility(remote_stdout) else {
+        return Ok(());
+    };
+    if report.status != "incompatible" {
+        return Ok(());
+    }
+
+    let constraint = report.requires_homeboy.as_deref().unwrap_or("<undeclared>");
+    let source_revision = report.source_revision.as_deref().unwrap_or("<missing>");
+    let command = format!("{homeboy_path} upgrade");
+    Err(Error::new(
+        ErrorCode::ValidationInvalidArgument,
+        format!(
+            "Invalid argument 'runner_extension': Runner '{runner_id}' has homeboy-core incompatible extension parity for '{extension_id}' before command execution"
+        ),
+        serde_json::json!({
+            "field": "runner_extension",
+            "problem": "homeboy_core.incompatible",
+            "diagnostic": {
+                "code": "homeboy_core.incompatible",
+                "runner_id": runner_id,
+                "extension_id": extension_id,
+                "installed_homeboy": report.installed_homeboy,
+                "requires_homeboy": constraint,
+                "source_revision": source_revision,
+                "remediation_command": command,
+            },
+            "tried": [
+                format!("Runner homeboy version: {}", report.installed_homeboy),
+                format!("Declared homeboy constraint: {constraint}"),
+                format!("Runner extension source_revision: {source_revision}"),
+                format!("Remediation: {command}"),
+            ]
+        }),
+    ))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RemoteExtensionCoreCompatibility {
+    status: String,
+    installed_homeboy: String,
+    requires_homeboy: Option<String>,
+    source_revision: Option<String>,
+}
+
+fn remote_extension_core_compatibility(stdout: &str) -> Option<RemoteExtensionCoreCompatibility> {
+    let value: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let extension = value.get("data").and_then(|data| data.get("extension"))?;
+    serde_json::from_value(extension.get("core_compatibility")?.clone()).ok()
 }
 
 #[derive(Default)]
@@ -846,9 +915,10 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
-        local_source_runner_sync_error, remote_extension_ready_status,
-        remote_extension_setting_ids, remote_extension_source_revision,
-        requested_setting_keys_for_command, runner_extension_sync_command,
+        local_source_runner_sync_error, remote_extension_core_compatibility,
+        remote_extension_ready_status, remote_extension_setting_ids,
+        remote_extension_source_revision, requested_setting_keys_for_command,
+        runner_extension_sync_command, validate_runner_extension_core_compatibility,
         validate_runner_extension_ready, validate_runner_extension_revision,
         validate_runner_extension_settings,
     };
@@ -892,6 +962,41 @@ mod tests {
             remote_extension_source_revision(stdout).as_deref(),
             Some("abc1234")
         );
+    }
+
+    #[test]
+    fn remote_extension_core_compatibility_reads_extension_show_output() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","core_compatibility":{"status":"incompatible","installed_homeboy":"0.1.0","requires_homeboy":">=999.0.0","source_revision":"abc1234","remediation_command":"homeboy upgrade"}}}}"#;
+
+        let report = remote_extension_core_compatibility(stdout).expect("core compatibility");
+
+        assert_eq!(report.status, "incompatible");
+        assert_eq!(report.installed_homeboy, "0.1.0");
+        assert_eq!(report.requires_homeboy.as_deref(), Some(">=999.0.0"));
+        assert_eq!(report.source_revision.as_deref(), Some("abc1234"));
+    }
+
+    #[test]
+    fn runner_extension_core_compatibility_fails_fast_with_remediation() {
+        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","core_compatibility":{"status":"incompatible","installed_homeboy":"0.1.0","requires_homeboy":">=999.0.0","source_revision":"abc1234","remediation_command":"homeboy upgrade"}}}}"#;
+
+        let err = validate_runner_extension_core_compatibility(
+            "lab",
+            "/usr/local/bin/homeboy",
+            "wordpress",
+            stdout,
+        )
+        .expect_err("incompatible runner core should fail");
+
+        assert_eq!(
+            err.details["diagnostic"]["code"],
+            "homeboy_core.incompatible"
+        );
+        assert_eq!(
+            err.details["diagnostic"]["remediation_command"],
+            "/usr/local/bin/homeboy upgrade"
+        );
+        assert!(err.message.contains("homeboy-core incompatible"));
     }
 
     #[test]
