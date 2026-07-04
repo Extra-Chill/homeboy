@@ -857,6 +857,10 @@ fn cross_separator_variants_from_kebab() {
         from_values.contains(&"WP_AGENT"),
         "Missing UPPER_SNAKE from"
     );
+    assert!(
+        from_values.contains(&"Wp_Agent"),
+        "Missing Title_Snake_Case from"
+    );
     assert!(from_values.contains(&"WpAgent"), "Missing PascalCase from");
     assert!(from_values.contains(&"wpAgent"), "Missing camelCase from");
     assert!(from_values.contains(&"Wp Agent"), "Missing display from");
@@ -872,6 +876,10 @@ fn cross_separator_variants_from_kebab() {
     assert!(
         to_values.contains(&"SAMPLE_PLUGIN_AGENT"),
         "Missing UPPER_SNAKE to"
+    );
+    assert!(
+        to_values.contains(&"Sample_Plugin_Agent"),
+        "Missing Title_Snake_Case to"
     );
     assert!(
         to_values.contains(&"SamplePluginAgent"),
@@ -898,6 +906,10 @@ fn cross_separator_variants_from_kebab() {
     assert!(
         from_values.contains(&"WP_AGENTS"),
         "Missing plural UPPER_SNAKE from"
+    );
+    assert!(
+        from_values.contains(&"Wp_Agents"),
+        "Missing plural Title_Snake_Case from"
     );
     assert!(
         from_values.contains(&"WpAgents"),
@@ -1045,6 +1057,62 @@ fn cross_separator_end_to_end_rename() {
     assert!(
         content.contains("sample-plugin-agents"),
         "Should rename plural kebab: {}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn title_snake_variant_renames_wordpress_class_names() {
+    let dir = std::env::temp_dir().join("homeboy_title_snake_variant_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("plugin.php"),
+        "final class Studio_Native_Codebox_Client {}\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::new("studio-native", "wp-build", RenameScope::All);
+    let result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    let content = &result.edits[0].new_content;
+
+    assert!(content.contains("Wp_Build_Codebox_Client"), "{}", content);
+    assert!(
+        !content.contains("Studio_Native_Codebox_Client"),
+        "{}",
+        content
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn explicit_variant_overrides_title_snake_auto_variant() {
+    let dir = std::env::temp_dir().join("homeboy_title_snake_explicit_variant_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("plugin.php"),
+        "final class Studio_Native_Codebox_Client {}\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::new("studio-native", "wp-build", RenameScope::All)
+        .with_explicit_variants(vec![("Studio_Native".to_string(), "WPBuild".to_string())]);
+    let result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    let content = &result.edits[0].new_content;
+
+    assert!(content.contains("WPBuild_Codebox_Client"), "{}", content);
+    assert!(!content.contains("Wp_Build_Codebox_Client"), "{}", content);
+    assert!(
+        !content.contains("Studio_Native_Codebox_Client"),
+        "{}",
         content
     );
 
