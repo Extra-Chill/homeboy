@@ -9,14 +9,12 @@ use sha2::{Digest, Sha256};
 
 use crate::core::error::{Error, Result};
 use crate::core::output::MergeOutput;
-use crate::core::resource_lifecycle_index::{
-    ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
-    ResourceLifecycleResourceStatus,
-};
 
 use super::{
-    connect, disconnect, exec, load, merge, normalize_runner_command_env_for_homeboy_path,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerFileTransfer,
+    connect, disconnect, exec, load, materialize_runner_extension, merge,
+    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExtensionMaterializationRequest,
+    RunnerExtensionMaterializationSource, RunnerFileTransfer,
 };
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
@@ -92,29 +90,11 @@ pub struct RunnerDevSyncBinaryProvenance {
     pub dirty: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerDevSyncExtensionProvenance {
-    pub id: String,
-    pub source_path: String,
-    pub synced_source_path: String,
-    pub content_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_revision: Option<String>,
-    pub dirty: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dirty_fingerprint: Option<String>,
-    pub synced_at: String,
-    pub dev_overlay: bool,
-    pub lifecycle: ResourceLifecycleRecord,
-}
+pub type RunnerDevSyncExtensionProvenance =
+    super::extension_materialization::RunnerExtensionMaterializationProvenance;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerDevSyncExtensionPlan {
-    pub id: String,
-    pub source_path: String,
-    pub synced_source_path: String,
-    pub content_hash: String,
-}
+pub type RunnerDevSyncExtensionPlan =
+    super::extension_materialization::RunnerExtensionMaterializationPlan;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerDevSyncPlan {
@@ -468,7 +448,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
         source_revision,
         dirty,
     };
-    let extensions = sync_extension_overlays(&options.runner_id, &plan, &transfer)?;
+    let extensions = sync_extension_overlays(&options.runner_id, &plan)?;
 
     let mut runner = load(&options.runner_id)?;
     runner.resources.insert(
@@ -535,14 +515,7 @@ fn plan_extension_overlays(
         .iter()
         .map(|spec| {
             let (id, source) = parse_extension_spec(spec)?;
-            let source_path = expand_path(source);
-            let content_hash = extension_source_content_hash(&source_path)?;
-            Ok(RunnerDevSyncExtensionPlan {
-                id: id.to_string(),
-                source_path: source_path.display().to_string(),
-                synced_source_path: dev_extension_path(workspace_root, id, &content_hash),
-                content_hash,
-            })
+            plan_controller_snapshot_extension(workspace_root, id, &expand_path(source))
         })
         .collect()
 }
@@ -550,118 +523,23 @@ fn plan_extension_overlays(
 fn sync_extension_overlays(
     runner_id: &str,
     plan: &RunnerDevSyncPlan,
-    transfer: &RunnerFileTransfer,
 ) -> Result<Vec<RunnerDevSyncExtensionProvenance>> {
+    let runner = load(runner_id)?;
     let mut overlays = Vec::new();
     for extension in &plan.extensions {
-        sync_extension_overlay_source(runner_id, extension, transfer)?;
-        let source = Path::new(&extension.source_path);
-        let dirty = git_dirty(source);
-        overlays.push(RunnerDevSyncExtensionProvenance {
-            id: extension.id.clone(),
-            source_path: extension.source_path.clone(),
-            synced_source_path: extension.synced_source_path.clone(),
-            content_hash: extension.content_hash.clone(),
-            source_revision: git_revision(source),
-            dirty,
-            dirty_fingerprint: dirty.then(|| git_dirty_fingerprint(source)).flatten(),
-            synced_at: chrono::Utc::now().to_rfc3339(),
-            dev_overlay: true,
-            lifecycle: dev_extension_lifecycle(
-                runner_id,
-                &extension.synced_source_path,
-                &extension.id,
-            ),
-        });
+        overlays.push(materialize_runner_extension(
+            &runner,
+            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
+            &RunnerExtensionMaterializationRequest {
+                id: extension.id.clone(),
+                revision: extension.content_hash.clone(),
+                source: RunnerExtensionMaterializationSource::ControllerSnapshot {
+                    local_path: PathBuf::from(&extension.source_path),
+                },
+            },
+        )?);
     }
     Ok(overlays)
-}
-
-fn sync_extension_overlay_source(
-    runner_id: &str,
-    extension: &RunnerDevSyncExtensionPlan,
-    transfer: &RunnerFileTransfer,
-) -> Result<()> {
-    let tempdir = tempfile::tempdir().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("stage extension overlay".to_string()))
-    })?;
-    let staged = tempdir.path().join("source");
-    super::copy_snapshot_to_directory(Path::new(&extension.source_path), &staged, &[])?;
-    let archive = tempdir.path().join("source.tar");
-    let status = Command::new("tar")
-        .args([
-            "-C",
-            &staged.display().to_string(),
-            "-cf",
-            &archive.display().to_string(),
-            ".",
-        ])
-        .status()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("archive extension overlay".to_string()),
-            )
-        })?;
-    if !status.success() {
-        return Err(Error::internal_unexpected(
-            "archive extension overlay failed".to_string(),
-        ));
-    }
-
-    let remote_archive = format!("{}.tar", extension.synced_source_path.trim_end_matches('/'));
-    let remote_parent = Path::new(&extension.synced_source_path)
-        .parent()
-        .and_then(Path::to_str)
-        .ok_or_else(|| {
-            Error::internal_json("invalid remote extension overlay path".to_string(), None)
-        })?;
-    transfer.ensure_directory(remote_parent)?;
-    transfer.upload_file(&archive.display().to_string(), &remote_archive)?;
-    let script = format!(
-        "set -e\nrm -rf {dest}\nmkdir -p {dest}\ntar -xf {archive} -C {dest}\nrm -f {archive}\nhomeboy extension refresh {dest} --id {id} --ref {hash}\n",
-        dest = sq(&extension.synced_source_path),
-        archive = sq(&remote_archive),
-        id = sq(&extension.id),
-        hash = sq(&extension.content_hash),
-    );
-    let (_output, exit_code) = exec(
-        runner_id,
-        RunnerExecOptions {
-            cwd: None,
-            project_id: None,
-            allow_diagnostic_ssh: true,
-            command: vec!["bash".to_string(), "-lc".to_string(), script],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
-    )?;
-    if exit_code != 0 {
-        return Err(Error::validation_invalid_argument(
-            "extensions",
-            format!(
-                "failed to relink dev overlay extension '{}' on runner",
-                extension.id
-            ),
-            Some(extension.synced_source_path.clone()),
-            None,
-        ));
-    }
-    Ok(())
 }
 
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
@@ -762,95 +640,6 @@ fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
     )
 }
 
-fn dev_extension_path(workspace_root: &str, id: &str, content_hash: &str) -> String {
-    format!(
-        "{}/_lab_workspaces/dev-extensions/{}/{}/",
-        workspace_root.trim_end_matches('/'),
-        sanitize_ref(id),
-        &content_hash[..16]
-    )
-}
-
-pub(crate) fn extension_source_content_hash(path: &Path) -> Result<String> {
-    let mut entries = Vec::new();
-    collect_hash_entries(path, path, &mut entries)?;
-    entries.sort();
-    let mut hasher = Sha256::new();
-    for (relative, path) in entries {
-        hasher.update(relative.as_bytes());
-        hasher.update([0]);
-        let mut file = fs::File::open(&path)
-            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|err| Error::internal_json(err.to_string(), None))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn collect_hash_entries(
-    root: &Path,
-    path: &Path,
-    entries: &mut Vec<(String, PathBuf)>,
-) -> Result<()> {
-    let mut children = fs::read_dir(path)
-        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
-    children.sort_by_key(|entry| entry.path());
-    for entry in children {
-        let path = entry.path();
-        if entry.file_name().to_string_lossy() == ".git" {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
-        if metadata.is_dir() {
-            collect_hash_entries(root, &path, entries)?;
-        } else if metadata.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            entries.push((relative, path));
-        }
-    }
-    Ok(())
-}
-
-fn dev_extension_lifecycle(
-    runner_id: &str,
-    remote_path: &str,
-    extension_id: &str,
-) -> ResourceLifecycleRecord {
-    ResourceLifecycleRecord {
-        owner: "runner.dev_sync.extension_overlay".to_string(),
-        run_id: format!("runner-dev-sync-{runner_id}-{extension_id}"),
-        runner_id: Some(runner_id.to_string()),
-        path: remote_path.to_string(),
-        root_bound: None,
-        kind: "runner_dev_extension_overlay".to_string(),
-        ttl: Some("P7D".to_string()),
-        cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
-        evidence_retention: ResourceEvidenceRetention::Metadata,
-        cleanup_intent: Default::default(),
-        cleanup_command: Some(format!(
-            "homeboy runner dev-sync {} --extensions {}=<path>",
-            shell_arg(runner_id),
-            shell_arg(extension_id)
-        )),
-        status: ResourceLifecycleResourceStatus::Active,
-    }
-}
-
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).map_err(|err| {
         Error::validation_invalid_argument(
@@ -895,23 +684,6 @@ fn git_dirty(path: &Path) -> bool {
         .output()
         .ok()
         .is_some_and(|output| !output.stdout.is_empty())
-}
-
-fn git_dirty_fingerprint(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &path.display().to_string(),
-            "status",
-            "--porcelain=v1",
-        ])
-        .output()
-        .ok()?;
-    output.status.success().then(|| {
-        let mut hasher = Sha256::new();
-        hasher.update(&output.stdout);
-        format!("{:x}", hasher.finalize())
-    })
 }
 
 fn validate_extension_specs(specs: &[String]) -> Result<()> {
@@ -1159,15 +931,22 @@ mod tests {
 
     #[test]
     fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
-        let lifecycle = dev_extension_lifecycle("lab", "/runner/ws/dev/rust/hash", "rust");
+        let lifecycle = super::super::extension_materialization::dev_extension_lifecycle(
+            "lab",
+            "/runner/ws/dev/rust/hash",
+            "rust",
+        );
 
         assert_eq!(lifecycle.owner, "runner.dev_sync.extension_overlay");
         assert_eq!(lifecycle.ttl.as_deref(), Some("P7D"));
         assert_eq!(
             lifecycle.cleanup_policy,
-            ResourceCleanupPolicy::DeleteAfterTtl
+            crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl
         );
-        assert_eq!(lifecycle.status, ResourceLifecycleResourceStatus::Active);
+        assert_eq!(
+            lifecycle.status,
+            crate::core::resource_lifecycle_index::ResourceLifecycleResourceStatus::Active
+        );
     }
 
     #[test]

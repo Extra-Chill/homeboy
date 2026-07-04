@@ -27,6 +27,7 @@ mod daemon_health;
 mod daemon_http_get;
 mod evidence;
 mod execution;
+mod extension_materialization;
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod lab;
@@ -102,12 +103,17 @@ pub use execution::{
     RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
     RunnerExecStructuredSummary,
 };
+pub(crate) use extension_materialization::extension_source_content_hash;
+pub(crate) use extension_materialization::{
+    materialize_runner_extension, materialize_runner_extension_with_exec,
+    plan_controller_snapshot_extension, RunnerExtensionMaterializationRequest,
+    RunnerExtensionMaterializationSource,
+};
 pub(crate) use git_dependency_materialization::{
     dependency_cache_save, dependency_cache_save_request, materialize_git_dependency,
     RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest,
     RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
 };
-pub(crate) use homeboy_refresh::extension_source_content_hash;
 pub use homeboy_refresh::{
     plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync, HomeboyBinaryRefreshMode,
     HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
