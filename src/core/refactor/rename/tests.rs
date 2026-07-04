@@ -984,6 +984,28 @@ fn explicit_variants_handle_project_specific_acronyms() {
 }
 
 #[test]
+fn explicit_variants_override_auto_variants_with_same_from() {
+    let dir = std::env::temp_dir().join("homeboy_explicit_variant_precedence_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("plugin.php"), "fn studio_native_gate() {}\n").unwrap();
+
+    let spec = RenameSpec::new("studio-native", "wp-build", RenameScope::All)
+        .with_explicit_variants(vec![("studio_native".to_string(), "wpbuild".to_string())]);
+
+    let result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    let content = &result.edits[0].new_content;
+
+    assert!(content.contains("wpbuild_gate"), "{}", content);
+    assert!(!content.contains("wp_build_gate"), "{}", content);
+    assert!(!content.contains("studio_native_gate"), "{}", content);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn root_artifacts_directory_is_skipped_by_default() {
     let dir = std::env::temp_dir().join("homeboy_refactor_artifacts_skip_test");
     let _ = std::fs::remove_dir_all(&dir);
