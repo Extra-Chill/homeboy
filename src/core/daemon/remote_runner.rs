@@ -37,7 +37,11 @@ impl BrokerAuthContext {
 
     /// Authorize this request against the on-disk broker auth store for the
     /// given scope and (optionally) the runner id carried in the request body.
-    fn authorize(&self, required: BrokerScope, runner_id: Option<&str>) -> Result<()> {
+    pub(in crate::core::daemon) fn authorize(
+        &self,
+        required: BrokerScope,
+        runner_id: Option<&str>,
+    ) -> Result<()> {
         if self.trusted_local {
             return Ok(());
         }
@@ -548,7 +552,7 @@ fn cancel(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthContext) -> Resul
 /// Map a handler error to an HTTP response. Broker auth rejections become
 /// `401 Unauthorized` (so unauthenticated callers see a distinct status), all
 /// other errors keep the existing `400 Bad Request` contract.
-fn auth_or_bad_request(err: Error) -> HttpResponse {
+pub(in crate::core::daemon) fn auth_or_bad_request(err: Error) -> HttpResponse {
     if err.code == crate::core::error::ErrorCode::BrokerAuthDenied {
         error_response(401, err)
     } else {

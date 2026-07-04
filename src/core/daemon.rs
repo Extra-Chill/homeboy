@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -18,8 +19,8 @@ use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnal
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{
-    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process, Runner,
-    RunnerProcessRequest,
+    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
+    BrokerScope, Runner, RunnerProcessRequest,
 };
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -147,6 +148,19 @@ struct ExecRequest {
     runner_workload: Option<RunnerWorkload>,
     #[serde(default)]
     lifecycle: Option<RunnerJobLifecycleMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FilePathRequest {
+    runner_id: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileUploadRequest {
+    runner_id: String,
+    path: String,
+    content_base64: String,
 }
 
 pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
@@ -559,11 +573,26 @@ where
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/files/mkdir") => match create_runner_file_directory(body, &broker_auth) {
+            Ok(body) => daemon_endpoint_response("files.mkdir", body),
+            Err(err) => remote_runner::auth_or_bad_request(err),
+        },
+        ("POST", "/files/upload") => match upload_runner_file(body, &broker_auth) {
+            Ok(body) => daemon_endpoint_response("files.upload", body),
+            Err(err) => remote_runner::auth_or_bad_request(err),
+        },
+        ("POST", "/files/download") => match download_runner_file(body, &broker_auth) {
+            Ok(body) => daemon_endpoint_response("files.download", body),
+            Err(err) => remote_runner::auth_or_bad_request(err),
+        },
         ("GET", "/exec") => HttpResponse {
             status_code: 405,
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
+        ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
+            method_not_allowed()
+        }
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs")
         | ("POST", "/runner/jobs/reconcile")
@@ -581,6 +610,177 @@ where
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
+    }
+}
+
+fn create_runner_file_directory(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<serde_json::Value> {
+    let request: FilePathRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse file mkdir request".to_string()),
+            )
+        })?;
+    broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
+    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    fs::create_dir_all(&path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("create {}", path.display())))
+    })?;
+    Ok(json!({
+        "runner_id": request.runner_id,
+        "path": path.display().to_string(),
+    }))
+}
+
+fn upload_runner_file(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<serde_json::Value> {
+    let request: FileUploadRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse file upload request".to_string()),
+            )
+        })?;
+    broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
+    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(&request.content_base64)
+        .map_err(|err| {
+            Error::validation_invalid_argument(
+                "content_base64",
+                format!("runner file upload content is not valid base64: {err}"),
+                None,
+                None,
+            )
+        })?;
+    fs::write(&path, &content).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
+    })?;
+    Ok(json!({
+        "runner_id": request.runner_id,
+        "path": path.display().to_string(),
+        "size_bytes": content.len(),
+    }))
+}
+
+fn download_runner_file(
+    body: Option<serde_json::Value>,
+    broker_auth: &remote_runner::BrokerAuthContext,
+) -> Result<serde_json::Value> {
+    let request: FilePathRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse file download request".to_string()),
+            )
+        })?;
+    broker_auth.authorize(BrokerScope::Submit, Some(&request.runner_id))?;
+    let path = resolve_runner_workspace_path(&request.runner_id, &request.path)?;
+    let content = fs::read(&path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    Ok(json!({
+        "runner_id": request.runner_id,
+        "path": path.display().to_string(),
+        "size_bytes": content.len(),
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+    }))
+}
+
+fn resolve_runner_workspace_path(runner_id: &str, requested_path: &str) -> Result<PathBuf> {
+    let runner = crate::core::runner::load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            format!("runner `{runner_id}` file API requires workspace_root"),
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Configure the runner workspace_root before using daemon file transfer."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let root = fs::canonicalize(workspace_root).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "canonicalize runner workspace_root {workspace_root}"
+            )),
+        )
+    })?;
+    let requested = Path::new(requested_path);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let normalized = canonicalize_existing_prefix(&normalize_path(&candidate));
+    if !normalized.starts_with(&root) {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "runner file path must stay inside the runner workspace_root",
+            Some(requested_path.to_string()),
+            Some(vec![format!(
+                "Runner `{runner_id}` workspace_root is {}.",
+                root.display()
+            )]),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = fs::canonicalize(current) {
+            let mut resolved = canonical;
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(file_name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(file_name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent;
     }
 }
 
