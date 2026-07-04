@@ -287,17 +287,35 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::core::Result<(Str
 }
 
 fn resolve_multi_args(args: &DeployArgs) -> homeboy::core::Result<(Vec<String>, DeployConfig)> {
+    let component_ids = resolve_multi_component_ids(args)?;
+    let mut config = build_config(args, false);
+    config.component_ids = component_ids.clone();
+
+    Ok((component_ids, config))
+}
+
+fn resolve_multi_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
+    if let Some(ref spec) = args.json {
+        return Ok(deploy::parse_bulk_component_ids(spec)?
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect());
+    }
+
+    if let Some(ref comps) = args.component {
+        return Ok(comps.iter().filter(|s| !s.is_empty()).cloned().collect());
+    }
+
     let mut component_ids: Vec<String> = Vec::new();
     if let Some(ref target) = args.target_id {
         component_ids.push(target.clone());
     }
     component_ids.extend(args.component_ids.clone());
-    let component_ids: Vec<String> = component_ids
+
+    Ok(component_ids
         .into_iter()
         .filter(|s| !s.is_empty())
-        .collect();
-
-    Ok((component_ids, build_config(args, false)))
+        .collect())
 }
 
 fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
