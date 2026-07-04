@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.4] - 2026-07-04
+
+### Changed
+- Purge WP Codebox Data Machine plumbing
+
 ## [1.23.3] - 2026-07-04
 
 ### Changed
