@@ -852,6 +852,10 @@ fn cross_separator_variants_from_kebab() {
 
     // Singular forms — all naming conventions
     assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+    assert!(
+        from_values.contains(&"Wp-Agent"),
+        "Missing Title-Kebab-Case from"
+    );
     assert!(from_values.contains(&"wp_agent"), "Missing snake from");
     assert!(
         from_values.contains(&"WP_AGENT"),
@@ -868,6 +872,10 @@ fn cross_separator_variants_from_kebab() {
     assert!(
         to_values.contains(&"sample-plugin-agent"),
         "Missing kebab to"
+    );
+    assert!(
+        to_values.contains(&"Sample-Plugin-Agent"),
+        "Missing Title-Kebab-Case to"
     );
     assert!(
         to_values.contains(&"sample_plugin_agent"),
@@ -900,6 +908,10 @@ fn cross_separator_variants_from_kebab() {
         "Missing plural kebab from"
     );
     assert!(
+        from_values.contains(&"Wp-Agents"),
+        "Missing plural Title-Kebab-Case from"
+    );
+    assert!(
         from_values.contains(&"wp_agents"),
         "Missing plural snake from"
     );
@@ -924,6 +936,10 @@ fn cross_separator_variants_from_pascal() {
     let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
 
     assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+    assert!(
+        from_values.contains(&"Wp-Agent"),
+        "Missing Title-Kebab-Case from"
+    );
     assert!(from_values.contains(&"wp_agent"), "Missing snake from");
     assert!(
         from_values.contains(&"WP_AGENT"),
@@ -940,6 +956,10 @@ fn cross_separator_variants_from_snake() {
     let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
 
     assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
+    assert!(
+        from_values.contains(&"Wp-Agent"),
+        "Missing Title-Kebab-Case from"
+    );
     assert!(from_values.contains(&"wp_agent"), "Missing snake from");
     assert!(
         from_values.contains(&"WP_AGENT"),
@@ -1086,6 +1106,56 @@ fn title_snake_variant_renames_wordpress_class_names() {
         "{}",
         content
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn title_kebab_variant_renames_hyphenated_doc_comments() {
+    let dir = std::env::temp_dir().join("homeboy_title_kebab_variant_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("plugin.php"),
+        "// Studio-Native-shaped site_spec\n",
+    )
+    .unwrap();
+
+    let spec = RenameSpec::new("studio-native", "wp-build", RenameScope::All);
+    let result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    let content = &result.edits[0].new_content;
+
+    assert!(content.contains("Wp-Build-shaped"), "{}", content);
+    assert!(!content.contains("Studio-Native-shaped"), "{}", content);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn explicit_variant_overrides_title_kebab_auto_variant() {
+    let dir = std::env::temp_dir().join("homeboy_title_kebab_explicit_variant_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("plugin.php"),
+        "// Studio-Native-shaped site_spec\n",
+    )
+    .unwrap();
+
+    let spec =
+        RenameSpec::new("studio-native", "wp-build", RenameScope::All).with_explicit_variants(
+            vec![("Studio-Native".to_string(), "WordPress-Build".to_string())],
+        );
+    let result = generate_renames(&spec, &dir);
+    assert_eq!(result.edits.len(), 1);
+    let content = &result.edits[0].new_content;
+
+    assert!(content.contains("WordPress-Build-shaped"), "{}", content);
+    assert!(!content.contains("Wp-Build-shaped"), "{}", content);
+    assert!(!content.contains("Studio-Native-shaped"), "{}", content);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
