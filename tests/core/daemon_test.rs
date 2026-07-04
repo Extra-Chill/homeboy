@@ -18,6 +18,7 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
     DaemonState {
         schema: DAEMON_LEASE_SCHEMA.to_string(),
         lease_id: "test-lease".to_string(),
+        startup_token: "test-token".to_string(),
         address: address.to_string(),
         pid,
         state_path: path.display().to_string(),
@@ -81,6 +82,7 @@ fn write_state_establishes_daemon_session_lease_identity() {
 
     assert_eq!(state.schema, DAEMON_LEASE_SCHEMA);
     assert!(!state.lease_id.is_empty());
+    assert_eq!(state.startup_token, "");
     assert_eq!(
         state.build_identity.display,
         build_identity::current().display
@@ -284,6 +286,61 @@ fn stop_without_state_reports_noop() {
     assert!(!result.stopped);
     assert_eq!(result.pid, None);
     assert!(result.state_path.ends_with("daemon/state.json"));
+}
+
+#[test]
+fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
+    let _home = HomeGuard::new();
+
+    let _held = acquire_daemon_operation_lock().expect("first lock");
+    let err = acquire_daemon_operation_lock().expect_err("second lock fails");
+
+    assert!(err
+        .message
+        .contains("daemon lifecycle operation already in progress"));
+    assert!(err
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("operation.lock")));
+}
+
+#[test]
+fn stop_refuses_stale_lease_that_points_at_reused_pid() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    write_daemon_state_for_test(&state);
+
+    let result = stop().expect("stop stale lease");
+    let status = read_status().expect("status after stop");
+
+    assert!(!result.stopped);
+    assert_eq!(result.pid, Some(std::process::id()));
+    assert!(pid_is_running(std::process::id()));
+    assert!(
+        status.state.is_some(),
+        "stale lease should remain for operator inspection"
+    );
+}
+
+#[test]
+fn stop_reports_corrupt_lease_without_signalling_pid() {
+    let _home = HomeGuard::new();
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(
+        &path,
+        format!(r#"{{"pid":{},"broken":"#, std::process::id()),
+    )
+    .expect("corrupt state");
+
+    let err = stop().expect_err("corrupt lease is rejected");
+
+    assert!(pid_is_running(std::process::id()));
+    assert!(path.exists(), "corrupt lease should remain for remediation");
+    assert!(err.message.contains("refusing to signal any pid"));
+    assert!(err.message.contains(&path.display().to_string()));
+    assert!(serialized_contains(&err.details, "remove"));
 }
 
 #[test]
