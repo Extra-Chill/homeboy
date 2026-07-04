@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.31] - 2026-07-04
+
+### Changed
+- Purge WP Codebox Data Machine plumbing
+
 ## [3.23.30] - 2026-07-04
 
 ### Changed
