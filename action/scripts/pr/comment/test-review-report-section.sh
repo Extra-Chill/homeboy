@@ -52,8 +52,8 @@ chmod +x "${fake_bin}/homeboy"
 export PATH="${fake_bin}:${PATH}"
 export HOMEBOY_REVIEW_CALL_LOG="${fake_bin}/review.log"
 export GITHUB_ACTION_PATH="${ROOT}"
-export COMMANDS="audit,lint,test"
-export RESULTS='{"audit":"fail","lint":"pass","test":"pass"}'
+export COMMANDS="review audit,review lint,review test"
+export RESULTS='{"review audit":"fail","review lint":"pass","review test":"pass"}'
 export COMP_ID="data-machine"
 export WORKSPACE="/tmp/workspace"
 export SECTION_TITLE="Audit"
@@ -94,14 +94,14 @@ unset HOMEBOY_REVIEW_OUTPUT_MODE
 export EXTRA_ARGS="--format json"
 build_section_body
 
-assert_contains "${SECTION_BODY}" ":x: **audit** — failed" "custom args render split audit status"
-assert_contains "${SECTION_BODY}" ":white_check_mark: **lint** — passed" "custom args render split lint status"
-assert_contains "${SECTION_BODY}" ":white_check_mark: **test** — passed" "custom args render split test status"
+assert_contains "${SECTION_BODY}" ":x: **review audit** — failed" "custom args render split audit status"
+assert_contains "${SECTION_BODY}" ":white_check_mark: **review lint** — passed" "custom args render split lint status"
+assert_contains "${SECTION_BODY}" ":white_check_mark: **review test** — passed" "custom args render split test status"
 assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "custom args do not fall back to legacy command blocks"
 assert_not_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "custom args do not use unsupported warning"
 
 split_output_dir="$(mktemp -d)"
-cat > "${split_output_dir}/lint.json" <<'JSON'
+cat > "${split_output_dir}/review-lint.json" <<'JSON'
 {
   "success": false,
   "data": {
@@ -115,20 +115,20 @@ cat > "${split_output_dir}/lint.json" <<'JSON'
 }
 JSON
 
-export COMMANDS="lint"
-export RESULTS='{"lint":"fail"}'
+export COMMANDS="review lint"
+export RESULTS='{"review lint":"fail"}'
 export SECTION_TITLE="Lint"
 export OUTPUT_DIR="${split_output_dir}"
 unset EXTRA_ARGS
 build_section_body
 
 assert_contains "${SECTION_BODY}" "### Lint" "split command section title preserved"
-assert_contains "${SECTION_BODY}" ":x: **lint** — failed" "split command failure rendered"
+assert_contains "${SECTION_BODY}" ":x: **review lint** — failed" "split command failure rendered"
 assert_contains "${SECTION_BODY}" '`phpstan` — 2 finding(s)' "split command phpstan bucket rendered"
 assert_contains "${SECTION_BODY}" '`phpcs` — 1 finding(s)' "split command phpcs bucket rendered"
 assert_contains "${SECTION_BODY}" "_Total: 3 finding(s)_" "split command total rendered"
 assert_contains "${SECTION_BODY}" "Some issues may require manual fixes" "split command hints rendered"
-assert_contains "${SECTION_BODY}" "Deep dive: homeboy lint data-machine --changed-since origin/main" "split command deep dive rendered"
+assert_contains "${SECTION_BODY}" "Deep dive: homeboy review lint data-machine --changed-since origin/main" "split command deep dive rendered"
 assert_not_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "split command does not use unsupported warning"
 
 printf 'All review report section checks passed.\n'

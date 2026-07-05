@@ -99,7 +99,7 @@ run_categorizer \
   "Nothing to categorize" \
   RESULTS='{}' \
   COMMANDS='' \
-  EXPECTED_COMMANDS='audit,lint,test'
+  EXPECTED_COMMANDS='review audit,review lint,review test'
 
 # Case 2 — totally empty env (no RESULTS at all). Should exit 0.
 run_categorizer \
@@ -116,9 +116,9 @@ run_categorizer \
   "failed command in RESULTS propagates exit 1" \
   1 \
   "Commands failed without producing structured output" \
-  RESULTS='{"audit":"fail"}' \
-  COMMANDS='audit' \
-  EXPECTED_COMMANDS='audit,lint,test'
+  RESULTS='{"review audit":"fail"}' \
+  COMMANDS='review audit' \
+  EXPECTED_COMMANDS='review audit,review lint,review test'
 
 # Case 4 — RESULTS marks all commands as passing but no JSON files exist.
 # This is the "clean codebase" path: nothing to categorize, exit 0.
@@ -126,9 +126,9 @@ run_categorizer \
   "all commands passed with no findings exits 0" \
   0 \
   "Nothing to categorize" \
-  RESULTS='{"audit":"pass","lint":"pass","test":"pass"}' \
-  COMMANDS='audit,lint,test' \
-  EXPECTED_COMMANDS='audit,lint,test'
+  RESULTS='{"review audit":"pass","review lint":"pass","review test":"pass"}' \
+  COMMANDS='review audit,review lint,review test' \
+  EXPECTED_COMMANDS='review audit,review lint,review test'
 
 # Case 5 — Malformed RESULTS JSON. Should not crash; treats as empty and
 # exits 0 with a warning so release pipelines aren't blocked by env quirks.
@@ -138,7 +138,7 @@ run_categorizer \
   "RESULTS is not a valid JSON object" \
   RESULTS='not-json' \
   COMMANDS='' \
-  EXPECTED_COMMANDS='audit,lint,test'
+  EXPECTED_COMMANDS='review audit,review lint,review test'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

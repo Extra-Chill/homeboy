@@ -102,7 +102,7 @@ def quality_base_command(command: str) -> str:
     parts = command.split()
     if len(parts) >= 2 and parts[0] == "review" and parts[1] in {"audit", "lint", "test"}:
         return parts[1]
-    return parts[0] if parts else command
+    return ""
 
 
 def changed_scope_introduced_count(command: str, payload: dict[str, Any] | None) -> int | None:

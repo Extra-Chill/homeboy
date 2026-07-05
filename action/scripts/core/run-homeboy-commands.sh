@@ -4,8 +4,8 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-# v2: prefer RESOLVED_COMMANDS (quality-only from resolve-commands.sh), fall back to COMMANDS for compat
-EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-audit,lint,test}}"
+# v2: prefer RESOLVED_COMMANDS (quality-only from resolve-commands.sh), fall back to review-nested defaults.
+EFFECTIVE_COMMANDS="${RESOLVED_COMMANDS:-${COMMANDS:-review audit,review lint,review test}}"
 
 # If no quality commands to run (e.g. operations-only mode), exit cleanly
 if [ -z "${EFFECTIVE_COMMANDS}" ]; then
@@ -31,7 +31,7 @@ HOMEBOY_ANNOTATIONS_DIR=$(mktemp -d)
 echo "HOMEBOY_ANNOTATIONS_DIR=${HOMEBOY_ANNOTATIONS_DIR}" >> "${GITHUB_ENV}"
 export HOMEBOY_ANNOTATIONS_DIR
 
-# Enforce canonical order: audit → lint → test
+# Enforce canonical order: review audit → review lint → review test
 ORDERED_COMMANDS="$(canonicalize_commands "${EFFECTIVE_COMMANDS}")"
 IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 HAS_LINT_COMMAND="$(has_lint_command "${EFFECTIVE_COMMANDS}")"
@@ -39,7 +39,7 @@ HAS_LINT_COMMAND="$(has_lint_command "${EFFECTIVE_COMMANDS}")"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD=$(echo "${CMD}" | xargs)
 
-  if [ "${CMD}" = "test" ] && [ "${HAS_LINT_COMMAND}" = "true" ]; then
+  if [ "$(quality_base_command "${CMD}")" = "test" ] && [ "${HAS_LINT_COMMAND}" = "true" ]; then
     export HOMEBOY_SKIP_LINT=1
   else
     unset HOMEBOY_SKIP_LINT 2>/dev/null || true

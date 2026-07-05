@@ -41,7 +41,7 @@ inputs:
     required: false
     default: ''
   expected-commands:
-    description: 'Full set of command types expected to run across the workflow (e.g. "audit,lint,test"). Used by auto-issue reconciliation to avoid closing issues owned by sibling invocations when a workflow splits audit/lint/test across separate steps. Defaults to `commands` when empty.'
+    description: 'Full set of command types expected to run across the workflow (e.g. "review audit,review lint,review test"). Used by auto-issue reconciliation to avoid closing issues owned by sibling invocations when a workflow splits review audit/lint/test across separate steps. Defaults to `commands` when empty.'
     required: false
     default: ''
   component:
@@ -81,7 +81,7 @@ inputs:
     required: false
     default: 'false'
   baseline-commands:
-    description: 'Commands to rerun at the PR base when differential-gating is true. Use auto to rerun requested audit/lint/test commands, a comma-separated subset such as audit,test, or none to skip baseline reruns.'
+    description: 'Commands to rerun at the PR base when differential-gating is true. Use auto to rerun requested review audit/lint/test commands, a comma-separated subset such as review audit,review test, or none to skip baseline reruns.'
     required: false
     default: 'auto'
   observation-window:

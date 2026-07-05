@@ -1,6 +1,6 @@
 # Homeboy Action
 
-GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) lint, test, audit, bench, and release commands in CI.
+GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) review, bench, and release commands in CI.
 
 Works with **any Homeboy extension** — WordPress, Rust, Node, or your own custom extension.
 
@@ -35,7 +35,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       extension: wordpress
-      commands: audit,lint,test
+      commands: review audit,review lint,review test
       php-version: '8.3'
     secrets: inherit
 ```
@@ -50,7 +50,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       component: homeboy
-      commands: audit,lint,test
+      commands: review audit,review lint,review test
       build-command: cargo build --release
       build-artifact-path: target/release/homeboy
     secrets: inherit
@@ -166,8 +166,8 @@ Use these outputs to gate downstream jobs:
 | `source` | No | | Path to build homeboy from source (e.g. `.`). Falls back to release binary. |
 | `extension` | No | | Extension ID (e.g. `wordpress`, `rust`, `node`) |
 | `extension-source` | No | `Extra-Chill/homeboy-extensions` | Git URL to install the extension from |
-| `commands` | No | `lint,test` | Comma-separated commands to run |
-| `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `audit,lint,test`). Set this on every invocation when a workflow splits audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
+| `commands` | No | `review audit,review lint,review test` | Comma-separated commands to run |
+| `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `review audit,review lint,review test`). Set this on every invocation when a workflow splits review audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
 | `rig` | No | | Bench rig pair/list passed to `homeboy bench --rig` |
@@ -175,8 +175,8 @@ Use these outputs to gate downstream jobs:
 | `runs` | No | | Bench run count passed to `homeboy bench --runs` |
 | `iterations` | No | | Bench iteration count passed to `homeboy bench --iterations` |
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
-| `differential-gating` | No | `false` | On PRs, compare `audit`/`test` counts against the base SHA and fail only when the PR is worse. Opt-in; `lint` still gates on exit code. PR autofix is skipped while enabled. |
-| `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` preserves existing behavior by rerunning requested `audit`/`lint`/`test` commands; use a comma-separated subset such as `audit` or `none` to skip baseline reruns. |
+| `differential-gating` | No | `false` | On PRs, compare `review audit`/`review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. PR autofix is skipped while enabled. |
+| `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review audit`/`review lint`/`review test` commands; use a comma-separated subset such as `review audit` or `none` to skip baseline reruns. |
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |
 | `import-observations` | No | `false` | Download and best-effort import earlier `homeboy-observations-*` artifacts from the same workflow run before command execution. |
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
@@ -219,13 +219,13 @@ Use these outputs to gate downstream jobs:
 
 ## Examples
 
-### Lint Only (Fast PR Check)
+### Review Lint Only (Fast PR Check)
 
 ```yaml
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: lint
+    commands: review lint
     args: --errors-only
     php-version: '8.3'
 ```
@@ -238,7 +238,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       extension: wordpress
-      commands: audit,lint,test
+      commands: review audit,review lint,review test
       php-version: '8.3'
       node-version: '20'
     secrets: inherit
@@ -254,7 +254,7 @@ By default, `scope: auto` uses changed-file scope for pull requests and full-wor
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: lint,test,audit
+    commands: review lint,review test,review audit
     php-version: '8.3'
     scope: 'changed'
 ```
@@ -276,7 +276,7 @@ jobs:
         with:
           extension: rust
           component: homeboy
-          commands: lint
+          commands: review lint
 
   test:
     runs-on: ubuntu-latest
@@ -286,7 +286,7 @@ jobs:
         with:
           extension: rust
           component: homeboy
-          commands: test
+          commands: review test
 
   audit:
     runs-on: ubuntu-latest
@@ -296,7 +296,7 @@ jobs:
         with:
           extension: rust
           component: homeboy
-          commands: audit
+          commands: review audit
 ```
 
 All three jobs write to the **same PR comment** automatically.
@@ -307,7 +307,7 @@ All three jobs write to the **same PR comment** automatically.
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: lint,test
+    commands: review lint,review test
     php-version: '8.3'
     autofix: 'true'
 ```
@@ -334,7 +334,7 @@ Use `pr-policy` to classify whether a PR is safe for deterministic auto-merge af
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: lint,test
+    commands: review lint,review test
     pr-policy: .homeboy/pr-policy.yml
     pr-policy-merge: 'true'
     pr-policy-merge-method: squash
@@ -387,7 +387,7 @@ Flat policy files from earlier action versions continue to work as merge policie
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: lint,test,audit
+    commands: review lint,review test,review audit
     php-version: '8.3'
     autofix: 'true'
     autofix-open-pr: 'true'
@@ -441,7 +441,7 @@ jobs:
         with:
           source: '.'
           extension: rust
-          commands: audit
+          commands: review audit
 
   # Version bump + changelog + tag
   prepare:
@@ -528,7 +528,7 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: lint,test,audit
+          commands: review lint,review test,review audit
           scope: changed
           php-version: '8.3'
 ```
@@ -562,13 +562,13 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: lint,test,audit
+          commands: review lint,review test,review audit
           scope: full
           auto-issue: 'true'
           php-version: '8.3'
 ```
 
-If you also run continuous release, keep release as its own workflow or separate job after the full quality gate. Release jobs should run `commands: release`; they should not be the only place full `lint,test,audit` runs.
+If you also run continuous release, keep release as its own workflow or separate job after the full quality gate. Release jobs should run `commands: release`; they should not be the only place full `review lint,review test,review audit` runs.
 
 > **Avoid cron-based release triggers.** A `schedule` cron fires whether there are new commits or not. Push-to-main triggers the quality/release pipeline only when there is new code to evaluate.
 
@@ -600,7 +600,7 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: lint,test,audit
+          commands: review lint,review test,review audit
           auto-issue: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
           php-version: '8.3'
 ```
@@ -619,22 +619,22 @@ The action does **not** probe for or emulate missing CLI features. If the instal
 
 ### Differential gating
 
-Set `differential-gating: 'true'` to make PR `audit` and `test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
+Set `differential-gating: 'true'` to make PR `review audit` and `review test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
 
 ```yaml
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: rust
-    commands: audit,test,lint
+    commands: review audit,review test,review lint
     differential-gating: 'true'
 ```
 
 When enabled on pull requests:
 
-1. `audit` and `test` run in full-scope mode on the PR branch.
-2. The action temporarily checks out the base SHA in the same workspace and captures base `audit`/`test` JSON.
-3. The final gate passes `audit`/`test` failures when the parsed PR count is less than or equal to the parsed base count.
-4. `lint` is unchanged and still gates on the command exit code.
+1. `review audit` and `review test` run in full-scope mode on the PR branch.
+2. The action temporarily checks out the base SHA in the same workspace and captures base `review audit`/`review test` JSON.
+3. The final gate passes `review audit`/`review test` failures when the parsed PR count is less than or equal to the parsed base count.
+4. `review lint` is unchanged and still gates on the command exit code.
 
 If the baseline checkout cannot be run safely or the structured counts cannot be parsed, the original failure is preserved.
 

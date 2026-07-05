@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-EFFECTIVE_COMMANDS="${COMMANDS:-audit,lint,test}"
+EFFECTIVE_COMMANDS="${COMMANDS:-review audit,review lint,review test}"
 BASELINE_COMMANDS_INPUT="${BASELINE_COMMANDS:-auto}"
 
 if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" != "true" ]; then

@@ -6,7 +6,8 @@
 # use it as-is. Otherwise, infer from the GitHub event context.
 #
 # Commands are split into three categories:
-#   1. Quality-style commands: audit, lint, test, refactor, bench
+#   1. Quality-style commands: review audit, review lint, review test,
+#      refactor, bench
 #      These run in canonical order with component/workspace/scope handling.
 #   2. Release command: release
 #      This is handled by the dedicated release workflow step.
@@ -35,19 +36,19 @@ else
   # Context-aware defaults (never include operations commands)
   case "${SCOPE_CONTEXT}" in
     pr)
-      ALL_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="review audit,review lint,review test"
       ;;
     push)
-      ALL_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="review audit,review lint,review test"
       ;;
     cron)
       ALL_COMMANDS="release"
       ;;
     manual)
-      ALL_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="review audit,review lint,review test"
       ;;
     *)
-      ALL_COMMANDS="audit,lint,test"
+      ALL_COMMANDS="review audit,review lint,review test"
       ;;
   esac
   echo "Commands inferred from context (${SCOPE_CONTEXT}): ${ALL_COMMANDS}"

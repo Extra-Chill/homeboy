@@ -25,24 +25,24 @@ assert_exit() {
 }
 
 assert_exit 1 "malformed quality results fail closed" \
-  env RESULTS='{"test":"fail"}}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"fail"}}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 1 "failing quality results fail" \
-  env RESULTS='{"test":"fail"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "closed PR ignores stale failing quality results" \
-  env RESULTS='{"test":"fail"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"fail"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "closed PR ignores malformed stale results" \
-  env RESULTS='{"test":"fail"}}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"fail"}}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "passing quality results pass" \
-  env RESULTS='{"test":"pass"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"pass"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "baseline red quality results do not fail PR" \
-  env RESULTS='{"test":"baseline_red"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review test":"baseline_red"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "inconclusive quality results do not fail PR" \
-  env RESULTS='{"lint":"inconclusive"}' COMMANDS='lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+  env RESULTS='{"review lint":"inconclusive"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 printf 'All final status enforcement checks passed.\n'

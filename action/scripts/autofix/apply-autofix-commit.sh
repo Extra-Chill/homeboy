@@ -205,7 +205,7 @@ commit_autofix_changes() {
 verify_autofix_quality_gates() {
   local effective_commands ordered_commands has_lint output_dir cmd output_stem output_json full_cmd cmd_exit overall_exit
 
-  effective_commands="${COMMANDS:-audit,lint,test}"
+  effective_commands="${COMMANDS:-review audit,review lint,review test}"
   if [ -z "${effective_commands}" ]; then
     echo "No quality commands configured for autofix verification"
     return 0
@@ -221,7 +221,7 @@ verify_autofix_quality_gates() {
     cmd=$(echo "${cmd}" | xargs)
     [ -n "${cmd}" ] || continue
 
-    if [ "${cmd}" = "test" ] && [ "${has_lint}" = "true" ]; then
+    if [ "$(quality_base_command "${cmd}")" = "test" ] && [ "${has_lint}" = "true" ]; then
       export HOMEBOY_SKIP_LINT=1
     else
       unset HOMEBOY_SKIP_LINT 2>/dev/null || true

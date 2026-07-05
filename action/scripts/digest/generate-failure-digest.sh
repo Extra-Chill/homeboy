@@ -25,7 +25,7 @@ append_local_reproduction_commands() {
 
   failed_commands="$(jq -r '
     to_entries[]
-    | select(.value == "fail" and (.key == "lint" or .key == "test"))
+    | select(.value == "fail" and (.key == "review lint" or .key == "review test"))
     | .key
   ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
 
@@ -76,20 +76,21 @@ append_differential_evidence() {
 
   while IFS=$'\t' read -r command status; do
     [ -n "${command}" ] || continue
-    local baseline_command baseline_exit baseline_result candidate_result baseline_json baseline_log
+    local baseline_command baseline_exit baseline_result candidate_result artifact_stem baseline_json baseline_log
     baseline_command="$(jq -r --arg cmd "${command}" '.[$cmd].command // ("homeboy " + $cmd)' "${baseline_status_file}" 2>/dev/null || printf 'homeboy %s' "${command}")"
     baseline_exit="$(jq -r --arg cmd "${command}" '.[$cmd].exit_code // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     baseline_result="$(jq -r --arg cmd "${command}" '.[$cmd].status // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     candidate_result="$(jq -r --arg cmd "${command}" '.[$cmd] // "unknown"' <<< "${RESULTS_JSON}" 2>/dev/null || printf 'unknown')"
-    baseline_json="baseline-${command}.json"
-    baseline_log="baseline-${command}.log"
+    artifact_stem="${command// /-}"
+    baseline_json="baseline-${artifact_stem}.json"
+    baseline_log="baseline-${artifact_stem}.log"
 
     {
       printf -- '- `%s`: **%s**\n' "${command}" "${status}"
       printf '  - Baseline command: `%s`\n' "${baseline_command}"
       printf '  - Baseline result: `%s` (exit `%s`)\n' "${baseline_result}" "${baseline_exit}"
       printf '  - Candidate result: `%s`\n' "${candidate_result}"
-      printf '  - Artifact refs: `%s`, `%s`, `%s`\n' "${command}.json" "${baseline_json}" "${baseline_log}"
+      printf '  - Artifact refs: `%s`, `%s`, `%s`\n' "${artifact_stem}.json" "${baseline_json}" "${baseline_log}"
     } >> "${digest_file}"
   done <<< "${rows}"
 }

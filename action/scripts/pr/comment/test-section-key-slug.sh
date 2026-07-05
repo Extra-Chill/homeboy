@@ -31,7 +31,7 @@ assert_key() {
 }
 
 assert_key "compound command" "refactor-from-all" COMMANDS="refactor --from all"
-assert_key "explicit section key" "audit-lint" COMMANDS="audit" COMMENT_SECTION_KEY_INPUT="Audit & Lint"
-assert_key "job fallback" "homeboy-build-lint-test" COMMANDS="audit,lint,test" GITHUB_JOB="Homeboy Build (Lint & Test)"
+assert_key "explicit section key" "audit-lint" COMMANDS="review audit" COMMENT_SECTION_KEY_INPUT="Audit & Lint"
+assert_key "job fallback" "homeboy-build-lint-test" COMMANDS="review audit,review lint,review test" GITHUB_JOB="Homeboy Build (Lint & Test)"
 
 printf 'All section key slug checks passed.\n'

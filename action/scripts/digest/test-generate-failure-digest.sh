@@ -28,7 +28,7 @@ chmod +x "${BIN_DIR}/homeboy"
 export PATH="${BIN_DIR}:${PATH}"
 export HOMEBOY_STUB_ARGS_FILE="${ARGS_FILE}"
 export HOMEBOY_OUTPUT_DIR="${OUTPUT_DIR}"
-export RESULTS='{"lint":"fail","test":"fail"}'
+export RESULTS='{"review lint":"fail","review test":"fail"}'
 export GITHUB_SERVER_URL="https://github.com"
 export GITHUB_REPOSITORY="Extra-Chill/homeboy-action"
 export GITHUB_RUN_ID="12345"
@@ -38,10 +38,10 @@ export HOMEBOY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensio
 export HOMEBOY_EXTENSION_REVISION="abc123"
 export HOMEBOY_ACTION_REPOSITORY="Extra-Chill/homeboy-action"
 export HOMEBOY_ACTION_REF="v2"
-export COMMANDS="lint,test,audit"
+export COMMANDS="review lint,review test,review audit"
 export AUTOFIX_ENABLED="true"
 export AUTOFIX_ATTEMPTED="true"
-export AUTOFIX_COMMANDS="test"
+export AUTOFIX_COMMANDS="review test"
 export COMPONENT_NAME="wordpress"
 export SCOPE_CONTEXT="pr"
 export SCOPE_MODE="changed"
@@ -65,8 +65,8 @@ grep -F "### Local reproduction" "${DIGEST_FILE}" >/dev/null
 grep -F -- "- Scope context: \`pr\`" "${DIGEST_FILE}" >/dev/null
 grep -F -- "- Scope mode: \`changed\`" "${DIGEST_FILE}" >/dev/null
 grep -F -- "- Scope base ref: \`abc123base\`" "${DIGEST_FILE}" >/dev/null
-grep -F "homeboy lint wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
-grep -F "homeboy test wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy review lint wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
+grep -F "homeboy review test wordpress --path . --changed-since abc123base" "${DIGEST_FILE}" >/dev/null
 
 grep -Fx -- "report" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "failure-digest" "${ARGS_FILE}" >/dev/null
@@ -79,9 +79,9 @@ grep -Fx -- "https://github.com/Extra-Chill/homeboy-action/actions/runs/12345" "
 grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "lint,test,audit" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "review lint,review test,review audit" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--autofix-commands" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "test" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "review test" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--autofix-enabled" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--autofix-attempted" "${ARGS_FILE}" >/dev/null
 
@@ -94,13 +94,13 @@ jq -e \
    .action_ref == "v2"' \
   "${TOOLING_JSON}" >/dev/null
 
-export RESULTS='{"test":"baseline_red"}'
+export RESULTS='{"review test":"baseline_red"}'
 cat > "${OUTPUT_DIR}/baseline-status.json" <<'JSON'
 {
-  "test": {
+  "review test": {
     "status": "fail",
     "exit_code": 1,
-    "command": "homeboy test wordpress --path /work --changed-since abc123base",
+    "command": "homeboy review test wordpress --path /work --changed-since abc123base",
     "structured_output": false
   }
 }
@@ -109,10 +109,10 @@ JSON
 bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
 
 grep -F "### Differential baseline evidence" "${DIGEST_FILE}" >/dev/null
-grep -F -- '- `test`: **baseline_red**' "${DIGEST_FILE}" >/dev/null
-grep -F -- '- Baseline command: `homeboy test wordpress --path /work --changed-since abc123base`' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- `review test`: **baseline_red**' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Baseline command: `homeboy review test wordpress --path /work --changed-since abc123base`' "${DIGEST_FILE}" >/dev/null
 grep -F -- '- Baseline result: `fail` (exit `1`)' "${DIGEST_FILE}" >/dev/null
 grep -F -- '- Candidate result: `baseline_red`' "${DIGEST_FILE}" >/dev/null
-grep -F -- '- Artifact refs: `test.json`, `baseline-test.json`, `baseline-test.log`' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Artifact refs: `review-test.json`, `baseline-review-test.json`, `baseline-review-test.log`' "${DIGEST_FILE}" >/dev/null
 
 echo "generate failure digest wrapper checks passed"

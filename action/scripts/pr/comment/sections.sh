@@ -9,7 +9,7 @@ commands_use_review_report() {
   local normalized
   normalized="$(canonicalize_commands "${COMMANDS}")"
 
-  [ "${normalized}" = "audit,lint,test" ] && [ -z "${EXTRA_ARGS:-}" ]
+  [ "${normalized}" = "review audit,review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ]
 }
 
 add_review_banner() {
@@ -203,7 +203,7 @@ append_command_details() {
   local command="$1"
   local json_file="$2"
 
-  case "${command}" in
+  case "$(quality_base_command "${command}")" in
     audit) append_audit_details "${json_file}" ;;
     lint) append_lint_details "${json_file}" ;;
     test) append_test_details "${json_file}" ;;

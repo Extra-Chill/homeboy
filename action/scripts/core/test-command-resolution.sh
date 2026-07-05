@@ -65,12 +65,12 @@ assert_equals "" "$(get_output "${release_only_output}" "resolved-commands")" "r
 assert_equals "release" "$(get_output "${release_only_output}" "release-commands")" "release-only populates release bucket"
 assert_equals "" "$(get_output "${release_only_output}" "operations-commands")" "release-only has no operations commands"
 
-mixed_output="$(run_resolve "audit,release")"
-assert_equals "audit" "$(get_output "${mixed_output}" "resolved-commands")" "mixed audit/release keeps audit in quality bucket"
+mixed_output="$(run_resolve "review audit,release")"
+assert_equals "review audit" "$(get_output "${mixed_output}" "resolved-commands")" "mixed review audit/release keeps audit in quality bucket"
 assert_equals "release" "$(get_output "${mixed_output}" "release-commands")" "mixed audit/release keeps release in release bucket"
 
-quality_output="$(run_resolve "audit,lint,test")"
-assert_equals "audit,lint,test" "$(get_output "${quality_output}" "resolved-commands")" "normal quality commands stay in quality bucket"
+quality_output="$(run_resolve "review audit,review lint,review test")"
+assert_equals "review audit,review lint,review test" "$(get_output "${quality_output}" "resolved-commands")" "normal review quality commands stay in quality bucket"
 assert_equals "" "$(get_output "${quality_output}" "release-commands")" "normal quality commands have no release bucket"
 assert_equals "" "$(get_output "${quality_output}" "operations-commands")" "normal quality commands have no operations bucket"
 

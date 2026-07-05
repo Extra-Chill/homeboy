@@ -703,6 +703,7 @@ quality_base_command() {
     "review test"*) printf '%s\n' "test" ;;
     "review build"*) printf '%s\n' "build" ;;
     "review ci"*) printf '%s\n' "ci" ;;
+    audit|audit\ *|lint|lint\ *|test|test\ *|build|build\ *|ci|ci\ *) printf '%s\n' "" ;;
     *) printf '%s\n' "$(printf '%s' "${cmd}" | awk '{print $1}')" ;;
   esac
 }

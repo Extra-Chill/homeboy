@@ -31,7 +31,7 @@ assert_not_contains() {
 }
 
 export GITHUB_ACTION_PATH="${ROOT}"
-export COMMANDS="audit"
+export COMMANDS="review audit"
 export COMP_ID="data-machine"
 export WORKSPACE="/tmp/workspace"
 export SECTION_TITLE="Audit"
@@ -45,16 +45,16 @@ source "${ROOT}/scripts/core/lib.sh"
 source "${ROOT}/scripts/pr/comment/sections.sh"
 
 body="$(RESULTS='{not-json' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" ":warning: **audit** — unknown" "invalid results render unknown status"
-assert_contains "${body}" "Structured output for \`audit\` was not found" "missing audit json warning rendered"
+assert_contains "${body}" ":warning: **review audit** — unknown" "invalid results render unknown status"
+assert_contains "${body}" "Structured output for \`review audit\` was not found" "missing audit json warning rendered"
 assert_not_contains "${body}" "Could not parse a pass/fail result for audit" "single-command runs do not render legacy parse warning"
 
-body="$(RESULTS='{"audit":"mystery"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" ":warning: **audit** — unknown" "unknown single-command status renders unknown"
-assert_contains "${body}" "Structured output for \`audit\` was not found" "unknown status missing json warning rendered"
+body="$(RESULTS='{"review audit":"mystery"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
+assert_contains "${body}" ":warning: **review audit** — unknown" "unknown single-command status renders unknown"
+assert_contains "${body}" "Structured output for \`review audit\` was not found" "unknown status missing json warning rendered"
 
-body="$(RESULTS='{"audit":"fail"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
-assert_contains "${body}" ":x: **audit** — failed" "explicit single-command failure renders failure"
-assert_contains "${body}" "Structured output for \`audit\` was not found" "failed status missing json warning rendered"
+body="$(RESULTS='{"review audit":"fail"}' build_section_body; printf '%s\n' "${SECTION_BODY}")"
+assert_contains "${body}" ":x: **review audit** — failed" "explicit single-command failure renders failure"
+assert_contains "${body}" "Structured output for \`review audit\` was not found" "failed status missing json warning rendered"
 
 printf 'All unsupported single-command rendering checks passed.\n'

@@ -5,7 +5,7 @@
 # Reads SCOPE_* env vars set by resolve.sh.
 
 # Get CLI flags for a command based on current scope.
-# Usage: scope_flags_for "lint"
+# Usage: scope_flags_for "review lint"
 #        scope_flags_for "refactor --from all --write"
 # Prints: "--changed-since abc123" or ""
 scope_flags_for() {
