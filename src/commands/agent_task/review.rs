@@ -389,8 +389,15 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
         .iter()
         .find(|provider| provider.default_backend)
         .or_else(|| providers.first())
+        .cloned();
+    let example_selector_id = example_selector
+        .as_ref()
         .map(|provider| provider.id.clone())
         .unwrap_or_else(|| "sample.executor-provider".to_string());
+    let example_ai_provider = example_selector
+        .as_ref()
+        .and_then(|provider| provider.provider_defaults.keys().next().cloned())
+        .unwrap_or_else(|| "example".to_string());
 
     serde_json::json!({
         "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass runtime-specific provider configuration inside --dispatch-provider-config — never the other way around.",
@@ -409,11 +416,11 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
                 "value_is": "Nested provider config JSON (and/or a model override), passed to the executor.",
             }
         ],
-        "common_mistake": "Passing runtime-specific provider configuration to --dispatch-selector. That selects the executor, not the model/provider, so it fails with 'no extension agent-task provider ... matched selector'. Put runtime-specific values in --dispatch-provider-config instead.",
+        "common_mistake": format!("Passing runtime-specific provider configuration such as `{example_ai_provider}` to --dispatch-selector. That selects the executor, not the model/provider, so it fails with 'no extension agent-task provider ... matched selector'. Put runtime-specific values in --dispatch-provider-config instead."),
         "example": {
             "description": "Run a task with a selected executor provider driving a nested AI runtime/provider config.",
             "command": format!(
-                "homeboy agent-task cook --dispatch-selector {example_selector} --dispatch-provider-config '{{\"provider\":\"example\"}}' --prompt @task.md"
+                "homeboy agent-task cook --dispatch-selector {example_selector_id} --dispatch-provider-config '{{\"provider\":\"{example_ai_provider}\"}}' --prompt @task.md"
             ),
         }
     })

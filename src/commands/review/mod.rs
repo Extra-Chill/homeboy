@@ -136,7 +136,7 @@ impl ReviewArgs {
                 ReviewCommand::AuditBaseline(_)
                 | ReviewCommand::Build(_)
                 | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
-                    REVIEW_LAB_LABEL,
+                    self.lab_label(),
                     "this nested review subcommand has no portable Lab contract",
                 )),
             };
@@ -148,6 +148,27 @@ impl ReviewArgs {
             ))
         } else {
             Some(LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate())
+        }
+    }
+
+    pub(crate) fn lab_label(&self) -> &'static str {
+        match self.command.as_ref() {
+            Some(ReviewCommand::Audit(_)) => "review audit",
+            Some(ReviewCommand::Lint(_)) => "review lint",
+            Some(ReviewCommand::Test(_)) => "review test",
+            Some(ReviewCommand::Build(_)) => "review build",
+            Some(ReviewCommand::Ci(_)) => "review ci",
+            Some(ReviewCommand::AuditBaseline(_)) => "review audit-baseline",
+            None => REVIEW_LAB_LABEL,
+        }
+    }
+
+    pub(crate) fn effective_component_args(&self) -> PositionalComponentArgs {
+        match self.command.as_ref() {
+            Some(ReviewCommand::Audit(args)) => args.audit.comp.clone(),
+            Some(ReviewCommand::Lint(args)) => args.comp.clone(),
+            Some(ReviewCommand::Test(args)) => args.comp.clone(),
+            _ => self.comp.clone(),
         }
     }
 }
@@ -297,7 +318,8 @@ fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
 pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
-    let component = args.comp.load()?;
+    let component_args = args.effective_component_args();
+    let component = component_args.load()?;
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
@@ -595,7 +617,7 @@ fn build_audit_args(
     review_context: &ReviewExecutionContext,
 ) -> audit::AuditArgs {
     audit::AuditArgs {
-        comp: args.comp.clone(),
+        comp: args.effective_component_args(),
         extension_override: args.extension_override.clone(),
         conventions: false,
         only: Vec::new(),
@@ -623,7 +645,7 @@ fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionCon
 
 fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
     lint::LintArgs {
-        comp: args.comp.clone(),
+        comp: args.effective_component_args(),
         summary: args.summary,
         file: None,
         glob: None,
@@ -647,7 +669,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
 
 fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> test::TestArgs {
     test::TestArgs {
-        comp: args.comp.clone(),
+        comp: args.effective_component_args(),
         extension_override: args.extension_override.clone(),
         skip_lint: true,
         coverage: false,
