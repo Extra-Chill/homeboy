@@ -444,10 +444,10 @@ jobs:
     if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
-      release-version: ${{ steps.recovery.outputs.release-version || steps.release.outputs.release-version }}
-      release-tag: ${{ steps.recovery.outputs.release-tag || steps.release.outputs.release-tag }}
-      prepared: ${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}
-      released: ${{ steps.recovery.outputs.released || steps.release.outputs.released }}
+      release-version: ${{ steps.outputs.outputs.release-version }}
+      release-tag: ${{ steps.outputs.outputs.release-tag }}
+      prepared: ${{ steps.outputs.outputs.prepared }}
+      released: ${{ steps.outputs.outputs.released }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -531,6 +531,19 @@ jobs:
           echo "prepared=true" >> "$GITHUB_OUTPUT"
           echo "released=true" >> "$GITHUB_OUTPUT"
           echo "::notice::Skipping release preparation; downstream jobs will publish existing tag ${TAG}"
+
+      - name: Resolve release outputs
+        id: outputs
+        run: |
+          RELEASE_VERSION="${{ steps.recovery.outputs.release-version || steps.release.outputs.release-version }}"
+          RELEASE_TAG="${{ steps.recovery.outputs.release-tag || steps.release.outputs.release-tag }}"
+          PREPARED="${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}"
+          RELEASED="${{ steps.recovery.outputs.released || steps.release.outputs.released }}"
+
+          echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release-tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "prepared=${PREPARED}" >> "$GITHUB_OUTPUT"
+          echo "released=${RELEASED}" >> "$GITHUB_OUTPUT"
 
   # ── Step 4: Build cross-platform binaries ──
   plan:
