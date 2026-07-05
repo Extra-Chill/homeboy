@@ -5,8 +5,8 @@
 //! - Once the runner streams output back, `mirror_agent_task_run_plan_lifecycle`
 //!   replays the run-plan aggregate into the controller's lifecycle store so
 //!   `homeboy agent-task status/logs` keeps working transparently.
-//! - The dispatch-envelope parsers below let the offload orchestrator recover
-//!   structured failure metadata from mixed stdout/stderr streams.
+//! - The legacy dispatch-envelope parser is retained only for pre-typed runners
+//!   that cannot surface the handoff through workload events/results.
 
 use std::fs;
 
@@ -155,27 +155,39 @@ fn mirror_legacy_agent_task_run_plan_lifecycle(
     if plan_spec == "-" {
         return Ok(());
     }
+    // Legacy runner compatibility: only pre-typed runner workloads reach this
+    // branch, so argv/stdout recovery is intentionally centralized here.
     let aggregate = match agent_task_run_plan_lifecycle_event_from_job_events(job_events) {
         Some(event) => event.aggregate,
-        None => {
-            let envelope = parse_offloaded_run_plan_envelope(
-                agent_task_run_plan_lifecycle_output(stdout, output_file_content),
-            )?;
-            if !is_agent_task_run_plan_envelope(&envelope) {
-                return Ok(());
-            }
-            let Some(aggregate_value) = envelope.get("data").cloned() else {
-                return Ok(());
-            };
-            serde_json::from_value(aggregate_value).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse offloaded agent-task aggregate".to_string()),
-                )
-            })?
-        }
+        None => legacy_agent_task_run_plan_aggregate(stdout, output_file_content)?,
     };
     mirror_agent_task_run_plan_aggregate(&plan_spec, &run_id, aggregate)
+}
+
+fn legacy_agent_task_run_plan_aggregate(
+    stdout: &str,
+    output_file_content: Option<&str>,
+) -> Result<AgentTaskAggregate> {
+    let envelope = parse_offloaded_run_plan_envelope(agent_task_run_plan_lifecycle_output(
+        stdout,
+        output_file_content,
+    ))?;
+    if !is_agent_task_run_plan_envelope(&envelope) {
+        return Err(Error::internal_unexpected(
+            "legacy agent-task run-plan output did not contain an aggregate envelope",
+        ));
+    }
+    let Some(aggregate_value) = envelope.get("data").cloned() else {
+        return Err(Error::internal_unexpected(
+            "legacy agent-task run-plan output aggregate envelope was missing data",
+        ));
+    };
+    serde_json::from_value(aggregate_value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse legacy offloaded agent-task aggregate".to_string()),
+        )
+    })
 }
 
 fn mirror_agent_task_run_plan_aggregate(
@@ -694,7 +706,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
+    fn legacy_offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
         let stdout = concat!(
             "Preparing extension runtime...\n",
             "Installing declared dependencies...\n",
@@ -709,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn offloaded_run_plan_envelope_parser_selects_aggregate_from_mixed_json() {
+    fn legacy_offloaded_run_plan_envelope_parser_selects_aggregate_from_mixed_json() {
         let stdout = concat!(
             "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}\n",
             "setup complete\n",
@@ -919,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn non_aggregate_offloaded_run_plan_stdout_is_not_mirrored() {
+    fn typed_run_plan_lifecycle_ignores_stdout_without_job_event() {
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -931,8 +943,15 @@ mod tests {
         ];
         let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
 
-        mirror_agent_task_run_plan_lifecycle(&args, None, stdout, None, None)
-            .expect("ignore non-aggregate output");
+        let agent_task = RunnerWorkloadAgentTask {
+            run_id: "run-typed-no-event".to_string(),
+            plan_ref: Some("@/tmp/plan.json".to_string()),
+            dispatch_kind: crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+            lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+        };
+
+        mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), stdout, None, None)
+            .expect("typed path does not parse stdout fallback");
     }
 
     #[test]
@@ -991,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_plan_lifecycle_fallback_still_uses_argv_and_stdout() {
+    fn legacy_run_plan_lifecycle_branch_uses_argv_and_stdout_only_without_typed_workload() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
             let plan_path = temp.path().join("plan.json");
