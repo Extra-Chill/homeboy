@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_scope_commands_are_hot_but_file_scoped_lint_is_not() {
+    fn changed_and_file_scoped_lint_commands_are_hot() {
         let changed_lint = Cli::parse_from([
             "homeboy",
             "review",
@@ -503,7 +503,10 @@ mod tests {
         assert!(hot.lab_offload_unsupported_reason.is_none());
 
         let file_lint = Cli::parse_from(["homeboy", "review", "lint", "--file", "src/main.rs"]);
-        assert!(hot_command(&file_lint.command).is_none());
+        let hot = hot_command(&file_lint.command).expect("file-scope lint is hot");
+        assert_eq!(hot.label, "review lint");
+        assert!(hot.lab_offload_supported);
+        assert!(hot.lab_offload_unsupported_reason.is_none());
     }
 
     #[test]

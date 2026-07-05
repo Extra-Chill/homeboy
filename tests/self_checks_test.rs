@@ -44,6 +44,7 @@ fn lint_args(root: &Path) -> LintArgs {
         changed_only: false,
         changed_since: None,
         precomputed_changed_files: None,
+        force_main_workflow: false,
         lab_changed_files_json: None,
         ci_job: None,
         sniff_filters: LintSniffArgs::default(),

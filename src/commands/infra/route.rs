@@ -835,13 +835,23 @@ fn lab_route_source_path_args(
     normalized_args: &[String],
     capture_mutation_patch: bool,
 ) -> Option<Vec<String>> {
-    if capture_mutation_patch {
+    if capture_mutation_patch || command_prefers_controller_source_path(command) {
         if let Some(rewritten) = rewrite_component_target_to_path(command, normalized_args) {
             return Some(rewritten);
         }
     }
 
     rewrite_ad_hoc_lab_workspace_to_path(command, normalized_args)
+}
+
+fn command_prefers_controller_source_path(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Review(crate::commands::review::ReviewArgs {
+            command: Some(crate::commands::review::ReviewCommand::Lint(_)),
+            ..
+        })
+    )
 }
 
 /// When a `lint --fix` / `refactor --write` command targets a component by id
@@ -973,6 +983,10 @@ fn strip_component_target_args(
     let mut passthrough = false;
     let mut positional_stripped = false;
     while let Some(arg) = iter.next() {
+        if rewritten.is_empty() {
+            rewritten.push(arg.clone());
+            continue;
+        }
         if passthrough {
             rewritten.push(arg.clone());
             continue;
@@ -2579,16 +2593,27 @@ mod tests {
     }
 
     #[test]
-    fn lab_route_source_path_args_keeps_component_id_without_patch_capture() {
-        let cli = Cli::parse_from(["homeboy", "review", "lint", "sample-component"]);
+    fn lab_route_source_path_args_rewrites_review_lint_component_without_patch_capture() {
+        let cli = Cli::parse_from(["homeboy", "review", "lint", "homeboy"]);
         let normalized = vec![
             "homeboy".to_string(),
             "review".to_string(),
             "lint".to_string(),
-            "sample-component".to_string(),
+            "homeboy".to_string(),
         ];
 
-        assert!(lab_route_source_path_args(&cli.command, &normalized, false).is_none());
+        let rewritten = lab_route_source_path_args(&cli.command, &normalized, false)
+            .expect("review lint component id should become a source path");
+
+        assert_eq!(rewritten[0..3], normalized[0..3]);
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|arg| arg.as_str() == "homeboy")
+                .count(),
+            1
+        );
+        assert!(rewritten.contains(&"--path".to_string()));
     }
 
     #[test]
