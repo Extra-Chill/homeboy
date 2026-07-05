@@ -137,6 +137,7 @@ pub fn runner_source_checkout_prepare_options(
             required_env: Vec::new(),
         }),
         required_extensions: Vec::new(),
+        accepted_extension_settings: Vec::new(),
         require_paths: Vec::new(),
         runner_workload: None,
         run_id: None,

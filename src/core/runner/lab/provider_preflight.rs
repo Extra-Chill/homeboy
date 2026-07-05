@@ -273,6 +273,7 @@ fn probe_agent_task_providers_on_runner(
             path_materialization_plan: None,
             capability_preflight,
             required_extensions,
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,

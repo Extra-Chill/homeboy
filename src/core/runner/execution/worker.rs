@@ -77,12 +77,14 @@ pub(super) fn exec_worker_local_with_process_output(
         ),
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
+    let accepted_extension_settings = options.accepted_extension_settings.clone();
     validate_runner_extension_parity(
         runner_id,
         &plan.runner,
         &plan.cwd,
         &required_extensions,
         &requested_setting_keys,
+        &accepted_extension_settings,
     )?;
     validate_runner_policy(
         &plan.runner,

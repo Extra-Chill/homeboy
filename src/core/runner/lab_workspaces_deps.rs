@@ -486,6 +486,7 @@ pub(super) fn bootstrap_source_cli_dependencies(
             // requirements are supplied declaratively by the workspace provider.
             capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,

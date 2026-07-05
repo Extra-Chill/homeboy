@@ -108,6 +108,7 @@ pub(super) fn exec(
                 ..Default::default()
             }),
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths,
             runner_workload: None,
             run_id: validated_run_id.clone(),

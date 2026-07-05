@@ -248,6 +248,7 @@ pub fn refresh_homeboy_binary(
                 ..Default::default()
             }),
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,
@@ -406,6 +407,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,

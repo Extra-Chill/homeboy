@@ -114,6 +114,7 @@ pub struct RunnerExecOptions {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
+    pub accepted_extension_settings: Vec<String>,
     pub require_paths: Vec<String>,
     pub runner_workload: Option<RunnerWorkload>,
     pub run_id: Option<String>,
@@ -582,6 +583,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         ),
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
+    let accepted_extension_settings = options.accepted_extension_settings.clone();
 
     validate_runner_extension_parity(
         runner_id,
@@ -589,6 +591,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         &cwd,
         &required_extensions,
         &requested_setting_keys,
+        &accepted_extension_settings,
     )?;
 
     // Remote capability-parity preflight: derive the contract from the command's
