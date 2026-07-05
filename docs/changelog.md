@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.12] - 2026-07-05
+
+### Fixed
+- Fix review test formatting gate
+
 ## [0.281.11] - 2026-07-05
 
 ### Changed
