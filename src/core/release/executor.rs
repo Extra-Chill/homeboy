@@ -546,6 +546,23 @@ mod tests {
     }
 
     #[test]
+    fn package_output_with_zero_artifacts_fails_before_github_release_can_upload_nothing() {
+        let mut state = ReleaseState::default();
+        let response = serde_json::json!({
+            "success": true,
+            "exitCode": 0,
+            "stdout": "[]",
+            "stderr": ""
+        });
+
+        let err = store_artifacts_from_output(&mut state, &response)
+            .expect_err("empty package output should fail");
+
+        assert!(state.artifacts.is_empty());
+        assert!(err.message.contains("zero release artifacts"));
+    }
+
+    #[test]
     fn cleanup_removes_build_dir_when_release_artifact_is_inside_build() {
         let temp = tempfile::tempdir().expect("tempdir");
         let build_dir = temp.path().join("build");

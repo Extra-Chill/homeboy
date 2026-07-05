@@ -357,6 +357,11 @@ pub(super) fn store_artifacts_from_output(
         )
     })?;
     let artifacts: Vec<ReleaseArtifact> = parse_release_artifacts(&raw_artifacts)?;
+    if artifacts.is_empty() {
+        return Err(Error::internal_unexpected(
+            "Package command produced zero release artifacts. A package-backed release must emit at least one artifact.",
+        ));
+    }
     state.artifacts.extend(artifacts);
     Ok(())
 }

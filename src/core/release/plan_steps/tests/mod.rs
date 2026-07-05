@@ -481,6 +481,122 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
 }
 
 #[test]
+fn skip_publish_with_package_provider_still_packages_before_github_release() {
+    let component = github_fixture_component();
+    let extension = release_extension("artifact-packager", &["release.package", "release.publish"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        pipeline: ReleasePipelineOptions {
+            skip_publish: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    let package_preflight_index = step_index(&ids, "preflight.package");
+    let package_index = step_index(&ids, "package");
+    let github_release_index = step_index(&ids, "github.release");
+
+    assert!(package_preflight_index < package_index);
+    assert!(package_index < github_release_index);
+    assert_eq!(steps[package_index].needs, vec!["git.commit"]);
+    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+    assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
+    assert!(!ids.contains(&"publish.artifact-packager"));
+    assert!(!ids.contains(&"cleanup"));
+}
+
+#[test]
+fn skip_publish_tag_only_release_can_skip_package_when_no_upload_needs_assets() {
+    let component = github_fixture_component();
+    let extension = release_extension("artifact-packager", &["release.package", "release.publish"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        skip_github_release: true,
+        pipeline: ReleasePipelineOptions {
+            skip_publish: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    assert!(!ids.contains(&"preflight.package"));
+    assert!(!ids.contains(&"package"));
+    assert!(!ids.contains(&"github.release"));
+    assert!(!ids.contains(&"publish.artifact-packager"));
+    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["git.commit"]);
+}
+
+#[test]
+fn head_skip_publish_with_package_provider_still_packages_before_github_release() {
+    let component = github_fixture_component();
+    let extension = release_extension("artifact-packager", &["release.package"]);
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "head".to_string(),
+        pipeline: ReleasePipelineOptions {
+            head: true,
+            skip_publish: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.1",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(steps[1].needs, vec!["package"]);
+}
+
+#[test]
 fn release_plan_records_changelog_contract() {
     let component = fixture_component();
     let mut warnings = Vec::new();
@@ -885,6 +1001,22 @@ fn fixture_changelog_plan() -> ReleaseChangelogPlan {
         )]),
         entry_count: 1,
     }
+}
+
+fn release_extension(id: &str, actions: &[&str]) -> ExtensionManifest {
+    let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": id,
+        "version": "1.0.0",
+        "actions": actions.iter().map(|action| serde_json::json!({
+            "id": action,
+            "label": action,
+            "type": "command",
+            "command": "true"
+        })).collect::<Vec<_>>()
+    }))
+    .expect("extension manifest");
+    extension.id = id.to_string();
+    extension
 }
 
 fn semver_recommendation(
