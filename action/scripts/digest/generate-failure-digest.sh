@@ -47,10 +47,17 @@ append_local_reproduction_commands() {
     printf '\n```bash\n'
     while IFS= read -r command; do
       [ -n "${command}" ] || continue
-      printf 'homeboy %s %s --path .%s\n' "${command}" "${COMPONENT_NAME}" "${scope_args}"
+      case "${command}" in
+        "review "*) printf 'homeboy %s %s --path .%s\n' "${command}" "${COMPONENT_NAME}" "${scope_args}" ;;
+        lint|test) printf 'homeboy review %s %s --path .%s\n' "${command}" "${COMPONENT_NAME}" "${scope_args}" ;;
+      esac
     done <<< "${failed_commands}"
     printf '```\n'
   } >> "${digest_file}"
+}
+
+command_artifact_stem() {
+  printf '%s' "$1" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//'
 }
 
 append_differential_evidence() {
@@ -81,7 +88,7 @@ append_differential_evidence() {
     baseline_exit="$(jq -r --arg cmd "${command}" '.[$cmd].exit_code // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     baseline_result="$(jq -r --arg cmd "${command}" '.[$cmd].status // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
     candidate_result="$(jq -r --arg cmd "${command}" '.[$cmd] // "unknown"' <<< "${RESULTS_JSON}" 2>/dev/null || printf 'unknown')"
-    artifact_stem="${command// /-}"
+    artifact_stem="$(command_artifact_stem "${command}")"
     baseline_json="baseline-${artifact_stem}.json"
     baseline_log="baseline-${artifact_stem}.log"
 

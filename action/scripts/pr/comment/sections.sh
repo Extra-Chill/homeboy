@@ -229,7 +229,14 @@ append_split_command_section() {
     SECTION_BODY+="> :warning: Structured output for \`${command}\` was not found. Check the action logs for details."$'\n'
   fi
 
-  SECTION_BODY+="> Deep dive: homeboy ${command} ${COMP_ID}${scope_suffix}"$'\n\n'
+  case "${command}" in
+    audit|lint|test|build|audit-baseline)
+      SECTION_BODY+="> Deep dive: homeboy review ${command} ${COMP_ID}${scope_suffix}"$'\n\n'
+      ;;
+    *)
+      SECTION_BODY+="> Deep dive: homeboy ${command} ${COMP_ID}${scope_suffix}"$'\n\n'
+      ;;
+  esac
 }
 
 append_split_command_sections() {

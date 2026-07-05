@@ -699,17 +699,23 @@ quality_base_command() {
   cmd="$(printf '%s' "${cmd}" | xargs)"
   case "${cmd}" in
     "review audit"*) printf '%s\n' "audit" ;;
+    "review audit-baseline"*) printf '%s\n' "audit-baseline" ;;
     "review lint"*) printf '%s\n' "lint" ;;
     "review test"*) printf '%s\n' "test" ;;
     "review build"*) printf '%s\n' "build" ;;
     "review ci"*) printf '%s\n' "ci" ;;
-    audit|audit\ *|lint|lint\ *|test|test\ *|build|build\ *|ci|ci\ *) printf '%s\n' "" ;;
+    audit|audit\ *) printf '%s\n' "audit" ;;
+    audit-baseline|audit-baseline\ *) printf '%s\n' "audit-baseline" ;;
+    lint|lint\ *) printf '%s\n' "lint" ;;
+    test|test\ *) printf '%s\n' "test" ;;
+    build|build\ *) printf '%s\n' "build" ;;
+    ci|ci\ *) printf '%s\n' "ci" ;;
     *) printf '%s\n' "$(printf '%s' "${cmd}" | awk '{print $1}')" ;;
   esac
 }
 
-# Sort commands into canonical order: audit → lint → test → refactor → bench.
-# Audit/lint/test are the core quality gates; real refactor and bench commands
+# Sort commands into canonical order: audit → lint → test → build → refactor → bench.
+# Review-backed audit/lint/test/build are core quality gates; real refactor and bench commands
 # run after them when explicitly requested. Release and operations commands are
 # handled by dedicated steps and are filtered out here defensively.
 canonicalize_commands() {
@@ -832,6 +838,24 @@ settings_json_flags() {
   done < <(printf '%s' "${raw}" | jq -r 'to_entries[] | [.key, (.value | tojson)] | @tsv')
 }
 
+review_subcommand_run_command() {
+  local cmd="$1"
+  local component_id="$2"
+  local workspace="$3"
+  local global_flags="$4"
+  local review_cmd base_cmd rest
+
+  review_cmd="${cmd#review }"
+  base_cmd="$(printf '%s' "${review_cmd}" | awk '{print $1}')"
+  rest="$(printf '%s' "${review_cmd#${base_cmd}}" | xargs)"
+
+  if [ -n "${rest}" ]; then
+    printf 'homeboy %sreview %s %s %s --path %s\n' "${global_flags}" "${base_cmd}" "${component_id}" "${rest}" "${workspace}"
+  else
+    printf 'homeboy %sreview %s %s --path %s\n' "${global_flags}" "${base_cmd}" "${component_id}" "${workspace}"
+  fi
+}
+
 homeboy_global_flags() {
   local output_file="${1:-}"
   local flags=""
@@ -869,6 +893,10 @@ build_run_command() {
     full_cmd="${full_cmd} --path ${workspace}"
   elif [[ "${cmd}" == "review ci"* ]]; then
     full_cmd="homeboy ${global_flags}${cmd}"
+  elif [[ "${cmd}" == "review "* ]]; then
+    full_cmd="$(review_subcommand_run_command "${cmd}" "${component_id}" "${workspace}" "${global_flags}")"
+  elif [[ "$(quality_base_command "${cmd}")" =~ ^(audit|audit-baseline|lint|test|build)$ ]]; then
+    full_cmd="$(review_subcommand_run_command "review ${cmd}" "${component_id}" "${workspace}" "${global_flags}")"
   else
     full_cmd="homeboy ${global_flags}${cmd} ${component_id} --path ${workspace}"
   fi
@@ -956,6 +984,10 @@ build_autofix_command() {
     full_cmd="homeboy ${global_flags}refactor ${component_id} ${fix_cmd#refactor } --path ${workspace}"
   elif [[ "${fix_cmd}" == "review ci"* ]]; then
     full_cmd="homeboy ${global_flags}${fix_cmd}"
+  elif [[ "${fix_cmd}" == "review "* ]]; then
+    full_cmd="$(review_subcommand_run_command "${fix_cmd}" "${component_id}" "${workspace}" "${global_flags}")"
+  elif [[ "$(quality_base_command "${fix_cmd}")" =~ ^(audit|audit-baseline|lint|test|build)$ ]]; then
+    full_cmd="$(review_subcommand_run_command "review ${fix_cmd}" "${component_id}" "${workspace}" "${global_flags}")"
   else
     full_cmd="homeboy ${global_flags}${fix_cmd} ${component_id} --path ${workspace}"
   fi

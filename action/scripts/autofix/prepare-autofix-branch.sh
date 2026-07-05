@@ -199,7 +199,7 @@ fi
 if changes_are_only_drift "${WORKSPACE}" || (git diff --quiet && git diff --cached --quiet); then
   echo "Updating audit baseline..."
   set +e
-  homeboy audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+  homeboy review audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
   BASELINE_EXIT=$?
   set -e
   if [ "${BASELINE_EXIT}" -ne 0 ]; then

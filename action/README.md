@@ -203,6 +203,8 @@ Use these outputs to gate downstream jobs:
 | `release-skip-github-release` | No | `false` | Skip GitHub Release creation |
 | `release-verify-github-release` | No | `true` | Verify that a successful release has a GitHub Release |
 
+Quality command inputs `audit`, `lint`, `test`, `build`, and `audit-baseline` are action-level shorthand. Homeboy Action runs them through Homeboy's review umbrella, for example `commands: test` emits `homeboy review test <component> --path <workspace>`. Commands that remain top-level in Homeboy, including `bench` and `refactor`, are emitted as top-level commands.
+
 ## Outputs
 
 | Output | Description |

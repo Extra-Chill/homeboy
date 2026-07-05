@@ -59,6 +59,16 @@ unset GITHUB_ACTIONS SCOPE_MODE SCOPE_BASE_REF EXTRA_ARGS || true
 SCOPE_MODE="full"
 assert_equals \
   "homeboy review lint data-machine --path /tmp/workspace" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "lint routes through review and includes workspace path"
+
+assert_equals \
+  "homeboy --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "lint routes through review and includes structured output path"
+
+assert_equals \
+  "homeboy review lint data-machine --path /tmp/workspace" \
   "$(build_run_command "review lint" "${COMPONENT}" "${WORKSPACE}")" \
   "review lint includes workspace path"
 
@@ -68,10 +78,30 @@ SCOPE_BASE_REF="origin/main"
 unset HOMEBOY_DIFFERENTIAL_GATING || true
 assert_equals \
   "homeboy review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "lint keeps path with changed-since"
+
+assert_equals \
+  "homeboy --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "lint keeps output path with changed-since"
+
+assert_equals \
+  "homeboy review lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review lint" "${COMPONENT}" "${WORKSPACE}")" \
   "review lint keeps path with changed-since"
 
 GITHUB_ACTIONS="true"
+assert_equals \
+  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "GitHub Actions lint opts into hot-runner execution"
+
+assert_equals \
+  "homeboy --force-hot --allow-local-hot review test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "GitHub Actions test opts into hot-runner execution"
+
 assert_equals \
   "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
@@ -85,11 +115,46 @@ assert_equals \
 unset GITHUB_ACTIONS
 
 assert_equals \
+  "homeboy review test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "test keeps path with changed scope"
+
+assert_equals \
+  "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "audit keeps path with changed-since"
+
+assert_equals \
   "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}")" \
   "review audit keeps path with changed-since"
 
+assert_equals \
+  "homeboy review build data-machine --path /tmp/workspace" \
+  "$(build_run_command "build" "${COMPONENT}" "${WORKSPACE}")" \
+  "build routes through review"
+
+assert_equals \
+  "homeboy review audit data-machine --baseline --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "audit --baseline" "${COMPONENT}" "${WORKSPACE}")" \
+  "audit flags route after component through review"
+
 HOMEBOY_DIFFERENTIAL_GATING="true"
+assert_equals \
+  "homeboy review audit data-machine --path /tmp/workspace" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential audit uses full scope"
+
+assert_equals \
+  "homeboy review test data-machine --path /tmp/workspace" \
+  "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential test uses full scope"
+
+assert_equals \
+  "homeboy review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "differential lint keeps changed scope"
+
 assert_equals \
   "homeboy review audit data-machine --path /tmp/workspace" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}")" \
@@ -139,9 +204,19 @@ assert_equals \
   "run command appends extra args"
 
 assert_equals \
+  "homeboy review audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}")" \
+  "bare audit command appends extra args through review"
+
+assert_equals \
   "homeboy --output /tmp/workspace/out.json review audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
   "run command keeps output path before extra args"
+
+assert_equals \
+  "homeboy --output /tmp/workspace/out.json review audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_run_command "audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
+  "bare audit command keeps output path before extra args"
 
 unset EXTRA_ARGS
 BENCH_RIG="main,pr"
