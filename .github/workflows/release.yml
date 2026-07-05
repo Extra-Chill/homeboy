@@ -60,6 +60,7 @@ jobs:
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       bump-type: ${{ steps.check.outputs.release-bump-type }}
+      recovery-release: ${{ steps.check.outputs.recovery-release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -138,6 +139,7 @@ jobs:
           elif [ -n "${RECOVERY_TAG}" ]; then
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
+            echo "recovery-release=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Release recovery will publish ${RECOVERY_TAG}"
           elif [ -z "${RELEASE_VERSION}" ]; then
             echo "should-release=false" >> "$GITHUB_OUTPUT"
@@ -145,6 +147,12 @@ jobs:
           else
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
+            if [ "${BUMP_TYPE}" = "recovery" ]; then
+              echo "recovery-release=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Recovered prepared release tag; bypassing quality gates and publishing artifacts"
+            else
+              echo "recovery-release=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
           fi
 
@@ -194,7 +202,7 @@ jobs:
     needs:
       - check
       - gate-build
-    if: needs.check.outputs.should-release == 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
     runs-on: ubuntu-latest
     outputs:
       audit-result: ${{ steps.audit.outcome }}
@@ -243,7 +251,7 @@ jobs:
     needs:
       - check
       - gate-build
-    if: needs.check.outputs.should-release == 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -287,7 +295,7 @@ jobs:
     needs:
       - check
       - gate-build
-    if: needs.check.outputs.should-release == 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -336,7 +344,7 @@ jobs:
       - gate-build
       - gate-lint
       - gate-test
-    if: ${{ always() && inputs.release_tag == '' && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
+    if: ${{ always() && inputs.release_tag == '' && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -394,7 +402,7 @@ jobs:
       - gate-audit
       - gate-lint
       - gate-test
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Enforce release-blocking commands
@@ -441,7 +449,7 @@ jobs:
       - check
       - gate-build
       - release-quality-policy
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.outputs.outputs.release-version }}
