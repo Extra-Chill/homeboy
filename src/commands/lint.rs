@@ -59,6 +59,9 @@ pub struct LintArgs {
     #[arg(skip)]
     pub precomputed_changed_files: Option<Vec<String>>,
 
+    #[arg(skip)]
+    pub force_main_workflow: bool,
+
     #[arg(long, hide = true, value_name = "JSON")]
     pub lab_changed_files_json: Option<String>,
 
@@ -101,7 +104,12 @@ impl LintArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
-        if self.is_full_workspace_run() || self.changed_since.is_some() || self.changed_only {
+        if self.is_full_workspace_run()
+            || self.changed_since.is_some()
+            || self.changed_only
+            || self.file.is_some()
+            || self.glob.is_some()
+        {
             return Some(
                 LabCommandContract::portable(
                     LINT_LAB_LABEL,
@@ -129,6 +137,7 @@ impl LintArgs {
 
     pub(crate) fn should_use_self_check_dispatch(&self) -> bool {
         !self.fix
+            && !self.force_main_workflow
             && self.ci_job.is_none()
             && !self.summary
             && self.is_full_workspace_run()
@@ -580,6 +589,21 @@ mod tests {
                 "scoped or behavior-changing args must use main lint workflow: {argv:?}"
             );
         }
+    }
+
+    #[test]
+    fn file_scoped_lint_has_lab_contract() {
+        let args = TestCli::try_parse_from(["lint", "homeboy", "--file", "src/lib.rs"])
+            .expect("file lint should parse")
+            .lint;
+
+        let contract = args.lab_contract().expect("file lint should offload");
+
+        assert_eq!(contract.hot_label, crate::command_contract::LINT_LAB_LABEL);
+        assert_eq!(
+            contract.portability,
+            crate::command_contract::LabCommandPortability::Portable
+        );
     }
 
     #[test]

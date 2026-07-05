@@ -297,7 +297,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit, global)),
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args, global)),
-        Some(ReviewCommand::Lint(args)) => to_value(lint::run(args, global)),
+        Some(ReviewCommand::Lint(args)) => to_value(lint::run(review_lint_args(args), global)),
         Some(ReviewCommand::Test(args)) => to_value(test::run(args, global)),
         Some(ReviewCommand::Build(args)) => to_value(build::run(args, global)),
         Some(ReviewCommand::Ci(args)) => to_value(ci::run(args, global)),
@@ -313,6 +313,11 @@ fn to_value<T: Serialize>(result: CmdResult<T>) -> CmdResult<Value> {
         ))
     })?;
     Ok((value, exit_code))
+}
+
+fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
+    args.force_main_workflow = true;
+    args
 }
 
 pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
@@ -654,6 +659,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         precomputed_changed_files: review_context
             .precomputed_changed_files()
             .map(<[String]>::to_vec),
+        force_main_workflow: true,
         ci_job: None,
         sniff_filters: Default::default(),
         category: None,
@@ -1135,6 +1141,22 @@ mod tests {
         assert!(
             !lint_args.should_use_self_check_dispatch(),
             "review-scoped lint must run the main lint workflow, not full self-check scripts"
+        );
+    }
+
+    #[test]
+    fn direct_review_lint_args_do_not_use_self_check_dispatch() {
+        let cli =
+            TestCli::try_parse_from(["test", "lint", "homeboy"]).expect("review lint should parse");
+        let ReviewCommand::Lint(args) = cli.review.command.expect("lint subcommand") else {
+            panic!("expected lint subcommand");
+        };
+
+        let args = review_lint_args(args);
+
+        assert!(
+            !args.should_use_self_check_dispatch(),
+            "direct review lint must run the main lint workflow for every target form"
         );
     }
 
