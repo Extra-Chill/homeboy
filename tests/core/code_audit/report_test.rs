@@ -120,13 +120,13 @@ fn test_build_audit_summary_groups_findings_for_drilldown() {
     );
     assert_eq!(
         summary.finding_groups[0].drilldown_command,
-        "homeboy audit homeboy --only god_file"
+        "homeboy review audit homeboy --only god_file"
     );
     assert_eq!(summary.finding_groups[1].kind, "high_item_count");
     assert_eq!(grouped_json[0]["sample_files"][1], "src/b.rs");
     assert_eq!(
         grouped_json[1]["drilldown_command"],
-        "homeboy audit homeboy --only high_item_count"
+        "homeboy review audit homeboy --only high_item_count"
     );
 }
 
