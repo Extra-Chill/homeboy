@@ -1224,10 +1224,14 @@ impl RunnerWorkloadCommandFamily {
     pub(crate) fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
-            label if matches!(
-                label,
-                "review audit" | "review lint" | "review test" | "review build" | "review ci"
-            ) => Self::Quality,
+            label
+                if matches!(
+                    label,
+                    "review audit" | "review lint" | "review test" | "review build" | "review ci"
+                ) =>
+            {
+                Self::Quality
+            }
             LINT_LAB_LABEL | TEST_LAB_LABEL | AUDIT_LAB_LABEL | REVIEW_LAB_LABEL
             | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL | RIG_RUN_LAB_LABEL => {
                 Self::Quality
