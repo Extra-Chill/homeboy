@@ -51,6 +51,7 @@ pub fn controller_request_dispatch_command(
             client_context: optional_string(dispatch, "client_context"),
             attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
             queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
+            timeout_ms: optional_u64(dispatch, "timeout_ms")?,
         },
     };
 
@@ -164,6 +165,23 @@ pub fn optional_u32(value: &Value, key: &str) -> Result<Option<u32>> {
                         None,
                     )
                 })
+        })
+        .transpose()
+}
+
+/// Extract an optional `u64` field from a controller request JSON value.
+pub fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>> {
+    value
+        .get(key)
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    key,
+                    format!("controller action request field '{key}' must be a u64"),
+                    Some(value.to_string()),
+                    None,
+                )
+            })
         })
         .transpose()
 }

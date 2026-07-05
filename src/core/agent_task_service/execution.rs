@@ -77,7 +77,21 @@ pub fn run_submitted<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
+    run_submitted_with_timeout(run_id, None, executor)
+}
+
+pub fn run_submitted_with_timeout<E>(
+    run_id: String,
+    timeout_ms: Option<u64>,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
+    if let Some(timeout_ms) = timeout_ms {
+        plan.options.timeout_ms = Some(timeout_ms);
+    }
     prepare_plan_for_execution(&mut plan, Some(&run_id))?;
     agent_task_lifecycle::mark_running(&run_id)?;
     run_prepared_claimed(run_id, plan, executor)

@@ -89,15 +89,21 @@ pub(crate) fn link_latest_executor_evidence(
     }
 }
 
-/// Stable, per-run/per-task evidence directory under the system temp dir.
-///
-/// Recorded runs use their durable run id as the first path segment so repeated
-/// fanout child cooks with the same task id keep distinct evidence files.
 fn executor_evidence_dir(run_id: Option<&str>, task_id: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("homeboy-agent-task-evidence")
+    durable_executor_evidence_root()
         .join(sanitize_task_id(run_id.unwrap_or("unrecorded-run")))
         .join(sanitize_task_id(task_id))
+}
+
+fn durable_executor_evidence_root() -> PathBuf {
+    crate::core::artifacts::root()
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".homeboy-artifacts")
+        })
+        .join("agent-task")
+        .join("executor-evidence")
 }
 
 fn sanitize_task_id(task_id: &str) -> String {
@@ -182,7 +188,7 @@ mod tests {
     use serde_json::Map;
     use std::sync::Mutex;
 
-    static TEMP_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
@@ -239,24 +245,18 @@ mod tests {
         }
     }
 
-    fn with_temp_dir<R>(test: impl FnOnce() -> R) -> R {
-        // Isolate writes to a unique temp dir without racing parallel tests that
-        // also read `std::env::temp_dir()`.
-        let _lock = TEMP_DIR_ENV_LOCK.lock().expect("temp dir env lock");
-        let guard = tempfile::tempdir().expect("temp dir");
-        let previous = std::env::var_os("TMPDIR");
-        std::env::set_var("TMPDIR", guard.path());
-        let result = test();
-        match previous {
-            Some(value) => std::env::set_var("TMPDIR", value),
-            None => std::env::remove_var("TMPDIR"),
-        }
+    fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
+        let _lock = ARTIFACT_ROOT_LOCK.lock().expect("artifact root lock");
+        let guard = tempfile::tempdir().expect("artifact root");
+        crate::core::set_artifact_root_override(Some(guard.path().to_path_buf()));
+        let result = test(guard.path());
+        crate::core::set_artifact_root_override(None);
         result
     }
 
     #[test]
     fn links_executor_input_and_result_evidence_refs() {
-        with_temp_dir(|| {
+        with_artifact_root(|_| {
             let request = test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn persisted_input_redacts_secrets_but_retains_contracts_paths_and_artifacts() {
-        with_temp_dir(|| {
+        with_artifact_root(|_| {
             let request = test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn re_linking_does_not_duplicate_evidence_refs() {
-        with_temp_dir(|| {
+        with_artifact_root(|_| {
             let request = test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
@@ -328,12 +328,21 @@ mod tests {
         assert_eq!(first, second);
         assert!(first
             .to_string_lossy()
-            .contains("homeboy-agent-task-evidence"));
+            .contains("agent-task/executor-evidence"));
+    }
+
+    #[test]
+    fn evidence_dir_is_under_durable_artifact_root() {
+        with_artifact_root(|artifact_root| {
+            let path = executor_evidence_dir(Some("run-1"), "task-1");
+            assert!(path.starts_with(artifact_root));
+            assert!(!path.to_string_lossy().contains("homeboy-agent-task-evidence"));
+        });
     }
 
     #[test]
     fn repeated_child_runs_with_same_task_id_keep_distinct_evidence_paths() {
-        with_temp_dir(|| {
+        with_artifact_root(|_| {
             let request = test_request();
             let mut first_outcome = test_outcome();
             let mut second_outcome = test_outcome();

@@ -72,6 +72,8 @@ pub struct DispatchCoreInputs {
     pub attempts: u32,
     /// Persist the run for a daemon/runner but do not execute immediately.
     pub queue_only: bool,
+    /// Optional provider wall-clock timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +160,9 @@ where
     }
 
     lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::new(executor).run(plan.clone());
+    let aggregate = AgentTaskScheduler::new(executor)
+        .with_run_id(run_id.clone())
+        .run(plan.clone());
     let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     let exit_code = aggregate_exit_code(&aggregate);
 
@@ -201,7 +205,9 @@ where
     }
 
     lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::new(executor).run(plan.clone());
+    let aggregate = AgentTaskScheduler::new(executor)
+        .with_run_id(run_id.clone())
+        .run(plan.clone());
     let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     let exit_code = aggregate_exit_code(&aggregate);
 

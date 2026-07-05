@@ -12,7 +12,7 @@ use homeboy::core::agent_tasks::scheduler::{
 use homeboy::core::agent_tasks::service as agent_task_service;
 
 use super::super::CmdResult;
-use super::args::{AgentTaskCookArgs, RetryArgs, RunPlanArgs, StatusArgs, SubmitArgs};
+use super::args::{AgentTaskCookArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs, SubmitArgs};
 
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
@@ -126,7 +126,10 @@ fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
 }
 
 pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
-    let plan = agent_task_service::read_plan(&args.plan)?;
+    let mut plan = agent_task_service::read_plan(&args.plan)?;
+    if let Some(timeout_ms) = args.timeout_ms {
+        plan.options.timeout_ms = Some(timeout_ms);
+    }
     run_loaded_plan(
         plan,
         args.record_run_id.as_deref(),
@@ -149,15 +152,23 @@ where
     ))
 }
 
-pub(super) fn run_submitted(args: StatusArgs) -> CmdResult<Value> {
-    run_submitted_with_executor(args.run_id, ExtensionProviderAgentTaskExecutor::discover())
+pub(super) fn run_submitted(args: RunArgs) -> CmdResult<Value> {
+    run_submitted_with_executor(
+        args.run_id,
+        args.timeout_ms,
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
 }
 
-pub(super) fn run_submitted_with_executor<E>(run_id: String, executor: E) -> CmdResult<Value>
+pub(super) fn run_submitted_with_executor<E>(
+    run_id: String,
+    timeout_ms: Option<u64>,
+    executor: E,
+) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter,
 {
-    let result = agent_task_service::run_submitted(run_id, executor)?;
+    let result = agent_task_service::run_submitted_with_timeout(run_id, timeout_ms, executor)?;
     Ok((
         aggregate_value_with_failure_reasons(&result.value),
         result.exit_code,
@@ -207,6 +218,7 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
     if result.run {
         return run_submitted_with_executor(
             result.record.run_id,
+            None,
             ExtensionProviderAgentTaskExecutor::discover(),
         );
     }

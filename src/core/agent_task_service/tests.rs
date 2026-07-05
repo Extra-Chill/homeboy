@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::core::agent_task::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
-    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskFailureClassification,
+    AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
+    AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
 use crate::core::agent_task_schedule::AgentTaskPlan;
@@ -29,6 +30,30 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
         assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
         assert!(record.aggregate_path.is_some());
+    });
+}
+
+#[test]
+fn service_persists_timed_out_run_record_and_evidence_refs() {
+    with_isolated_home(|_| {
+        let result = run_loaded_plan(test_plan(), Some("service-timeout"), TimeoutExecutor)
+            .expect("timeout run completed");
+        let record = lifecycle_status("service-timeout").expect("status persisted");
+        let artifacts = artifacts("service-timeout").expect("artifacts persisted");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state, AgentTaskState::TimedOut);
+        assert_eq!(record.totals.as_ref().expect("totals").timed_out, 1);
+        assert!(record.aggregate_path.is_some());
+        assert!(record
+            .artifact_refs
+            .iter()
+            .any(|artifact| artifact.kind == "executor-result"));
+        assert!(artifacts
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "executor-result"));
     });
 }
 
@@ -490,6 +515,40 @@ impl AgentTaskExecutorAdapter for SucceedingExecutor {
             typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+struct TimeoutExecutor;
+
+impl AgentTaskExecutorAdapter for TimeoutExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Timeout,
+            summary: Some("provider exceeded timeout_ms=50".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::Timeout),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "executor-result".to_string(),
+                uri: "file:///tmp/executor-result.json".to_string(),
+                label: Some("executor result".to_string()),
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "agent_task.provider_timeout".to_string(),
+                message: "provider exceeded timeout_ms=50".to_string(),
+                data: serde_json::json!({ "timeout_ms": 50 }),
+            }],
             outputs: Value::Null,
             workflow: None,
             follow_up: None,
