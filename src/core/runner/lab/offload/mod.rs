@@ -112,7 +112,8 @@ use super::super::{
 };
 
 use super::super::workload::{
-    build_runner_workload, runner_workload_agent_task_from_command, RunnerWorkloadBuildInput,
+    build_runner_workload_for_dispatched_command, runner_workload_agent_task_from_command,
+    RunnerWorkloadBuildInput,
 };
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,

@@ -1,3 +1,4 @@
+use crate::cli_surface::Cli;
 use crate::command_contract::{
     RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
     RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
@@ -9,6 +10,7 @@ use crate::command_contract::{
 use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
+use clap::Parser;
 
 use super::{
     LabOffloadCommand, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
@@ -31,16 +33,34 @@ pub(crate) struct RunnerWorkloadBuildInput<'a> {
     pub proof_id: Option<&'a str>,
 }
 
+#[cfg(test)]
 pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> RunnerWorkload {
+    let command_label = input.command.hot_label.to_string();
+    build_runner_workload_with_command_label(input, command_label)
+}
+
+pub(crate) fn build_runner_workload_for_dispatched_command(
+    input: RunnerWorkloadBuildInput<'_>,
+    dispatched_command: &[String],
+) -> RunnerWorkload {
+    let command_label = runner_workload_command_label_from_dispatched_command(dispatched_command)
+        .unwrap_or_else(|| input.command.hot_label.to_string());
+    build_runner_workload_with_command_label(input, command_label)
+}
+
+fn build_runner_workload_with_command_label(
+    input: RunnerWorkloadBuildInput<'_>,
+    command_label: String,
+) -> RunnerWorkload {
     let workspace_mapping_ref = input.workspace_mapping_ref.map(str::to_string);
+    let command_family = RunnerWorkloadCommandFamily::from_command_label(&command_label);
+    let required_secret_categories = required_secret_categories(&command_label);
     RunnerWorkload {
         schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
         workload_id: format!("{}.runner_workload", input.plan.id),
         kind: RunnerWorkloadKind {
-            command_label: input.command.hot_label.to_string(),
-            command_family: RunnerWorkloadCommandFamily::from_command_label(
-                input.command.hot_label,
-            ),
+            command_label,
+            command_family,
         },
         agent_task: None,
         workspace_mappings: RunnerWorkloadWorkspaceMappings {
@@ -51,7 +71,7 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
         },
         required_capabilities: required_capabilities(input.command),
         required_secrets: RunnerWorkloadSecrets {
-            categories: required_secret_categories(input.command.hot_label),
+            categories: required_secret_categories,
             secret_env_plan: SecretEnvPlan::default(),
         },
         required_extensions: input.command.required_extensions.clone(),
@@ -82,6 +102,33 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
             artifacts: Vec::new(),
         },
     }
+}
+
+fn runner_workload_command_label_from_dispatched_command(command: &[String]) -> Option<String> {
+    let argv = cli_argv_from_dispatched_command(command)?;
+    let cli = Cli::try_parse_from(argv).ok()?;
+    let route_contract = cli.command.lab_route_contract().ok()??;
+    Some(route_contract.command.hot_label.to_string())
+}
+
+fn cli_argv_from_dispatched_command(command: &[String]) -> Option<Vec<String>> {
+    if command.is_empty() {
+        return None;
+    }
+    if is_homeboy_executable(&command[0]) {
+        return Some(command.to_vec());
+    }
+    let mut argv = Vec::with_capacity(command.len() + 1);
+    argv.push("homeboy".to_string());
+    argv.extend(command.iter().cloned());
+    Some(argv)
+}
+
+fn is_homeboy_executable(value: &str) -> bool {
+    std::path::Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("homeboy")
 }
 
 pub(crate) fn runner_workload_agent_task_from_command(
@@ -575,6 +622,121 @@ mod tests {
             workspace_mapping_ref: None,
             proof_id: None,
         })
+    }
+
+    #[test]
+    fn runner_workload_kind_comes_from_dispatched_command_for_lab_shapes() {
+        struct Case {
+            name: &'static str,
+            argv: Vec<&'static str>,
+            expected_label: &'static str,
+            expected_family: RunnerWorkloadCommandFamily,
+        }
+
+        let cases = [
+            Case {
+                name: "review lint component",
+                argv: vec![
+                    "/srv/homeboy/bin/homeboy",
+                    "--force-hot",
+                    "review",
+                    "lint",
+                    "homeboy",
+                ],
+                expected_label: "review lint",
+                expected_family: RunnerWorkloadCommandFamily::Quality,
+            },
+            Case {
+                name: "agent-task cook",
+                argv: vec![
+                    "/srv/homeboy/bin/homeboy",
+                    "--force-hot",
+                    "agent-task",
+                    "cook",
+                    "--to-worktree",
+                    "homeboy@cook",
+                    "--goal",
+                    "tighten lab dispatch metadata",
+                    "--verify",
+                    "cargo check --all-targets",
+                    "--no-finalize",
+                ],
+                expected_label: "agent-task cook/run-plan/retry --run",
+                expected_family: RunnerWorkloadCommandFamily::AgentTask,
+            },
+            Case {
+                name: "plain offloaded command",
+                argv: vec![
+                    "/srv/homeboy/bin/homeboy",
+                    "--force-hot",
+                    "extension",
+                    "update",
+                    "wordpress",
+                ],
+                expected_label: "extension update",
+                expected_family: RunnerWorkloadCommandFamily::Unknown,
+            },
+            Case {
+                name: "resident-path command",
+                argv: vec![
+                    "/srv/homeboy/bin/homeboy",
+                    "--force-hot",
+                    "agent-task",
+                    "status",
+                    "run-1",
+                ],
+                expected_label:
+                    "agent-task run/run-next/status/logs/artifacts/review/list/active/latest",
+                expected_family: RunnerWorkloadCommandFamily::AgentTask,
+            },
+        ];
+
+        for case in cases {
+            let plan = plan();
+            let mut command = command();
+            command.hot_label = "trace";
+            let dispatched_command = case
+                .argv
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+
+            let workload = build_runner_workload_for_dispatched_command(
+                RunnerWorkloadBuildInput {
+                    plan: &plan,
+                    command: &command,
+                    capture_patch: true,
+                    mutation_flag: None,
+                    allow_dirty_lab_workspace: false,
+                    runner_id: "lab-a",
+                    runner_mode: "direct_ssh",
+                    assignment_source: "explicit",
+                    status: "offloaded",
+                    remote_workspace: Some("/srv/homeboy/work"),
+                    fallback_reason: None,
+                    workspace_mapping_ref: Some("path_materialization_plan"),
+                    proof_id: None,
+                },
+                &dispatched_command,
+            );
+
+            assert_eq!(
+                workload.kind.command_label, case.expected_label,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                workload.kind.command_family, case.expected_family,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                workload.workspace_mappings.mapping_ref.as_deref(),
+                Some("path_materialization_plan"),
+                "{}",
+                case.name
+            );
+        }
     }
 
     fn secret_plan(names: &[&str]) -> SecretEnvPlan {
