@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.7] - 2026-07-05
+
+### Changed
+- Guard release package artifacts with skip publish
+
+### Fixed
+- recover prepared release tags
+
 ## [0.281.6] - 2026-07-05
 
 ### Changed
