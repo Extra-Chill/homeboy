@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.7] - 2026-07-05
+
+### Changed
+- use review quality command defaults
+
 ## [2.8.6] - 2026-07-04
 
 ### Fixed
