@@ -1,5 +1,8 @@
 use super::common::{request, script};
 use super::*;
+use std::sync::Mutex;
+
+static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn scheduler_dispatches_extension_provider_command() {
@@ -198,6 +201,28 @@ fn provider_timeout_returns_structured_outcome() {
     assert_eq!(
         aggregate.outcomes[0].failure_classification,
         Some(AgentTaskFailureClassification::Timeout)
+    );
+}
+
+#[test]
+fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout() {
+    let _lock = DEFAULT_TIMEOUT_ENV_LOCK.lock().expect("default timeout env lock");
+    std::env::set_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS", "50");
+    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
+    let (request, provider) = request("task-default-timeout", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+    std::env::remove_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS");
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Timeout)
+    );
+    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_timeout");
+    assert_eq!(
+        outcome.diagnostics[0].data["timeout_ms"],
+        json!(50)
     );
 }
 

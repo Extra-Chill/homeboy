@@ -215,7 +215,7 @@ pub enum AgentTaskCommand {
     /// Lifecycle: run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
     /// Lifecycle: execute a previously submitted durable agent-task run.
-    Run(StatusArgs),
+    Run(RunArgs),
     /// Lifecycle: claim and execute the oldest queued durable agent-task run.
     RunNext,
     /// Lifecycle: persist an agent-task plan and return a durable run id without executing it.
@@ -635,6 +635,20 @@ pub struct RunPlanArgs {
     /// Also persist the completed run lifecycle record under this id.
     #[arg(long, value_name = "ID")]
     pub record_run_id: Option<String>,
+
+    /// Provider wall-clock timeout in milliseconds. Overrides the plan timeout.
+    #[arg(long = "timeout-ms", value_name = "MS")]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+pub struct RunArgs {
+    /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
+    pub run_id: String,
+
+    /// Provider wall-clock timeout in milliseconds. Overrides the submitted plan timeout.
+    #[arg(long = "timeout-ms", value_name = "MS")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Args, Debug)]

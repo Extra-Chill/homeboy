@@ -28,6 +28,10 @@ pub struct DispatchCoreArgs {
     /// Persist the run for a daemon/runner but do not execute immediately.
     #[arg(long)]
     pub queue_only: bool,
+
+    /// Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout.
+    #[arg(long = "timeout-ms", value_name = "MS")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl From<DispatchCoreArgs> for DispatchCoreInputs {
@@ -38,6 +42,7 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             client_context: args.client_context,
             attempts: args.attempts,
             queue_only: args.queue_only,
+            timeout_ms: args.timeout_ms,
         }
     }
 }
@@ -236,6 +241,7 @@ mod tests {
                     client_context: None,
                     attempts: 1,
                     queue_only: false,
+                    timeout_ms: None,
                 },
             }
             .into(),
@@ -269,6 +275,7 @@ mod tests {
                     client_context: None,
                     attempts: 1,
                     queue_only: false,
+                    timeout_ms: None,
                 },
             }
             .into(),
@@ -348,6 +355,7 @@ mod tests {
                     overrides.core.attempts
                 },
                 queue_only: overrides.core.queue_only,
+                timeout_ms: overrides.core.timeout_ms,
             },
         }
     }

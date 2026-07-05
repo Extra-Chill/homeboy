@@ -46,11 +46,9 @@ fn submit_run_status_reports_terminal_state() {
             run_id: Some("run-cli-terminal".to_string()),
         })
         .expect("submitted");
-        let (_, run_exit_code) = run_submitted(StatusArgs {
+        let (_, run_exit_code) = run_submitted(RunArgs {
             run_id: "run-cli-terminal".to_string(),
-            bridge: false,
-            since_cursor: None,
-            full: false,
+            timeout_ms: None,
         })
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {

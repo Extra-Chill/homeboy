@@ -517,6 +517,7 @@ impl BatchCookSpec {
                 client_context: Some(merged_client_context(plan, self)),
                 attempts: self.attempts,
                 queue_only: false,
+                timeout_ms: None,
             },
         };
         let title = self

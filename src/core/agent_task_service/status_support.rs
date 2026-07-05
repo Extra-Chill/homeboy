@@ -83,8 +83,14 @@ pub fn persist_provider_boundary_replay_evidence(report: &Value) -> Option<Strin
         .get("task_id")
         .and_then(Value::as_str)
         .unwrap_or("unknown-task");
-    let dir = std::env::temp_dir()
-        .join("homeboy-agent-task-evidence")
+    let dir = crate::core::artifacts::root()
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".homeboy-artifacts")
+        })
+        .join("agent-task")
+        .join("executor-evidence")
         .join(sanitize_evidence_path_part(run_id));
     fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!(

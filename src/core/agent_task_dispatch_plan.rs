@@ -209,6 +209,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     );
     plan.group_key = repo.clone();
     plan.options.max_concurrency = request.concurrency.max(1);
+    plan.options.timeout_ms = request.core.timeout_ms;
     plan.options.retry = AgentTaskRetryPolicy {
         max_attempts: request.core.attempts.max(1),
         ..AgentTaskRetryPolicy::default()
@@ -1725,6 +1726,7 @@ mod tests {
                     overrides.core.attempts
                 },
                 queue_only: overrides.core.queue_only,
+                timeout_ms: overrides.core.timeout_ms,
             },
             backend_selection: None,
         }

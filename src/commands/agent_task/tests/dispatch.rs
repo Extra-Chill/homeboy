@@ -330,6 +330,68 @@ fn cook_dispatch_provider_id_alias_maps_to_selector() {
 }
 
 #[test]
+fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
+    let cook = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@cook-timeout",
+        "--verify",
+        "true",
+        "--backend",
+        "sample-backend",
+        "--prompt",
+        "cook",
+        "--timeout-ms",
+        "1234",
+    ])
+    .expect("cook timeout parses");
+    let Commands::AgentTask(agent_task) = cook.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Cook(args) = agent_task.command else {
+        panic!("expected cook command");
+    };
+    assert_eq!(args.dispatch.core.timeout_ms, Some(1234));
+
+    let run = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "run",
+        "run-123",
+        "--timeout-ms",
+        "5678",
+    ])
+    .expect("run timeout parses");
+    let Commands::AgentTask(agent_task) = run.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Run(args) = agent_task.command else {
+        panic!("expected run command");
+    };
+    assert_eq!(args.timeout_ms, Some(5678));
+
+    let run_plan = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "run-plan",
+        "--plan",
+        "@plan.json",
+        "--timeout-ms",
+        "9012",
+    ])
+    .expect("run-plan timeout parses");
+    let Commands::AgentTask(agent_task) = run_plan.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::RunPlan(args) = agent_task.command else {
+        panic!("expected run-plan command");
+    };
+    assert_eq!(args.timeout_ms, Some(9012));
+}
+
+#[test]
 fn controller_dispatch_provider_id_alias_maps_to_dispatch_selector() {
     let cli = Cli::try_parse_from([
         "homeboy",

@@ -209,12 +209,13 @@ pub(super) fn run_provider_command_once(
         return preflight;
     }
 
-    let timeout = request
-        .limits
-        .timeout_ms
-        .or(request.limits.max_runtime_ms)
-        .map(|timeout_ms| (timeout_ms, timeout_with_grace(timeout_ms)));
+    let requested_timeout_ms = crate::core::agent_task_timeout::effective_provider_timeout_ms(
+        request.limits.timeout_ms,
+        request.limits.max_runtime_ms,
+    );
+    let process_timeout = timeout_with_grace(requested_timeout_ms);
     let mut provider_request = request.clone();
+    provider_request.limits.timeout_ms = Some(requested_timeout_ms);
     provider_request.normalize_artifact_declarations();
     let input = match serde_json::to_vec(&provider_request) {
         Ok(input) => input,
@@ -291,7 +292,7 @@ pub(super) fn run_provider_command_once(
         let _ = std::io::Write::write_all(&mut stdin, &input);
     }
 
-    let output = if let Some((requested_timeout_ms, process_timeout)) = timeout {
+    let output = {
         let started = Instant::now();
         loop {
             match child.try_wait() {
@@ -315,8 +316,6 @@ pub(super) fn run_provider_command_once(
                 Err(error) => break Err(error),
             }
         }
-    } else {
-        child.wait_with_output()
     };
 
     let Ok(output) = output else {
