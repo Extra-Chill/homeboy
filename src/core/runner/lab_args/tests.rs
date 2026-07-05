@@ -1551,6 +1551,30 @@ mod lab_args_rewrite_tests {
     use super::*;
 
     #[test]
+    fn lab_args_rewrite_preserves_nested_review_quality_command_label() {
+        let args = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+            "data-machine".to_string(),
+            "--lab-only".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, "/runner/data-machine", &[], None),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "review".to_string(),
+                "lint".to_string(),
+                "data-machine".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn lab_args_rewrite_agent_task_dispatch_cwd() {
         let args = vec![
             "homeboy".to_string(),

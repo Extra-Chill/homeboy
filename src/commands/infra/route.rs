@@ -1157,6 +1157,66 @@ mod tests {
     }
 
     #[test]
+    fn nested_review_quality_subcommands_use_specific_lab_labels() {
+        for (args, expected_label) in [
+            (vec!["homeboy", "review", "audit", "data-machine"], "review audit"),
+            (vec!["homeboy", "review", "lint", "data-machine"], "review lint"),
+            (vec!["homeboy", "review", "test", "data-machine"], "review test"),
+            (vec!["homeboy", "review", "build", "data-machine"], "review build"),
+            (
+                vec!["homeboy", "review", "ci", "run", "data-machine", "--job", "lint"],
+                "review ci",
+            ),
+        ] {
+            let cli = Cli::parse_from(args);
+            let command = cli.command.lab_contract().unwrap();
+
+            assert_eq!(command.hot_label, expected_label);
+        }
+    }
+
+    #[test]
+    fn nested_review_lint_dispatch_uses_matching_lab_label() {
+        let cli = Cli::parse_from(["homeboy", "review", "lint", "data-machine"]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "review lint");
+        assert!(command.portable);
+        assert!(command.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn nested_review_quality_subcommand_resolves_effective_component() {
+        let cli = Cli::parse_from(["homeboy", "review", "lint", "data-machine"]);
+        let Commands::Review(args) = cli.command else {
+            panic!("expected review command");
+        };
+
+        assert_eq!(args.lab_label(), "review lint");
+        assert_eq!(
+            args.effective_component_args().component.as_deref(),
+            Some("data-machine")
+        );
+    }
+
+    #[test]
+    fn nested_review_quality_in_dir_offload_uses_current_dir_path() {
+        let dir = tempdir().expect("tempdir");
+        let _cwd = CwdGuard::set(dir.path());
+        let normalized = vec!["homeboy".to_string(), "review".to_string(), "lint".to_string()];
+        let cli = Cli::parse_from(&normalized);
+
+        let rewritten = lab_route_source_path_args(&cli.command, &normalized, false)
+            .expect("review lint without component gets cwd path rewrite");
+        let cwd = std::env::current_dir().expect("current dir");
+
+        assert_eq!(rewritten[0..3], normalized);
+        assert_eq!(rewritten[3], "--path");
+        assert_eq!(rewritten[4], cwd.to_string_lossy());
+    }
+
+    #[test]
     fn explicit_runner_for_changed_scope_test_is_lab_portable() {
         let cli = Cli::parse_from([
             "homeboy",

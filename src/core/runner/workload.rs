@@ -371,38 +371,16 @@ fn dispatched_command_label(command_args: &[String], expected_label: &str) -> Op
         || expected_parts
             .iter()
             .any(|part| part.starts_with('-') || part.contains('/'))
-        || command_args.len() < expected_parts.len()
     {
         return None;
     }
 
-    let mut matched = Vec::with_capacity(expected_parts.len());
-    let mut command_index = 0;
-
-    for expected in expected_parts {
-        loop {
-            let Some(arg) = command_args.get(command_index).map(String::as_str) else {
-                return None;
-            };
-            command_index += 1;
-
-            if runner_workload_command_label_value_option(arg) {
-                command_index += 1;
-                continue;
-            }
-            if runner_workload_command_label_flag_option(arg) {
-                continue;
-            }
-
-            matched.push(arg);
-            if arg != expected {
-                return Some(matched.join(" "));
-            }
-            break;
-        }
+    let positional_parts = dispatched_positional_command_parts(command_args);
+    if positional_parts.len() < expected_parts.len() {
+        return None;
     }
 
-    Some(matched.join(" "))
+    Some(positional_parts[..expected_parts.len()].join(" "))
 }
 
 fn runner_workload_command_label_value_option(arg: &str) -> bool {
@@ -414,19 +392,41 @@ fn runner_workload_command_label_flag_option(arg: &str) -> bool {
 }
 
 fn dispatched_command_family(command_args: &[String]) -> RunnerWorkloadCommandFamily {
-    let max_parts = command_args.len().min(3);
+    let positional_parts = dispatched_positional_command_parts(command_args);
+    let max_parts = positional_parts.len().min(3);
     for part_count in (1..=max_parts).rev() {
-        let label = command_args[..part_count]
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ");
+        let label = positional_parts[..part_count].join(" ");
         let family = RunnerWorkloadCommandFamily::from_command_label(&label);
         if family != RunnerWorkloadCommandFamily::Unknown {
             return family;
         }
     }
     RunnerWorkloadCommandFamily::Unknown
+}
+
+fn dispatched_positional_command_parts(command_args: &[String]) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut iter = command_args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if runner_workload_command_label_value_option(arg) {
+            let _ = iter.next();
+            continue;
+        }
+        if runner_workload_command_label_flag_option(arg) {
+            continue;
+        }
+        if arg.starts_with('-') {
+            if !arg.contains('=') && iter.peek().is_some_and(|next| !next.starts_with('-')) {
+                let _ = iter.next();
+            }
+            continue;
+        }
+        parts.push(arg.as_str());
+    }
+    parts
 }
 
 pub(crate) fn merge_runner_workload_capability_preflight(
@@ -852,6 +852,74 @@ mod tests {
             true,
         )
         .expect("matching runner-injected homeboy argv is valid");
+    }
+
+    #[test]
+    fn runner_workload_validation_accepts_nested_review_quality_labels() {
+        for label in [
+            "review audit",
+            "review lint",
+            "review test",
+            "review build",
+            "review ci",
+        ] {
+            let plan = plan();
+            let mut command = command();
+            command.hot_label = label;
+            command.required_extensions.clear();
+            command.required_capabilities.clear();
+            let workload = build_runner_workload(RunnerWorkloadBuildInput {
+                plan: &plan,
+                command: &command,
+                capture_patch: false,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+                runner_id: "lab-a",
+                runner_mode: "direct_ssh",
+                assignment_source: "explicit",
+                status: "offloaded",
+                remote_workspace: Some("/srv/homeboy/work"),
+                fallback_reason: None,
+                workspace_mapping_ref: None,
+                proof_id: None,
+            });
+            let mut argv = label
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            argv.push("data-machine".to_string());
+
+            assert_eq!(
+                workload.kind.command_family,
+                RunnerWorkloadCommandFamily::Quality
+            );
+            validate_runner_workload_dispatch(
+                Some(&workload),
+                "lab-a",
+                Some("/srv/homeboy/work"),
+                &argv,
+                &SecretEnvPlan::default(),
+                false,
+            )
+            .expect("nested review quality command label is valid");
+
+            let mut argv_with_extension = vec![
+                "review".to_string(),
+                "--extension".to_string(),
+                "wordpress".to_string(),
+            ];
+            argv_with_extension.extend(label.split_whitespace().skip(1).map(str::to_string));
+            argv_with_extension.push("data-machine".to_string());
+            validate_runner_workload_dispatch(
+                Some(&workload),
+                "lab-a",
+                Some("/srv/homeboy/work"),
+                &argv_with_extension,
+                &SecretEnvPlan::default(),
+                false,
+            )
+            .expect("nested review quality command label tolerates interleaved options");
+        }
     }
 
     #[test]

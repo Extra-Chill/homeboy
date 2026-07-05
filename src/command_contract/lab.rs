@@ -1224,6 +1224,10 @@ impl RunnerWorkloadCommandFamily {
     pub(crate) fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
+            label if matches!(
+                label,
+                "review audit" | "review lint" | "review test" | "review build" | "review ci"
+            ) => Self::Quality,
             LINT_LAB_LABEL | TEST_LAB_LABEL | AUDIT_LAB_LABEL | REVIEW_LAB_LABEL
             | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL | RIG_RUN_LAB_LABEL => {
                 Self::Quality
@@ -1283,6 +1287,18 @@ impl Commands {
             }
             Commands::Review(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone());
+                match args.command.as_ref() {
+                    Some(crate::commands::review::ReviewCommand::Audit(audit_args)) => {
+                        extension_ids.extend(audit_args.audit.extension_override.extensions.clone())
+                    }
+                    Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => {
+                        extension_ids.extend(lint_args.extension_override.extensions.clone())
+                    }
+                    Some(crate::commands::review::ReviewCommand::Test(test_args)) => {
+                        extension_ids.extend(test_args.extension_override.extensions.clone())
+                    }
+                    _ => {}
+                }
                 extension_ids.extend(review_lab_extension_ids(args)?);
             }
             Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
@@ -1348,15 +1364,28 @@ mod extension_ids {
     pub(crate) fn review_lab_extension_ids(
         args: &crate::commands::review::ReviewArgs,
     ) -> crate::core::Result<Vec<String>> {
+        let extension_overrides = match args.command.as_ref() {
+            Some(crate::commands::review::ReviewCommand::Audit(audit_args)) => {
+                audit_args.audit.extension_override.extensions.clone()
+            }
+            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => {
+                lint_args.extension_override.extensions.clone()
+            }
+            Some(crate::commands::review::ReviewCommand::Test(test_args)) => {
+                test_args.extension_override.extensions.clone()
+            }
+            _ => args.extension_override.extensions.clone(),
+        };
         let resolve_for = |capability: Option<ExtensionCapability>| {
+            let component_args = args.effective_component_args();
             execution_context::resolve(&ResolveOptions {
-                component_id: args.comp.component.clone(),
-                path_override: args.comp.path.clone(),
+                component_id: component_args.component.clone(),
+                path_override: component_args.path.clone(),
                 capability,
                 settings_overrides: Vec::new(),
                 settings_profile_json_overrides: Vec::new(),
                 settings_json_overrides: Vec::new(),
-                extension_overrides: args.extension_override.extensions.clone(),
+                extension_overrides: extension_overrides.clone(),
             })
         };
 
