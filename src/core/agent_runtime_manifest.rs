@@ -1037,6 +1037,58 @@ mod tests {
     }
 
     #[test]
+    fn standalone_runtime_manifest_accepts_path_discovered_executable_readiness_without_env() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("opencode");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("opencode.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "ignored-on-disk",
+                    "label": "OpenCode",
+                    "agent_task_executors": [{
+                        "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                        "id": "opencode.agent-task-executor",
+                        "backend": "opencode",
+                        "command": "node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs",
+                        "runner_readiness": [{
+                            "id": "opencode.executable",
+                            "label": "OpenCode executable",
+                            "executable": {
+                                "candidates": ["opencode"],
+                                "version_command": ["--version"],
+                                "install_hint": "Install opencode so it is available on PATH."
+                            }
+                        }]
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let catalog = discover_standalone_agent_runtime_catalog();
+
+            assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+            assert_eq!(catalog.manifests.len(), 1);
+            let executable = catalog.manifests[0].agent_task_executors[0].runner_readiness[0]
+                .executable
+                .as_ref()
+                .expect("executable readiness");
+            assert!(executable.env.is_empty());
+            assert_eq!(executable.candidates, vec!["opencode".to_string()]);
+            assert_eq!(executable.version_command, vec!["--version".to_string()]);
+            assert_eq!(
+                executable.install_hint.as_deref(),
+                Some("Install opencode so it is available on PATH.")
+            );
+        });
+    }
+
+    #[test]
     fn standalone_runtime_manifest_with_unsatisfied_core_constraint_reports_diagnostic() {
         crate::test_support::with_isolated_home(|home| {
             let runtime_dir = home
