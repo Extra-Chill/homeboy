@@ -481,6 +481,136 @@ fn release_plan_runs_package_preflight_before_mutating_release_steps() {
 }
 
 #[test]
+fn skip_publish_still_packages_artifacts_for_github_release() {
+    let mut component = github_fixture_component();
+    component.extensions = Some(std::collections::HashMap::from([(
+        "fixture-packager".to_string(),
+        ScopedExtensionConfig::default(),
+    )]));
+    let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Fixture Packager",
+        "version": "1.0.0",
+        "actions": [
+            {
+                "id": "release.package",
+                "label": "Package release",
+                "type": "command",
+                "command": "true"
+            },
+            {
+                "id": "release.publish",
+                "label": "Publish release",
+                "type": "command",
+                "command": "true"
+            }
+        ]
+    }))
+    .expect("extension manifest");
+    extension.id = "fixture-packager".to_string();
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        pipeline: ReleasePipelineOptions {
+            skip_publish: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    let package_preflight_index = step_index(&ids, "preflight.package");
+    let tag_preflight_index = step_index(&ids, "preflight.tag_availability");
+    let package_index = step_index(&ids, "package");
+    let tag_index = step_index(&ids, "git.tag");
+    let push_index = step_index(&ids, "git.push");
+    let github_release_index = step_index(&ids, "github.release");
+
+    assert!(package_preflight_index < tag_preflight_index);
+    assert!(package_index < tag_index);
+    assert!(push_index < github_release_index);
+    assert_eq!(steps[tag_preflight_index].needs, vec!["preflight.package"]);
+    assert_eq!(steps[tag_index].needs, vec!["package"]);
+    assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
+    assert!(!ids.iter().any(|id| id.starts_with("publish.")));
+    assert!(!ids.contains(&"cleanup"));
+}
+
+#[test]
+fn skip_publish_and_no_github_release_does_not_package_artifacts() {
+    let mut component = github_fixture_component();
+    component.extensions = Some(std::collections::HashMap::from([(
+        "fixture-packager".to_string(),
+        ScopedExtensionConfig::default(),
+    )]));
+    let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Fixture Packager",
+        "version": "1.0.0",
+        "actions": [
+            {
+                "id": "release.package",
+                "label": "Package release",
+                "type": "command",
+                "command": "true"
+            },
+            {
+                "id": "release.publish",
+                "label": "Publish release",
+                "type": "command",
+                "command": "true"
+            }
+        ]
+    }))
+    .expect("extension manifest");
+    extension.id = "fixture-packager".to_string();
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        pipeline: ReleasePipelineOptions {
+            skip_publish: true,
+            ..Default::default()
+        },
+        skip_github_release: true,
+        ..Default::default()
+    };
+
+    let steps = build_release_steps(
+        &component,
+        &[extension],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &options,
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("steps");
+
+    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+    assert!(!ids.contains(&"preflight.package"));
+    assert!(!ids.contains(&"package"));
+    assert!(!ids.contains(&"github.release"));
+    assert!(!ids.iter().any(|id| id.starts_with("publish.")));
+}
+
+#[test]
 fn release_plan_records_changelog_contract() {
     let component = fixture_component();
     let mut warnings = Vec::new();

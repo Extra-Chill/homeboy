@@ -51,11 +51,18 @@ pub(in crate::core::release) fn build_release_steps(
         );
     }
 
-    let package_preflight_step_id = add_package_preflight_step(
-        &mut steps,
+    let github_release_will_run = !options.skip_github_release && github_release_applies(component);
+    let package_needed = release_package_needed(
         extensions,
         &publish_targets,
         options,
+        github_release_will_run,
+    );
+
+    let package_preflight_step_id = add_package_preflight_step(
+        &mut steps,
+        extensions,
+        package_needed,
         "preflight.changelog_bootstrap",
     );
 
@@ -115,7 +122,7 @@ pub(in crate::core::release) fn build_release_steps(
         StepConfig::new(),
     ));
 
-    let tag_needs = if !publish_targets.is_empty() && !options.pipeline.skip_publish {
+    let tag_needs = if package_needed {
         steps.push(ready_step(
             "package",
             "package",
@@ -147,7 +154,7 @@ pub(in crate::core::release) fn build_release_steps(
             .string("branch", push_branch),
     ));
 
-    if !options.skip_github_release && github_release_applies(component) {
+    if github_release_will_run {
         steps.push(ready_step(
             "github.release",
             "github.release",
@@ -243,6 +250,13 @@ fn build_head_release_steps(
 ) -> Vec<PlanStep> {
     let mut steps = Vec::new();
     let mut artifact_need = "preflight.remote_sync".to_string();
+    let github_release_will_run = !options.skip_github_release && github_release_applies(component);
+    let package_needed = release_package_needed(
+        extensions,
+        publish_targets,
+        options,
+        github_release_will_run,
+    );
 
     if !publish_targets.is_empty()
         && !options.pipeline.skip_publish
@@ -265,7 +279,7 @@ fn build_head_release_steps(
             string_config("dir", dir),
         ));
         artifact_need = "artifacts.inventory".to_string();
-    } else if !options.pipeline.skip_publish && has_package_capability(extensions) {
+    } else if package_needed {
         steps.push(ready_step(
             "package",
             "package",
@@ -283,7 +297,7 @@ fn build_head_release_steps(
         );
     }
 
-    if !options.skip_github_release && github_release_applies(component) {
+    if github_release_will_run {
         let tag_name = release_scope.tag_name(version);
         steps.push(ready_step(
             "github.release",
@@ -330,7 +344,7 @@ fn build_head_release_steps(
             } else {
                 vec!["cleanup".to_string()]
             }
-        } else if !options.skip_github_release && github_release_applies(component) {
+        } else if github_release_will_run {
             vec!["github.release".to_string()]
         } else {
             vec![artifact_need.clone()]
@@ -350,7 +364,7 @@ fn build_head_release_steps(
             vec!["post_release".to_string()]
         } else if !options.pipeline.skip_publish && !publish_step_ids.is_empty() {
             publish_step_ids
-        } else if !options.skip_github_release && github_release_applies(component) {
+        } else if github_release_will_run {
             vec!["github.release".to_string()]
         } else {
             vec![artifact_need]
@@ -371,14 +385,10 @@ fn build_head_release_steps(
 fn add_package_preflight_step(
     steps: &mut Vec<PlanStep>,
     extensions: &[ExtensionManifest],
-    publish_targets: &[String],
-    options: &ReleaseOptions,
+    package_needed: bool,
     needs: &str,
 ) -> Option<String> {
-    if publish_targets.is_empty()
-        || options.pipeline.skip_publish
-        || !has_package_capability(extensions)
-    {
+    if !package_needed || !has_package_capability(extensions) {
         return None;
     }
 
@@ -391,6 +401,17 @@ fn add_package_preflight_step(
         StepConfig::new(),
     ));
     Some(step_id)
+}
+
+fn release_package_needed(
+    extensions: &[ExtensionManifest],
+    publish_targets: &[String],
+    options: &ReleaseOptions,
+    github_release_will_run: bool,
+) -> bool {
+    has_package_capability(extensions)
+        && (github_release_will_run
+            || (!options.pipeline.skip_publish && !publish_targets.is_empty()))
 }
 
 fn add_release_extension_diagnostics(
