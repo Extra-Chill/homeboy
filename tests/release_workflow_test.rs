@@ -43,7 +43,7 @@ fn release_refactor_gate_enables_non_pr_repair_path() {
 #[test]
 fn release_quality_policy_defaults_to_lint_and_test_blocking() {
     assert!(release_workflow().contains(
-        "RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}"
+        "RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'review lint,review test' }}"
     ));
 
     let policy = job_section(release_workflow(), "release-quality-policy");
@@ -77,7 +77,7 @@ fn release_ci_disables_homeboy_update_checks() {
 fn release_test_gate_does_not_repeat_separate_lint_gate() {
     let gate_test = job_section(release_workflow(), "gate-test");
 
-    assert!(gate_test.contains("commands: test"));
+    assert!(gate_test.contains("commands: review test"));
     assert!(gate_test.contains("--skip-lint"));
     assert!(gate_test.contains("--changed-since {0}"));
 }
@@ -128,12 +128,14 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     let prepare = job_section(release_workflow(), "prepare");
     let plan = job_section(release_workflow(), "plan");
 
-    assert!(prepare.contains(
-        "prepared: ${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}"
-    ));
+    assert!(prepare.contains("prepared: ${{ steps.outputs.outputs.prepared }}"));
     assert!(prepare.contains("id: prepared"));
+    assert!(prepare.contains("id: outputs"));
     assert!(prepare.contains("steps.release.outputs.release-tag != ''"));
     assert!(prepare.contains("echo \"prepared=true\" >> \"$GITHUB_OUTPUT\""));
+    assert!(prepare.contains(
+        "PREPARED=\"${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}\""
+    ));
     assert!(prepare.contains("downstream jobs will publish it in this run"));
     assert!(
         prepare.contains("Skipping release preparation; downstream jobs will publish existing tag")
@@ -142,6 +144,26 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     assert!(plan.contains("needs.prepare.outputs.prepared == 'true'"));
     assert!(plan.contains("needs.prepare.outputs.release-tag != ''"));
     assert!(!plan.contains("needs.prepare.outputs.released == 'true'"));
+}
+
+#[test]
+fn release_recovery_bypasses_quality_gates_and_still_prepares() {
+    let check = job_section(release_workflow(), "check");
+    let gate_audit = job_section(release_workflow(), "gate-audit");
+    let gate_lint = job_section(release_workflow(), "gate-lint");
+    let gate_test = job_section(release_workflow(), "gate-test");
+    let policy = job_section(release_workflow(), "release-quality-policy");
+    let prepare = job_section(release_workflow(), "prepare");
+
+    assert!(check.contains("recovery-release: ${{ steps.check.outputs.recovery-release }}"));
+    assert!(check.contains("echo \"recovery-release=true\" >> \"$GITHUB_OUTPUT\""));
+    assert!(check.contains("Recovered prepared release tag; bypassing quality gates"));
+
+    for section in [gate_audit, gate_lint, gate_test, policy] {
+        assert!(section.contains("needs.check.outputs.recovery-release != 'true'"));
+    }
+
+    assert!(prepare.contains("needs.check.outputs.recovery-release == 'true'"));
 }
 
 #[test]
