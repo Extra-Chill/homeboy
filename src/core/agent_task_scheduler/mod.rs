@@ -309,10 +309,11 @@ where
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
-                let task_timeout_ms = crate::core::agent_task_timeout::effective_provider_timeout_ms(
-                    request.limits.timeout_ms.or(plan.options.timeout_ms),
-                    request.limits.max_runtime_ms,
-                );
+                let task_timeout_ms =
+                    crate::core::agent_task_timeout::effective_provider_timeout_ms(
+                        request.limits.timeout_ms.or(plan.options.timeout_ms),
+                        request.limits.max_runtime_ms,
+                    );
                 let tx = tx.clone();
                 let attempt = scheduled.attempt;
                 let context = AgentTaskExecutionContext {

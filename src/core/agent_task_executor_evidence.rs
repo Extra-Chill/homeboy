@@ -336,7 +336,9 @@ mod tests {
         with_artifact_root(|artifact_root| {
             let path = executor_evidence_dir(Some("run-1"), "task-1");
             assert!(path.starts_with(artifact_root));
-            assert!(!path.to_string_lossy().contains("homeboy-agent-task-evidence"));
+            assert!(!path
+                .to_string_lossy()
+                .contains("homeboy-agent-task-evidence"));
         });
     }
 
