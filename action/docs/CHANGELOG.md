@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.9] - 2026-07-05
+
+### Fixed
+- route quality gates through review umbrella
+
 ## [2.8.8] - 2026-07-05
 
 ### Changed
