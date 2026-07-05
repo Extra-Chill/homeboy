@@ -131,18 +131,20 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     assert!(prepare.contains("prepared: ${{ steps.outputs.outputs.prepared }}"));
     assert!(prepare.contains("id: prepared"));
     assert!(prepare.contains("id: outputs"));
-    assert!(prepare.contains("steps.release.outputs.release-tag != ''"));
+    assert!(prepare.contains("steps.release.outputs['release-tag'] != ''"));
     assert!(prepare.contains("echo \"prepared=true\" >> \"$GITHUB_OUTPUT\""));
     assert!(prepare.contains(
         "PREPARED=\"${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}\""
     ));
+    assert!(prepare.contains("release-tag: ${{ steps.outputs.outputs['release-tag'] }}"));
     assert!(prepare.contains("downstream jobs will publish it in this run"));
     assert!(
         prepare.contains("Skipping release preparation; downstream jobs will publish existing tag")
     );
 
     assert!(plan.contains("needs.prepare.outputs.prepared == 'true'"));
-    assert!(plan.contains("needs.prepare.outputs.release-tag != ''"));
+    assert!(plan.contains("needs.prepare.outputs['release-tag'] != ''"));
+    assert!(plan.contains("needs.prepare.outputs['release-tag']"));
     assert!(!plan.contains("needs.prepare.outputs.released == 'true'"));
 }
 
