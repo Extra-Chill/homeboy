@@ -90,9 +90,17 @@ pub(super) fn validate_runner_extension_parity(
     cwd: &str,
     required_extensions: &[String],
     requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
 ) -> Result<()> {
     for extension_id in required_extensions {
-        validate_runner_extension(runner_id, runner, cwd, extension_id, requested_setting_keys)?;
+        validate_runner_extension(
+            runner_id,
+            runner,
+            cwd,
+            extension_id,
+            requested_setting_keys,
+            accepted_setting_keys,
+        )?;
     }
 
     Ok(())
@@ -104,6 +112,7 @@ fn validate_runner_extension(
     cwd: &str,
     extension_id: &str,
     requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
 ) -> Result<()> {
     let homeboy_path = remote_runner_homeboy_path(runner, "runner extension parity preflight")?;
     let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
@@ -116,6 +125,7 @@ fn validate_runner_extension(
             extension_id,
             &output.stdout,
             requested_setting_keys,
+            accepted_setting_keys,
         )?;
         validate_runner_extension_core_compatibility(
             runner_id,
@@ -155,6 +165,7 @@ fn validate_runner_extension(
                     extension_id,
                     &refreshed.stdout,
                     requested_setting_keys,
+                    accepted_setting_keys,
                 )?;
                 validate_runner_extension_core_compatibility(
                     runner_id,
@@ -211,6 +222,7 @@ fn validate_runner_extension_settings(
     extension_id: &str,
     remote_stdout: &str,
     requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
 ) -> Result<()> {
     if requested_setting_keys.is_empty() {
         return Ok(());
@@ -219,7 +231,9 @@ fn validate_runner_extension_settings(
     let metadata = remote_extension_metadata(remote_stdout);
     let declared = remote_extension_settings(remote_stdout);
     for key in requested_setting_keys {
-        if !runner_extension_setting_declared(&declared, key) {
+        if !runner_extension_setting_declared(&declared, key)
+            && !accepted_setting_keys.iter().any(|accepted| accepted == key)
+        {
             return Err(unsupported_runner_extension_setting_error(
                 runner_id,
                 homeboy_path,
@@ -1070,6 +1084,7 @@ mod tests {
             "example",
             remote_stdout,
             &["missing_setting".to_string()],
+            &[],
         )
         .expect_err("unsupported setting should fail before execution");
 
@@ -1113,6 +1128,7 @@ mod tests {
                 "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT".to_string(),
                 "bench_env.SSI_FIXTURE_MATRIX_VISUAL_PARITY_FULL_PAGE".to_string(),
             ],
+            &[],
         )
         .expect("declared object setting should cover dotted child overrides");
 
@@ -1122,6 +1138,7 @@ mod tests {
             "wordpress",
             remote_stdout,
             &["profile.name".to_string()],
+            &[],
         )
         .expect_err("string settings should not cover dotted child overrides");
     }
@@ -1189,6 +1206,7 @@ mod tests {
             "wordpress",
             remote_stdout,
             &requested_setting_keys,
+            &[],
         )
         .expect("declared bench_env object should cover Lab bench dotted overrides");
     }
@@ -1203,8 +1221,34 @@ mod tests {
             "wordpress",
             remote_stdout,
             &["bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT".to_string()],
+            &[],
         )
         .expect("settings object maps should preserve object-child semantics");
+    }
+
+    #[test]
+    fn setting_parity_accepts_caller_accepted_setting_not_declared_by_extension() {
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"example","path":"/runner/extensions/example","source_revision":"abc1234","settings":[{"id":"profile","type":"string","label":"Profile"}]}}}"#;
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "example",
+            remote_stdout,
+            &["rig_namespace".to_string()],
+            &["rig_namespace".to_string()],
+        )
+        .expect("caller-accepted rig settings should pass runner extension parity");
+
+        validate_runner_extension_settings(
+            "homeboy-lab",
+            "homeboy",
+            "example",
+            remote_stdout,
+            &["still_unknown".to_string()],
+            &["rig_namespace".to_string()],
+        )
+        .expect_err("unknown settings must still fail runner extension parity");
     }
 
     #[test]

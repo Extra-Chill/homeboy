@@ -417,6 +417,7 @@ fn runner_exec_options_from_envelope(
         path_materialization_plan: None,
         capability_preflight,
         required_extensions,
+        accepted_extension_settings: Vec::new(),
         require_paths: dispatch.require_paths,
         runner_workload: envelope.runner_workload,
         run_id,

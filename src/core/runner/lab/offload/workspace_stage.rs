@@ -20,6 +20,7 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) remapped_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
     pub(crate) runner_required_extensions: Vec<String>,
+    pub(crate) accepted_extension_settings: Vec<String>,
     pub(crate) command: Vec<String>,
     pub(crate) remote_command: Vec<String>,
     pub(crate) remote_output_file: Option<String>,
@@ -461,6 +462,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         Path::new(&synced.local_path),
     )?;
     let runner_required_extensions = runner_command_plan.required_extensions.clone();
+    let accepted_extension_settings = runner_command_plan.accepted_settings.clone();
     let command = build_lab_offload_remote_command(
         command_prefix_argv,
         &remapped_args,
@@ -491,6 +493,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         remapped_args,
         agent_task_run_id,
         runner_required_extensions,
+        accepted_extension_settings,
         command,
         remote_command,
         remote_output_file,
@@ -710,6 +713,7 @@ fn build_lab_offload_remote_command(
 struct RunnerCommandPlan {
     required_extensions: Vec<String>,
     command_extensions: Vec<String>,
+    accepted_settings: Vec<String>,
 }
 
 impl RunnerCommandPlan {
@@ -719,6 +723,7 @@ impl RunnerCommandPlan {
         primary_source_path: &Path,
     ) -> Result<Self> {
         let rig_extensions = rig_required_extensions_from_primary_rig(args, primary_source_path)?;
+        let accepted_settings = rig_accepted_settings_from_primary_rig(args, primary_source_path)?;
         let rig_dispatch_extensions =
             rig_dispatch_extensions_from_primary_rig(args, primary_source_path)?;
         let mut required_extensions = std::collections::BTreeSet::new();
@@ -732,8 +737,35 @@ impl RunnerCommandPlan {
         Ok(Self {
             required_extensions: required_extensions.into_iter().collect(),
             command_extensions,
+            accepted_settings,
         })
     }
+}
+
+fn rig_accepted_settings_from_primary_rig(
+    args: &[String],
+    primary_source_path: &Path,
+) -> Result<Vec<String>> {
+    if rig_workload_command(args) != Some(RigWorkloadCommand::Bench) {
+        return Ok(Vec::new());
+    }
+
+    let rig_ids = rig_ids_from_args(args);
+    if rig_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut accepted_settings = std::collections::BTreeSet::new();
+    for rig_id in rig_ids {
+        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
+            continue;
+        };
+        if let Some(bench) = spec.bench.as_ref() {
+            accepted_settings.extend(bench.accepted_settings.iter().cloned());
+        }
+    }
+
+    Ok(accepted_settings.into_iter().collect())
 }
 
 fn rig_required_extensions_from_primary_rig(
@@ -816,7 +848,7 @@ fn rig_dispatch_extensions_from_primary_rig(
     Ok(extension_ids.into_iter().collect())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RigWorkloadCommand {
     Bench,
     Fuzz,
@@ -1093,6 +1125,7 @@ mod tests {
                 .iter()
                 .map(|extension| extension.to_string())
                 .collect(),
+            accepted_settings: Vec::new(),
         }
     }
 
@@ -1254,7 +1287,10 @@ mod tests {
                             "path": "/controller/workspaces/static-site-importer"
                         }
                     },
-                    "bench": { "default_component": "static-site-importer" },
+                    "bench": {
+                        "default_component": "static-site-importer",
+                        "accepted_settings": ["fixture_namespace"]
+                    },
                     "bench_workloads": {
                         "nodejs": [
                             {
@@ -1333,7 +1369,10 @@ mod tests {
                             "path": "/controller/workspaces/static-site-importer"
                         }
                     },
-                    "bench": { "default_component": "static-site-importer" },
+                    "bench": {
+                        "default_component": "static-site-importer",
+                        "accepted_settings": ["fixture_namespace"]
+                    },
                     "bench_workloads": {
                         "nodejs": [
                             {
@@ -1381,6 +1420,10 @@ mod tests {
                 vec!["nodejs".to_string(), "wordpress".to_string()]
             );
             assert_eq!(plan.command_extensions, vec!["nodejs".to_string()]);
+            assert_eq!(
+                plan.accepted_settings,
+                vec!["fixture_namespace".to_string()]
+            );
             assert_eq!(
                 command,
                 vec![

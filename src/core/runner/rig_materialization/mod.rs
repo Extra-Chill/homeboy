@@ -277,6 +277,7 @@ pub(super) fn sync_lab_offload_rigs(
                 // correctly provisioned runner and fails early otherwise (#5285).
                 capability_preflight: Some(rig_install_capability_preflight()),
                 required_extensions: Vec::new(),
+                accepted_extension_settings: Vec::new(),
                 require_paths: Vec::new(),
                 runner_workload: None,
                 run_id: None,

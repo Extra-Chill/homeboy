@@ -81,6 +81,7 @@ fn exec_runner_rig_sources_command(
             path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,

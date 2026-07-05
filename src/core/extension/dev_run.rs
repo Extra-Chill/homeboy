@@ -259,6 +259,7 @@ pub(crate) fn run_extension_dev_run_with(
                 ..Default::default()
             }),
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: Some(install_workload.clone()),
             run_id: None,
@@ -320,6 +321,7 @@ pub(crate) fn run_extension_dev_run_with(
                 ..Default::default()
             }),
             required_extensions: vec![plan.extension_id.clone()],
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: Some(command_workload.clone()),
             run_id: None,
@@ -562,6 +564,7 @@ fn probe_runner_extension_state(
                 ..Default::default()
             }),
             required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             runner_workload: None,
             run_id: None,
