@@ -83,6 +83,45 @@ fn provider_manifest_accepts_command_invocation_contract() {
 }
 
 #[test]
+fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
+    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+        "id": "path-runtime.agent-task-executor",
+        "backend": "path-runtime",
+        "command": "node {{runtime_path}}/scripts/agent/homeboy-path-runtime-agent-task-executor.cjs",
+        "runner_readiness": [{
+            "id": "path-runtime.executable",
+            "label": "PATH runtime executable",
+            "executable": {
+                "candidates": ["path-runtime"],
+                "version_command": ["--version"],
+                "install_hint": "Install path-runtime so it is available on PATH."
+            }
+        }]
+    }))
+    .expect("provider manifest");
+
+    let executable = provider.runner_readiness[0]
+        .executable
+        .as_ref()
+        .expect("executable readiness");
+    assert!(executable.env.is_empty());
+    assert_eq!(executable.candidates, vec!["path-runtime".to_string()]);
+    assert_eq!(executable.version_command, vec!["--version".to_string()]);
+    assert_eq!(
+        executable.install_hint.as_deref(),
+        Some("Install path-runtime so it is available on PATH.")
+    );
+
+    let exported = serde_json::to_value(&provider).expect("provider export");
+    assert!(
+        exported["runner_readiness"][0]["executable"]
+            .get("env")
+            .is_none(),
+        "empty env should remain omitted on export: {exported:?}"
+    );
+}
+
+#[test]
 fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
     crate::test_support::with_isolated_home(|home| {
         let runtime_dir = home.path().join(".config/homeboy/agent-runtimes/codex");

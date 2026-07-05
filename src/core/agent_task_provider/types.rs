@@ -293,6 +293,7 @@ pub struct AgentTaskProviderEnvPathReadiness {
 pub struct AgentTaskProviderExecutableReadiness {
     /// Environment variable names that should receive the resolved executable path.
     /// Existing non-empty env values win before binary candidate discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
     /// Ordered executable names or paths to try when env does not already point
     /// at an executable. Bare names are resolved on PATH; paths are checked as-is.
