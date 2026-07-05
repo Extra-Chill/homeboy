@@ -158,14 +158,29 @@ fn release_recovery_bypasses_quality_gates_and_still_prepares() {
     let prepare = job_section(release_workflow(), "prepare");
 
     assert!(check.contains("recovery-release: ${{ steps.check.outputs.recovery-release }}"));
+    assert!(check.contains("release-version: ${{ steps.check.outputs['release-version'] }}"));
+    assert!(check.contains("release-tag: ${{ steps.check.outputs['release-tag'] }}"));
+    assert!(check.contains("RELEASE_TAG=\"${{ steps.recovery.outputs['release-tag'] || steps.release-check.outputs['release-tag'] }}\""));
     assert!(check.contains("echo \"recovery-release=true\" >> \"$GITHUB_OUTPUT\""));
-    assert!(check.contains("Recovered prepared release tag; bypassing quality gates"));
+    assert!(check.contains("echo \"release-tag=${RELEASE_TAG}\" >> \"$GITHUB_OUTPUT\""));
+    assert!(
+        check.contains("Recovered prepared release tag ${RELEASE_TAG}; bypassing quality gates")
+    );
 
     for section in [gate_audit, gate_lint, gate_test, policy] {
         assert!(section.contains("needs.check.outputs.recovery-release != 'true'"));
     }
 
     assert!(prepare.contains("needs.check.outputs.recovery-release == 'true'"));
+    assert!(prepare.contains(
+        "if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'"
+    ));
+    assert!(prepare.contains(
+        "if: inputs.release_tag != '' || needs.check.outputs.recovery-release == 'true'"
+    ));
+    assert!(
+        prepare.contains("TAG=\"${{ inputs.release_tag || needs.check.outputs['release-tag'] }}\"")
+    );
 }
 
 #[test]
