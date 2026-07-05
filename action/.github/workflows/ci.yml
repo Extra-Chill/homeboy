@@ -12,7 +12,7 @@ on:
       commands:
         description: 'Homeboy quality commands to run.'
         type: string
-        default: 'audit,lint,test'
+        default: 'review audit,review lint,review test'
       expected-commands:
         description: 'Full command set expected across the workflow.'
         type: string

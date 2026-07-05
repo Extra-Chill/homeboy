@@ -37,7 +37,7 @@ inputs:
 
   # ── Commands ──
   commands:
-    description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → audit,lint,test; cron → release.'
+    description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → review audit,review lint,review test; cron → release.'
     required: false
     default: ''
   expected-commands:
