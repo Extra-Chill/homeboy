@@ -31,7 +31,26 @@ impl ReviewArtifactFindings for AuditCommandOutput {
 
 impl ReviewArtifactFindings for LintCommandOutput {
     fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
-        self.findings.clone().unwrap_or_default()
+        let mut findings = self.findings.clone().unwrap_or_default();
+        if let Some(formatting) = &self.formatting_findings {
+            findings.extend(formatting.files.iter().map(|file| {
+                HomeboyFinding::builder(
+                    "format",
+                    format!(
+                        "Formatting required; run `{}`",
+                        formatting.suggested_command
+                    ),
+                )
+                .rule("format-check")
+                .category("format")
+                .severity("error")
+                .file(file.clone())
+                .fixable(true)
+                .metadata("suggested_command", formatting.suggested_command.clone())
+                .build()
+            }));
+        }
+        findings
     }
 }
 

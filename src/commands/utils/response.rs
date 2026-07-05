@@ -5,7 +5,7 @@
 use homeboy::core::error::Hint;
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::output::{write_output_file_atomically, OutputWriteOptions};
 
@@ -513,7 +513,7 @@ fn envelope_for_data(
         }
     }
 
-    let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts);
+    let diagnostics = failure_diagnostics_for_data(exit_code, &run, &artifacts, &data);
 
     CommandResultEnvelope {
         schema: COMMAND_RESULT_SCHEMA,
@@ -537,13 +537,15 @@ fn failure_diagnostics_for_data(
     exit_code: i32,
     run: &Option<CommandRunRef>,
     artifacts: &[CommandArtifactRef],
+    data: &Value,
 ) -> Option<CommandDiagnostics> {
     if exit_code == 0 {
         return None;
     }
-    let failure_digest = run
-        .as_ref()
-        .and_then(|run| failure_digest_for_run(&run.id, artifacts));
+    let failure_digest = failure_digest_for_data(data).or_else(|| {
+        run.as_ref()
+            .and_then(|run| failure_digest_for_run(&run.id, artifacts))
+    });
     failure_digest.map(|failure_digest| CommandDiagnostics {
         code: "command.failed".to_string(),
         message: failure_digest.summary.clone(),
@@ -564,8 +566,103 @@ fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
             next_actions: Vec::new(),
             retryable: err.retryable,
         }),
+        _ => Some(CommandFailureDigest {
+            summary: err.message.clone(),
+            stdout_tail: None,
+            stderr_tail: None,
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+            retryable: err.retryable,
+        }),
+    }
+}
+
+fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
+    if let Some(digest) = formatting_failure_digest(data) {
+        return Some(digest);
+    }
+    let failure = data.get("failure").and_then(Value::as_object);
+    let summary = failure
+        .and_then(|failure| string_at_object(failure, "summary"))
+        .or_else(|| {
+            data.get("phase")
+                .and_then(Value::as_object)
+                .and_then(|phase| string_at_object(phase, "summary"))
+        })
+        .or_else(|| {
+            data.get("summary")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })?;
+
+    Some(CommandFailureDigest {
+        summary,
+        stdout_tail: raw_output_tail(data, "stdout_tail"),
+        stderr_tail: raw_output_tail(data, "stderr_tail"),
+        artifact_refs: Vec::new(),
+        next_actions: Vec::new(),
+        retryable: None,
+    })
+}
+
+fn formatting_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
+    let formatting = find_object_key(data, "formatting_findings")?;
+    let files = formatting_files(formatting);
+    let command = string_at_object(formatting, "suggested_command")?;
+    let summary = if files.is_empty() {
+        format!("FORMAT: format check failed; run `{command}`")
+    } else {
+        format!(
+            "FORMAT: format check found {} unformatted file(s): {}; run `{}`",
+            files.len(),
+            files.join(", "),
+            command
+        )
+    };
+    Some(CommandFailureDigest {
+        summary,
+        stdout_tail: raw_output_tail(data, "stdout_tail"),
+        stderr_tail: raw_output_tail(data, "stderr_tail"),
+        artifact_refs: Vec::new(),
+        next_actions: vec![CommandNextAction::new("fix formatting", command)
+            .with_kind(CommandNextActionKind::Repair)],
+        retryable: Some(false),
+    })
+}
+
+fn find_object_key<'a>(value: &'a Value, key: &str) -> Option<&'a Map<String, Value>> {
+    match value {
+        Value::Object(map) => map
+            .get(key)
+            .and_then(Value::as_object)
+            .or_else(|| map.values().find_map(|value| find_object_key(value, key))),
+        Value::Array(values) => values.iter().find_map(|value| find_object_key(value, key)),
         _ => None,
     }
+}
+
+fn formatting_files(formatting: &Map<String, Value>) -> Vec<String> {
+    formatting
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn string_at_object(object: &Map<String, Value>, key: &str) -> Option<String> {
+    object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn raw_output_tail(data: &Value, key: &str) -> Option<String> {
+    data.get("raw_output")
+        .and_then(Value::as_object)
+        .and_then(|raw| string_at_object(raw, key))
 }
 
 fn failure_digest_for_run(
@@ -916,6 +1013,40 @@ mod tests {
         assert_eq!(
             value["diagnostics"]["failure_digest"]["stderr_tail"],
             "before\nstderr tail"
+        );
+    }
+
+    #[test]
+    fn failed_quality_payload_includes_format_failure_digest_without_run_evidence() {
+        let response = cli_response_for_json_result_for_command(
+            &Ok(json!({
+                "command": "review",
+                "summary": { "status": "failed" },
+                "lint": {
+                    "stage": "lint",
+                    "passed": false,
+                    "output": {
+                        "formatting_findings": {
+                            "files": ["src/lib.rs", "src/main.rs"],
+                            "suggested_command": "cargo fmt"
+                        }
+                    }
+                }
+            })),
+            1,
+            "review",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["summary"],
+            "FORMAT: format check found 2 unformatted file(s): src/lib.rs, src/main.rs; run `cargo fmt`"
+        );
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+            "cargo fmt"
         );
     }
 

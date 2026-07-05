@@ -714,6 +714,11 @@ fn audit_finding_count(output: &AuditCommandOutput) -> usize {
 
 fn lint_finding_count(output: &LintCommandOutput) -> usize {
     output.findings.as_ref().map(|f| f.len()).unwrap_or(0)
+        + output
+            .formatting_findings
+            .as_ref()
+            .map(|formatting| formatting.files.len().max(1))
+            .unwrap_or(0)
 }
 
 fn test_finding_count(output: &TestCommandOutput) -> usize {

@@ -1159,12 +1159,32 @@ mod tests {
     #[test]
     fn nested_review_quality_subcommands_use_specific_lab_labels() {
         for (args, expected_label) in [
-            (vec!["homeboy", "review", "audit", "data-machine"], "review audit"),
-            (vec!["homeboy", "review", "lint", "data-machine"], "review lint"),
-            (vec!["homeboy", "review", "test", "data-machine"], "review test"),
-            (vec!["homeboy", "review", "build", "data-machine"], "review build"),
             (
-                vec!["homeboy", "review", "ci", "run", "data-machine", "--job", "lint"],
+                vec!["homeboy", "review", "audit", "data-machine"],
+                "review audit",
+            ),
+            (
+                vec!["homeboy", "review", "lint", "data-machine"],
+                "review lint",
+            ),
+            (
+                vec!["homeboy", "review", "test", "data-machine"],
+                "review test",
+            ),
+            (
+                vec!["homeboy", "review", "build", "data-machine"],
+                "review build",
+            ),
+            (
+                vec![
+                    "homeboy",
+                    "review",
+                    "ci",
+                    "run",
+                    "data-machine",
+                    "--job",
+                    "lint",
+                ],
                 "review ci",
             ),
         ] {
@@ -1204,7 +1224,11 @@ mod tests {
     fn nested_review_quality_in_dir_offload_uses_current_dir_path() {
         let dir = tempdir().expect("tempdir");
         let _cwd = CwdGuard::set(dir.path());
-        let normalized = vec!["homeboy".to_string(), "review".to_string(), "lint".to_string()];
+        let normalized = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+        ];
         let cli = Cli::parse_from(&normalized);
 
         let rewritten = lab_route_source_path_args(&cli.command, &normalized, false)

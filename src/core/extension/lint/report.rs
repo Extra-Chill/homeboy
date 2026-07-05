@@ -16,7 +16,7 @@ use crate::core::refactor::AppliedRefactor;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::run::{LintRunWorkflowResult, LintSummaryOutput};
+use super::run::{FormattingFindings, LintRunWorkflowResult, LintSummaryOutput};
 
 /// Unified output envelope for the lint command.
 ///
@@ -90,7 +90,11 @@ pub fn from_main_workflow_with_ci_context(
     let failure = if exit_code == 0 {
         None
     } else {
-        Some(lint_phase_failure(exit_code, finding_count))
+        Some(lint_phase_failure(
+            exit_code,
+            finding_count,
+            result.formatting_findings.as_ref(),
+        ))
     };
 
     (
@@ -229,7 +233,31 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
     )
 }
 
-fn lint_phase_failure(exit_code: i32, finding_count: usize) -> PhaseFailure {
+fn lint_phase_failure(
+    exit_code: i32,
+    finding_count: usize,
+    formatting_findings: Option<&FormattingFindings>,
+) -> PhaseFailure {
+    if let Some(formatting) = formatting_findings {
+        let count = formatting.files.len();
+        return PhaseFailure {
+            phase: VerificationPhase::Format,
+            category: PhaseFailureCategory::Findings,
+            summary: if count == 0 {
+                format!(
+                    "format check failed; run `{}`",
+                    formatting.suggested_command
+                )
+            } else {
+                format!(
+                    "format check found {} unformatted file(s): {}; run `{}`",
+                    count,
+                    formatting.files.join(", "),
+                    formatting.suggested_command
+                )
+            },
+        };
+    }
     let category = phase_failure_category_from_exit_code(exit_code);
     PhaseFailure {
         phase: VerificationPhase::Lint,
@@ -284,6 +312,40 @@ mod tests {
         assert_eq!(
             output.phase.summary,
             "lint phase failed with 2 finding(s) across phpcs passed: 0, eslint failed: 1, phpstan failed: 1"
+        );
+    }
+
+    #[test]
+    fn formatting_findings_surface_as_format_failure() {
+        let result = LintRunWorkflowResult {
+            status: "failed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            harness_error: false,
+            autofix: None,
+            hints: None,
+            baseline_comparison: None,
+            formatting_findings: Some(FormattingFindings {
+                files: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+                summary: Some("FMT SUMMARY: 2 files need formatting".to_string()),
+                suggested_command: "cargo fmt".to_string(),
+            }),
+            findings: Some(Vec::new()),
+            producer_summaries: Vec::new(),
+            summary: None,
+            self_check_capture: None,
+            extension_phase_timings: Vec::new(),
+        };
+
+        let (output, exit_code) = from_main_workflow(result);
+
+        assert_eq!(exit_code, 1);
+        let failure = output.failure.expect("format failure");
+        assert_eq!(failure.phase, VerificationPhase::Format);
+        assert_eq!(failure.category, PhaseFailureCategory::Findings);
+        assert_eq!(
+            failure.summary,
+            "format check found 2 unformatted file(s): src/lib.rs, src/main.rs; run `cargo fmt`"
         );
     }
 }
