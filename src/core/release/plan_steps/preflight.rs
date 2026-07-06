@@ -57,6 +57,14 @@ pub(in crate::core::release) fn build_preflight_steps(
 
     steps.extend(build_extension_release_preflight_steps(extensions));
 
+    steps.push(ready_step(
+        "preflight.dependencies",
+        "preflight.dependencies",
+        "Hydrate release dependencies",
+        vec!["preflight.bump_policy".to_string()],
+        StepConfig::new(),
+    ));
+
     if let Some(identity) = options.git_identity.as_ref() {
         steps.insert(
             1,
@@ -117,10 +125,10 @@ fn build_extension_release_preflight_steps(extensions: &[ExtensionManifest]) -> 
 }
 
 fn build_quality_steps(options: &ReleaseOptions) -> Vec<PlanStep> {
-    build_shared_quality_steps(
-        &QualityPlanOptions::release_preflight("release", options.skip_checks)
-            .with_granular_skips(&options.skip_checks_granular),
-    )
+    let mut quality_options = QualityPlanOptions::release_preflight("release", options.skip_checks)
+        .with_granular_skips(&options.skip_checks_granular);
+    quality_options.lint_needs = vec!["preflight.dependencies".to_string()];
+    build_shared_quality_steps(&quality_options)
 }
 
 fn build_bump_policy_step(

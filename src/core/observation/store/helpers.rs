@@ -125,20 +125,33 @@ pub(crate) fn row_to_artifact_record_at(
             Box::new(error),
         )
     })?;
+    let metadata_json = parse_metadata(row.get(offset + 12)?)?;
+    let metadata_url = |key: &str| {
+        metadata_json
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+    };
     Ok(ArtifactRecord {
         id: row.get(offset)?,
         run_id: row.get(offset + 1)?,
         kind: row.get(offset + 2)?,
         artifact_type: artifact_type.clone(),
         path: path.clone(),
-        url: url.or_else(|| (artifact_type == "url").then_some(path.clone())),
-        public_url: row.get(offset + 6)?,
-        viewer_url: row.get(offset + 7)?,
+        url: url
+            .or_else(|| (artifact_type == "url").then_some(path.clone()))
+            .or_else(|| metadata_url("url")),
+        public_url: row
+            .get::<_, Option<String>>(offset + 6)?
+            .or_else(|| metadata_url("public_url")),
+        viewer_url: row
+            .get::<_, Option<String>>(offset + 7)?
+            .or_else(|| metadata_url("viewer_url")),
         viewer_links,
         sha256: row.get(offset + 9)?,
         size_bytes: row.get(offset + 10)?,
         mime: row.get(offset + 11)?,
-        metadata_json: parse_metadata(row.get(offset + 12)?)?,
+        metadata_json,
         created_at: row.get(offset + 13)?,
     })
 }

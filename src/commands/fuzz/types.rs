@@ -66,6 +66,21 @@ impl FuzzArgs {
             }))
         )
     }
+
+    pub(crate) fn destructive_local_execution_requires_override(&self) -> bool {
+        self.destructive_run_args()
+            .is_some_and(|run| run.allow_destructive && !run.allow_local_destructive_fuzz)
+    }
+
+    fn destructive_run_args(&self) -> Option<&FuzzRunArgs> {
+        match &self.command {
+            None => Some(&self.run),
+            Some(FuzzCommand::Run(run)) => Some(run),
+            Some(FuzzCommand::RunCampaign(plan)) => (!plan.dry_run).then_some(&plan.run),
+            Some(FuzzCommand::Plan(plan)) => plan.execute.then_some(&plan.run),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -226,6 +241,10 @@ pub struct FuzzRunArgs {
     /// Explicit homeboy/isolation-proof/v1 JSON proving destructive fuzz can run safely.
     #[arg(long = "isolation-proof", value_name = "PATH")]
     pub(crate) isolation_proof: Option<PathBuf>,
+
+    /// Permit destructive fuzz to execute on the local controller instead of Lab.
+    #[arg(long = "allow-local-destructive-fuzz")]
+    pub(crate) allow_local_destructive_fuzz: bool,
 
     /// Require a numeric metric emitted by the fuzz campaign to equal this value.
     /// Repeatable. Format: `--expect-metric metric_name=2`.

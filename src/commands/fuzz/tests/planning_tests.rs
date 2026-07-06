@@ -625,15 +625,59 @@ fn fuzz_plan_skips_destructive_operations_by_default() {
 }
 
 #[test]
-fn fuzz_plan_rejects_destructive_mode_without_explicit_isolation_proof() {
+fn fuzz_plan_allows_destructive_with_generated_isolation_proof() {
     let mut args = planner_args();
     args.run.allow_destructive = true;
-    args.run.isolation = FuzzIsolationArg::Isolated;
+    let proof = load_or_default_isolation_proof(&args, "component-a")
+        .expect("generated isolation proof")
+        .expect("proof present");
 
-    let error = super::plan_inventory_selection(&args, &destructive_inventory(), None)
-        .expect_err("destructive mode requires proof");
+    let metadata = super::plan_inventory_selection(&args, &destructive_inventory(), Some(&proof))
+        .expect("destructive planning uses generated proof");
 
-    assert!(error.to_string().contains("homeboy/isolation-proof/v1"));
+    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("isolated"));
+    assert_eq!(metadata["isolation"]["destructive_allowed"], true);
+    assert_eq!(metadata["isolation"]["verified"], true);
+    assert_eq!(
+        metadata["isolation"]["runtime_kind"],
+        "homeboy-fuzz-run-dir"
+    );
+    assert_eq!(
+        proof.metadata["reason"],
+        "--allow-destructive implies isolated fuzz mode for this fuzz run"
+    );
+}
+
+#[test]
+fn fuzz_plan_accepts_component_scripts_fuzz_without_extension_provider() {
+    with_isolated_home(|_| {
+        let component_dir = tempfile::tempdir().expect("component dir");
+        std::fs::write(
+            component_dir.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": "script-fuzz",
+                "scripts": {
+                    "fuzz": ["printf '{}' > $HOMEBOY_FUZZ_RESULTS_FILE"]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write homeboy.json");
+        let mut args = planner_args();
+        args.run.comp.component = Some("script-fuzz".to_string());
+        args.run.comp.path = Some(component_dir.path().to_string_lossy().to_string());
+        args.run.workload_id = Some("component-script-1".to_string());
+
+        let output = run_plan(args).expect("component scripts.fuzz plans without extension");
+
+        assert!(output.request.workload_id.as_deref() == Some("component-script-1"));
+        assert_eq!(output.runner_contract.capability, "fuzz");
+        assert!(output.target_inventory.metadata["declared_workloads"]
+            .as_array()
+            .expect("declared workloads")
+            .iter()
+            .any(|workload| workload["id"] == "component-script-1"));
+    });
 }
 
 #[test]
@@ -802,6 +846,7 @@ fn fuzz_run_parses_generic_contract_flags() {
         "isolated",
         "--isolation-proof",
         "/tmp/isolation-proof.json",
+        "--allow-local-destructive-fuzz",
         "--expect-metric",
         "side_effect_grouped_created_count=2",
         "--",
@@ -835,6 +880,7 @@ fn fuzz_run_parses_generic_contract_flags() {
                 run.isolation_proof.as_deref(),
                 Some(Path::new("/tmp/isolation-proof.json"))
             );
+            assert!(run.allow_local_destructive_fuzz);
             assert_eq!(
                 run.expect_metric,
                 vec![(

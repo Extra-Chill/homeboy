@@ -10,7 +10,10 @@ use super::execution::{
     persist_fuzz_run_evidence, persist_fuzz_sequence_plan, run_fuzz_artifact_postprocess,
     FuzzRunEvidenceInput,
 };
-use super::planning::{build_campaign_plan, plan_inventory_selection, run_campaign};
+use super::planning::{
+    build_campaign_plan, load_or_default_isolation_proof, plan_inventory_selection, run_campaign,
+    run_plan,
+};
 use super::replay::{run_minimize, run_replay};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
@@ -102,6 +105,7 @@ fn planner_args() -> FuzzPlanArgs {
             allow_destructive: false,
             isolation: FuzzIsolationArg::Shared,
             isolation_proof: None,
+            allow_local_destructive_fuzz: false,
             expect_metric: vec![],
             action_model: None,
             exploration_policy: None,
@@ -351,6 +355,7 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         allow_destructive: false,
         isolation: FuzzIsolationArg::Shared,
         isolation_proof: None,
+        allow_local_destructive_fuzz: false,
         expect_metric: vec![],
         action_model: None,
         exploration_policy: None,

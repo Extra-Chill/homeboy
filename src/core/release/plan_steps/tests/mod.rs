@@ -28,6 +28,7 @@ fn test_build_preflight_steps() {
             "preflight.working_tree",
             "preflight.remote_sync",
             "preflight.bump_policy",
+            "preflight.dependencies",
             "preflight.audit",
             "preflight.lint",
             "preflight.test",
@@ -198,6 +199,10 @@ fn release_plan_records_explicit_quality_preflights() {
         .iter()
         .find(|step| step.id == "preflight.audit")
         .expect("audit step");
+    let dependencies = steps
+        .iter()
+        .find(|step| step.id == "preflight.dependencies")
+        .expect("dependencies step");
     let lint = steps
         .iter()
         .find(|step| step.id == "preflight.lint")
@@ -216,8 +221,10 @@ fn release_plan_records_explicit_quality_preflights() {
         audit.inputs.get("reason").and_then(|value| value.as_str()),
         Some("no-release-audit-policy")
     );
+    assert_eq!(dependencies.status, PlanStepStatus::Ready);
+    assert_eq!(dependencies.needs, vec!["preflight.bump_policy"]);
     assert_eq!(lint.status, PlanStepStatus::Ready);
-    assert_eq!(lint.needs, vec!["preflight.bump_policy"]);
+    assert_eq!(lint.needs, vec!["preflight.dependencies"]);
     assert_eq!(test.status, PlanStepStatus::Ready);
     assert_eq!(test.needs, vec!["preflight.lint"]);
     assert_eq!(changelog_bootstrap.needs, vec!["preflight.test"]);
