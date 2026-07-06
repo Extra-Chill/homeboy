@@ -21,7 +21,7 @@ impl ObservationStore {
         if let Some(existing) = self.get_artifact(&artifact.id)? {
             return ensure_identical("artifact", &artifact.id, &existing, artifact);
         }
-        let metadata_json = serialize_metadata(&artifact.metadata_json)?;
+        let metadata_json = serialize_metadata(&metadata_with_imported_public_url(artifact))?;
         execute_with_retry("import artifact record", || {
             self.connection.execute(
                 r#"
@@ -789,4 +789,26 @@ impl ObservationStore {
         })?;
         Ok(())
     }
+}
+
+fn metadata_with_imported_public_url(artifact: &ArtifactRecord) -> serde_json::Value {
+    let Some(public_url) = artifact
+        .public_url
+        .as_deref()
+        .or(artifact.url.as_deref())
+        .and_then(crate::core::artifact_address::validated_public_url)
+    else {
+        return artifact.metadata_json.clone();
+    };
+
+    let mut metadata = artifact.metadata_json.clone();
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object
+            .entry("public_url".to_string())
+            .or_insert_with(|| serde_json::Value::String(public_url));
+    }
+    metadata
 }
