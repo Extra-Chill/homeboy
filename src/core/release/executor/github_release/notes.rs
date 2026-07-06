@@ -5,6 +5,7 @@ use crate::core::component::GithubConfig;
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
 use crate::core::release::changelog;
+use crate::core::release::scope::ReleaseScope;
 use crate::core::release::types::ReleaseState;
 
 use super::gh_cli::{gh_command, safe_filename};
@@ -60,6 +61,19 @@ pub(crate) fn build_github_release_body(
     changelog_url: Option<&str>,
     notes_start_tag: Option<&str>,
 ) -> GitHubReleaseBody {
+    if component_release_notes_require_changelog_fallback(component) {
+        log_status!(
+            "release",
+            "Using Homeboy changelog notes for component-scoped release {} because GitHub generated release notes cannot path-filter monorepo commits",
+            tag
+        );
+        return GitHubReleaseBody {
+            body: fallback_release_notes(state, changelog_url, tag),
+            generated_notes_ok: false,
+            changelog_url: changelog_url.map(str::to_string),
+        };
+    }
+
     match github_generated_notes(github, &component.github, tag, notes_start_tag) {
         Ok(generated_notes) => {
             let body = changelog_url
@@ -84,6 +98,12 @@ pub(crate) fn build_github_release_body(
             }
         }
     }
+}
+
+fn component_release_notes_require_changelog_fallback(component: &Component) -> bool {
+    ReleaseScope::resolve(component, &component.id)
+        .map(|scope| !scope.path_prefix.is_empty() || !scope.path_prefixes.is_empty())
+        .unwrap_or(false)
 }
 
 /// Persist the exact release body to `build/<tag>-release-notes.md` so it is

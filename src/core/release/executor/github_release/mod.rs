@@ -33,8 +33,9 @@ pub(crate) use crate::core::release::types::ReleaseStepResult;
 pub(crate) use gh_cli::{github_cli_env, github_release_artifact_paths};
 #[cfg(test)]
 pub(crate) use notes::{
-    fallback_release_notes, github_changelog_url, github_generated_notes_start_tag,
-    github_release_notes_start_tag, replace_full_changelog_footer, GitHubReleaseBody,
+    build_github_release_body, fallback_release_notes, github_changelog_url,
+    github_generated_notes_start_tag, github_release_notes_start_tag,
+    replace_full_changelog_footer, GitHubReleaseBody,
 };
 #[cfg(test)]
 pub(crate) use repair::{
