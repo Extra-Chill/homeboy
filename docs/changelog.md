@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.13] - 2026-07-06
+
+### Changed
+- Use typed agent-task lifecycle handoff
+- Unify Lab workload metadata derivation
+- Unify review lint scope routing
+
 ## [0.281.12] - 2026-07-05
 
 ### Fixed
