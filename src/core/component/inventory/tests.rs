@@ -28,6 +28,7 @@ use tempfile::TempDir;
 /// is fine.
 struct HomeGuard {
     previous: Option<String>,
+    previous_transient_markers: Option<String>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -37,17 +38,48 @@ impl Drop for HomeGuard {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        match &self.previous_transient_markers {
+            Some(value) => unsafe {
+                std::env::set_var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS", value)
+            },
+            None => unsafe { std::env::remove_var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS") },
+        }
     }
 }
+
+const TEST_TRANSIENT_WORKSPACE_MARKER: &str = "__homeboy_test_transient__";
 
 fn with_home_override(new_home: &std::path::Path) -> HomeGuard {
     let lock = crate::test_support::home_env_guard();
     let previous = std::env::var("HOME").ok();
+    let previous_transient_markers = std::env::var("HOMEBOY_TRANSIENT_WORKSPACE_MARKERS").ok();
     unsafe { std::env::set_var("HOME", new_home.to_string_lossy().as_ref()) };
+    // macOS tempdirs live under a path segment named `T`, which the production
+    // transient policy intentionally treats as temporary. Pin test fixtures to a
+    // private marker so stable checkouts under TempDir remain stable.
+    unsafe {
+        std::env::set_var(
+            "HOMEBOY_TRANSIENT_WORKSPACE_MARKERS",
+            TEST_TRANSIENT_WORKSPACE_MARKER,
+        )
+    };
     HomeGuard {
         previous,
+        previous_transient_markers,
         _lock: lock,
     }
+}
+
+fn temp_home_dir() -> TempDir {
+    let parent = std::env::current_dir()
+        .expect("current dir")
+        .join("target")
+        .join("homeboy-inventory-tests");
+    fs::create_dir_all(&parent).expect("inventory test temp parent");
+    tempfile::Builder::new()
+        .prefix("home-")
+        .tempdir_in(parent)
+        .expect("inventory test temp home")
 }
 
 /// Helper: create a standalone component JSON file in a directory.
@@ -102,7 +134,7 @@ fn write_standalone_registration_rejects_blank_id() {
 fn standalone_prefers_portable_config_when_available() {
     // This test calls load_standalone_components() which reads from
     // paths::components(). We set HOME to an isolated temp dir.
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -173,7 +205,7 @@ fn standalone_prefers_portable_config_when_available() {
 
 #[test]
 fn portable_config_fields_override_standalone_registration() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -231,7 +263,7 @@ fn portable_config_fields_override_standalone_registration() {
 
 #[test]
 fn load_standalone_skips_missing_local_path() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
 
     let config_components = dir
         .path()
@@ -263,7 +295,7 @@ fn load_standalone_skips_missing_local_path() {
 
 #[test]
 fn load_standalone_skips_non_json_files() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -288,7 +320,7 @@ fn load_standalone_skips_non_json_files() {
 
 #[test]
 fn load_standalone_reads_json_files() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
 
     // Create the ~/.config/homeboy/components/ directory structure
     let config_components = dir
@@ -317,7 +349,7 @@ fn load_standalone_reads_json_files() {
 
 #[test]
 fn stale_standalone_path_discovers_renamed_sibling_portable_component() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -370,7 +402,7 @@ fn stale_standalone_path_discovers_renamed_sibling_portable_component() {
 
 #[test]
 fn reconcile_reports_safe_sibling_repair_without_applying() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -406,7 +438,7 @@ fn reconcile_reports_safe_sibling_repair_without_applying() {
 
 #[test]
 fn reconcile_apply_updates_stale_local_path_when_candidate_is_unique() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -440,7 +472,7 @@ fn reconcile_apply_updates_stale_local_path_when_candidate_is_unique() {
 
 #[test]
 fn reconcile_flags_relative_local_path_and_repairs_to_absolute() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -489,9 +521,12 @@ fn reconcile_flags_relative_local_path_and_repairs_to_absolute() {
 
 #[test]
 fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let stable_checkout = dir.path().join("Developer").join("homeboy");
-    let temp_checkout = dir.path().join("tmp").join("homeboy-issue-4202-temp");
+    let temp_checkout = dir
+        .path()
+        .join(TEST_TRANSIENT_WORKSPACE_MARKER)
+        .join("homeboy-issue-4202-temp");
     init_git_repo(&stable_checkout);
     init_git_repo(&temp_checkout);
     write_portable_id(&stable_checkout, "homeboy");
@@ -533,7 +568,7 @@ fn local_path_diagnostic_flags_temp_checkout_and_reports_stable_candidate() {
 
 #[test]
 fn reconcile_repairs_temp_checkout_to_unique_stable_candidate() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -541,7 +576,10 @@ fn reconcile_repairs_temp_checkout_to_unique_stable_candidate() {
         .join("components");
     fs::create_dir_all(&config_components).unwrap();
     let stable_checkout = dir.path().join("Developer").join("homeboy");
-    let temp_checkout = dir.path().join("tmp").join("homeboy-temp");
+    let temp_checkout = dir
+        .path()
+        .join(TEST_TRANSIENT_WORKSPACE_MARKER)
+        .join("homeboy-temp");
     init_git_repo(&stable_checkout);
     init_git_repo(&temp_checkout);
     write_portable_id(&stable_checkout, "homeboy");
@@ -571,7 +609,7 @@ fn reconcile_repairs_temp_checkout_to_unique_stable_candidate() {
 
 #[test]
 fn write_standalone_creates_and_reads_back() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_dir = dir.path().join(".config").join("homeboy");
     fs::create_dir_all(&config_dir).unwrap();
 
@@ -608,7 +646,7 @@ fn write_standalone_creates_and_reads_back() {
 
 #[test]
 fn write_standalone_preserves_existing_fields() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -660,7 +698,7 @@ fn write_standalone_preserves_existing_fields() {
 
 #[test]
 fn rename_standalone_moves_pointer_to_new_component_id() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
@@ -710,7 +748,7 @@ fn rename_standalone_moves_pointer_to_new_component_id() {
 
 #[test]
 fn write_standalone_rejects_preserved_invalid_remote_url() {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_home_dir();
     let config_components = dir
         .path()
         .join(".config")
