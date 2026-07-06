@@ -6,6 +6,7 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
+use crate::commands::output_runtime::CommandRun;
 use crate::commands::{contract, fleet, observe, GlobalArgs};
 
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
@@ -132,6 +133,22 @@ pub(crate) fn command_adapter(
     }
 }
 
+pub(crate) fn run_command_output(
+    command: Commands,
+    global: &GlobalArgs,
+    output_file_mode: CommandOutputFileMode,
+) -> Result<CommandRun, Commands> {
+    let command_name = command.top_level_name();
+    let adapter = command_adapter(command, output_file_mode)?;
+    let (stdout_result, exit_code) = adapter.run(global);
+
+    Ok(CommandRun::from_command_stdout_result(
+        command_name,
+        stdout_result,
+        exit_code,
+    ))
+}
+
 pub(crate) fn output_descriptor(
     command: &Commands,
     output_file_mode: CommandOutputFileMode,
@@ -190,6 +207,12 @@ mod tests {
     #[test]
     fn command_adapter_recognizes_migrated_json_commands() {
         assert!(command_adapter(
+            parsed_command(&["homeboy", "fleet", "list"]),
+            CommandOutputFileMode::None,
+        )
+        .is_ok());
+
+        assert!(command_adapter(
             parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
             CommandOutputFileMode::None,
         )
@@ -200,6 +223,22 @@ mod tests {
             CommandOutputFileMode::None,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn run_command_output_routes_migrated_json_command() {
+        let run = run_command_output(
+            parsed_command(&["homeboy", "contract", "manifest"]),
+            &GlobalArgs {},
+            CommandOutputFileMode::None,
+        )
+        .unwrap_or_else(|_| panic!("contract should route through adapter JSON output"));
+
+        assert_eq!(run.command, "contract");
+        assert_eq!(run.exit_code, 0);
+        let value = run.stdout_result.expect("manifest should dispatch as JSON");
+        assert_eq!(value["command"], "contract.manifest");
+        assert!(value["commands"].is_array());
     }
 
     #[test]

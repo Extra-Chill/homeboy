@@ -28,114 +28,123 @@ pub fn run_command_output(
     crate::commands::utils::tty::status("homeboy is working...");
     let command_name = command.top_level_name();
 
-    let run = match command {
-        Commands::AgentTask(args) => {
-            let run_from_spec_output_ref =
-                agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
-            let summary_kind = agent_task_summary_kind_for_output(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
-            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                if let Some(output_file) = run_from_spec_output_ref {
-                    return render_controller_run_from_spec_output_ref(
-                        payload,
-                        exit_code,
-                        output_file,
-                    );
-                }
+    let run = match adapter::run_command_output(
+        command,
+        global,
+        crate::command_contract::CommandOutputFileMode::None,
+    ) {
+        Ok(run) => run,
+        Err(command) => match command {
+            Commands::AgentTask(args) => {
+                let run_from_spec_output_ref =
+                    agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
+                let summary_kind = agent_task_summary_kind_for_output(&args);
+                let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
+                let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                    if let Some(output_file) = run_from_spec_output_ref {
+                        return render_controller_run_from_spec_output_ref(
+                            payload,
+                            exit_code,
+                            output_file,
+                        );
+                    }
 
-                summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
-            });
+                    summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
+                });
 
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
-        Commands::Runner(args) => runner::run_command_output(args, global),
-        Commands::Activity(args) => {
-            let (stdout_result, exit_code) = dispatch(Commands::Activity(args), global);
-            let summary_stdout = stdout_result
-                .as_ref()
-                .ok()
-                .and_then(super::activity::render_activity_summary);
+                CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                    CommandPresentation {
+                        stdout: summary_stdout,
+                        stderr: None,
+                    },
+                )
+            }
+            Commands::Runner(args) => runner::run_command_output(args, global),
+            Commands::Activity(args) => {
+                let (stdout_result, exit_code) = dispatch(Commands::Activity(args), global);
+                let summary_stdout = stdout_result
+                    .as_ref()
+                    .ok()
+                    .and_then(super::activity::render_activity_summary);
 
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
-        Commands::Bench(args) => {
-            let summarize = bench_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Bench(args), global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(super::bench_summary::render_bench_summary)
-                })
-                .flatten();
+                CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                    CommandPresentation {
+                        stdout: summary_stdout,
+                        stderr: None,
+                    },
+                )
+            }
+            Commands::Bench(args) => {
+                let summarize = bench_summary_eligible(&args);
+                let (stdout_result, exit_code) = dispatch(Commands::Bench(args), global);
+                let summary_stdout = summarize
+                    .then(|| {
+                        stdout_result
+                            .as_ref()
+                            .ok()
+                            .and_then(super::bench_summary::render_bench_summary)
+                    })
+                    .flatten();
 
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
-        Commands::Cleanup(args) => {
-            let summarize = cleanup_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(super::cleanup::render_cleanup_summary)
-                })
-                .flatten();
+                CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                    CommandPresentation {
+                        stdout: summary_stdout,
+                        stderr: None,
+                    },
+                )
+            }
+            Commands::Cleanup(args) => {
+                let summarize = cleanup_summary_eligible(&args);
+                let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), global);
+                let summary_stdout = summarize
+                    .then(|| {
+                        stdout_result
+                            .as_ref()
+                            .ok()
+                            .and_then(super::cleanup::render_cleanup_summary)
+                    })
+                    .flatten();
 
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
-        Commands::Runs(args) => {
-            let summarize_show = runs_show_summary_eligible(&args);
-            let summarize_dossier = runs_dossier_summary_eligible(&args);
-            let summarize_proof = runs_proof_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
-            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                if let Some(rendered) = super::runs_summary::render_runs_field_selection(payload) {
-                    Some(rendered)
-                } else if summarize_show {
-                    super::runs_summary::render_runs_show_summary(payload)
-                } else if summarize_dossier {
-                    super::runs_dossier_summary::render_runs_dossier_summary(payload)
-                } else if summarize_proof {
-                    super::runs_proof_summary::render_runs_proof_summary(payload)
-                } else {
-                    None
-                }
-            });
+                CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                    CommandPresentation {
+                        stdout: summary_stdout,
+                        stderr: None,
+                    },
+                )
+            }
+            Commands::Runs(args) => {
+                let summarize_show = runs_show_summary_eligible(&args);
+                let summarize_dossier = runs_dossier_summary_eligible(&args);
+                let summarize_proof = runs_proof_summary_eligible(&args);
+                let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
+                let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+                    if let Some(rendered) =
+                        super::runs_summary::render_runs_field_selection(payload)
+                    {
+                        Some(rendered)
+                    } else if summarize_show {
+                        super::runs_summary::render_runs_show_summary(payload)
+                    } else if summarize_dossier {
+                        super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                    } else if summarize_proof {
+                        super::runs_proof_summary::render_runs_proof_summary(payload)
+                    } else {
+                        None
+                    }
+                });
 
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
-        command => {
-            let (stdout_result, exit_code) = dispatch(command, global);
-            CommandRun::from_stdout_result(stdout_result, exit_code)
-        }
+                CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                    CommandPresentation {
+                        stdout: summary_stdout,
+                        stderr: None,
+                    },
+                )
+            }
+            command => {
+                let (stdout_result, exit_code) = dispatch(command, global);
+                CommandRun::from_stdout_result(stdout_result, exit_code)
+            }
+        },
     };
 
     run.with_command(command_name)
