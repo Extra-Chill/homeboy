@@ -93,6 +93,30 @@ pub(super) fn validate_release_version_floor(
     None
 }
 
+pub(super) fn release_version_floor_base(
+    scope: &ReleaseScope,
+    current_version: &str,
+) -> Result<(String, Option<String>)> {
+    let Some(latest_tag) = scope.latest_tag_any()? else {
+        return Ok((current_version.to_string(), None));
+    };
+    let Some(tag_version) = git::extract_version_from_tag(&latest_tag) else {
+        return Ok((current_version.to_string(), None));
+    };
+    let Ok(tag_version_semver) = semver::Version::parse(&tag_version) else {
+        return Ok((current_version.to_string(), None));
+    };
+    let Ok(current_version_semver) = semver::Version::parse(current_version) else {
+        return Ok((current_version.to_string(), None));
+    };
+
+    if tag_version_semver > current_version_semver {
+        Ok((tag_version, Some(latest_tag)))
+    } else {
+        Ok((current_version.to_string(), None))
+    }
+}
+
 pub(super) fn validate_current_version_tag_reachable(
     scope: &ReleaseScope,
     current_version: &str,
@@ -157,52 +181,12 @@ pub(super) fn current_version_tag_at_head(
 pub(super) fn resolve_tag_and_commits(
     scope: &ReleaseScope,
 ) -> Result<(Option<String>, Vec<git::CommitInfo>)> {
-    // Make release tags (and connecting history) available before the
-    // reachability/changelog-range guard inspects them. A tagless or shallow
-    // release checkout would otherwise report a genuinely-reachable tag as "not
-    // reachable from HEAD" and refuse (issue #6916). Best-effort: offline
-    // checkouts still fall through to the guard against local history, so a tag
-    // that is truly not an ancestor of HEAD is still refused.
-    let (latest_tag, commits) = scope.commits_since_latest_tag()?;
-    validate_latest_release_tag_reachable(scope, latest_tag.as_deref())?;
-    Ok((latest_tag, commits))
-}
-
-fn validate_latest_release_tag_reachable(
-    scope: &ReleaseScope,
-    latest_reachable_tag: Option<&str>,
-) -> Result<()> {
-    let Some(latest_any_tag) = scope.latest_tag_any()? else {
-        return Ok(());
-    };
-
-    if latest_reachable_tag == Some(latest_any_tag.as_str()) {
-        return Ok(());
-    }
-
-    if git::is_ancestor(&scope.git_root, &latest_any_tag, "HEAD")? {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "release-range",
-        format!(
-            "Latest release tag {} is not reachable from HEAD. Refusing to plan changelog entries from {} because that would duplicate a prior release range.",
-            latest_any_tag,
-            latest_reachable_tag.unwrap_or("the initial commit")
-        ),
-        Some(format!("Repository: {}", scope.git_root)),
-        Some(vec![
-            format!(
-                "Merge or recover the {} release commit onto the selected release base/default branch, then rerun the release.",
-                latest_any_tag
-            ),
-            format!(
-                "Inspect the boundary: git merge-base --is-ancestor {} HEAD",
-                latest_any_tag
-            ),
-        ]),
-    ))
+    // Make release tags (and connecting history) available before resolving the
+    // reachable changelog base. A tagless or shallow release checkout would
+    // otherwise miss a genuinely reachable tag and over-expand the range (issue
+    // #6916). Truly off-branch tags are handled by version flooring instead of
+    // becoming the changelog base.
+    scope.commits_since_latest_tag()
 }
 
 fn commit_rows(commits: &[git::CommitInfo]) -> Vec<ReleaseSemverCommit> {
@@ -272,7 +256,7 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, resolve_tag_and_commits,
+        build_semver_recommendation, release_version_floor_base, resolve_tag_and_commits,
         validate_current_version_tag_reachable, validate_release_version_floor,
     };
     use crate::core::component::{CommandScopeConfig, Component, ScopeConfig, VersionTarget};
@@ -490,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tag_and_commits_fails_closed_when_latest_release_tag_is_off_branch() {
+    fn resolve_tag_and_commits_uses_reachable_tag_when_latest_release_tag_is_off_branch() {
         let temp = git_repo();
         let dir = temp.path();
         commit_file(dir, "README.md", "initial", "chore: initial");
@@ -519,12 +503,38 @@ mod tests {
             ..Default::default()
         };
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let err = resolve_tag_and_commits(&release_scope)
-            .expect_err("off-branch latest release tag should fail closed");
+        let (latest_tag, commits) =
+            resolve_tag_and_commits(&release_scope).expect("off-branch latest tag should recover");
 
-        assert!(err.message.contains("Latest release tag v0.2.0"));
-        assert!(err.message.contains("not reachable from HEAD"));
-        assert!(err.message.contains("duplicate a prior release range"));
+        assert_eq!(latest_tag.as_deref(), Some("v0.1.0"));
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "fix: second release work");
+    }
+
+    #[test]
+    fn release_version_floor_base_uses_unreachable_higher_tag() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["branch", "-M", "main"]);
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(dir, "fix.txt", "work", "fix: release work");
+        run_git(dir, &["branch", "release-v0.2.0"]);
+        run_git(dir, &["checkout", "-q", "release-v0.2.0"]);
+        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(dir, &["tag", "v0.2.0"]);
+        run_git(dir, &["checkout", "-q", "main"]);
+
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        let (floor, floor_tag) = release_version_floor_base(&release_scope, "0.1.0")
+            .expect("version floor should resolve");
+
+        assert_eq!(floor, "0.2.0");
+        assert_eq!(floor_tag.as_deref(), Some("v0.2.0"));
     }
 
     #[test]
@@ -656,11 +666,11 @@ mod tests {
         assert_eq!(commits[0].subject, "fix: patch bug");
     }
 
-    /// Guard correctness preserved: a tag that is genuinely NOT an ancestor of
-    /// HEAD must still refuse, even after the fetch-before-guard step pulls all
-    /// tags from origin.
+    /// A tag that is genuinely NOT an ancestor of HEAD must not become the
+    /// changelog base, even after the fetch-before-range step pulls all tags
+    /// from origin. Recovery uses the latest reachable tag for release notes.
     #[test]
-    fn resolve_tag_and_commits_still_refuses_genuinely_unreachable_tag_after_fetch() {
+    fn resolve_tag_and_commits_ignores_genuinely_unreachable_tag_after_fetch() {
         // Upstream has a tag on an off-branch commit that never merges into the
         // main line that the working checkout tracks.
         let origin = git_repo();
@@ -678,7 +688,7 @@ mod tests {
 
         // Working checkout tracks main and, like the real failure, is missing
         // tags locally. The fetch step will pull v0.2.0, but it remains
-        // off-branch — so the guard must still fail closed.
+        // off-branch, so the reachable v0.1.0 tag remains the changelog base.
         let work = tempfile::tempdir().expect("tempdir");
         let work_dir = work.path();
         run_git(
@@ -701,10 +711,11 @@ mod tests {
             ..Default::default()
         };
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let err = resolve_tag_and_commits(&release_scope)
-            .expect_err("off-branch tag must still fail closed after fetching tags");
+        let (latest_tag, commits) = resolve_tag_and_commits(&release_scope)
+            .expect("off-branch tag should not block changelog planning");
 
-        assert!(err.message.contains("Latest release tag v0.2.0"));
-        assert!(err.message.contains("not reachable from HEAD"));
+        assert_eq!(latest_tag.as_deref(), Some("v0.1.0"));
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "fix: second work");
     }
 }

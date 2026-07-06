@@ -10,7 +10,8 @@ use super::planning_changelog::{build_changelog_plan, generate_changelog_entries
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
     build_semver_recommendation, current_version_tag_at_head, current_version_tag_name,
-    validate_current_version_tag_reachable, validate_release_version_floor,
+    release_version_floor_base, validate_current_version_tag_reachable,
+    validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
 use super::scope::ReleaseScope;
@@ -30,6 +31,7 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let extensions = resolve_extensions(&component)?;
 
     let mut v = ValidationCollector::new();
+    let mut warnings = Vec::new();
 
     let release_scope = ReleaseScope::resolve(&component, component_id)?;
     let version_info = v.capture(version::read_component_version(&component), "version");
@@ -99,7 +101,19 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         if options.pipeline.head {
             Some(info.version.clone())
         } else {
-            match version::increment_version(&info.version, &options.bump_type) {
+            let (version_floor_base, floor_tag) = v
+                .capture(
+                    release_version_floor_base(&release_scope, &info.version),
+                    "tag",
+                )
+                .unwrap_or_else(|| (info.version.clone(), None));
+            if let Some(tag) = floor_tag {
+                warnings.push(format!(
+                    "Latest release tag {} is ahead of source version {}; planning the next release from {} to avoid reusing an existing tag.",
+                    tag, info.version, version_floor_base
+                ));
+            }
+            match version::increment_version(&version_floor_base, &options.bump_type) {
                 Some(ver) => Some(ver),
                 None => {
                     v.push(
@@ -146,7 +160,6 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
         Error::internal_unexpected("new_version missing after validation".to_string())
     })?;
 
-    let mut warnings = Vec::new();
     let mut hints = Vec::new();
     let changelog_plan = build_changelog_plan(&component, options, pending_entries)?;
     if let Some(warning) =
