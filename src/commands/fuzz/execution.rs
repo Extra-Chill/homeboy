@@ -1241,6 +1241,31 @@ fn run_fuzz_extension_script(
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+    let env = fuzz_runner_env(
+        args,
+        rig_context,
+        workload,
+        &results_path,
+        run_dir,
+        Some(execution_request_path),
+        sequence_plan_path,
+    )?;
+
+    if ctx.component.has_script(ExtensionCapability::Fuzz) {
+        let output =
+            homeboy::core::extension::component_script::run_component_scripts_with_run_dir(
+                &ctx.component,
+                ExtensionCapability::Fuzz,
+                &ctx.source_path,
+                run_dir,
+                false,
+                &env,
+                &args.args,
+            )?;
+        return Ok(output.into());
+    }
+
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
     if execution_context.script_path.trim().is_empty() {
@@ -1267,16 +1292,6 @@ fn run_fuzz_extension_script(
         .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
         .script_args(&args.args);
 
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let env = fuzz_runner_env(
-        args,
-        rig_context,
-        workload,
-        &results_path,
-        run_dir,
-        Some(execution_request_path),
-        sequence_plan_path,
-    )?;
     for (key, value) in env {
         runner = runner.env(&key, &value);
     }
