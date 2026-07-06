@@ -15,6 +15,7 @@ pub struct CommandSpec {
     pub docs_slug: Option<&'static str>,
     pub representative_argv: Option<&'static [&'static str]>,
     pub safety: CommandSafetySpec,
+    pub subcommand_safety: &'static [CommandPathSafetySpec],
     pub output_notes: &'static str,
     pub lab_supported: bool,
     pub lab_notes: &'static str,
@@ -47,6 +48,14 @@ pub struct CommandSafetySpec {
     pub dry_run_flag: Option<&'static str>,
     pub risk_exemption: Option<&'static str>,
     pub dangerous_flags: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandPathSafetySpec {
+    pub paths: &'static [&'static str],
+    pub safety: CommandSafetySpec,
+    pub output_notes: Option<&'static str>,
+    pub lab_notes: Option<&'static str>,
 }
 
 impl CommandSafetySpec {
@@ -110,6 +119,19 @@ impl CommandSpec {
     pub fn dispatch_family(&self) -> CommandDispatchFamily {
         self.json_family.into()
     }
+
+    pub fn path_safety(&self, path: &[&str]) -> Option<&'static CommandPathSafetySpec> {
+        self.subcommand_safety.iter().find(|entry| {
+            entry
+                .paths
+                .iter()
+                .any(|entry_path| path_matches(entry_path, path))
+        })
+    }
+}
+
+fn path_matches(spec: &str, path: &[&str]) -> bool {
+    spec.split_whitespace().eq(path.iter().copied())
 }
 
 const fn command_spec(name: &'static str, json_family: CommandJsonFamily) -> CommandSpec {
@@ -119,6 +141,7 @@ const fn command_spec(name: &'static str, json_family: CommandJsonFamily) -> Com
         docs_slug: Some(name),
         representative_argv: None,
         safety: CommandSafetySpec::read_only(),
+        subcommand_safety: &[],
         output_notes: "standard CLI output contract",
         lab_supported: false,
         lab_notes: DEFAULT_LAB_UNSUPPORTED_NOTES,
@@ -387,6 +410,11 @@ const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const TRIAGE_DANGEROUS_FLAGS: &[&str] = &["--auto-merge"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
+const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const API_MUTATION_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const API_HTTP_REQUEST_DANGEROUS_FLAGS: &[&str] =
+    &["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
 
 const fn mutating_safety() -> CommandSafetySpec {
     CommandSafetySpec {
@@ -421,6 +449,114 @@ const fn guarded_safety(dangerous_flags: &'static [&'static str]) -> CommandSafe
     }
 }
 
+const fn paths_safety(
+    paths: &'static [&'static str],
+    safety: CommandSafetySpec,
+    output_notes: &'static str,
+) -> CommandPathSafetySpec {
+    CommandPathSafetySpec {
+        paths,
+        safety,
+        output_notes: Some(output_notes),
+        lab_notes: None,
+    }
+}
+
+const fn paths_safety_without_notes(
+    paths: &'static [&'static str],
+    safety: CommandSafetySpec,
+) -> CommandPathSafetySpec {
+    CommandPathSafetySpec {
+        paths,
+        safety,
+        output_notes: None,
+        lab_notes: None,
+    }
+}
+
+const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
+const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
+const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
+const FLEET_CONFIG_PATHS: &[&str] = &["create", "set", "delete", "add", "remove"];
+const API_MUTATION_PATHS: &[&str] = &["post", "put", "patch", "delete"];
+const API_AUTH_PATHS: &[&str] = &[
+    "auth login",
+    "auth set",
+    "auth remove",
+    "auth logout",
+    "auth profile set-basic",
+    "auth profile set-bearer",
+    "auth profile remove",
+];
+const SERVER_OPERATOR_PATHS: &[&str] = &[
+    "create",
+    "set",
+    "delete",
+    "connect",
+    "disconnect",
+    "key generate",
+    "key import",
+    "key use",
+    "key unset",
+];
+
+const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    DEPS_MUTATING_PATHS,
+    mutating_safety(),
+    "mutates dependency manifests, lockfiles, or installed dependency trees",
+)];
+
+const FILE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        FILE_APPLY_PATHS,
+        operator_safety(None, FILE_APPLY_DANGEROUS_FLAGS),
+        "default output is a non-mutating plan; pass --apply to mutate",
+    ),
+    paths_safety(
+        &["edit"],
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates file content unless --dry-run is passed",
+    ),
+    paths_safety_without_notes(FILE_TRANSFER_PATHS, mutating_safety()),
+];
+
+const FLEET_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    CommandPathSafetySpec {
+        paths: &["exec"],
+        safety: operator_safety(Some("--check"), FLEET_EXEC_DANGEROUS_FLAGS),
+        output_notes: Some(
+            "default output is blocked for remote execution; pass --check to plan or --apply to execute",
+        ),
+        lab_notes: Some(
+            "local-only: depends on local fleet/project/server configuration before SSH fan-out",
+        ),
+    },
+    paths_safety(FLEET_CONFIG_PATHS, mutating_safety(), "mutates local fleet configuration"),
+];
+
+const API_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        API_MUTATION_PATHS,
+        operator_safety(None, API_MUTATION_DANGEROUS_FLAGS),
+        "mutating API requests require --apply",
+    ),
+    paths_safety(
+        &["http request"],
+        operator_safety(None, API_HTTP_REQUEST_DANGEROUS_FLAGS),
+        "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it",
+    ),
+    paths_safety(
+        API_AUTH_PATHS,
+        operator_safety(None, &[]),
+        "mutates keychain-backed authentication state",
+    ),
+];
+
+const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
+    SERVER_OPERATOR_PATHS,
+    operator_safety(None, &[]),
+)];
+
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         output_notes: "unified active/recent activity read model in the standard JSON envelope",
@@ -439,7 +575,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     command_spec("project", CommandJsonFamily::Workspace),
     command_spec("ssh", CommandJsonFamily::Ops),
-    command_spec("server", CommandJsonFamily::Ops),
+    CommandSpec {
+        subcommand_safety: SERVER_SUBCOMMAND_SAFETY,
+        ..command_spec("server", CommandJsonFamily::Ops)
+    },
     command_spec_with_representative_argv(
         &["homeboy", "bench"],
         lab_command_spec_with_summary(
@@ -476,9 +615,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     command_spec("observe", CommandJsonFamily::Quality),
     command_spec("db", CommandJsonFamily::Ops),
-    command_spec("deps", CommandJsonFamily::Ops),
-    command_spec("file", CommandJsonFamily::Ops),
-    command_spec("fleet", CommandJsonFamily::Ops),
+    CommandSpec {
+        subcommand_safety: DEPS_SUBCOMMAND_SAFETY,
+        ..command_spec("deps", CommandJsonFamily::Ops)
+    },
+    CommandSpec {
+        subcommand_safety: FILE_SUBCOMMAND_SAFETY,
+        ..command_spec("file", CommandJsonFamily::Ops)
+    },
+    CommandSpec {
+        subcommand_safety: FLEET_SUBCOMMAND_SAFETY,
+        ..command_spec("fleet", CommandJsonFamily::Ops)
+    },
     command_spec("logs", CommandJsonFamily::Ops),
     command_spec_with_safety(
         "triage",
@@ -619,7 +767,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "inspects the active Homeboy runtime and renders built-in CLI documentation",
     ),
     command_spec("stack", CommandJsonFamily::Workspace),
-    command_spec("api", CommandJsonFamily::Ops),
+    CommandSpec {
+        subcommand_safety: API_SUBCOMMAND_SAFETY,
+        ..command_spec("api", CommandJsonFamily::Ops)
+    },
     command_spec_with_output_notes_and_safety(
         "upgrade",
         CommandJsonFamily::Ops,
