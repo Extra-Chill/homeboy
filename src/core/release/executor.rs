@@ -911,6 +911,7 @@ mod tests {
     fn package_preflight_payload_distinguishes_staging_path_from_source_path() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
+            run_in(component.path(), &["git", "init"]);
             std::fs::write(component.path().join("fixture.php"), "<?php\n")
                 .expect("component file");
             let payload_out = component.path().join("package-payload.json");
@@ -933,6 +934,11 @@ mod tests {
 
             let result = package_preflight::run_package_preflight(
                 &[package],
+                &Component {
+                    id: "fixture".to_string(),
+                    local_path: component.path().to_string_lossy().to_string(),
+                    ..Component::default()
+                },
                 "fixture",
                 &component.path().to_string_lossy(),
                 false,
