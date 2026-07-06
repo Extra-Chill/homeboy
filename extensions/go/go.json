@@ -1,7 +1,7 @@
 {
   "name": "Go",
   "id": "go",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "icon": "g.circle.fill",
   "description": "Go CLI integration for services, bridges, and binaries",
   "author": "Extra Chill",

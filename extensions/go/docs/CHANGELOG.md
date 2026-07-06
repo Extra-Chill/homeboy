@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.6.1] - 2026-07-06
+
+### Changed
+- Add extension shape lint
+- Converge shell runners on shared harness
+- Declare extension contract producers
+- Use core sidecar helpers in non-WP runners
+
+### Fixed
+- consume core test scope in runners
+
 ## [1.5.2] - 2026-05-22
 
 ### Fixed
