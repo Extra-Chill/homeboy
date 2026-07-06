@@ -231,8 +231,12 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
 
 fn planned_release_tag_name(context: &ReleaseExecutionContext) -> Result<String> {
     let version_info = super::version::read_component_version(context.component)?;
+    let release_scope =
+        super::scope::ReleaseScope::resolve(context.component, context.component_id)?;
+    let (version_floor_base, _) =
+        super::planning_semver::release_version_floor_base(&release_scope, &version_info.version)?;
     let new_version =
-        super::version::increment_version(&version_info.version, &context.options.bump_type)
+        super::version::increment_version(&version_floor_base, &context.options.bump_type)
             .ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "bump_type",
@@ -247,8 +251,6 @@ fn planned_release_tag_name(context: &ReleaseExecutionContext) -> Result<String>
                     ]),
                 )
             })?;
-    let release_scope =
-        super::scope::ReleaseScope::resolve(context.component, context.component_id)?;
 
     Ok(release_scope.tag_name(&new_version))
 }
@@ -664,8 +666,8 @@ fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStep
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_release_plan_step, release_step_is_plan_only, release_step_is_show_stopper,
-        release_step_unexpected_dirty_files, ReleaseExecutionContext,
+        execute_release_plan_step, planned_release_tag_name, release_step_is_plan_only,
+        release_step_is_show_stopper, release_step_unexpected_dirty_files, ReleaseExecutionContext,
     };
     use crate::core::component::{Component, ComponentScriptsConfig, VersionTarget};
     use crate::core::plan::PlanStep;
@@ -1249,6 +1251,62 @@ mod tests {
         );
         let plugin = std::fs::read_to_string(temp.path().join("plugin.php")).expect("read plugin");
         assert!(plugin.contains("Version: 0.7.0"));
+    }
+
+    #[test]
+    fn planned_release_tag_name_floors_against_unreachable_higher_tag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        run_in(root, &["git", "init", "-q"]);
+        configure_git_user(root);
+        let component_dir = root.join("packages/fixture");
+        std::fs::create_dir_all(&component_dir).expect("create component dir");
+        std::fs::write(
+            component_dir.join("fixture.json"),
+            "{\"version\":\"0.1.0\"}\n",
+        )
+        .expect("write version file");
+        run_in(root, &["git", "add", "packages/fixture/fixture.json"]);
+        run_in(root, &["git", "commit", "-q", "-m", "chore: initial"]);
+        run_in(root, &["git", "branch", "-M", "main"]);
+        run_in(root, &["git", "tag", "fixture-v0.1.0"]);
+        run_in(root, &["git", "checkout", "-q", "-b", "release-v0.2.0"]);
+        std::fs::write(
+            component_dir.join("fixture.json"),
+            "{\"version\":\"0.2.0\"}\n",
+        )
+        .expect("write release version");
+        run_in(root, &["git", "add", "packages/fixture/fixture.json"]);
+        run_in(root, &["git", "commit", "-q", "-m", "release: v0.2.0"]);
+        run_in(root, &["git", "tag", "fixture-v0.2.0"]);
+        run_in(root, &["git", "checkout", "-q", "main"]);
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: component_dir.to_string_lossy().to_string(),
+            version_targets: Some(vec![VersionTarget {
+                file: "fixture.json".to_string(),
+                pattern: Some(r#""version":\s*"([0-9.]+)""#.to_string()),
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let tag = planned_release_tag_name(&context).expect("planned tag");
+
+        assert_eq!(tag, "fixture-v0.2.1");
     }
 
     #[test]
