@@ -62,7 +62,7 @@ fn validation_error_writes_json_output_file() {
             .expect("output file json");
 
     assert_eq!(file_json, stdout_json);
-    assert_eq!(file_json["schema"], "homeboy/command-result/v2");
+    assert_eq!(file_json["schema"], "homeboy/command-result/v3");
     assert_eq!(file_json["success"], false);
     assert_eq!(
         file_json["diagnostics"]["code"],
@@ -93,7 +93,7 @@ fn bare_json_output_format_is_rejected_as_footgun() {
         );
 
         let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-        assert_eq!(stdout_json["schema"], "homeboy/command-result/v2");
+        assert_eq!(stdout_json["schema"], "homeboy/command-result/v3");
         assert_eq!(stdout_json["success"], false);
         assert_eq!(
             stdout_json["diagnostics"]["code"],

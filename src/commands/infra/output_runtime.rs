@@ -6,12 +6,13 @@ use crate::command_contract::CommandOutputFileMode;
 use crate::commands::utils::response as output;
 use crate::commands::{review, trace, GlobalArgs};
 
-pub struct JsonCommandRun {
+pub struct CommandRun {
     pub command: String,
     pub stdout_result: homeboy::core::Result<Value>,
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
     pub presentation: CommandPresentation,
+    pub raw_stdout: Option<homeboy::core::Result<String>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub struct CommandPresentation {
     pub stderr: Option<String>,
 }
 
-impl JsonCommandRun {
+impl CommandRun {
     pub fn from_stdout_result(stdout_result: homeboy::core::Result<Value>, exit_code: i32) -> Self {
         Self::from_command_stdout_result("unknown", stdout_result, exit_code)
     }
@@ -36,6 +37,7 @@ impl JsonCommandRun {
             exit_code,
             output_file_result: None,
             presentation: CommandPresentation::default(),
+            raw_stdout: None,
         }
     }
 
@@ -49,12 +51,13 @@ impl JsonCommandRun {
         self
     }
 
-    pub fn from_raw(
-        raw_run: crate::commands::raw_output::RawCommandRun,
-    ) -> (Self, homeboy::core::Result<String>) {
-        let exit_code = raw_run.exit_code;
-        let raw_stdout = raw_run.stdout_result;
-        let output_file_result = match raw_run.output_file_result {
+    pub fn from_raw_stdout(
+        command: impl Into<String>,
+        raw_stdout: homeboy::core::Result<String>,
+        exit_code: i32,
+        output_file_result: Option<homeboy::core::Result<Value>>,
+    ) -> Self {
+        let stdout_result = match output_file_result.clone() {
             Some(result) => result,
             None => match raw_stdout.as_ref() {
                 Ok(content) => Ok(Value::String(content.clone())),
@@ -62,16 +65,14 @@ impl JsonCommandRun {
             },
         };
 
-        (
-            Self {
-                command: "unknown".to_string(),
-                stdout_result: output_file_result,
-                exit_code,
-                output_file_result: None,
-                presentation: CommandPresentation::default(),
-            },
-            raw_stdout,
-        )
+        Self {
+            command: command.into(),
+            stdout_result,
+            exit_code,
+            output_file_result,
+            presentation: CommandPresentation::default(),
+            raw_stdout: Some(raw_stdout),
+        }
     }
 }
 
@@ -85,7 +86,7 @@ impl<'a> OutputService<'a> {
     }
 
     pub fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
-        let run = JsonCommandRun::from_stdout_result(result, exit_code);
+        let run = CommandRun::from_stdout_result(result, exit_code);
         self.write_output_file(&run, CommandOutputFileMode::GenericEnvelope);
         output::print_json_result_for_command(
             run.stdout_result,
@@ -96,8 +97,25 @@ impl<'a> OutputService<'a> {
         .ok();
     }
 
-    pub fn emit_run(&self, run: JsonCommandRun, mode: CommandOutputFileMode) -> i32 {
+    pub fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
+        if let Some(raw_stdout) = run.raw_stdout {
+            match raw_stdout {
+                Ok(content) => print!("{}", content),
+                Err(err) => {
+                    output::print_json_result_for_command(
+                        Err(err),
+                        run.exit_code,
+                        &run.command,
+                        None,
+                    )
+                    .ok();
+                }
+            }
+
+            return run.exit_code;
+        }
+
         if let Some(stderr) = &run.presentation.stderr {
             eprint!("{}", stderr);
         }
@@ -112,26 +130,7 @@ impl<'a> OutputService<'a> {
         run.exit_code
     }
 
-    pub fn emit_raw_run(
-        &self,
-        raw_run: crate::commands::raw_output::RawCommandRun,
-        mode: CommandOutputFileMode,
-    ) -> i32 {
-        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
-        let exit_code = json_run.exit_code;
-        self.write_output_file(&json_run, mode);
-
-        match raw_stdout {
-            Ok(content) => print!("{}", content),
-            Err(err) => {
-                output::print_result::<Value>(Err(err)).ok();
-            }
-        }
-
-        exit_code
-    }
-
-    pub fn write_output_file(&self, run: &JsonCommandRun, mode: CommandOutputFileMode) {
+    pub fn write_output_file(&self, run: &CommandRun, mode: CommandOutputFileMode) {
         write_output_file(run, mode, self.output_file);
     }
 }
@@ -151,8 +150,8 @@ pub fn run_command(
             let run = run_json(*command, global, plan.output_file, output_file);
             output_service.emit_run(run, plan.output_file)
         }
-        crate::commands::raw_output::CommandRunPreparation::Raw(raw_run) => {
-            output_service.emit_raw_run(raw_run, plan.output_file)
+        crate::commands::raw_output::CommandRunPreparation::Raw(run) => {
+            output_service.emit_run(run, plan.output_file)
         }
     }
 }
@@ -206,18 +205,19 @@ pub fn run_json(
     global: &GlobalArgs,
     mode: CommandOutputFileMode,
     output_file: Option<&str>,
-) -> JsonCommandRun {
+) -> CommandRun {
     match (mode, command) {
         (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
             let (stdout_result, exit_code, output_file_result) =
                 trace::run_json_with_output_artifact(args, global);
 
-            JsonCommandRun {
+            CommandRun {
                 command: "trace".to_string(),
                 stdout_result,
                 exit_code,
                 output_file_result,
                 presentation: CommandPresentation::default(),
+                raw_stdout: None,
             }
         }
         (_, command) => {
@@ -226,7 +226,7 @@ pub fn run_json(
     }
 }
 
-pub fn write_output_file(run: &JsonCommandRun, mode: CommandOutputFileMode, path: Option<&str>) {
+pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Option<&str>) {
     let Some(path) = path else {
         return;
     };
@@ -273,7 +273,7 @@ fn presentation_envelope(
 }
 
 pub fn select_output_file_result(
-    run: &JsonCommandRun,
+    run: &CommandRun,
     mode: CommandOutputFileMode,
 ) -> &homeboy::core::Result<Value> {
     match mode {
@@ -294,42 +294,36 @@ mod tests {
 
     fn run_with_output_file_result(
         output_file_result: Option<homeboy::core::Result<Value>>,
-    ) -> JsonCommandRun {
-        JsonCommandRun {
+    ) -> CommandRun {
+        CommandRun {
             command: "test".to_string(),
             stdout_result: Ok(json!({ "kind": "stdout" })),
             exit_code: 0,
             output_file_result,
             presentation: CommandPresentation::default(),
+            raw_stdout: None,
         }
     }
 
     #[test]
     fn raw_command_run_without_artifact_uses_raw_stdout_for_file_payload() {
-        let raw_run = crate::commands::raw_output::RawCommandRun {
-            stdout_result: Ok("plain output".to_string()),
-            exit_code: 0,
-            output_file_result: None,
-        };
+        let run = CommandRun::from_raw_stdout("test", Ok("plain output".to_string()), 0, None);
 
-        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
-
-        assert_eq!(raw_stdout.unwrap(), "plain output");
-        assert_eq!(json_run.stdout_result.unwrap(), json!("plain output"));
+        assert_eq!(run.raw_stdout.unwrap().unwrap(), "plain output");
+        assert_eq!(run.stdout_result.unwrap(), json!("plain output"));
     }
 
     #[test]
     fn raw_command_run_with_artifact_uses_artifact_for_file_payload() {
-        let raw_run = crate::commands::raw_output::RawCommandRun {
-            stdout_result: Ok("markdown output".to_string()),
-            exit_code: 0,
-            output_file_result: Some(Ok(json!({ "artifact": true }))),
-        };
+        let run = CommandRun::from_raw_stdout(
+            "test",
+            Ok("markdown output".to_string()),
+            0,
+            Some(Ok(json!({ "artifact": true }))),
+        );
 
-        let (json_run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
-
-        assert_eq!(raw_stdout.unwrap(), "markdown output");
-        assert_eq!(json_run.stdout_result.unwrap(), json!({ "artifact": true }));
+        assert_eq!(run.raw_stdout.unwrap().unwrap(), "markdown output");
+        assert_eq!(run.stdout_result.unwrap(), json!({ "artifact": true }));
     }
 
     #[test]
@@ -370,7 +364,7 @@ mod tests {
 
     #[test]
     fn presentation_does_not_replace_structured_stdout_or_file_payload() {
-        let run = JsonCommandRun::from_stdout_result(Ok(json!({ "kind": "stdout" })), 0)
+        let run = CommandRun::from_stdout_result(Ok(json!({ "kind": "stdout" })), 0)
             .with_presentation(CommandPresentation {
                 stdout: Some("short summary\n".to_string()),
                 stderr: Some("progress\n".to_string()),
@@ -390,7 +384,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("controller-result.json");
         let large = "x".repeat(2 * 1024 * 1024);
-        let run = JsonCommandRun::from_stdout_result(
+        let run = CommandRun::from_stdout_result(
             Ok(json!({
                 "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
                 "loop_id": "large-loop",
@@ -446,7 +440,7 @@ mod tests {
     fn review_output_file_writes_stable_artifact_without_envelope() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("review.json");
-        let run = JsonCommandRun::from_stdout_result(
+        let run = CommandRun::from_stdout_result(
             Ok(json!({
                 "command": "review",
                 "artifact": {

@@ -8,8 +8,8 @@ use crate::cli_surface::Commands;
 
 use crate::commands::{contract, fleet, observe, GlobalArgs};
 
-pub(crate) type JsonCommandRun = (homeboy::core::Result<Value>, i32);
-pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonCommandRun;
+pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
+pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonHandlerResult;
 pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub(crate) struct TypedCommandAdapter<Args> {
 }
 
 pub(crate) struct BoundCommandAdapter {
-    run: Box<dyn FnOnce(&GlobalArgs) -> JsonCommandRun>,
+    run: Box<dyn FnOnce(&GlobalArgs) -> JsonHandlerResult>,
 }
 
 impl BoundCommandAdapter {
@@ -70,7 +70,7 @@ impl BoundCommandAdapter {
         }
     }
 
-    pub fn run(self, global: &GlobalArgs) -> JsonCommandRun {
+    pub fn run(self, global: &GlobalArgs) -> JsonHandlerResult {
         (self.run)(global)
     }
 }

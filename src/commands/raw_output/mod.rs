@@ -1,8 +1,7 @@
-use serde_json::Value;
-
 use crate::cli_surface::Commands;
 use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
+use super::output_runtime::CommandRun;
 use super::utils::{response as output, tty};
 use super::{file, release, report, review, runner, runs, runtime, self_cmd, trace, GlobalArgs};
 
@@ -14,13 +13,7 @@ pub enum RawExecution {
 pub enum CommandRunPreparation {
     Handled(i32),
     Json(Box<Commands>),
-    Raw(RawCommandRun),
-}
-
-pub struct RawCommandRun {
-    pub stdout_result: homeboy::core::Result<String>,
-    pub exit_code: i32,
-    pub output_file_result: Option<homeboy::core::Result<Value>>,
+    Raw(CommandRun),
 }
 
 pub fn prepare_command_run(
@@ -56,7 +49,7 @@ pub fn run_and_print(
     let raw_run =
         run(command, global, mode).expect("markdown and plain-text modes should return raw output");
 
-    RawExecution::Handled(match raw_run.stdout_result {
+    RawExecution::Handled(match raw_run.raw_stdout.expect("raw mode has raw stdout") {
         Ok(content) => {
             print!("{}", content);
             raw_run.exit_code
@@ -72,7 +65,7 @@ pub fn run(
     command: Commands,
     global: &GlobalArgs,
     mode: CommandRawOutputMode,
-) -> Option<RawCommandRun> {
+) -> Option<CommandRun> {
     match mode {
         CommandRawOutputMode::InteractivePassthrough => None,
         CommandRawOutputMode::Markdown => Some(run_markdown(command, global)),
@@ -80,7 +73,7 @@ pub fn run(
     }
 }
 
-fn run_markdown(command: Commands, global: &GlobalArgs) -> RawCommandRun {
+fn run_markdown(command: Commands, global: &GlobalArgs) -> CommandRun {
     match command {
         Commands::SelfCmd(args) => raw_stdout_only(self_cmd::run_docs_markdown(args)),
         Commands::Release(args) => match args.markdown_changelog_args() {
@@ -97,7 +90,7 @@ fn run_markdown(command: Commands, global: &GlobalArgs) -> RawCommandRun {
     }
 }
 
-fn run_plain_text(command: Commands, global: &GlobalArgs) -> RawCommandRun {
+fn run_plain_text(command: Commands, global: &GlobalArgs) -> CommandRun {
     match command {
         Commands::File(args) => raw_stdout_only(match file::run(args, global) {
             Ok((file::FileCommandOutput::Raw(content), exit_code)) => Ok((content, exit_code)),
@@ -117,22 +110,16 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> RawCommandRun {
 fn runner_compact_exec(
     args: crate::commands::runner::RunnerArgs,
     global: &GlobalArgs,
-) -> RawCommandRun {
+) -> CommandRun {
     runner::run_plain_text_raw(args, global)
 }
 
-pub fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> RawCommandRun {
+pub fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
     match result {
-        Ok((content, exit_code)) => RawCommandRun {
-            stdout_result: Ok(content),
-            exit_code,
-            output_file_result: None,
-        },
-        Err(err) => RawCommandRun {
-            stdout_result: Err(err),
-            exit_code: 1,
-            output_file_result: None,
-        },
+        Ok((content, exit_code)) => {
+            CommandRun::from_raw_stdout("unknown", Ok(content), exit_code, None)
+        }
+        Err(err) => CommandRun::from_raw_stdout("unknown", Err(err), 1, None),
     }
 }
 
@@ -191,7 +178,8 @@ mod tests {
             CommandRawOutputMode::PlainText,
         )
         .expect("plain text mode should return a result")
-        .stdout_result
+        .raw_stdout
+        .expect("raw mode has raw stdout")
         .expect_err("manifest does not support plain text output");
 
         assert!(result.to_string().contains("plain text output"));

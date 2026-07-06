@@ -143,9 +143,11 @@ fn compact_exec_command_run_preserves_full_output_file_payload() {
     let run = compact_exec_command_run(output, 0);
 
     assert!(run
-        .stdout_result
+        .raw_stdout
         .as_ref()
         .expect("compact stdout")
+        .as_ref()
+        .expect("compact stdout result")
         .contains("Stdout:\nhello\n"));
     let output_file = run
         .output_file_result

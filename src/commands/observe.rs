@@ -88,7 +88,7 @@ pub(crate) fn adapter(
     adapter::TypedCommandAdapter::json_only(CommandJsonFamily::Quality, output_file_mode, run_json)
 }
 
-fn run_json(args: ObserveArgs, global: &GlobalArgs) -> adapter::JsonCommandRun {
+fn run_json(args: ObserveArgs, global: &GlobalArgs) -> adapter::JsonHandlerResult {
     crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
 }
 
