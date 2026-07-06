@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.17] - 2026-07-06
+
+### Changed
+- Clarify runner version alignment remediation
+- Stage declared rig path inputs for Lab offload
+- Simplify runner exec option construction
+- Consolidate command safety descriptors
+- Unify command output run rendering
+- Consolidate component override schema
+
+### Fixed
+- Fix component inventory repair tests
+
 ## [0.281.16] - 2026-07-06
 
 ### Changed
