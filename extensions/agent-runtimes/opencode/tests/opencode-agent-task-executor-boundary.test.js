@@ -152,7 +152,8 @@ process.exit(0);
 	fs.writeFileSync(modelCliPath, `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 assert.equal(process.cwd(), ${JSON.stringify(realModelWorkspace)});
-assert.deepEqual(process.argv.slice(2, 5), ['run', '--model', 'opencode-go/kimi-k2.7-code']);
+assert.equal(process.env.PWD, ${JSON.stringify(modelWorkspace)});
+assert.deepEqual(process.argv.slice(2, 7), ['run', '--format', 'json', '--model', 'opencode-go/kimi-k2.7-code']);
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.$schema, 'https://opencode.ai/config.json');
 assert.equal(config.model, 'opencode-go/kimi-k2.7-code');

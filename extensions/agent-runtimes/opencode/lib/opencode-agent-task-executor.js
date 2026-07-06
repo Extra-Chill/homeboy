@@ -645,6 +645,31 @@ function resolveCommandSpec(config = {}, options = {}) {
 	return { command: configuredCommand.trim(), args: configuredArgs };
 }
 
+function opencodeRunArgs(request = {}, config = {}, commandSpec = {}) {
+	const model = config.model || request.executor?.model || request.model;
+	const format = config.format || 'json';
+	return [
+		...arrayValue(commandSpec.args),
+		'run',
+		...(format ? ['--format', format] : []),
+		...(model ? ['--model', model] : []),
+		...(config.agent ? ['--agent', config.agent] : []),
+		...(config.variant ? ['--variant', config.variant] : []),
+		...(config.title ? ['--title', config.title] : []),
+		request.instructions,
+	];
+}
+
+function resolveOpenCodeCwd(request = {}, config = {}) {
+	return config.cwd
+		|| config.workspace_root
+		|| config.workspaceRoot
+		|| request.workspace_path
+		|| request.workspace?.path
+		|| request.workspace?.root
+		|| process.cwd();
+}
+
 async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const validationError = validateOpenCodeRequest(request);
 	if (validationError) {
@@ -663,18 +688,9 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const cwd = config.cwd || config.workspace_root || config.workspaceRoot || request.workspace_path || request.workspace?.path || request.workspace?.root || process.cwd();
-	const model = config.model || request.executor.model || request.model;
-	const args = [
-		...commandSpec.args,
-		'run',
-		...(model ? ['--model', model] : []),
-		...(config.agent ? ['--agent', config.agent] : []),
-		...(config.variant ? ['--variant', config.variant] : []),
-		...(config.title ? ['--title', config.title] : []),
-		request.instructions,
-	];
-	const spawnExtra = { env: opencodeSpawnEnv(request, options) };
+	const cwd = resolveOpenCodeCwd(request, config);
+	const args = opencodeRunArgs(request, config, commandSpec);
+	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
 	const spawnResult = await spawnOpenCodeStreaming(commandSpec.command, args, {
@@ -956,16 +972,10 @@ const { outcome, validationFailure } = createCliAgentTaskExecutor({
 	resolveCommandSpec,
 	successOutcome: opencodeSuccessOutcome,
 	failureOutcome: opencodeFailureOutcome,
-	buildArgs: (request, config, commandSpec) => [
-		...commandSpec.args,
-		'run',
-		...(config.model ? ['--model', config.model] : []),
-		...(config.agent ? ['--agent', config.agent] : []),
-		...(config.variant ? ['--variant', config.variant] : []),
-		...(config.title ? ['--title', config.title] : []),
-		request.instructions,
-	],
-	buildSpawn: (request, config, options) => ({ env: opencodeSpawnEnv(request, options) }),
+	buildArgs: opencodeRunArgs,
+	buildSpawn: (request, config, options) => ({
+		env: { ...opencodeSpawnEnv(request, options), PWD: resolveOpenCodeCwd(request, config) },
+	}),
 	messages: {
 		invalidRequest: { code: 'agent_task.invalid_opencode_request', summary: 'OpenCode request validation failed.' },
 		invalidCommand: { code: 'agent_task.invalid_opencode_command', summary: 'OpenCode command configuration is invalid.' },
