@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.18] - 2026-07-06
+
+### Changed
+- Hydrate dependencies for Lab workspace offloads
+
+### Fixed
+- Fix rig lint conflict marker false positives
+
 ## [0.281.17] - 2026-07-06
 
 ### Changed
