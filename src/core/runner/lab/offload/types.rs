@@ -15,9 +15,9 @@ pub struct LabOffloadRequest<'a> {
     pub force_hot: bool,
     pub local_policy: LabLocalExecutionPolicy,
     pub allow_dirty_lab_workspace: bool,
-    /// Skip post-materialization dependency hydration for agent-task exec
+    /// Skip post-materialization dependency hydration for Lab workspace exec
     /// jobs. When true, Homeboy does not run `composer install`/`npm ci`/etc. in
-    /// the materialized runner workspace before the executor starts (#7366).
+    /// the materialized runner workspace before the command starts (#7366).
     pub skip_deps_hydration: bool,
     pub capture_patch: bool,
     /// Human-readable flag (e.g. `--write`, `--fix`) that requested the

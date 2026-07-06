@@ -978,8 +978,7 @@ pub(crate) fn run_lab_offload_inner(
         ensure_remote_lab_artifact_dir(runner_id, output_file)?;
     }
 
-    let dependency_hydration = hydrate_for_agent_task_exec(
-        agent_task_run_id.is_some(),
+    let dependency_hydration = hydrate_for_lab_workspace_exec(
         request.skip_deps_hydration,
         runner_id,
         &synced.local_path,
