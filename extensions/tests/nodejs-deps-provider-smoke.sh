@@ -65,4 +65,47 @@ if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
     exit 1
 fi
 
+rm "$PROJECT_DIR/package-lock.json"
+status_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh status)"
+STATUS_JSON="$status_json" node <<'NODE'
+const status = JSON.parse(process.env.STATUS_JSON);
+if (!status.errors.some((error) => error.code === 'nodejs.lockfile_missing')) {
+  throw new Error(`expected missing lockfile error, got ${JSON.stringify(status.errors)}`);
+}
+NODE
+
+set +e
+command_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh install-command)"
+command_status=$?
+set -e
+if [ "$command_status" -eq 0 ]; then
+    echo "expected install-command to fail without a lockfile" >&2
+    exit 1
+fi
+COMMAND_JSON="$command_json" node <<'NODE'
+const plan = JSON.parse(process.env.COMMAND_JSON);
+if (!Array.isArray(plan.command) || plan.command.length !== 0) {
+  throw new Error(`expected empty command for unsupported install plan, got ${JSON.stringify(plan.command)}`);
+}
+if (!plan.errors.some((error) => error.code === 'nodejs.lockfile_missing')) {
+  throw new Error(`expected missing lockfile error, got ${JSON.stringify(plan.errors)}`);
+}
+NODE
+
+cat >"$PROJECT_DIR/package-lock.json" <<'JSON'
+{
+  "name": "fixture-node-project",
+  "lockfileVersion": 3,
+  "packages": {}
+}
+JSON
+touch "$PROJECT_DIR/yarn.lock"
+status_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh status)"
+STATUS_JSON="$status_json" node <<'NODE'
+const status = JSON.parse(process.env.STATUS_JSON);
+if (!status.errors.some((error) => error.code === 'nodejs.lockfile_ambiguous')) {
+  throw new Error(`expected ambiguous lockfile error, got ${JSON.stringify(status.errors)}`);
+}
+NODE
+
 echo "nodejs deps provider smoke passed"
