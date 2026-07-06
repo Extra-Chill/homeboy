@@ -144,6 +144,13 @@ pub(crate) fn output_descriptor(
     }
 }
 
+pub(crate) fn lab_contract(command: &Commands) -> Option<LabCommandContract> {
+    match command {
+        Commands::Fleet(args) => fleet::adapter(CommandOutputFileMode::None).lab_contract(args),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +275,14 @@ mod tests {
         assert!(fleet::adapter(CommandOutputFileMode::None)
             .lab_contract(&args)
             .is_none());
+    }
+
+    #[test]
+    fn migrated_adapter_lab_contract_matches_command_contract() {
+        let command = parsed_command(&[
+            "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
+        ]);
+
+        assert_eq!(lab_contract(&command), command.lab_contract());
     }
 }
