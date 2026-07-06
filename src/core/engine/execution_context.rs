@@ -776,6 +776,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_with_component_accepts_component_scripts_for_capability() {
+        with_isolated_home(|_| {
+            let dir = TempDir::new().expect("temp dir");
+            let component = Component {
+                id: "script-owned".to_string(),
+                local_path: dir.path().to_string_lossy().to_string(),
+                scripts: Some(crate::core::component::ComponentScriptsConfig {
+                    fuzz: vec!["node fuzz-runner.mjs".to_string()],
+                    ..Default::default()
+                }),
+                ..Component::default()
+            };
+            let options = ResolveOptions::with_capability(
+                "script-owned",
+                None,
+                ExtensionCapability::Fuzz,
+                Vec::new(),
+            );
+
+            let ctx = resolve_with_component(&options, Some(component))
+                .expect("component scripts should satisfy fuzz context");
+
+            assert_eq!(ctx.extension_id, None);
+            assert_eq!(ctx.extension_path, None);
+            assert_eq!(
+                ctx.component
+                    .script_commands(ExtensionCapability::Fuzz)
+                    .len(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn resolve_capability_raw_path_reports_unsupported_shape() {
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path();
