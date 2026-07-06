@@ -27,6 +27,7 @@ pub(crate) fn run_package(
     state: &mut ReleaseState,
     component_id: &str,
     component_local_path: &str,
+    component_source_path: Option<&str>,
     skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
     let package_extensions: Vec<&ExtensionManifest> = extensions
@@ -52,6 +53,7 @@ pub(crate) fn run_package(
             state,
             component_id,
             component_local_path,
+            component_source_path,
             extra_config.as_ref(),
         );
         let response = run_package_action_with_retry(&extension.id, &payload)
@@ -209,7 +211,7 @@ pub(crate) fn run_extension_release_preflight(
         );
     }
 
-    let payload = build_release_payload(state, component_id, component_local_path, None);
+    let payload = build_release_payload(state, component_id, component_local_path, None, None);
     let response =
         match extension::execute_action(extension_id, action_id, None, None, Some(&payload)) {
             Ok(response) => response,
@@ -279,6 +281,7 @@ pub(crate) fn build_release_payload(
     state: &ReleaseState,
     component_id: &str,
     component_local_path: &str,
+    component_source_path: Option<&str>,
     extra_config: Option<&std::collections::HashMap<String, serde_json::Value>>,
 ) -> serde_json::Value {
     let version = state.version.clone().unwrap_or_default();
@@ -295,6 +298,12 @@ pub(crate) fn build_release_payload(
             "artifacts": state.artifacts,
         }
     });
+
+    if let Some(source_path) = component_source_path {
+        if source_path != component_local_path {
+            payload["release"]["source_path"] = serde_json::Value::String(source_path.to_string());
+        }
+    }
 
     if let Some(config) = extra_config {
         if !config.is_empty() {

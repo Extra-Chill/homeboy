@@ -51,6 +51,7 @@ pub fn package_existing_tag(
         &mut state,
         component_id,
         &component.local_path,
+        None,
         skip_build_validation,
     )?;
     if state.artifacts.is_empty() {

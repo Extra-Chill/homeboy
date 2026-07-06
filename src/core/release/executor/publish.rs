@@ -47,6 +47,7 @@ pub(crate) fn run_publish(
         state,
         component_id,
         component_local_path,
+        None,
         extra_config.as_ref(),
     );
     let response = extension::execute_action(&extension.id, action_id, None, None, Some(&payload))?;

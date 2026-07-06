@@ -27,7 +27,7 @@ pub(crate) fn run_prepare(
         ));
     }
 
-    let payload = build_release_payload(state, component_id, component_local_path, None);
+    let payload = build_release_payload(state, component_id, component_local_path, None, None);
     let mut responses = Vec::new();
 
     for extension in providers {

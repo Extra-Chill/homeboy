@@ -409,7 +409,7 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::package::store_artifacts_from_output;
-    use super::{github_release, run_cleanup, run_package};
+    use super::{github_release, package_preflight, run_cleanup, run_package};
     use crate::core::component::Component;
     use crate::core::deploy::release_download::GitHubRepo;
     use crate::core::extension::ExtensionManifest;
@@ -768,6 +768,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect("package step");
@@ -858,6 +859,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect("package step");
@@ -891,6 +893,7 @@ mod tests {
                 &mut state,
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect("package step");
@@ -900,6 +903,62 @@ mod tests {
             assert_eq!(
                 state.artifacts[0].path,
                 "build/intelligence-horse-theme.zip"
+            );
+        });
+    }
+
+    #[test]
+    fn package_preflight_payload_distinguishes_staging_path_from_source_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            std::fs::write(component.path().join("fixture.php"), "<?php\n")
+                .expect("component file");
+            let payload_out = component.path().join("package-payload.json");
+            let source_env_out = component.path().join("release-source-env.txt");
+            let component_env_out = component.path().join("component-env.txt");
+            let package = release_package_extension(
+                "wordpress",
+                &format!(
+                    "printf '%s' \"$HOMEBOY_SETTINGS_JSON\" > '{}'; \
+                     printf '%s' \"${{HOMEBOY_RELEASE_SOURCE_PATH:-}}\" > '{}'; \
+                     printf '%s' \"$HOMEBOY_COMPONENT_PATH\" > '{}'; \
+                     mkdir -p build; printf artifact > build/fixture.zip; \
+                     printf '[{{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}}]'",
+                    payload_out.display(),
+                    source_env_out.display(),
+                    component_env_out.display()
+                ),
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let result = package_preflight::run_package_preflight(
+                &[package],
+                "fixture",
+                &component.path().to_string_lossy(),
+                false,
+            )
+            .expect("package preflight");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            let payload: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&payload_out).expect("payload output"),
+            )
+            .expect("payload json");
+            assert_eq!(
+                payload["release"]["source_path"].as_str(),
+                Some(component.path().to_string_lossy().as_ref())
+            );
+            assert_ne!(
+                payload["release"]["local_path"].as_str(),
+                payload["release"]["source_path"].as_str()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&source_env_out).expect("source env"),
+                component.path().to_string_lossy()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&component_env_out).expect("component env"),
+                payload["release"]["local_path"].as_str().unwrap()
             );
         });
     }
@@ -925,6 +984,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect_err("failing package provider should fail the step");
@@ -961,6 +1021,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect_err("persistently failing package should fail after retry");
@@ -1011,6 +1072,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 false,
             )
             .expect("retry after transient failure should succeed");

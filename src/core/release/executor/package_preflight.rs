@@ -31,6 +31,7 @@ pub(crate) fn run_package_preflight(
         &mut state,
         component_id,
         &temp_component_path.to_string_lossy(),
+        Some(component_local_path),
         skip_build_validation,
     );
 
