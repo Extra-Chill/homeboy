@@ -2,6 +2,21 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.6.3] - 2026-07-06
+
+### Changed
+- Converge shell runners on shared harness
+- Consolidate runtime helper smoke coverage
+- drop dead per-language runtime helper shims
+- Use core sidecar helpers in non-WP runners
+
+### Fixed
+- remove shared core helper fallbacks
+- prefer runtime helpers in extension wrappers
+- consume core test scope in runners
+- make Swift setup capability-aware
+- make coverage completeness audit advisory
+
 ## [2.6.1] - 2026-05-21
 
 ### Fixed
