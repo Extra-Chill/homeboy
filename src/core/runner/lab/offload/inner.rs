@@ -34,6 +34,24 @@ pub(crate) fn remote_lab_output_file(checkout_root: &str) -> String {
     )
 }
 
+/// Remote structured-output path for runner-resident commands.
+///
+/// Runner-resident commands execute from the runner workspace root itself, not a
+/// synced checkout under that root. Keep their output inside `workspace_root` so
+/// daemon-mode file transfer can create/read it, while still keeping the file out
+/// of any materialized git checkout.
+pub(crate) fn remote_runner_resident_lab_output_file(workspace_root: &str) -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}/.homeboy-artifacts/homeboy-lab-structured-output-{}.json",
+        workspace_root.trim_end_matches('/'),
+        nonce
+    )
+}
+
 /// Ensure the Homeboy-owned Lab artifact directory exists on the runner before
 /// a command writes its structured output there. The directory is a sibling of
 /// the checkout, so it is not created by workspace sync and must be made

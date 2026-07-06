@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn other_extension_commands_stay_local_only() {
+    fn extension_show_routes_to_explicit_lab_runner() {
         let cli = Cli::parse_from([
             "homeboy",
             "--runner",
@@ -1981,6 +1981,22 @@ mod tests {
             "show",
             "wordpress",
         ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+        assert_eq!(command.hot_label, "extension show");
+        assert!(command.portable);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(command.unsupported_reason.is_none());
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(command.required_extensions.is_empty());
+        assert!(!command.routing_policy.infer_source_path_tools);
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn extension_list_stays_local_only() {
+        let cli = Cli::parse_from(["homeboy", "--runner", "lab", "extension", "list"]);
 
         assert!(lab_offload_command(&cli.command).unwrap().is_none());
         assert!(!cli.command.supports_lab_runner());

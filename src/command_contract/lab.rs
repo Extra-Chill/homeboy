@@ -924,6 +924,9 @@ impl Commands {
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple(args.update_command_label())
             }
+            Commands::Extension(args) if args.is_runner_resident_read_command() => {
+                LabCommandContract::runner_resident(args.runner_resident_read_command_label())
+            }
             Commands::Runtime(args) if args.is_refresh_command() => {
                 LabCommandContract::explicit_runner_simple(RUNTIME_REFRESH_LAB_LABEL)
             }
