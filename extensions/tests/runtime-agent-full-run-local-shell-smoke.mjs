@@ -65,8 +65,8 @@ assert.equal(outcome.evidence_refs[0].kind, 'preview');
 const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(results.scenarios[0].id, 'local-shell-smoke');
 assert.equal(results.scenarios[0].metadata.job_status, 'no_op');
-assert.equal(results.scenarios[0].metadata.controller_loop_proof_validation.valid, true);
-assert.equal(results.scenarios[0].metadata.bounded_production_loop_proof.status, 'succeeded');
+assert.equal(results.scenarios[0].metadata.agent_task_outcome.metadata.runtime_id, 'local-shell');
+assert.equal(results.scenarios[0].metadata.agent_task_outcome.metadata.backend, 'local-shell');
 
 assert.deepEqual(resolveControllerLoopProofPolicy({}), {
   proof_profile: 'artifact_only',
