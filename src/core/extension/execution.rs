@@ -670,7 +670,7 @@ pub(super) fn build_action_env(
     let component_path =
         crate::core::engine::text::json_path_str(payload, &["release", "local_path"]);
 
-    build_exec_env(
+    let mut env = build_exec_env(
         extension_id,
         project_id,
         component_id,
@@ -679,7 +679,16 @@ pub(super) fn build_action_env(
         project_base_path,
         None,
         component_path,
-    )
+    );
+    if let Some(source_path) =
+        crate::core::engine::text::json_path_str(payload, &["release", "source_path"])
+    {
+        env.push((
+            "HOMEBOY_RELEASE_SOURCE_PATH".to_string(),
+            source_path.to_string(),
+        ));
+    }
+    env
 }
 
 pub(super) fn execute_extension_command(

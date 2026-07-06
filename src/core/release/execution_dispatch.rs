@@ -104,6 +104,7 @@ pub(super) fn execute_release_plan_step(
                 &mut context.state,
                 context.component_id,
                 &context.component.local_path,
+                None,
                 context.options.skip_build_validation,
             )
             .unwrap_or_else(|err| failed_result("package", "package", err)),
