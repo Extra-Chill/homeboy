@@ -61,6 +61,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         trace_experiments: HashMap::new(),
         trace_guardrails: Vec::new(),
         bench_profiles: HashMap::new(),
+        fuzz_profiles: HashMap::new(),
         app_launcher: None,
     }
 }
@@ -633,6 +634,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             trace_experiments: HashMap::new(),
             trace_guardrails: Vec::new(),
             bench_profiles: HashMap::new(),
+            fuzz_profiles: HashMap::new(),
             app_launcher: None,
         };
 
@@ -704,6 +706,7 @@ fn test_run_status() {
             trace_experiments: HashMap::new(),
             trace_guardrails: Vec::new(),
             bench_profiles: HashMap::new(),
+            fuzz_profiles: HashMap::new(),
         };
 
         let status = run_status(&rig).expect("run_status with service");
@@ -881,6 +884,7 @@ fn test_snapshot_state() {
         trace_experiments: HashMap::new(),
         trace_guardrails: Vec::new(),
         bench_profiles: HashMap::new(),
+        fuzz_profiles: HashMap::new(),
         app_launcher: None,
     };
 

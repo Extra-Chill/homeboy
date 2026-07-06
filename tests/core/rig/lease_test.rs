@@ -54,6 +54,7 @@ fn rig(id: &str, resources: RigResourcesSpec) -> RigSpec {
         trace_experiments: Default::default(),
         trace_guardrails: Default::default(),
         bench_profiles: Default::default(),
+        fuzz_profiles: Default::default(),
         app_launcher: None,
     }
 }

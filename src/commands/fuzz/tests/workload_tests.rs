@@ -170,6 +170,96 @@ fn resolve_fuzz_context_preserves_rig_extensions_with_explicit_path_when_registr
 }
 
 #[test]
+fn resolve_fuzz_context_infers_single_rig_fuzz_workload_extension() {
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/generic");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("generic.json"),
+            serde_json::json!({
+                "name": "generic",
+                "version": "0.0.0",
+                "fuzz": { "workloads": [] }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.path().to_string_lossy(),
+                    "extensions": {
+                        "generic": { "settings": {} }
+                    }
+                }
+            },
+            "fuzz": { "default_component": "package" },
+            "fuzz_workloads": {
+                "generic": [{ "path": "${package.root}/fuzz/parser.json" }]
+            }
+        }))
+        .expect("parse rig spec");
+        let context = FuzzRigContext {
+            spec,
+            package_root: Some(home.path().join("rig-package")),
+        };
+        let comp = PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: None,
+        };
+
+        let resolved = resolve_fuzz_context(
+            "package",
+            &comp,
+            &SettingArgs::default(),
+            &ExtensionOverrideArgs::default(),
+            homeboy::core::extension::ExtensionCapability::Fuzz,
+            Some(&context),
+        )
+        .expect("resolve fuzz context");
+
+        assert_eq!(resolved.extension_id.as_deref(), Some("generic"));
+    });
+}
+
+#[test]
+fn resolve_profile_workload_id_uses_single_fuzz_profile_entry() {
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "fuzz_profiles": {
+            "lab": ["mysql-poc-lifecycle-fuzz"]
+        }
+    }))
+    .expect("parse rig spec");
+
+    let workload_id = resolve_profile_workload_id(Some(&spec), Some("lab"), None)
+        .expect("resolve profile workload");
+
+    assert_eq!(workload_id.as_deref(), Some("mysql-poc-lifecycle-fuzz"));
+}
+
+#[test]
+fn resolve_profile_workload_id_rejects_unknown_profile_with_available_profiles() {
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "fuzz_profiles": {
+            "lab": ["mysql-poc-lifecycle-fuzz"]
+        }
+    }))
+    .expect("parse rig spec");
+
+    let err = resolve_profile_workload_id(Some(&spec), Some("missing"), None)
+        .expect_err("missing profile should fail");
+
+    assert!(err
+        .message
+        .contains("does not declare fuzz profile 'missing'"));
+    assert_eq!(err.details["tried"], serde_json::json!(["lab"]));
+}
+
+#[test]
 fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
@@ -482,6 +572,8 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
             setting_json: vec![],
         },
         workload_id: Some("parser".to_string()),
+        profile: None,
+        shared_state: Some(PathBuf::from("/tmp/fuzz-shared-state")),
         run_id: Some("proof-1".to_string()),
         tracker_refs: vec![],
         seed: Some("1234".to_string()),
@@ -551,6 +643,10 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         "HOMEBOY_FUZZ_INVENTORY_FILE".to_string(),
         "/tmp/fuzz-inventory.json".to_string()
     )));
+    assert!(env.contains(&(
+        "HOMEBOY_FUZZ_SHARED_STATE".to_string(),
+        "/tmp/fuzz-shared-state".to_string()
+    )));
     assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
     assert!(env.contains(&(
         "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
@@ -568,6 +664,9 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
     assert!(contract
         .env
         .contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string()));
+    assert!(contract
+        .env
+        .contains(&"HOMEBOY_FUZZ_SHARED_STATE".to_string()));
     assert!(contract
         .env
         .contains(&"HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string()));
@@ -661,6 +760,8 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
             setting_json: vec![],
         },
         workload_id: Some("parser".to_string()),
+        profile: None,
+        shared_state: None,
         run_id: Some("proof-1".to_string()),
         tracker_refs: vec![],
         seed: None,
@@ -790,6 +891,8 @@ fn fuzz_runner_env_stages_generic_workload_file_refs() {
             setting_json: vec![],
         },
         workload_id: Some("rest-product-batch-import".to_string()),
+        profile: None,
+        shared_state: None,
         run_id: Some("proof-1".to_string()),
         tracker_refs: vec![],
         seed: None,
@@ -930,6 +1033,8 @@ fn fuzz_runner_env_stages_nested_generic_workload_json_file_refs() {
             setting_json: vec![],
         },
         workload_id: Some("rest-product-batch-import".to_string()),
+        profile: None,
+        shared_state: None,
         run_id: Some("proof-1".to_string()),
         tracker_refs: vec![],
         seed: None,

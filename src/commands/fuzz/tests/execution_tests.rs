@@ -16,6 +16,8 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
                 setting_json: vec![],
             },
             workload_id: Some("parser".to_string()),
+            profile: None,
+            shared_state: None,
             run_id: Some("proof-1".to_string()),
             tracker_refs: vec![homeboy::core::evidence_manifest::TrackerRef {
                 kind: "github_issue".to_string(),
@@ -1230,6 +1232,8 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
                 setting_json: vec![],
             },
             workload_id: Some("parser".to_string()),
+            profile: None,
+            shared_state: None,
             run_id: Some("proof-bad-results".to_string()),
             tracker_refs: vec![],
             seed: None,

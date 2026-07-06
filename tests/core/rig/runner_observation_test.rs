@@ -36,6 +36,7 @@ fn observation_spec(id: &str) -> RigSpec {
         trace_experiments: HashMap::new(),
         trace_guardrails: Vec::new(),
         bench_profiles: HashMap::new(),
+        fuzz_profiles: HashMap::new(),
         app_launcher: None,
     }
 }

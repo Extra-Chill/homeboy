@@ -53,6 +53,7 @@ mod lifecycle {
             trace_experiments: HashMap::new(),
             trace_guardrails: Vec::new(),
             bench_profiles: HashMap::new(),
+            fuzz_profiles: HashMap::new(),
         }
     }
 
@@ -82,6 +83,7 @@ mod lifecycle {
             trace_experiments: HashMap::new(),
             trace_guardrails: Vec::new(),
             bench_profiles: HashMap::new(),
+            fuzz_profiles: HashMap::new(),
         }
     }
 

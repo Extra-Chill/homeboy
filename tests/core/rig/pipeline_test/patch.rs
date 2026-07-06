@@ -50,6 +50,7 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
         trace_experiments: Default::default(),
         trace_guardrails: Default::default(),
         bench_profiles: Default::default(),
+        fuzz_profiles: Default::default(),
         app_launcher: None,
     }
 }
