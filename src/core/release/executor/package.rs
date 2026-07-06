@@ -345,7 +345,9 @@ pub(super) fn store_artifacts_from_output(
     // dependency install inside the build script can fail intermittently, and
     // the real error must be visible in the structured error payload.
     if !success {
-        return Err(package_command_failure_error(exit_code, stdout, stderr));
+        return Err(package_command_failure_error(
+            exit_code, stdout, stderr, response,
+        ));
     }
 
     if stdout.trim().is_empty() {
@@ -456,7 +458,12 @@ fn safe_artifact_file_name(value: &str) -> String {
 /// Package/build tools commonly write progress to stdout and errors to stderr.
 /// Including both streams ensures the operator can diagnose the real failure
 /// instead of seeing truncated output.  Issue #3238.
-fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> Error {
+fn package_command_failure_error(
+    exit_code: i64,
+    stdout: &str,
+    stderr: &str,
+    response: &serde_json::Value,
+) -> Error {
     let stderr_trimmed = stderr.trim();
     let stdout_trimmed = stdout.trim();
     let has_stderr = !stderr_trimmed.is_empty();
@@ -483,7 +490,52 @@ fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> 
         detail.push_str(stdout_trimmed);
     }
 
-    Error::internal_unexpected(detail)
+    Error::new(
+        crate::core::error::ErrorCode::InternalUnexpected,
+        detail,
+        serde_json::json!({
+            "exit_code": exit_code,
+            "command": response.get("command").and_then(serde_json::Value::as_str),
+            "cwd": response.get("cwd").and_then(serde_json::Value::as_str),
+            "relevant_error_lines": relevant_package_error_lines(stdout, stderr),
+            "stdout": stdout_trimmed,
+            "stderr": stderr_trimmed,
+        }),
+    )
+}
+
+fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in stderr.lines().chain(stdout.lines()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("missing")
+            || lower.contains("not found")
+            || lower.contains("enoent")
+        {
+            lines.push(trimmed.to_string());
+        }
+        if lines.len() >= 12 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        lines.extend(
+            stderr
+                .lines()
+                .chain(stdout.lines())
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .take(12)
+                .map(str::to_string),
+        );
+    }
+    lines
 }
 
 fn package_output_reports_missing_frontend_assets(stdout: &str, stderr: &str) -> bool {

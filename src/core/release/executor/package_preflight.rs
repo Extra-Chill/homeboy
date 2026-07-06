@@ -43,8 +43,27 @@ pub(crate) fn run_package_preflight(
         skip_build_validation,
     );
 
+    if let Err(err) = result {
+        let diagnostic = package_preflight_failure_diagnostic(
+            component_id,
+            component_local_path,
+            &temp,
+            &temp_component_path,
+            skip_build_validation,
+            &err,
+        );
+        let artifact_path = persist_package_preflight_failure_diagnostic(component_id, &diagnostic)
+            .unwrap_or_else(|persist_err| format!("unavailable: {}", persist_err.message));
+        let _ = std::fs::remove_dir_all(&temp);
+        return Err(package_preflight_failure_error(
+            err,
+            diagnostic,
+            artifact_path,
+        ));
+    }
+
     let _ = std::fs::remove_dir_all(&temp);
-    let result = result?;
+    let result = result.expect("checked package preflight error above");
     validate_package_completeness(component, Path::new(component_local_path), &state.artifacts)?;
 
     let data = serde_json::json!({
@@ -110,6 +129,115 @@ fn release_preflight_component_path(
         })?;
 
     Ok(temp_root_path.join(relative_component_path))
+}
+
+fn package_preflight_failure_diagnostic(
+    component_id: &str,
+    component_local_path: &str,
+    temp_root: &Path,
+    temp_component_path: &Path,
+    skip_build_validation: bool,
+    err: &Error,
+) -> serde_json::Value {
+    let source = err.details.get("source").unwrap_or(&err.details);
+    let command = source
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let build_cwd = source
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| temp_component_path.display().to_string());
+    let exit_code = source
+        .get("exit_code")
+        .or_else(|| source.get("exitCode"))
+        .and_then(serde_json::Value::as_i64);
+    let relevant_error_lines = source
+        .get("relevant_error_lines")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    serde_json::json!({
+        "component_id": component_id,
+        "package_root": component_local_path,
+        "build_cwd": build_cwd,
+        "materialized_temp_root": temp_root.display().to_string(),
+        "command": command,
+        "exit_code": exit_code,
+        "relevant_error_lines": relevant_error_lines,
+        "config_fields": {
+            "component.local_path": component_local_path,
+            "release.local_path": temp_component_path.display().to_string(),
+            "release.source_path": component_local_path,
+            "config.skip_build_validation": skip_build_validation,
+        },
+        "error": {
+            "message": err.message,
+            "details": err.details,
+        }
+    })
+}
+
+fn persist_package_preflight_failure_diagnostic(
+    component_id: &str,
+    diagnostic: &serde_json::Value,
+) -> Result<String> {
+    let artifact_root = crate::core::paths::artifact_root()?;
+    let path = artifact_root
+        .join("release")
+        .join(crate::core::paths::sanitize_path_segment(component_id))
+        .join("package-preflight-failure.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            Error::internal_io(
+                format!(
+                    "Failed to create package preflight diagnostic directory: {}",
+                    e
+                ),
+                Some(parent.display().to_string()),
+            )
+        })?;
+    }
+    let body = serde_json::to_string_pretty(diagnostic).map_err(|e| {
+        Error::internal_json(
+            e.to_string(),
+            Some("package preflight diagnostic".to_string()),
+        )
+    })?;
+    std::fs::write(&path, body).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to write package preflight diagnostic: {}", e),
+            Some(path.display().to_string()),
+        )
+    })?;
+    Ok(path.display().to_string())
+}
+
+fn package_preflight_failure_error(
+    err: Error,
+    diagnostic: serde_json::Value,
+    artifact_path: String,
+) -> Error {
+    let mut details = serde_json::json!({
+        "diagnostic": diagnostic,
+        "artifact_path": artifact_path,
+    });
+    details["diagnostic"]["artifact_path"] = serde_json::Value::String(artifact_path.clone());
+
+    let mut wrapped = Error::new(
+        err.code,
+        format!(
+            "Package preflight failed for component '{}'; diagnostic artifact: {}. {}",
+            details["diagnostic"]["component_id"].as_str().unwrap_or(""),
+            artifact_path,
+            err.message
+        ),
+        details,
+    );
+    wrapped.hints = err.hints;
+    wrapped.retryable = err.retryable;
+    wrapped
 }
 
 fn create_release_preflight_tempdir() -> Result<PathBuf> {

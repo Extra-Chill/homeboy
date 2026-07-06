@@ -973,12 +973,21 @@ mod tests {
     fn package_preflight_materializes_repo_root_for_subdirectory_component() {
         crate::test_support::with_isolated_home(|_| {
             let repo = tempfile::tempdir().expect("repo tempdir");
-            std::fs::create_dir(repo.path().join(".git")).expect("git marker");
             std::fs::write(repo.path().join("build-input.txt"), "repo-root-input")
                 .expect("repo-root input");
             let component = repo.path().join("packages").join("plugin");
             std::fs::create_dir_all(&component).expect("component dir");
             std::fs::write(component.join("fixture.php"), "<?php\n").expect("component file");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            run_in(
+                repo.path(),
+                &[
+                    "git",
+                    "add",
+                    "build-input.txt",
+                    "packages/plugin/fixture.php",
+                ],
+            );
 
             let package = release_package_extension(
                 "wordpress",
@@ -992,6 +1001,11 @@ mod tests {
 
             let result = package_preflight::run_package_preflight(
                 &[package],
+                &Component {
+                    id: "fixture".to_string(),
+                    local_path: component.to_string_lossy().to_string(),
+                    ..Component::default()
+                },
                 "fixture",
                 &component.to_string_lossy(),
                 false,
@@ -1001,6 +1015,72 @@ mod tests {
             assert_eq!(result.status, ReleaseStepStatus::Success);
             let data = result.data.expect("preflight data");
             assert_eq!(data["validated_action"].as_str(), Some("release.package"));
+        });
+    }
+
+    #[test]
+    fn package_preflight_failure_includes_actionable_diagnostics() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let package = release_package_extension(
+                "wordpress",
+                "printf 'building package\n'; printf 'error: missing tsconfig.base.json\n' >&2; exit 9",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let err = package_preflight::run_package_preflight(
+                &[package],
+                &Component {
+                    id: "fixture".to_string(),
+                    local_path: component.path().to_string_lossy().to_string(),
+                    ..Component::default()
+                },
+                "fixture",
+                &component.path().to_string_lossy(),
+                true,
+            )
+            .expect_err("failing package preflight should surface diagnostics");
+
+            let diagnostic = &err.details["diagnostic"];
+            assert_eq!(diagnostic["component_id"].as_str(), Some("fixture"));
+            assert_eq!(
+                diagnostic["package_root"].as_str(),
+                Some(component.path().to_string_lossy().as_ref())
+            );
+            assert!(diagnostic["build_cwd"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("homeboy-release-package-preflight"));
+            assert!(diagnostic["materialized_temp_root"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("homeboy-release-package-preflight"));
+            assert_eq!(diagnostic["exit_code"].as_i64(), Some(9));
+            let command = diagnostic["command"].as_str().expect("command");
+            assert!(command.contains("building package"));
+            assert!(command.contains("missing tsconfig.base.json"));
+            assert!(command.contains("exit 9"));
+            assert_eq!(
+                diagnostic["config_fields"]["component.local_path"].as_str(),
+                Some(component.path().to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                diagnostic["config_fields"]["config.skip_build_validation"].as_bool(),
+                Some(true)
+            );
+            assert!(diagnostic["relevant_error_lines"]
+                .as_array()
+                .expect("relevant error lines")
+                .iter()
+                .any(|line| line.as_str() == Some("error: missing tsconfig.base.json")));
+
+            let artifact_path = err.details["artifact_path"]
+                .as_str()
+                .expect("artifact path");
+            assert!(std::path::Path::new(artifact_path).is_file());
+            let artifact = std::fs::read_to_string(artifact_path).expect("diagnostic artifact");
+            assert!(artifact.contains("missing tsconfig.base.json"));
+            assert!(err.message.contains("diagnostic artifact"));
         });
     }
 
