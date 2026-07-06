@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.36] - 2026-07-06
+
+### Changed
+- Use release source path for WordPress packages
+
 ## [3.23.35] - 2026-07-06
 
 ### Fixed
