@@ -148,6 +148,8 @@ pub(crate) fn execute_action(
                 "stderr": execution.output.stderr,
                 "exitCode": execution.exit_code,
                 "success": execution.success,
+                "command": command_template,
+                "cwd": working_dir,
                 "payload": payload
             }))
         }
