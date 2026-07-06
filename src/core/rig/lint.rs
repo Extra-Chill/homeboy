@@ -13,8 +13,21 @@ use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::RigSpec;
 use crate::core::error::{Error, Result};
 
-/// Structural directories the generic rig package lint never descends into.
-const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[".git", ".homeboy"];
+/// Structural, dependency, and generated directories the generic rig package lint never descends into.
+const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[
+    ".git",
+    ".homeboy",
+    ".next",
+    ".venv",
+    "bower_components",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
+];
 
 pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
     let Some(root) = package_lint_root(rig) else {
@@ -289,22 +302,64 @@ fn conflict_marker_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String
     let mut failures = Vec::new();
     for file in files {
         let content = fs::read_to_string(file).unwrap_or_default();
+        let mut active_conflict: Option<(usize, &str)> = None;
+        let mut saw_separator = false;
         for (index, line) in content.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("<<<<<<<")
-                || trimmed.starts_with("=======")
-                || trimmed.starts_with(">>>>>>>")
-            {
-                failures.push(format!(
-                    "{}:{} unresolved conflict marker: {}",
-                    display_relative(root, file),
-                    index + 1,
-                    line.trim()
-                ));
+            match conflict_marker_line(line) {
+                Some(ConflictMarkerLine::Start) => {
+                    active_conflict = Some((index + 1, line.trim()));
+                    saw_separator = false;
+                }
+                Some(ConflictMarkerLine::Base) if active_conflict.is_some() => {}
+                Some(ConflictMarkerLine::Separator) if active_conflict.is_some() => {
+                    saw_separator = true;
+                }
+                Some(ConflictMarkerLine::End) if active_conflict.is_some() && saw_separator => {
+                    let (start_line, marker) = active_conflict.expect("active conflict");
+                    failures.push(format!(
+                        "{}:{} unresolved conflict marker: {}",
+                        display_relative(root, file),
+                        start_line,
+                        marker
+                    ));
+                    active_conflict = None;
+                    saw_separator = false;
+                }
+                _ => {}
             }
         }
     }
     Ok(failures)
+}
+
+enum ConflictMarkerLine {
+    Start,
+    Base,
+    Separator,
+    End,
+}
+
+fn conflict_marker_line(line: &str) -> Option<ConflictMarkerLine> {
+    if line == "=======" {
+        return Some(ConflictMarkerLine::Separator);
+    }
+    if conflict_edge_marker(line, "<<<<<<<") {
+        return Some(ConflictMarkerLine::Start);
+    }
+    if conflict_edge_marker(line, "|||||||") {
+        return Some(ConflictMarkerLine::Base);
+    }
+    if conflict_edge_marker(line, ">>>>>>>") {
+        return Some(ConflictMarkerLine::End);
+    }
+    None
+}
+
+fn conflict_edge_marker(line: &str, marker: &str) -> bool {
+    let Some(rest) = line.strip_prefix(marker) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(char::is_whitespace)
 }
 
 fn json_parse_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -778,6 +833,14 @@ mod tests {
             .expect("portability step")
     }
 
+    fn conflict_marker_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
+        outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("unresolved conflict markers"))
+            .expect("conflict marker step")
+    }
+
     #[test]
     fn aggregate_step_reports_failure_details() {
         let outcome = aggregate_step(
@@ -799,6 +862,66 @@ mod tests {
     #[test]
     fn lint_ignores_homeboy_metadata_directory() {
         assert!(IgnorePolicy::new(&[]).ignored_directory(OsStr::new(".homeboy")));
+    }
+
+    #[test]
+    fn lint_ignores_standard_dependency_directories() {
+        let policy = IgnorePolicy::new(&[]);
+
+        assert!(policy.ignored_directory(OsStr::new("vendor")));
+        assert!(policy.ignored_directory(OsStr::new("node_modules")));
+    }
+
+    #[test]
+    fn conflict_marker_scan_ignores_banners_headings_and_vendored_content() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let fixture_dir = temp.path().join("tests").join("fixtures");
+        let vendor_dir = temp
+            .path()
+            .join("vendor")
+            .join("psr")
+            .join("event-dispatcher");
+        fs::create_dir_all(&fixture_dir).expect("fixture dir");
+        fs::create_dir_all(&vendor_dir).expect("vendor dir");
+        fs::write(
+            fixture_dir.join("banner.css"),
+            "/* ================================ */\n/* <<<<<<< visual separator >>>>>>> */\n",
+        )
+        .expect("write fixture css");
+        fs::write(
+            fixture_dir.join("README.md"),
+            "Package Fixture\n=======\n\nNot a conflict block.\n",
+        )
+        .expect("write fixture markdown");
+        fs::write(
+            vendor_dir.join("README.md"),
+            "<<<<<<< dependency docs\n=======\n>>>>>>> dependency docs\n",
+        )
+        .expect("write vendor readme");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+
+        assert_eq!(conflict_marker_step(&outcome).status, "pass");
+    }
+
+    #[test]
+    fn conflict_marker_scan_reports_real_git_conflict_blocks() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        fs::write(
+            temp.path().join("rig.json"),
+            "<<<<<<< HEAD\n{\"id\":\"ours\"}\n=======\n{\"id\":\"theirs\"}\n>>>>>>> main\n",
+        )
+        .expect("write conflicted rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = conflict_marker_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        assert!(step
+            .error
+            .as_ref()
+            .expect("conflict marker error")
+            .contains("rig.json:1 unresolved conflict marker: <<<<<<< HEAD"));
     }
 
     #[test]
