@@ -13,6 +13,7 @@ const {
   buildSecretEnvPlan,
   loopPolicyFromEnv,
   normalizePathMaterializationPlan,
+  parseRuntimeWorkloadProfile,
   PATH_MATERIALIZATION_PLAN_SCHEMA,
   SECRET_ENV_PLAN_SCHEMA,
 } = require('../provider-adapters');
@@ -49,6 +50,26 @@ assert.deepEqual(loopPolicyFromEnv({
   duration_ms: 5000,
   deadline_at: '2030-01-01T00:00:00.000Z',
 });
+
+assert.deepEqual(parseRuntimeWorkloadProfile(JSON.stringify({
+  runtime: 'local-shell',
+  profile: 'profile-default',
+  workload: { id: 'profile-workload', label: 'Profile workload' },
+  tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
+  loop_policy: { mode: 'duration', max_revolutions: 2 },
+})), {
+  runtime: 'local-shell',
+  profile: 'profile-default',
+  workload_id: '',
+  workload: { id: 'profile-workload', label: 'Profile workload' },
+  tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
+  loop_policy: { mode: 'duration', max_revolutions: 2 },
+});
+
+assert.throws(
+  () => parseRuntimeWorkloadProfile('{bad-json'),
+  /Invalid runtime_workload_profile_json:/
+);
 
 const pathPlanWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-path-plan-'));
 try {
@@ -152,6 +173,71 @@ try {
   assert.deepEqual(config.secret_env_plan.secret_env_names, config.secret_env);
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+const profileTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-profile-'));
+try {
+  const config = buildConfig({
+    ...process.env,
+    GITHUB_WORKSPACE: profileTmpRoot,
+    RUNNER_TEMP: profileTmpRoot,
+    WORKLOAD_ID: '',
+    TARGET_REPO: 'Extra-Chill/example',
+    PROFILE: '',
+    RUNTIME_PROFILES: '{}',
+    RUNTIME: '',
+    LOOP_POLICY: '{}',
+    TOOL_PROFILE: '{}',
+    WORKLOAD: '{}',
+    RUNTIME_WORKLOAD_PROFILE_JSON: JSON.stringify({
+      runtime: 'local-shell',
+      profile: 'profile-default',
+      workload_id: 'profile-workload',
+      workload: { label: 'Profile workload' },
+      tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
+      loop_policy: { mode: 'duration', max_revolutions: 2 },
+    }),
+  });
+
+  assert.equal(config.runtime_id, 'local-shell');
+  assert.equal(config.runtime_profile, 'profile-default');
+  assert.equal(config.workload_id, 'profile-workload');
+  assert.equal(config.workload_label, 'Profile workload');
+  assert.deepEqual(config.loop_policy, { mode: 'duration', max_revolutions: 2 });
+} finally {
+  fs.rmSync(profileTmpRoot, { recursive: true, force: true });
+}
+
+const explicitProfileTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-profile-explicit-'));
+try {
+  const config = buildConfig({
+    ...process.env,
+    GITHUB_WORKSPACE: explicitProfileTmpRoot,
+    RUNNER_TEMP: explicitProfileTmpRoot,
+    WORKLOAD_ID: 'explicit-workload',
+    TARGET_REPO: 'Extra-Chill/example',
+    PROFILE: 'explicit-profile',
+    RUNTIME_PROFILES: '{}',
+    RUNTIME: 'local-shell',
+    WORKLOAD: '{"label":"Explicit workload"}',
+    LOOP_POLICY: '{"mode":"revolution"}',
+    MAX_REVOLUTIONS: '5',
+    RUNTIME_WORKLOAD_PROFILE_JSON: JSON.stringify({
+      runtime: 'other-runtime',
+      profile: 'profile-default',
+      workload_id: 'profile-workload',
+      workload: { label: 'Profile workload' },
+      loop_policy: { mode: 'duration', max_revolutions: 2 },
+    }),
+  });
+
+  assert.equal(config.runtime_id, 'local-shell');
+  assert.equal(config.runtime_profile, 'explicit-profile');
+  assert.equal(config.workload_id, 'explicit-workload');
+  assert.equal(config.workload_label, 'Explicit workload');
+  assert.deepEqual(config.loop_policy, { mode: 'revolution', max_revolutions: 5 });
+} finally {
+  fs.rmSync(explicitProfileTmpRoot, { recursive: true, force: true });
 }
 
 const materializedTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-build-runner-config-path-plan-'));

@@ -19,6 +19,10 @@ name: Runtime Agent Full Run (reusable)
         description: Runtime provider ref.
         type: string
         default: main
+      runtime_workload_profile_json:
+        description: JSON object carrying compact defaults for non-secret runtime/workload knobs. Explicit workflow inputs take precedence.
+        type: string
+        default: '{}'
       profile:
         description: Runtime profile id selected from runtime_profiles.
         type: string
@@ -481,6 +485,7 @@ jobs:
           SECRET_ENV_MAP: ${{ inputs.secret_env_map }}
           SECRET_ENV_PLAN: ${{ inputs.secret_env_plan }}
           RUNTIME: ${{ inputs.runtime }}
+          RUNTIME_WORKLOAD_PROFILE_JSON: ${{ inputs.runtime_workload_profile_json }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROFILE: ${{ inputs.profile }}

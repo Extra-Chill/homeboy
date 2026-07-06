@@ -45,14 +45,15 @@ function writeFullRunConfig(env = process.env) {
 }
 
 function buildConfig(env) {
+  const workloadProfile = parseRuntimeWorkloadProfile(env.RUNTIME_WORKLOAD_PROFILE_JSON || '{}');
   const workspace = required(env.GITHUB_WORKSPACE, 'GITHUB_WORKSPACE');
   const runnerTemp = required(env.RUNNER_TEMP, 'RUNNER_TEMP');
-  const workloadId = required(env.WORKLOAD_ID, 'WORKLOAD_ID');
+  const workloadId = required(env.WORKLOAD_ID || workloadProfile.workload_id, 'WORKLOAD_ID');
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
   const componentId = env.COMPONENT_ID || path.basename(workspace);
   const componentPath = env.COMPONENT_PATH || workspace;
-  const runtimeId = runtimeIdFromOptions({ runtime: env.RUNTIME }, env);
-  const runtimeProfile = required(env.PROFILE, 'PROFILE');
+  const runtimeId = runtimeIdFromOptions({ runtime: env.RUNTIME || workloadProfile.runtime }, env);
+  const runtimeProfile = required(env.PROFILE || workloadProfile.profile, 'PROFILE');
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
   const runtimeBin = runtime.paths.runtime_bin;
@@ -94,8 +95,8 @@ function buildConfig(env) {
 
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
-  const workload = runtimeWorkloadFromEnv(env, workloadId);
-  const toolProfile = parseJsonInput('tool_profile', env.TOOL_PROFILE || '{}', 'object', {});
+  const workload = runtimeWorkloadFromEnv(env, workloadId, workloadProfile.workload);
+  const toolProfile = parseProfileDefaultObject('tool_profile', env.TOOL_PROFILE, workloadProfile.tool_profile);
   const runtimeOutputProjections = parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {});
   const evidenceProjections = parseJsonInput('evidence_projections', env.EVIDENCE_PROJECTIONS || '[]', 'array', []);
   const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
@@ -105,7 +106,7 @@ function buildConfig(env) {
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
   const pathMaterializationPlan = parsePathMaterializationPlan(env.PATH_MATERIALIZATION_PLAN || '', { workspace });
-  const loopPolicy = loopPolicyFromEnv(env);
+  const loopPolicy = loopPolicyFromEnv(env, workloadProfile.loop_policy);
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
   const renderedRuntimeInputs = renderRuntimeWorkflowInputs({
     runtimeProviderConfig: runtime,
@@ -267,17 +268,50 @@ function buildConfig(env) {
   };
 }
 
-function loopPolicyFromEnv(env) {
-  const policy = parseJsonInput('loop_policy', env.LOOP_POLICY || '{}', 'object', {});
-  const maxRevolutions = positiveNumber(env.MAX_REVOLUTIONS);
-  const durationMs = positiveNumber(env.DURATION_MS);
-  const deadlineAt = String(env.DEADLINE_AT || '').trim();
+function loopPolicyFromEnv(env, profilePolicy = {}) {
+  const policy = parseProfileDefaultObject('loop_policy', env.LOOP_POLICY, profilePolicy);
+  const maxRevolutions = positiveNumber(env.MAX_REVOLUTIONS || profilePolicy.max_revolutions);
+  const durationMs = positiveNumber(env.DURATION_MS || profilePolicy.duration_ms);
+  const deadlineAt = String(env.DEADLINE_AT || profilePolicy.deadline_at || '').trim();
   return {
     ...policy,
     ...(maxRevolutions > 0 ? { max_revolutions: maxRevolutions } : {}),
     ...(durationMs > 0 ? { duration_ms: durationMs } : {}),
     ...(deadlineAt !== '' ? { deadline_at: deadlineAt } : {}),
   };
+}
+
+function parseRuntimeWorkloadProfile(value) {
+  try {
+    const profile = parseJsonInput('runtime_workload_profile_json', value || '{}', 'object', {});
+    return {
+      runtime: stringDefault(profile.runtime),
+      profile: stringDefault(profile.profile),
+      workload_id: stringDefault(profile.workload_id),
+      workload: objectDefault(profile.workload),
+      tool_profile: objectDefault(profile.tool_profile),
+      loop_policy: objectDefault(profile.loop_policy),
+    };
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid runtime_workload_profile_json: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function parseProfileDefaultObject(name, explicitValue, profileValue) {
+  const profileObject = objectDefault(profileValue);
+  const explicitObject = parseJsonInput(name, explicitValue || '{}', 'object', {});
+  return { ...profileObject, ...explicitObject };
+}
+
+function stringDefault(value) {
+  return typeof value === 'string' ? value : '';
+}
+
+function objectDefault(value) {
+  return plainObject(value) ? value : {};
 }
 
 function positiveNumber(value) {
@@ -328,8 +362,8 @@ function uniqueStrings(values) {
   return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.length > 0))).sort();
 }
 
-function runtimeWorkloadFromEnv(env, fallbackId) {
-  const workload = parseJsonInput('workload', env.WORKLOAD || '{}', 'object', {});
+function runtimeWorkloadFromEnv(env, fallbackId, profileWorkload = {}) {
+  const workload = parseProfileDefaultObject('workload', env.WORKLOAD, profileWorkload);
   return Object.keys(workload).length > 0 ? workload : { id: fallbackId };
 }
 
@@ -515,4 +549,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, writeFullRunConfig };
+module.exports = { buildConfig, buildSecretEnvFallbacks, buildSecretEnvPlan, loopPolicyFromEnv, parseRuntimeWorkloadProfile, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired, withoutInternalKeys, writeFullRunConfig };
