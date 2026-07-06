@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.19] - 2026-07-06
+
+### Changed
+- Support extension deps install plans
+
 ## [0.281.18] - 2026-07-06
 
 ### Changed

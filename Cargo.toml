@@ -1,6 +1,6 @@
 [package]
 name = "homeboy"
-version = "0.281.18"
+version = "0.281.19"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
