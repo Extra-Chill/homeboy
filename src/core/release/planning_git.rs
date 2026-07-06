@@ -220,10 +220,10 @@ fn head_matches_remote_default(component: &Component, default_branch: &str) -> R
         "git rev-parse HEAD",
     )
     .map(|value| value.trim().to_string())
-    .map_err(|_| {
+    .map_err(|error| {
         Error::validation_invalid_argument(
             "release",
-            "Refusing to release because HEAD could not be resolved",
+            format!("Refusing to release because HEAD could not be resolved: {error}"),
             None,
             Some(vec![
                 "Ensure the checkout has at least one commit before releasing".to_string(),

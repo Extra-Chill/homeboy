@@ -686,10 +686,10 @@ fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
 }
 
 fn parse_job_id(job_id: &str) -> Result<Uuid> {
-    Uuid::parse_str(job_id).map_err(|_| {
+    Uuid::parse_str(job_id).map_err(|error| {
         Error::validation_invalid_argument(
             "job_id",
-            format!("invalid job id: {job_id}"),
+            format!("invalid job id: {job_id}: {error}"),
             Some(job_id.to_string()),
             None,
         )

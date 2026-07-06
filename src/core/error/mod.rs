@@ -221,6 +221,18 @@ pub struct InvalidArgumentDetails {
     pub command_evidence: Option<CommandEvidence>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SchemaMismatchDetails {
+    pub field: String,
+    pub problem: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub expected: String,
+    pub cause: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_cause: Option<String>,
+}
+
 /// Captured evidence describing a single command-backed validation failure.
 ///
 /// Surfaced inside [`InvalidArgumentDetails::command_evidence`] so structured
@@ -438,6 +450,38 @@ impl Error {
         });
 
         Self::new(ErrorCode::ValidationInvalidArgument, message, details)
+    }
+
+    pub fn validation_schema_mismatch(
+        field: impl Into<String>,
+        expected: impl Into<String>,
+        id: Option<String>,
+        cause: impl Into<String>,
+        fallback_cause: Option<String>,
+    ) -> Self {
+        let field_str = field.into();
+        let expected_str = expected.into();
+        let cause_str = cause.into();
+        let problem = match &fallback_cause {
+            Some(fallback) => format!(
+                "does not match expected schema ({expected_str}); primary cause: {cause_str}; fallback cause: {fallback}"
+            ),
+            None => format!("does not match expected schema ({expected_str}): {cause_str}"),
+        };
+        let details = to_details(SchemaMismatchDetails {
+            field: field_str.clone(),
+            problem: problem.clone(),
+            id,
+            expected: expected_str,
+            cause: cause_str,
+            fallback_cause,
+        });
+
+        Self::new(
+            ErrorCode::ValidationInvalidArgument,
+            format!("Invalid argument '{}': {}", field_str, problem),
+            details,
+        )
     }
 
     pub fn validation_invalid_json(
@@ -929,13 +973,14 @@ impl Error {
     }
 
     pub fn remote_command_failed(details: RemoteCommandFailedDetails) -> Self {
-        let details = to_details(details);
+        Self::remote_command_failed_with_details("Remote command failed", details)
+    }
 
-        Self::new(
-            ErrorCode::RemoteCommandFailed,
-            "Remote command failed",
-            details,
-        )
+    pub fn remote_command_failed_with_details(
+        message: impl Into<String>,
+        details: impl Serialize,
+    ) -> Self {
+        Self::new(ErrorCode::RemoteCommandFailed, message, to_details(details))
     }
 
     pub fn git_command_failed(message: impl Into<String>) -> Self {
@@ -1061,6 +1106,11 @@ impl Error {
         self.hints.push(Hint {
             message: message.into(),
         });
+        self
+    }
+
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
         self
     }
 

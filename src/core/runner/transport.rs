@@ -439,7 +439,7 @@ fn unsupported_file_transfer_error(
     reason: &str,
     broker_url: Option<&str>,
 ) -> Error {
-    let mut error = Error::new(
+    Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
             "Lab offload runner `{runner_id}` does not currently support controller file transfer over `{transport}`: {reason}"
@@ -451,9 +451,8 @@ fn unsupported_file_transfer_error(
             "missing_capability": "runner_file_transfer",
             "supported_transports": ["direct_ssh"],
         }),
-    );
-    error.retryable = Some(false);
-    error
+    )
+    .with_retryable(false)
         .with_hint("Use a direct SSH runner for Lab @file arguments and structured-output download until the reverse broker exposes a file-transfer API.".to_string())
         .with_hint("Next transport implementation should provide mkdir/upload/download through the selected runner transport instead of calling SSH directly.".to_string())
 }
@@ -465,7 +464,7 @@ fn file_transfer_operation_error(
     stderr: String,
     transport: &str,
 ) -> Error {
-    let mut error = Error::new(
+    Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
             "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
@@ -478,9 +477,8 @@ fn file_transfer_operation_error(
             "stderr": stderr,
             "transport": transport,
         }),
-    );
-    error.retryable = Some(true);
-    error
+    )
+    .with_retryable(true)
 }
 
 fn http_file_transfer_error(
@@ -490,7 +488,7 @@ fn http_file_transfer_error(
     source: Error,
     transport: &str,
 ) -> Error {
-    let mut error = Error::new(
+    Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
             "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
@@ -503,9 +501,8 @@ fn http_file_transfer_error(
             "transport": transport,
             "source": source.details,
         }),
-    );
-    error.retryable = Some(true);
-    error
+    )
+    .with_retryable(true)
 }
 
 #[cfg(test)]
