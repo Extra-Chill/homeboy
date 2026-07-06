@@ -150,6 +150,10 @@ fn prepare_lab_offload_workspace_stage_inner(
         source_path,
     )?);
     extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
+    extra_workspaces.extend(rig_declared_path_input_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
     extra_workspaces.extend(runtime_refresh_source_extra_workspaces(
         &offload_args,
         source_path,
@@ -424,10 +428,14 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     let late_path_setting_workspaces =
         path_setting_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
+    let late_declared_path_input_workspaces =
+        rig_declared_path_input_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
+    let mut late_path_input_workspaces = late_path_setting_workspaces;
+    late_path_input_workspaces.extend(late_declared_path_input_workspaces);
     let late_synced_path_settings = sync_extra_lab_workspaces(
         runner_id,
         &synced.local_path,
-        late_path_setting_workspaces,
+        late_path_input_workspaces,
         &mut workspace_mapping,
     )?;
     if !late_synced_path_settings.is_empty() {
@@ -739,6 +747,167 @@ impl RunnerCommandPlan {
             command_extensions,
             accepted_settings,
         })
+    }
+}
+
+fn rig_declared_path_input_extra_workspaces(
+    args: &[String],
+    primary_source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    if rig_workload_command(args) != Some(RigWorkloadCommand::Bench) {
+        return Ok(Vec::new());
+    }
+
+    let path_inputs = rig_path_inputs_from_primary_rig(args, primary_source_path)?;
+    if path_inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    path_values_extra_workspaces(
+        declared_path_input_values(args, &path_inputs),
+        primary_source_path,
+        "rig_path_input",
+    )
+}
+
+fn rig_path_inputs_from_primary_rig(
+    args: &[String],
+    primary_source_path: &Path,
+) -> Result<Vec<String>> {
+    let rig_ids = rig_ids_from_args(args);
+    if rig_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut path_inputs = std::collections::BTreeSet::new();
+    for rig_id in rig_ids {
+        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
+            continue;
+        };
+        if let Some(bench) = spec.bench.as_ref() {
+            path_inputs.extend(bench.path_inputs.iter().cloned());
+        }
+    }
+
+    Ok(path_inputs.into_iter().collect())
+}
+
+fn declared_path_input_values(args: &[String], path_inputs: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    for input in path_inputs {
+        if input.starts_with("--") {
+            values.extend(values_for_flag_including_passthrough(args, input));
+        } else {
+            values.extend(values_for_setting_path(args, input));
+        }
+    }
+    values
+}
+
+fn values_for_flag_including_passthrough(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            if let Some(value) = iter.peek() {
+                values.push((*value).to_string());
+            }
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
+fn values_for_setting_path(args: &[String], setting_path: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--setting" {
+            if let Some(raw) = iter.next() {
+                collect_setting_path_values(raw, setting_path, false, &mut values);
+            }
+            continue;
+        }
+        if arg == "--setting-json" {
+            if let Some(raw) = iter.next() {
+                collect_setting_path_values(raw, setting_path, true, &mut values);
+            }
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting=") {
+            collect_setting_path_values(raw, setting_path, false, &mut values);
+            continue;
+        }
+        if let Some(raw) = arg.strip_prefix("--setting-json=") {
+            collect_setting_path_values(raw, setting_path, true, &mut values);
+        }
+    }
+    values
+}
+
+fn collect_setting_path_values(
+    raw: &str,
+    setting_path: &str,
+    json: bool,
+    values: &mut Vec<String>,
+) {
+    let Some((key, value)) = raw.split_once('=') else {
+        return;
+    };
+    if key == setting_path {
+        values.push(value.to_string());
+        return;
+    }
+    let Some(suffix) = setting_path
+        .strip_prefix(key)
+        .and_then(|suffix| suffix.strip_prefix('.'))
+    else {
+        return;
+    };
+    if !json {
+        return;
+    }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
+        return;
+    };
+    collect_json_path_values(&parsed, suffix, values);
+}
+
+fn collect_json_path_values(
+    value: &serde_json::Value,
+    dotted_path: &str,
+    values: &mut Vec<String>,
+) {
+    let mut current = value;
+    for segment in dotted_path.split('.') {
+        let Some(next) = current.get(segment) else {
+            return;
+        };
+        current = next;
+    }
+    collect_json_string_values(current, values);
+}
+
+fn collect_json_string_values(value: &serde_json::Value, values: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => values.push(text.to_string()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_string_values(item, values);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_json_string_values(item, values);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1729,6 +1898,170 @@ mod tests {
         assert!(!command
             .iter()
             .any(|arg| arg == &requested_source.display().to_string()));
+    }
+
+    #[test]
+    fn declared_rig_path_inputs_stage_passthrough_flags_and_settings() {
+        crate::test_support::with_isolated_home(|home| {
+            let primary = home.path().join("primary-static-site-importer");
+            let rig_dir = primary.join("rigs/static-site-importer-fixture-matrix");
+            let fixture_root = home.path().join("fixtures/sites");
+            let transformer_root = home.path().join("transformer");
+            let ignored_root = home.path().join("ignored");
+            std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
+            std::fs::create_dir_all(&fixture_root).expect("fixture root");
+            std::fs::create_dir_all(&transformer_root).expect("transformer root");
+            std::fs::create_dir_all(&ignored_root).expect("ignored root");
+            std::fs::write(
+                rig_dir.join("rig.json"),
+                r#"{
+                    "components": {
+                        "static-site-importer": {
+                            "component_id": "static-site-importer",
+                            "path": "/controller/workspaces/static-site-importer"
+                        }
+                    },
+                    "bench": {
+                        "default_component": "static-site-importer",
+                        "path_inputs": [
+                            "--fixture-root",
+                            "bench_env.TRANSFORMER_ROOT"
+                        ]
+                    }
+                }"#,
+            )
+            .expect("primary rig spec");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--path".to_string(),
+                primary.display().to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+                "--setting".to_string(),
+                format!("bench_env.TRANSFORMER_ROOT={}", transformer_root.display()),
+                "--setting".to_string(),
+                format!("bench_env.IGNORED_ROOT={}", ignored_root.display()),
+                "--".to_string(),
+                "--fixture-root".to_string(),
+                fixture_root.display().to_string(),
+            ];
+
+            let workspaces = rig_declared_path_input_extra_workspaces(&args, &primary)
+                .expect("declared path input workspaces");
+            let paths = workspaces
+                .iter()
+                .map(|workspace| workspace.path.clone())
+                .collect::<Vec<_>>();
+
+            assert_eq!(workspaces.len(), 2);
+            assert!(workspaces
+                .iter()
+                .all(|workspace| workspace.role == "rig_path_input"));
+            assert!(paths.contains(&fixture_root.canonicalize().expect("fixture canonical")));
+            assert!(paths.contains(
+                &transformer_root
+                    .canonicalize()
+                    .expect("transformer canonical")
+            ));
+            assert!(!paths.contains(&ignored_root.canonicalize().expect("ignored canonical")));
+        });
+    }
+
+    #[test]
+    fn declared_rig_path_inputs_stage_json_setting_paths() {
+        let fixture_root = "/controller/fixtures";
+        let other_root = "/controller/other";
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--setting-json".to_string(),
+            format!(
+                r#"bench_env={{"FIXTURE_ROOT":"{fixture_root}","IGNORED_ROOT":"{other_root}"}}"#
+            ),
+        ];
+
+        assert_eq!(
+            declared_path_input_values(&args, &["bench_env.FIXTURE_ROOT".to_string()]),
+            vec![fixture_root.to_string()]
+        );
+    }
+
+    #[test]
+    fn final_remote_command_remaps_declared_passthrough_path_inputs_when_staged() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "static-site-importer".to_string(),
+            "--rig".to_string(),
+            "static-site-importer-fixture-matrix".to_string(),
+            "--".to_string(),
+            "--fixture-root".to_string(),
+            "/controller/tmp/fixtures".to_string(),
+            "--max-depth".to_string(),
+            "0".to_string(),
+        ];
+        let path_remaps = vec![LabPathRemap {
+            local: "/controller/tmp/fixtures".to_string(),
+            remote: "/runner/_lab_workspaces/fixtures".to_string(),
+        }];
+
+        let command = rewrite_lab_offload_remote_command_args(
+            &args,
+            "/runner/_lab_workspaces/static-site-importer",
+            &path_remaps,
+            None,
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--rig".to_string(),
+                "static-site-importer-fixture-matrix".to_string(),
+                "--".to_string(),
+                "--fixture-root".to_string(),
+                "/runner/_lab_workspaces/fixtures".to_string(),
+                "--max-depth".to_string(),
+                "0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn final_remote_command_rewrites_shared_state_to_runner_artifact_dir() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "static-site-importer".to_string(),
+            "--shared-state".to_string(),
+            "/tmp/controller-shared-state".to_string(),
+        ];
+
+        let command = rewrite_lab_offload_remote_command_args(
+            &args,
+            "/runner/_lab_workspaces/static-site-importer",
+            &[],
+            None,
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "bench".to_string(),
+                "static-site-importer".to_string(),
+                "--shared-state".to_string(),
+                "/runner/_lab_workspaces/static-site-importer-homeboy-artifacts/bench-shared-state"
+                    .to_string(),
+            ]
+        );
     }
 
     #[test]

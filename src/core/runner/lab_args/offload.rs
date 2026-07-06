@@ -147,12 +147,32 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg.starts_with("--artifact-root=") {
             continue;
         }
+        if arg == "--shared-state" {
+            stripped.push(arg.clone());
+            let _ = iter.next();
+            stripped.push(remote_lab_shared_state_dir(remote_path));
+            continue;
+        }
+        if arg.starts_with("--shared-state=") {
+            stripped.push(format!(
+                "--shared-state={}",
+                remote_lab_shared_state_dir(remote_path)
+            ));
+            continue;
+        }
         stripped.push(remap_lab_offload_arg(arg, &ordered));
     }
     if !has_force_hot {
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+fn remote_lab_shared_state_dir(remote_path: &str) -> String {
+    format!(
+        "{}-homeboy-artifacts/bench-shared-state",
+        remote_path.trim_end_matches('/')
+    )
 }
 
 fn is_extension_dev_run(args: &[String]) -> bool {

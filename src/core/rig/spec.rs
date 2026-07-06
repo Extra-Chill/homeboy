@@ -452,6 +452,13 @@ pub struct BenchSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_settings: Vec<String>,
 
+    /// Bench inputs whose values are controller-local paths that Lab offload
+    /// must materialize on the runner and rewrite before dispatch. Entries that
+    /// start with `--` name CLI flags; other entries name `--setting` paths such
+    /// as `bench_env.FIXTURE_ROOT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_inputs: Vec<String>,
+
     /// Check-pipeline groups required before any scenario-scoped bench run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub check_groups: Vec<String>,
