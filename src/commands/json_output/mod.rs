@@ -4,7 +4,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::{registered_command, CommandDispatchFamily};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
-use super::output_runtime::{CommandPresentation, JsonCommandRun};
+use super::output_runtime::{CommandPresentation, CommandRun};
 use super::{adapter, runner, GlobalArgs};
 
 mod ops;
@@ -24,7 +24,7 @@ pub fn run_command_output(
     command: Commands,
     global: &GlobalArgs,
     output_file: Option<&str>,
-) -> JsonCommandRun {
+) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
     let command_name = command.top_level_name();
 
@@ -46,7 +46,7 @@ pub fn run_command_output(
                 summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
             });
 
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
                     stdout: summary_stdout,
                     stderr: None,
@@ -61,7 +61,7 @@ pub fn run_command_output(
                 .ok()
                 .and_then(super::activity::render_activity_summary);
 
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
                     stdout: summary_stdout,
                     stderr: None,
@@ -80,7 +80,7 @@ pub fn run_command_output(
                 })
                 .flatten();
 
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
                     stdout: summary_stdout,
                     stderr: None,
@@ -99,7 +99,7 @@ pub fn run_command_output(
                 })
                 .flatten();
 
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
                     stdout: summary_stdout,
                     stderr: None,
@@ -125,7 +125,7 @@ pub fn run_command_output(
                 }
             });
 
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
                 CommandPresentation {
                     stdout: summary_stdout,
                     stderr: None,
@@ -134,7 +134,7 @@ pub fn run_command_output(
         }
         command => {
             let (stdout_result, exit_code) = dispatch(command, global);
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+            CommandRun::from_stdout_result(stdout_result, exit_code)
         }
     };
 

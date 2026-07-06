@@ -36,7 +36,7 @@ pub fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
 pub fn run_plain_text_raw(
     args: RunnerArgs,
     _global: &super::GlobalArgs,
-) -> super::raw_output::RawCommandRun {
+) -> super::output_runtime::CommandRun {
     match args.command {
         cli::RunnerCommand::Exec {
             id,
@@ -79,15 +79,16 @@ pub fn run_plain_text_raw(
             summary_outputs,
             command,
         ),
-        _ => super::raw_output::RawCommandRun {
-            stdout_result: Err(homeboy::core::Error::validation_invalid_argument(
+        _ => super::output_runtime::CommandRun::from_raw_stdout(
+            "runner",
+            Err(homeboy::core::Error::validation_invalid_argument(
                 "output_mode",
                 "runner command does not support plain text output",
                 None,
                 None,
             )),
-            exit_code: 2,
-            output_file_result: None,
-        },
+            2,
+            None,
+        ),
     }
 }

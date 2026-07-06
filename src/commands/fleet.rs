@@ -203,7 +203,7 @@ pub(crate) fn adapter(
         .with_lab_contract(lab_contract)
 }
 
-fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonCommandRun {
+fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonHandlerResult {
     crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
 }
 

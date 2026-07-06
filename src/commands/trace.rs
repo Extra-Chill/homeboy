@@ -294,7 +294,7 @@ pub fn run_markdown(args: TraceArgs, global: &GlobalArgs) -> CmdResult<String> {
 pub fn run_markdown_with_json_artifact(
     args: TraceArgs,
     _global: &GlobalArgs,
-) -> super::raw_output::RawCommandRun {
+) -> super::output_runtime::CommandRun {
     let output_to_json = |output: &TraceCommandOutput| {
         serde_json::to_value(output).map_err(|err| {
             homeboy::core::Error::internal_json(
@@ -307,20 +307,17 @@ pub fn run_markdown_with_json_artifact(
     match run_outputs(args) {
         Ok(((stdout_output, artifact_output), exit_code)) => {
             let markdown = render_markdown_output(&stdout_output);
-            super::raw_output::RawCommandRun {
-                stdout_result: Ok(markdown),
+            super::output_runtime::CommandRun::from_raw_stdout(
+                "trace",
+                Ok(markdown),
                 exit_code,
-                output_file_result: Some(match artifact_output {
+                Some(match artifact_output {
                     Some(ref output) => output_to_json(output),
                     None => output_to_json(&stdout_output),
                 }),
-            }
+            )
         }
-        Err(err) => super::raw_output::RawCommandRun {
-            stdout_result: Err(err),
-            exit_code: 1,
-            output_file_result: None,
-        },
+        Err(err) => super::output_runtime::CommandRun::from_raw_stdout("trace", Err(err), 1, None),
     }
 }
 

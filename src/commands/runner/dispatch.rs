@@ -4,8 +4,7 @@ use homeboy::core::runners::{
 use homeboy::core::server::RunnerSettings;
 use serde_json::Value;
 
-use super::super::output_runtime::{CommandPresentation, JsonCommandRun};
-use super::super::raw_output::RawCommandRun;
+use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
 use super::broker::run_broker;
 use super::cli::{RunnerArgs, RunnerCommand};
@@ -265,7 +264,7 @@ pub fn run(
     }
 }
 
-pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) -> JsonCommandRun {
+pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
 
     match args.command {
@@ -398,7 +397,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
                     RunnerArgs { command },
                     _global,
                 ));
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+            CommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
 }
@@ -423,7 +422,7 @@ fn run_json_exec(
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
-) -> JsonCommandRun {
+) -> CommandRun {
     let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
         exec(
             &id,
@@ -452,7 +451,7 @@ fn run_json_exec(
             )
         }),
     );
-    JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+    CommandRun::from_stdout_result(stdout_result, exit_code)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -475,7 +474,7 @@ fn run_raw_exec(
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
-) -> JsonCommandRun {
+) -> CommandRun {
     match exec(
         &id,
         cwd,
@@ -502,7 +501,7 @@ fn run_raw_exec(
                 crate::commands::utils::response::map_cmd_result_to_json::<RunnerCommandOutput>(
                     Err(err),
                 );
-            JsonCommandRun::from_stdout_result(stdout_result, exit_code)
+            CommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
 }
@@ -527,7 +526,7 @@ fn run_compact_exec_json(
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
-) -> JsonCommandRun {
+) -> CommandRun {
     let raw_run = run_compact_exec(
         id,
         cwd,
@@ -548,12 +547,16 @@ fn run_compact_exec_json(
         summary_outputs,
         command,
     );
-    let (run, raw_stdout) = JsonCommandRun::from_raw(raw_run);
-    run.with_presentation(CommandPresentation {
-        stdout: raw_stdout.ok(),
-        stderr: None,
-    })
-    .with_command("runner")
+    let presentation_stdout = raw_run
+        .raw_stdout
+        .as_ref()
+        .and_then(|result| result.as_ref().ok().cloned());
+    raw_run
+        .with_presentation(CommandPresentation {
+            stdout: presentation_stdout,
+            stderr: None,
+        })
+        .with_command("runner")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -576,7 +579,7 @@ pub(super) fn run_compact_exec(
     artifact_dir_outputs: Vec<String>,
     summary_outputs: Vec<String>,
     command: Vec<String>,
-) -> RawCommandRun {
+) -> CommandRun {
     match exec(
         &id,
         cwd,
@@ -598,26 +601,29 @@ pub(super) fn run_compact_exec(
         command,
     ) {
         Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),
-        Err(err) => RawCommandRun {
-            stdout_result: Err(err),
-            exit_code: 1,
-            output_file_result: None,
-        },
+        Err(err) => {
+            let (output_file_result, exit_code) =
+                crate::commands::utils::response::map_cmd_result_to_json::<RunnerCommandOutput>(
+                    Err(err.clone()),
+                );
+            CommandRun::from_raw_stdout("runner", Err(err), exit_code, Some(output_file_result))
+        }
     }
 }
 
-pub(super) fn compact_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> RawCommandRun {
+pub(super) fn compact_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> CommandRun {
     let compact_stdout = render_compact_exec_output(&output);
     let (output_file_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
         RunnerCommandOutput::Execution(runner_exec_command_output(output)),
         exit_code,
     )));
 
-    RawCommandRun {
-        stdout_result: Ok(compact_stdout),
+    CommandRun::from_raw_stdout(
+        "runner",
+        Ok(compact_stdout),
         exit_code,
-        output_file_result: Some(output_file_result),
-    }
+        Some(output_file_result),
+    )
 }
 
 pub(super) fn render_compact_exec_output(output: &RunnerExecOutput) -> String {
@@ -671,7 +677,7 @@ fn render_stream(stream: &str) -> String {
         .unwrap_or_else(|| stream.to_string())
 }
 
-pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommandRun {
+pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> CommandRun {
     let presentation_stdout = output.stdout.clone();
     let presentation_stderr = output.stderr.clone();
     let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
@@ -679,7 +685,7 @@ pub(super) fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> 
         exit_code,
     )));
 
-    JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+    CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
         CommandPresentation {
             stdout: Some(presentation_stdout),
             stderr: Some(presentation_stderr),

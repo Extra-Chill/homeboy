@@ -455,7 +455,7 @@ pub(crate) fn adapter(
     )
 }
 
-fn run_json(args: ContractArgs, global: &GlobalArgs) -> adapter::JsonCommandRun {
+fn run_json(args: ContractArgs, global: &GlobalArgs) -> adapter::JsonHandlerResult {
     crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
 }
 
