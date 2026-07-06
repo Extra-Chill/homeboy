@@ -1063,26 +1063,29 @@ pub(crate) fn run_lab_offload_inner(
         env_delta,
     )?;
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
-    let mut runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
-        plan: &plan,
-        command: &contract,
-        capture_patch: request.capture_patch,
-        mutation_flag: request.mutation_flag,
-        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-        runner_id,
-        runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
-        assignment_source: selection.source.metadata_value(),
-        status: "offloaded",
-        remote_workspace: Some(&remote_cwd),
-        fallback_reason: None,
-        workspace_mapping_ref: execution_context.workspace_mapping_ref(),
-        proof_id: lab_metadata
-            .get("proof")
-            .and_then(|proof| proof.get("id"))
-            .and_then(|id| id.as_str()),
-    });
+    let mut runner_workload = build_runner_workload_for_dispatched_command(
+        RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &contract,
+            capture_patch: request.capture_patch,
+            mutation_flag: request.mutation_flag,
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+            runner_id,
+            runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
+            assignment_source: selection.source.metadata_value(),
+            status: "offloaded",
+            remote_workspace: Some(&remote_cwd),
+            fallback_reason: None,
+            workspace_mapping_ref: execution_context.workspace_mapping_ref(),
+            proof_id: lab_metadata
+                .get("proof")
+                .and_then(|proof| proof.get("id"))
+                .and_then(|id| id.as_str()),
+        },
+        &command,
+    );
     runner_workload.agent_task =
-        runner_workload_agent_task_from_command(&remapped_args, agent_task_run_id.as_deref());
+        runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["runner_workload"] =
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
