@@ -1,7 +1,9 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use homeboy::core::observation::{ObservationStore, RunListFilter, RunStatus};
+use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::resource_lifecycle_index::{
     resource_lifecycle_index_from_artifacts, resource_lifecycle_record_is_actionable,
     resource_lifecycle_record_is_cleanup_eligible,
@@ -465,9 +467,20 @@ fn load_observation_store_index(
             .collect()
     };
 
-    let Some(mut index) = resource_lifecycle_index_from_artifacts(&artifacts)? else {
+    let mut index = resource_lifecycle_index_from_artifacts(&artifacts)?.unwrap_or_else(|| {
+        ResourceLifecycleIndex {
+            schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+            resources: Vec::new(),
+        }
+    });
+
+    index
+        .resources
+        .extend(executor_evidence_resources(store, run_id)?);
+
+    if index.resources.is_empty() {
         return Ok(Vec::new());
-    };
+    }
 
     apply_terminal_workspace_transitions(store, &mut index)?;
 
@@ -478,6 +491,76 @@ fn load_observation_store_index(
         },
         index,
     }])
+}
+
+fn executor_evidence_resources(
+    store: &ObservationStore,
+    run_id: Option<&str>,
+) -> Result<Vec<ResourceLifecycleRecord>> {
+    let root = homeboy::core::artifacts::root()?.join("agent-task/executor-evidence");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut resources = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", root.display())))
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", root.display())))
+        })?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(evidence_run_id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if run_id.is_some_and(|run_id| run_id != evidence_run_id) {
+            continue;
+        }
+
+        resources.push(executor_evidence_resource(
+            store,
+            &root,
+            &path,
+            evidence_run_id,
+        )?);
+    }
+
+    Ok(resources)
+}
+
+fn executor_evidence_resource(
+    store: &ObservationStore,
+    root: &Path,
+    path: &Path,
+    run_id: String,
+) -> Result<ResourceLifecycleRecord> {
+    let status = match store.get_run(&run_id)? {
+        Some(run) if is_terminal_run_status(&run.status) => {
+            ResourceLifecycleResourceStatus::CleanupPending
+        }
+        Some(_) => ResourceLifecycleResourceStatus::Active,
+        None => ResourceLifecycleResourceStatus::CleanupPending,
+    };
+
+    Ok(ResourceLifecycleRecord {
+        owner: "agent-task.executor-evidence".to_string(),
+        run_id: run_id.clone(),
+        runner_id: None,
+        path: path.display().to_string(),
+        root_bound: Some(root.display().to_string()),
+        kind: "executor_evidence_directory".to_string(),
+        ttl: Some("P30D".to_string()),
+        cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
+        evidence_retention: ResourceEvidenceRetention::Metadata,
+        cleanup_intent: ResourceCleanupIntent::DryRun,
+        cleanup_command: Some(format!(
+            "homeboy runs resources --run-id {run_id} --cleanup-plan --cleanup-eligible"
+        )),
+        status,
+    })
 }
 
 fn apply_terminal_workspace_transitions(
@@ -598,6 +681,7 @@ fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
 mod tests {
     use homeboy::core::observation::{NewRunRecord, ObservationStore};
     use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
+    use homeboy::core::resource_lifecycle_index::resource_lifecycle_record_is_cleanup_eligible_at;
 
     use super::*;
 
@@ -747,24 +831,158 @@ mod tests {
 
     #[test]
     fn default_store_discovery_loads_resource_lifecycle_metadata() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let store = temp_store(&tempdir);
-        let run = store
-            .start_run(NewRunRecord::builder("runner-exec").build())
-            .expect("run");
-        let artifact_path = tempdir.path().join("artifact.json");
-        std::fs::write(&artifact_path, "{}").expect("artifact file");
-        let resource = ResourceLifecycleRecord {
-            run_id: run.id.clone(),
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-        record_store_resource(&store, &run.id, &artifact_path, resource.clone());
+        crate::test_support::with_isolated_home(|_| {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let store = temp_store(&tempdir);
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            let artifact_path = tempdir.path().join("artifact.json");
+            std::fs::write(&artifact_path, "{}").expect("artifact file");
+            let resource = ResourceLifecycleRecord {
+                run_id: run.id.clone(),
+                ..record(ResourceLifecycleResourceStatus::CleanupPending)
+            };
+            record_store_resource(&store, &run.id, &artifact_path, resource.clone());
 
-        let indexes = load_observation_store_index(&store, None).expect("store index");
+            let indexes = load_observation_store_index(&store, None).expect("store index");
 
-        assert_eq!(indexes.len(), 1);
-        assert_eq!(indexes[0].source, "observation-store");
-        assert_eq!(indexes[0].index.resources, vec![resource]);
+            assert_eq!(indexes.len(), 1);
+            assert_eq!(indexes[0].source, "observation-store");
+            assert_eq!(indexes[0].index.resources, vec![resource]);
+        });
+    }
+
+    #[test]
+    fn default_store_discovery_includes_executor_evidence_directories() {
+        crate::test_support::with_isolated_home(|_| {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let artifact_root = homeboy::core::artifacts::root().expect("artifact root");
+            let store = temp_store(&tempdir);
+            let run = store
+                .start_run(NewRunRecord::builder("agent-task").build())
+                .expect("run");
+            let evidence_dir = artifact_root
+                .join("agent-task")
+                .join("executor-evidence")
+                .join(&run.id);
+            std::fs::create_dir_all(evidence_dir.join("task-1")).expect("executor evidence dir");
+            std::fs::write(evidence_dir.join("task-1/executor-input.json"), "{}")
+                .expect("evidence file");
+
+            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            assert_eq!(indexes.len(), 1);
+            assert_eq!(indexes[0].source, format!("observation-store:{}", run.id));
+            assert_eq!(indexes[0].index.resources.len(), 1);
+
+            let resource = &indexes[0].index.resources[0];
+            assert_eq!(resource.owner, "agent-task.executor-evidence");
+            assert_eq!(resource.run_id, run.id);
+            assert_eq!(resource.path, evidence_dir.display().to_string());
+            let expected_root_bound = artifact_root
+                .join("agent-task/executor-evidence")
+                .display()
+                .to_string();
+            assert_eq!(
+                resource.root_bound.as_deref(),
+                Some(expected_root_bound.as_str())
+            );
+            assert_eq!(resource.kind, "executor_evidence_directory");
+            assert_eq!(resource.ttl.as_deref(), Some("P30D"));
+            assert_eq!(
+                resource.cleanup_policy,
+                ResourceCleanupPolicy::DeleteAfterTtl
+            );
+            assert_eq!(
+                resource.evidence_retention,
+                ResourceEvidenceRetention::Metadata
+            );
+            assert_eq!(resource.cleanup_intent, ResourceCleanupIntent::DryRun);
+            assert_eq!(resource.status, ResourceLifecycleResourceStatus::Active);
+        });
+    }
+
+    #[test]
+    fn terminal_executor_evidence_is_pending_but_ttl_gated_for_cleanup() {
+        crate::test_support::with_isolated_home(|_| {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let artifact_root = homeboy::core::artifacts::root().expect("artifact root");
+            let store = temp_store(&tempdir);
+            let run = store
+                .start_run(NewRunRecord::builder("agent-task").build())
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+            let evidence_dir = artifact_root
+                .join("agent-task")
+                .join("executor-evidence")
+                .join(&run.id);
+            std::fs::create_dir_all(evidence_dir.join("task-1")).expect("executor evidence dir");
+            std::fs::write(evidence_dir.join("task-1/executor-result.json"), "{}")
+                .expect("evidence file");
+
+            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            let resource = &indexes[0].index.resources[0];
+
+            assert_eq!(
+                resource.status,
+                ResourceLifecycleResourceStatus::CleanupPending
+            );
+            assert!(!resource_lifecycle_record_is_cleanup_eligible(resource));
+            assert!(resource_lifecycle_record_is_cleanup_eligible_at(
+                resource,
+                chrono::Utc::now() + chrono::Duration::days(31)
+            ));
+        });
+    }
+
+    #[test]
+    fn cleanup_plan_outputs_executor_evidence_metadata_when_ttl_elapsed() {
+        crate::test_support::with_isolated_home(|_| {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let artifact_root = homeboy::core::artifacts::root().expect("artifact root");
+            let store = temp_store(&tempdir);
+            let run_id = "orphaned-run";
+            let evidence_root = artifact_root.join("agent-task").join("executor-evidence");
+            let evidence_dir = evidence_root.join(run_id);
+            std::fs::create_dir_all(evidence_dir.join("task-1")).expect("executor evidence dir");
+            std::fs::write(evidence_dir.join("task-1/executor-input.json"), "{}")
+                .expect("evidence file");
+
+            let mut indexes =
+                load_observation_store_index(&store, Some(run_id)).expect("store index");
+            let mut resource = indexes.remove(0).index.resources.remove(0);
+            resource.ttl = Some("0s".to_string());
+
+            let cleanup = build_cleanup_output(
+                &[resource],
+                &RunsResourcesArgs {
+                    cleanup_plan: true,
+                    cleanup_root: Some(artifact_root.clone()),
+                    cleanup_eligible: true,
+                    ..Default::default()
+                },
+            )
+            .expect("cleanup plan");
+
+            assert_eq!(cleanup.candidate_count, 1);
+            assert_eq!(cleanup.planned_count, 1);
+            assert_eq!(cleanup.applied_count, 0);
+            assert_eq!(cleanup.planned[0].owner, "agent-task.executor-evidence");
+            assert_eq!(cleanup.planned[0].run_id, run_id);
+            assert_eq!(cleanup.planned[0].path, evidence_dir.display().to_string());
+            assert_eq!(
+                cleanup.planned[0].root_bound,
+                Some(evidence_root.display().to_string())
+            );
+            assert_eq!(cleanup.planned[0].kind, "executor_evidence_directory");
+            assert_eq!(
+                cleanup.planned[0].cleanup_command.as_deref(),
+                Some("homeboy runs resources --run-id orphaned-run --cleanup-plan --cleanup-eligible")
+            );
+            assert!(evidence_dir.exists());
+        });
     }
 
     #[test]
