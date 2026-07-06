@@ -146,9 +146,82 @@ pub(super) fn resolve_fuzz_context(
         settings.setting.clone(),
         settings.setting_json.clone(),
     );
-    resolve_options.extension_overrides = extension_override.extensions.clone();
+    resolve_options.extension_overrides = if extension_override.extensions.is_empty() {
+        infer_single_rig_fuzz_extension(rig_spec)
+            .into_iter()
+            .collect()
+    } else {
+        extension_override.extensions.clone()
+    };
 
     execution_context::resolve_with_component(&resolve_options, component_override)
+}
+
+fn infer_single_rig_fuzz_extension(rig_spec: Option<&RigSpec>) -> Option<String> {
+    let mut ids = rig_spec
+        .map(|spec| rig::extension_ids_for_workloads(spec, rig::RigWorkloadKind::Fuzz))
+        .unwrap_or_default();
+    (ids.len() == 1).then(|| ids.remove(0))
+}
+
+pub(super) fn resolve_profile_workload_id(
+    rig_spec: Option<&RigSpec>,
+    profile: Option<&str>,
+    explicit_workload_id: Option<&str>,
+) -> homeboy::core::Result<Option<String>> {
+    if profile.is_some() && explicit_workload_id.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "profile",
+            "--profile and --workload cannot be combined; pass one workload selector",
+            profile.map(str::to_string),
+            None,
+        ));
+    }
+
+    let Some(profile) = profile else {
+        return Ok(explicit_workload_id.map(str::to_string));
+    };
+    let Some(spec) = rig_spec else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "profile",
+            "fuzz profiles require --rig so Homeboy can read rig fuzz_profiles",
+            Some(profile.to_string()),
+            None,
+        ));
+    };
+    let Some(workload_ids) = spec.fuzz_profiles.get(profile) else {
+        let mut profiles = spec.fuzz_profiles.keys().cloned().collect::<Vec<_>>();
+        profiles.sort();
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "profile",
+            format!(
+                "rig '{}' does not declare fuzz profile '{}'",
+                spec.id, profile
+            ),
+            Some(profile.to_string()),
+            Some(profiles),
+        )
+        .with_hint(format!(
+            "Run `homeboy fuzz list --rig {}` to inspect resolved fuzz workloads",
+            spec.id
+        )));
+    };
+    if workload_ids.len() != 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "profile",
+            format!(
+                "fuzz profile '{}' in rig '{}' resolves to {} workloads; `homeboy fuzz run` requires exactly one workload",
+                profile,
+                spec.id,
+                workload_ids.len()
+            ),
+            Some(profile.to_string()),
+            Some(workload_ids.clone()),
+        )
+        .with_hint("Select one workload with `--workload <id>` or use a campaign command for multi-workload profiles."));
+    }
+
+    Ok(workload_ids.first().cloned())
 }
 
 fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<String> {
@@ -381,6 +454,7 @@ pub(super) fn select_workload<'a>(
                     None,
                     None,
                 )
+                .with_hint("For rig-backed workloads, run `homeboy fuzz list --rig <id>` and pass `--workload <id>` or `--profile <profile>`.")
             });
     }
 

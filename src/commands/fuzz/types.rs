@@ -190,6 +190,16 @@ pub struct FuzzRunArgs {
     #[arg(long = "workload", value_name = "ID")]
     pub(crate) workload_id: Option<String>,
 
+    /// Rig-defined fuzz profile to select. Profiles resolve to workload ids in
+    /// the selected rig's fuzz_profiles map.
+    #[arg(long = "profile", value_name = "ID")]
+    pub(crate) profile: Option<String>,
+
+    /// Shared state directory handed to the fuzz runner. Homeboy forwards the
+    /// path as HOMEBOY_FUZZ_SHARED_STATE; the runner owns any mutation policy.
+    #[arg(long = "shared-state", value_name = "DIR")]
+    pub(crate) shared_state: Option<PathBuf>,
+
     /// Stable caller-supplied proof label for downstream fuzz runners.
     #[arg(long = "run-id", value_name = "ID")]
     pub(crate) run_id: Option<String>,

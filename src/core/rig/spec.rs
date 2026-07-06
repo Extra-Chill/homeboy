@@ -163,6 +163,13 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub bench_profiles: HashMap<String, Vec<String>>,
 
+    /// Named fuzz workload suites keyed by profile name.
+    ///
+    /// `homeboy fuzz --rig <id> --profile <name>` resolves the profile to
+    /// workload ids, then uses the normal fuzz workload selection path.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub fuzz_profiles: HashMap<String, Vec<String>>,
+
     /// Optional desktop launcher wrapper for this rig.
     ///
     /// Generates a desktop launcher that runs `homeboy rig check` and

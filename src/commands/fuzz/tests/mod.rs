@@ -27,8 +27,8 @@ use super::types::{
     FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
-    fuzz_workloads, resolve_component_id, resolve_fuzz_context, rig_component_for_fuzz,
-    select_workload, FuzzRigContext,
+    fuzz_workloads, resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id,
+    rig_component_for_fuzz, select_workload, FuzzRigContext,
 };
 use super::{run_contract, run_discover, FuzzArgs};
 use clap::Parser;
@@ -92,6 +92,8 @@ fn planner_args() -> FuzzPlanArgs {
             extension_override: ExtensionOverrideArgs::default(),
             setting_args: SettingArgs::default(),
             workload_id: Some("api-fuzz".to_string()),
+            profile: None,
+            shared_state: None,
             run_id: Some("proof-1".to_string()),
             tracker_refs: vec![],
             seed: None,
@@ -342,6 +344,8 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
             setting_json: vec![],
         },
         workload_id: Some("parser".to_string()),
+        profile: None,
+        shared_state: None,
         run_id: Some(run_id.to_string()),
         tracker_refs: vec![],
         seed: Some("1234".to_string()),

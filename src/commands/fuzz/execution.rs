@@ -33,7 +33,8 @@ use super::types::{
 };
 use super::workloads::{
     build_target_inventory, fuzz_invocation_requirements, fuzz_workloads, load_rig,
-    resolve_component_id, resolve_fuzz_context, select_workload, FuzzRigContext,
+    resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id, select_workload,
+    FuzzRigContext,
 };
 
 const FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND: &str = "fuzz_coverage_reconciliation";
@@ -81,7 +82,12 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         rig_context.as_ref(),
         extension_id.as_deref(),
     );
-    let selected_workload = select_workload(&workloads, args.workload_id.as_deref())?;
+    let selected_workload_id = resolve_profile_workload_id(
+        rig_context.as_ref().map(|context| &context.spec),
+        args.profile.as_deref(),
+        args.workload_id.as_deref(),
+    )?;
+    let selected_workload = select_workload(&workloads, selected_workload_id.as_deref())?;
     let target_inventory = build_target_inventory(
         &ctx.component_id,
         &workloads,
@@ -94,7 +100,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let rig_id = rig_context.as_ref().map(|context| context.spec.id.clone());
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
-        .or_else(|| args.workload_id.clone());
+        .or(selected_workload_id);
     let execution_request = build_fuzz_execution_request(
         &args,
         &ctx.component_id,
@@ -1199,6 +1205,7 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
         "HOMEBOY_FUZZ_RUN_ID",
         "HOMEBOY_FUZZ_SEED",
         "HOMEBOY_FUZZ_INVENTORY_FILE",
+        "HOMEBOY_FUZZ_SHARED_STATE",
         "HOMEBOY_FUZZ_MAX_DURATION",
         "HOMEBOY_FUZZ_GATE_PROFILE",
         "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE",
@@ -1394,6 +1401,12 @@ pub(super) fn fuzz_runner_env(
     if let Some(path) = args.inventory.as_ref() {
         env.push((
             "HOMEBOY_FUZZ_INVENTORY_FILE".to_string(),
+            path.to_string_lossy().to_string(),
+        ));
+    }
+    if let Some(path) = args.shared_state.as_ref() {
+        env.push((
+            "HOMEBOY_FUZZ_SHARED_STATE".to_string(),
             path.to_string_lossy().to_string(),
         ));
     }

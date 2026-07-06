@@ -22,7 +22,7 @@ use super::types_extra::{
 };
 use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
-    select_workload,
+    resolve_profile_workload_id, select_workload,
 };
 use homeboy::core::extension::ExtensionCapability;
 
@@ -50,10 +50,15 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         rig_context.as_ref(),
         ctx.extension_id.as_deref(),
     );
-    let selected_workload = select_workload(&workloads, args.run.workload_id.as_deref())?;
+    let selected_workload_id = resolve_profile_workload_id(
+        rig_context.as_ref().map(|context| &context.spec),
+        args.run.profile.as_deref(),
+        args.run.workload_id.as_deref(),
+    )?;
+    let selected_workload = select_workload(&workloads, selected_workload_id.as_deref())?;
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
-        .or_else(|| args.run.workload_id.clone());
+        .or(selected_workload_id);
     let (required_artifacts, gates) = fuzz_gate_profile_contract(args.run.gate_profile.as_core());
     let request_id = args
         .request_id
