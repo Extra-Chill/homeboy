@@ -25,45 +25,109 @@ function normalizePathMaterializationPlan(plan, options = {}) {
   }
 
   const workspace = requiredString(options.workspace, 'workspace');
-  const paths = plainObject(plan.paths) ? plan.paths : {};
+  const projection = pathMaterializationProjection(plan);
+  const projectedPathRemaps = normalizePathRemaps(projection.path_remaps, workspace, 'path_materialization_plan.projection.path_remaps');
+  const canonicalPathRemaps = projectedPathRemaps.length > 0
+    ? []
+    : normalizeCanonicalEntryPathRemaps(plan.entries || [], workspace);
+  const pathRemaps = projectedPathRemaps.length > 0 ? projectedPathRemaps : canonicalPathRemaps;
+  const primaryWorkspaceRemotePath = firstString(
+    projection.runner_workspace_guest_checkout,
+    primaryWorkspaceRemotePathFromRemaps(pathRemaps),
+    primaryWorkspaceRemotePathFromEntries(plan.entries || [])
+  );
 
   return stripUndefined({
     schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
     runner_workspace_guest_checkout: optionalGuestPath(
-      paths.runner_workspace_guest_checkout,
-      'path_materialization_plan.paths.runner_workspace_guest_checkout'
+      primaryWorkspaceRemotePath,
+      'path_materialization_plan.projection.runner_workspace_guest_checkout'
     ),
     transcript_host_dir: optionalHostPath(
-      paths.transcript_host_dir,
+      projection.transcript_host_dir,
       workspace,
-      'path_materialization_plan.paths.transcript_host_dir'
+      'path_materialization_plan.projection.transcript_host_dir'
     ),
     transcript_dir: optionalGuestPath(
-      paths.transcript_dir,
-      'path_materialization_plan.paths.transcript_dir'
+      projection.transcript_dir,
+      'path_materialization_plan.projection.transcript_dir'
     ),
-    runtime_mounts: normalizeMounts(plan.runtime_mounts || [], workspace),
+    path_remaps: pathRemaps,
+    runtime_mounts: runtimeMountsFromPathRemaps(pathRemaps),
   });
 }
 
-function normalizeMounts(mounts, workspace) {
-  if (!Array.isArray(mounts)) {
-    throw new Error('path_materialization_plan.runtime_mounts must be an array');
+function pathMaterializationProjection(plan) {
+  if (plainObject(plan.projection)) {
+    return plan.projection;
   }
-  return mounts.map((mount, index) => {
-    if (!plainObject(mount)) {
-      throw new Error(`path_materialization_plan.runtime_mounts[${index}] must be an object`);
+  return plan;
+}
+
+function normalizeCanonicalEntryPathRemaps(entries, workspace) {
+  if (!Array.isArray(entries)) {
+    throw new Error('path_materialization_plan.entries must be an array');
+  }
+  return entries.flatMap((entry, index) => {
+    if (!plainObject(entry)) {
+      throw new Error(`path_materialization_plan.entries[${index}] must be an object`);
     }
-    const source = requiredHostPath(mount.source, workspace, `path_materialization_plan.runtime_mounts[${index}].source`, { allowWorkspaceRoot: true });
-    const target = requiredGuestPath(mount.target, `path_materialization_plan.runtime_mounts[${index}].target`);
-    return stripUndefined({
-      type: mount.type || 'directory',
-      source,
-      target,
-      mode: mount.mode || 'readwrite',
-      metadata: plainObject(mount.metadata) ? mount.metadata : undefined,
-    });
+    if (!entry.local_path && !entry.remote_path) {
+      return [];
+    }
+    if (!entry.local_path || !entry.remote_path) {
+      return [];
+    }
+    return [normalizePathRemap(entry, workspace, `path_materialization_plan.entries[${index}]`)];
   });
+}
+
+function normalizePathRemaps(pathRemaps, workspace, name) {
+  if (pathRemaps === undefined) {
+    return [];
+  }
+  if (!Array.isArray(pathRemaps)) {
+    throw new Error(`${name} must be an array`);
+  }
+  return pathRemaps.map((remap, index) => normalizePathRemap(remap, workspace, `${name}[${index}]`));
+}
+
+function normalizePathRemap(remap, workspace, name) {
+  if (!plainObject(remap)) {
+    throw new Error(`${name} must be an object`);
+  }
+  return stripUndefined({
+    role: typeof remap.role === 'string' && remap.role.length > 0 ? remap.role : undefined,
+    owner: typeof remap.owner === 'string' && remap.owner.length > 0 ? remap.owner : undefined,
+    local_path: requiredHostPath(remap.local_path, workspace, `${name}.local_path`, { allowWorkspaceRoot: true }),
+    remote_path: requiredGuestPath(remap.remote_path, `${name}.remote_path`),
+  });
+}
+
+function runtimeMountsFromPathRemaps(pathRemaps) {
+  return pathRemaps.map((remap) => stripUndefined({
+    type: 'directory',
+    source: remap.local_path,
+    target: remap.remote_path,
+    mode: 'readwrite',
+    metadata: stripUndefined({
+      role: remap.role,
+      owner: remap.owner,
+    }),
+  }));
+}
+
+function primaryWorkspaceRemotePathFromRemaps(pathRemaps) {
+  const primary = pathRemaps.find((remap) => remap.role === 'primary_workspace') || pathRemaps[0];
+  return primary ? primary.remote_path : '';
+}
+
+function primaryWorkspaceRemotePathFromEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return '';
+  }
+  const primary = entries.find((entry) => plainObject(entry) && entry.role === 'primary_workspace' && typeof entry.remote_path === 'string');
+  return primary ? primary.remote_path : '';
 }
 
 function requiredHostPath(value, workspace, name, options = {}) {
@@ -147,5 +211,6 @@ function stripUndefined(value) {
 module.exports = {
   PATH_MATERIALIZATION_PLAN_SCHEMA,
   normalizePathMaterializationPlan,
+  normalizePathRemaps,
   parsePathMaterializationPlan,
 };

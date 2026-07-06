@@ -54,44 +54,69 @@ const pathPlanWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-path-pl
 try {
   const pathPlan = normalizePathMaterializationPlan({
     schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
-    paths: {
+    projection: {
       runner_workspace_guest_checkout: '/runtime/workspace/example',
       transcript_host_dir: 'artifacts/transcript',
       transcript_dir: '/runtime/workspace/example/artifacts/transcript',
+      path_remaps: [{ role: 'primary_workspace', owner: 'runner', local_path: '.', remote_path: '/runtime/workspace/example' }],
     },
-    runtime_mounts: [{ source: '.', target: '/runtime/workspace/example', metadata: { kind: 'runner-workspace' } }],
   }, { workspace: pathPlanWorkspace });
   assert.equal(pathPlan.runner_workspace_guest_checkout, '/runtime/workspace/example');
   assert.equal(pathPlan.transcript_host_dir, path.join(pathPlanWorkspace, 'artifacts/transcript'));
   assert.equal(pathPlan.transcript_dir, '/runtime/workspace/example/artifacts/transcript');
+  assert.deepEqual(pathPlan.path_remaps, [{
+    role: 'primary_workspace',
+    owner: 'runner',
+    local_path: pathPlanWorkspace,
+    remote_path: '/runtime/workspace/example',
+  }]);
   assert.deepEqual(pathPlan.runtime_mounts, [{
     type: 'directory',
     source: pathPlanWorkspace,
     target: '/runtime/workspace/example',
     mode: 'readwrite',
-    metadata: { kind: 'runner-workspace' },
+    metadata: { role: 'primary_workspace', owner: 'runner' },
+  }]);
+
+  const canonicalFallbackPathPlan = normalizePathMaterializationPlan({
+    schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
+    entries: [{
+      role: 'primary_workspace',
+      owner: 'runner_exec.source_snapshot',
+      local_path: '.',
+      remote_path: '/runtime/workspace/example',
+      materialization_mode: 'snapshot',
+      validation_status: 'materialized',
+    }],
+  }, { workspace: pathPlanWorkspace });
+  assert.equal(canonicalFallbackPathPlan.runner_workspace_guest_checkout, '/runtime/workspace/example');
+  assert.deepEqual(canonicalFallbackPathPlan.path_remaps, [{
+    role: 'primary_workspace',
+    owner: 'runner_exec.source_snapshot',
+    local_path: pathPlanWorkspace,
+    remote_path: '/runtime/workspace/example',
   }]);
 
   assert.throws(
     () => normalizePathMaterializationPlan({
       schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
-      paths: { transcript_host_dir: '../outside' },
+      projection: { transcript_host_dir: '../outside' },
     }, { workspace: pathPlanWorkspace }),
     /transcript_host_dir.*parent-directory|transcript_host_dir.*under GITHUB_WORKSPACE/
   );
   assert.throws(
     () => normalizePathMaterializationPlan({
       schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
-      paths: { transcript_dir: 'relative/transcript' },
+      projection: { transcript_dir: 'relative/transcript' },
     }, { workspace: pathPlanWorkspace }),
     /transcript_dir must be an absolute POSIX path/
   );
   assert.throws(
     () => normalizePathMaterializationPlan({
       schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
-      runtime_mounts: [{ source: '.', target: '/runtime/../escape' }],
+      projection: { path_remaps: [{ local_path: '.', remote_path: '/runtime/../escape' }] },
     }, { workspace: pathPlanWorkspace }),
-    /runtime_mounts\[0\]\.target.*normalized absolute POSIX path/
+    /path_remaps\[0\]\.remote_path.*normalized absolute POSIX path/
   );
 } finally {
   fs.rmSync(pathPlanWorkspace, { recursive: true, force: true });
@@ -143,12 +168,12 @@ try {
     RUNNER_WORKSPACE_CONFIG: '{"enabled":true}',
     PATH_MATERIALIZATION_PLAN: JSON.stringify({
       schema: PATH_MATERIALIZATION_PLAN_SCHEMA,
-      paths: {
+      projection: {
         runner_workspace_guest_checkout: '/runtime/workspace/example',
         transcript_host_dir: 'runtime-artifacts/path-plan-fixture',
         transcript_dir: '/runtime/workspace/example/runtime-artifacts/path-plan-fixture',
+        path_remaps: [{ role: 'primary_workspace', owner: 'runner', local_path: '.', remote_path: '/runtime/workspace/example' }],
       },
-      runtime_mounts: [{ source: '.', target: '/runtime/workspace/example', mode: 'readwrite' }],
     }),
   });
 
@@ -160,6 +185,7 @@ try {
     source: materializedTmpRoot,
     target: '/runtime/workspace/example',
     mode: 'readwrite',
+    metadata: { role: 'primary_workspace', owner: 'runner' },
   }]);
   assert.equal(config.path_materialization_plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
 } finally {
