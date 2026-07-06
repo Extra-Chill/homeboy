@@ -197,6 +197,20 @@ fn render_ci_stage(out: &mut String, stage: &ReviewStage<CiRunOutput>) {
 
 /// Render the lint stage body — top sniff codes (by `category`) with counts.
 fn render_lint_body(out: &mut String, output: &LintCommandOutput) {
+    if let Some(formatting) = &output.formatting_findings {
+        let _ = writeln!(out, "- **FORMAT** — run `{}`", formatting.suggested_command);
+        for file in formatting.files.iter().take(TOP_N) {
+            let _ = writeln!(out, "- `{}` needs formatting", file);
+        }
+        if formatting.files.len() > TOP_N {
+            let _ = writeln!(
+                out,
+                "- _… {} more file(s) need formatting_",
+                formatting.files.len() - TOP_N
+            );
+        }
+    }
+
     let findings = match output.findings.as_ref() {
         Some(f) if !f.is_empty() => f,
         _ => return,

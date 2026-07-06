@@ -25,6 +25,7 @@ pub const GENERIC_INFRASTRUCTURE_FAILURE_MARKERS: &[&str] = &[
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum VerificationPhase {
+    Format,
     Syntax,
     Lint,
     Typecheck,
