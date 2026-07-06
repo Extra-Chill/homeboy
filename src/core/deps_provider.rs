@@ -595,9 +595,25 @@ impl ExtensionDependencyProvider {
 
     fn install_command(
         &self,
-        _context: DependencyProviderContext<'_>,
+        context: DependencyProviderContext<'_>,
     ) -> Result<Option<DependencyProviderCommand>> {
-        Ok(None)
+        let args = vec!["install-command".to_string()];
+        let output = self.run(context.component, context.path, &args)?;
+        let plan: ExtensionInstallCommandOutput =
+            parse_extension_output(&output.stdout, "deps install-command")?;
+        if plan.command.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "dependency_provider",
+                "Dependency provider install-command returned an empty command".to_string(),
+                None,
+                None,
+            ));
+        }
+        Ok(Some(DependencyProviderCommand::new(
+            plan.command.first().cloned().unwrap_or_default(),
+            plan.command.into_iter().skip(1).collect(),
+            context.path,
+        )))
     }
 }
 
@@ -745,6 +761,11 @@ struct ExtensionStatusOutput {
     packages: Vec<DependencyPackage>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExtensionInstallCommandOutput {
+    command: Vec<String>,
+}
+
 fn parse_extension_output<T: for<'de> Deserialize<'de>>(stdout: &str, action: &str) -> Result<T> {
     serde_json::from_str(stdout).map_err(|e| {
         Error::validation_invalid_json(e, Some(action.to_string()), Some(stdout.to_string()))
@@ -753,4 +774,92 @@ fn parse_extension_output<T: for<'de> Deserialize<'de>>(stdout: &str, action: &s
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().find(|line| !line.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::Component;
+    use crate::core::extension::ExtensionCapability;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn extension_provider_reports_runner_safe_install_command() {
+        let dir = tempdir().unwrap();
+        let extension_path = dir.path().join("fixture-deps");
+        let component_path = dir.path().join("component");
+        fs::create_dir_all(&extension_path).unwrap();
+        fs::create_dir_all(&component_path).unwrap();
+        fs::write(
+            extension_path.join("fixture-deps.json"),
+            r#"{
+                "name": "Fixture Deps",
+                "version": "0.0.0",
+                "deps": { "extension_script": "deps.sh" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            extension_path.join("deps.sh"),
+            r#"#!/bin/sh
+case "$1" in
+  status) printf '{"package_manager":"fixture","packages":[]}\n' ;;
+  install-command) printf '{"command":["fixture-pm","install","--locked"]}\n' ;;
+  *) exit 64 ;;
+esac
+"#,
+        )
+        .unwrap();
+        make_executable(&extension_path.join("deps.sh"));
+
+        let component = Component::new(
+            "fixture".to_string(),
+            component_path.display().to_string(),
+            String::new(),
+            None,
+        );
+        let provider = ExtensionDependencyProvider {
+            context: crate::core::extension::ExtensionExecutionContext {
+                component: component.clone(),
+                capability: ExtensionCapability::Deps,
+                extension_id: "fixture-deps".to_string(),
+                extension_path,
+                script_path: "deps.sh".to_string(),
+                settings: Vec::new(),
+                accepted_setting_keys: Vec::new(),
+            },
+        };
+
+        let status = provider
+            .status(DependencyProviderStatusRequest {
+                context: DependencyProviderContext {
+                    component: &component,
+                    path: &component_path,
+                },
+                package_filter: None,
+            })
+            .unwrap();
+        assert_eq!(status.package_manager, "fixture");
+
+        let command = provider
+            .install_command(DependencyProviderContext {
+                component: &component,
+                path: &component_path,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.argv(), vec!["fixture-pm", "install", "--locked"]);
+        assert_eq!(command.cwd, component_path);
+    }
+
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = fs::metadata(path).unwrap().permissions();
+            mode.set_mode(0o755);
+            fs::set_permissions(path, mode).unwrap();
+        }
+    }
 }
