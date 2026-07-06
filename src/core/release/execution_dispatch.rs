@@ -42,6 +42,7 @@ pub(super) fn execute_release_plan_step(
         "preflight.package" => Ok(Some(
             executor::package_preflight::run_package_preflight(
                 context.extensions,
+                context.component,
                 context.component_id,
                 &context.component.local_path,
                 context.options.skip_build_validation,
