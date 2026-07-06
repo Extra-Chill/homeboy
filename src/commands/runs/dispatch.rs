@@ -29,7 +29,10 @@ impl RunsArgs {
         matches!(self.command, RunsCommand::Proof { json: false, .. })
     }
 
-    pub fn absorb_global_runner_for_list(&mut self, runner: Option<String>) -> Option<String> {
+    pub fn absorb_global_runner_for_command_option(
+        &mut self,
+        runner: Option<String>,
+    ) -> Option<String> {
         match (&mut self.command, runner) {
             (RunsCommand::List(args), Some(runner_id)) if args.runner.is_none() => {
                 args.runner = Some(runner_id);
@@ -40,6 +43,21 @@ impl RunsArgs {
             {
                 None
             }
+            (
+                RunsCommand::Artifact(RunsArtifactArgs {
+                    command: RunsArtifactCommand::Get(args),
+                }),
+                Some(runner_id),
+            ) if args.runner.is_none() => {
+                args.runner = Some(runner_id);
+                None
+            }
+            (
+                RunsCommand::Artifact(RunsArtifactArgs {
+                    command: RunsArtifactCommand::Get(args),
+                }),
+                Some(runner_id),
+            ) if args.runner.as_deref() == Some(runner_id.as_str()) => None,
             (_, runner) => runner,
         }
     }
@@ -66,6 +84,15 @@ impl RunsArgs {
                 command: RunsArtifactCommand::Get(_),
             })
         )
+    }
+
+    pub fn artifact_get_runner(&self) -> Option<&str> {
+        match &self.command {
+            RunsCommand::Artifact(RunsArtifactArgs {
+                command: RunsArtifactCommand::Get(args),
+            }) => args.runner.as_deref(),
+            _ => None,
+        }
     }
 
     pub fn has_command_local_runner_option(&self) -> bool {
@@ -112,7 +139,7 @@ impl RunsArgs {
                     format!("Run `homeboy runs artifacts {}` to list mirrored artifact records.", args.run_id),
                     format!("Run `homeboy runs artifacts {} --pull` to retrieve runner/remote artifact bytes to the operator-local artifact root.", args.run_id),
                     format!("Run `homeboy runs artifacts {} --runner {runner_id}` to query the connected runner daemon directly.", args.run_id),
-                    "Use `homeboy runs artifact get <run-id> <artifact-id> --runner <id>` to pull selected runner-side artifact bytes.".to_string(),
+                    "Use `homeboy runs artifact get <run-id> <artifact-id> --runner <id>` to pull selected runner-side artifact bytes, or `homeboy --runner <id> runs artifact get <run-id> <artifact-id>` from Lab-oriented workflows.".to_string(),
                 ],
             ),
             RunsCommand::Artifact(_) => (
