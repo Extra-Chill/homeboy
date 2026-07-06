@@ -69,28 +69,25 @@ rm "$PROJECT_DIR/package-lock.json"
 status_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh status)"
 STATUS_JSON="$status_json" node <<'NODE'
 const status = JSON.parse(process.env.STATUS_JSON);
-if (!status.errors.some((error) => error.code === 'nodejs.lockfile_missing')) {
-  throw new Error(`expected missing lockfile error, got ${JSON.stringify(status.errors)}`);
+if (status.errors.length !== 0) {
+  throw new Error(`expected package-only npm workspace to hydrate with fallback install, got ${JSON.stringify(status.errors)}`);
 }
 NODE
 
-set +e
 command_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh install-command)"
-command_status=$?
-set -e
-if [ "$command_status" -eq 0 ]; then
-    echo "expected install-command to fail without a lockfile" >&2
-    exit 1
-fi
 COMMAND_JSON="$command_json" node <<'NODE'
 const plan = JSON.parse(process.env.COMMAND_JSON);
-if (!Array.isArray(plan.command) || plan.command.length !== 0) {
-  throw new Error(`expected empty command for unsupported install plan, got ${JSON.stringify(plan.command)}`);
-}
-if (!plan.errors.some((error) => error.code === 'nodejs.lockfile_missing')) {
-  throw new Error(`expected missing lockfile error, got ${JSON.stringify(plan.errors)}`);
+if (JSON.stringify(plan.command) !== JSON.stringify(['npm', 'install', '--no-audit', '--no-fund'])) {
+  throw new Error(`expected npm install fallback plan, got ${JSON.stringify(plan.command)}`);
 }
 NODE
+
+: >"$HOMEBOY_FAKE_NPM_LOG"
+"$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install >/dev/null
+if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "install --no-audit --no-fund" ]; then
+    echo "expected package-only install to run npm install fallback" >&2
+    exit 1
+fi
 
 cat >"$PROJECT_DIR/package-lock.json" <<'JSON'
 {

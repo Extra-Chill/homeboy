@@ -21,11 +21,6 @@ for lockfile in pnpm-lock.yaml yarn.lock package-lock.json; do
 done
 
 lockfile_error_code() {
-    if [ "${#LOCKFILES[@]}" -eq 0 ]; then
-        printf '%s\n' "nodejs.lockfile_missing"
-        return
-    fi
-
     if [ "${#LOCKFILES[@]}" -gt 1 ]; then
         printf '%s\n' "nodejs.lockfile_ambiguous"
         return
@@ -34,9 +29,6 @@ lockfile_error_code() {
 
 lockfile_error_message() {
     case "$(lockfile_error_code)" in
-        nodejs.lockfile_missing)
-            printf '%s\n' "Node.js dependency hydration requires a lockfile. Add package-lock.json, pnpm-lock.yaml, or yarn.lock."
-            ;;
         nodejs.lockfile_ambiguous)
             printf 'Multiple Node.js lockfiles found: %s. Keep exactly one lockfile so Homeboy can choose a deterministic package manager.\n' "${LOCKFILES[*]}"
             ;;
@@ -56,7 +48,11 @@ dependency_command() {
             printf '%s\n' "yarn install --frozen-lockfile"
             ;;
         npm|*)
-            printf '%s\n' "npm ci"
+            if [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/package-lock.json" ]; then
+                printf '%s\n' "npm ci"
+            else
+                printf '%s\n' "npm install --no-audit --no-fund"
+            fi
             ;;
     esac
 }
