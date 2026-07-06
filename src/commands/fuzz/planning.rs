@@ -54,7 +54,8 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
         .or_else(|| args.run.workload_id.clone());
-    let (required_artifacts, gates) = fuzz_gate_profile_contract(args.run.gate_profile.as_core());
+    let (required_artifacts, gates) =
+        fuzz_gate_profile_contract(args.run.effective_gate_profile().as_core());
     let request_id = args
         .request_id
         .clone()
@@ -374,6 +375,13 @@ pub(super) fn build_campaign_plan(
                 tracker_refs: args.run.tracker_refs.clone(),
                 artifact_requirements: artifact_requirements.clone(),
                 command: campaign_run_command(args, component, workload_id, &run_id),
+                lab_command: lab_campaign_run_command(
+                    args,
+                    component,
+                    workload_id,
+                    &run_id,
+                    lab_runner.as_deref(),
+                ),
                 request,
             }
         })
@@ -392,8 +400,9 @@ pub(super) fn build_campaign_plan(
         lab_runner,
         isolation: FuzzCampaignPlanIsolationOutput {
             mode: effective_isolation_mode(&args).to_string(),
-            allow_destructive: args.run.allow_destructive,
-            proof_required: args.run.allow_destructive || args.run.isolation.requests_isolation(),
+            allow_destructive: args.run.effective_allow_destructive(),
+            proof_required: args.run.effective_allow_destructive()
+                || args.run.effective_isolation().requests_isolation(),
             proof_file: args
                 .run
                 .isolation_proof
@@ -552,21 +561,27 @@ fn campaign_run_command(
     }
     command.extend([
         "--gate-profile".to_string(),
-        args.run.gate_profile.as_str().to_string(),
+        args.run.effective_gate_profile().as_str().to_string(),
     ]);
-    if args.run.require_case_log {
+    if args.run.profile.as_str() != "default" {
+        command.extend([
+            "--profile".to_string(),
+            args.run.profile.as_str().to_string(),
+        ]);
+    }
+    if args.run.effective_require_case_log() {
         command.push("--require-case-log".to_string());
     }
-    if args.run.require_coverage_summary {
+    if args.run.effective_require_coverage_summary() {
         command.push("--require-coverage-summary".to_string());
     }
-    if args.run.require_result_envelope {
+    if args.run.effective_require_result_envelope() {
         command.push("--require-result-envelope".to_string());
     }
     if let Some(max_duration) = args.run.max_duration.as_ref() {
         command.extend(["--max-duration".to_string(), max_duration.clone()]);
     }
-    if args.run.allow_destructive {
+    if args.run.effective_allow_destructive() {
         command.push("--allow-destructive".to_string());
     }
     if effective_isolation_requested(args) {
@@ -586,6 +601,29 @@ fn campaign_run_command(
         command.extend(args.run.args.clone());
     }
     command
+}
+
+fn lab_campaign_run_command(
+    args: &FuzzPlanArgs,
+    component: &str,
+    workload_id: &str,
+    run_id: &str,
+    lab_runner: Option<&str>,
+) -> Option<Vec<String>> {
+    lab_runner.map(|runner| {
+        let mut command = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            runner.to_string(),
+            "--lab-only".to_string(),
+        ];
+        command.extend(
+            campaign_run_command(args, component, workload_id, run_id)
+                .into_iter()
+                .skip(1),
+        );
+        command
+    })
 }
 
 pub(super) fn load_sequence_plan(
@@ -651,7 +689,7 @@ pub(super) fn plan_inventory_selection(
     let surface_safety = inventory_surface_safety(inventory);
     let isolation_requested = effective_isolation_requested(args);
     let destructive_allowed =
-        args.run.allow_destructive && isolation_requested && isolation_proof.is_some();
+        args.run.effective_allow_destructive() && isolation_requested && isolation_proof.is_some();
 
     let mut selected_target_ids = BTreeSet::new();
     let mut selected_families = BTreeSet::new();
@@ -787,7 +825,7 @@ pub(super) fn plan_inventory_selection(
         .collect::<Vec<_>>();
 
     let (profile_artifacts, profile_gates) =
-        fuzz_gate_profile_contract(args.run.gate_profile.as_core());
+        fuzz_gate_profile_contract(args.run.effective_gate_profile().as_core());
     let target_ids = selected_target_ids.into_iter().collect::<Vec<_>>();
     let operation_families = selected_families.into_iter().collect::<Vec<_>>();
     let case_budget = args
@@ -858,8 +896,9 @@ pub(super) fn plan_inventory_selection(
         metadata: json!({
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
-            "gate_profile": args.run.gate_profile.as_str(),
-            "allow_destructive": args.run.allow_destructive,
+            "gate_profile": args.run.effective_gate_profile().as_str(),
+            "profile": args.run.profile.as_str(),
+            "allow_destructive": args.run.effective_allow_destructive(),
             "isolation": effective_isolation_mode(args),
             "destructive_allowed": destructive_allowed,
             "verified_isolation": isolation_proof.is_some(),
@@ -873,8 +912,9 @@ pub(super) fn plan_inventory_selection(
             "strategy": args.strategy.as_str(),
             "operation_filters": args.operations,
             "operation_family_filters": args.operation_families,
-            "gate_profile": args.run.gate_profile.as_str(),
-            "allow_destructive": args.run.allow_destructive,
+            "gate_profile": args.run.effective_gate_profile().as_str(),
+            "profile": args.run.profile.as_str(),
+            "allow_destructive": args.run.effective_allow_destructive(),
             "isolation": effective_isolation_mode(args),
             "destructive_allowed": destructive_allowed,
             "verified_isolation": isolation_proof.is_some(),
@@ -896,7 +936,7 @@ pub(super) fn plan_inventory_selection(
         "isolation": {
             "required": isolation_required,
             "mode": effective_isolation_mode(args),
-            "allow_destructive": args.run.allow_destructive,
+            "allow_destructive": args.run.effective_allow_destructive(),
             "destructive_allowed": destructive_allowed,
             "verified": isolation_proof.is_some(),
             "proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
@@ -984,7 +1024,7 @@ pub(super) fn load_or_default_isolation_proof(
     if let Some(proof) = load_isolation_proof(args.run.isolation_proof.as_deref())? {
         return Ok(Some(proof));
     }
-    if !args.run.allow_destructive {
+    if !args.run.effective_allow_destructive() {
         return Ok(None);
     }
 
@@ -1021,11 +1061,11 @@ pub(super) fn load_or_default_isolation_proof(
 }
 
 pub(super) fn effective_isolation_requested(args: &FuzzPlanArgs) -> bool {
-    args.run.allow_destructive || args.run.isolation.requests_isolation()
+    args.run.effective_allow_destructive() || args.run.effective_isolation().requests_isolation()
 }
 
 pub(super) fn effective_isolation_mode(args: &FuzzPlanArgs) -> &'static str {
-    if args.run.allow_destructive || args.run.isolation.requests_isolation() {
+    if args.run.effective_isolation().requests_isolation() {
         "isolated"
     } else {
         "shared"
@@ -1069,8 +1109,8 @@ fn skip_reason_detail(
     if reason != "destructive" {
         return "operation is outside the selected strategy, filters, or supported operation families";
     }
-    if !args.run.allow_destructive {
-        return "destructive fuzz requires --allow-destructive";
+    if !args.run.effective_allow_destructive() {
+        return "destructive fuzz requires --allow-destructive or --profile lab";
     }
     if isolation_proof.is_none() {
         return "destructive fuzz requires verified isolation proof";

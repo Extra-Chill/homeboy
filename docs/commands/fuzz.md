@@ -5,8 +5,8 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--profile <default|lab>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--profile <default|lab>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--campaign-manifest <path>] [--campaign-workload <id>] [--lab-runner <id>] [--required-artifact <id>] [--execute|--dry-run] [--resume] [--allow-destructive [--isolation-proof <path>]]
 homeboy fuzz stable plan --manifest <path> [--stable-id <id[,id]>] [--runner <id>] [--artifact-root <dir>] [--run-id-prefix <id>] [--tracker-ref <kind:id>] [--detach-after-handoff] [--component <id>] [--since <duration>] [--limit <n>] [--hotspot-limit <n>]
@@ -157,6 +157,17 @@ generated `homeboy/isolation-proof/v1` to the execution request for the common
 disposable-runner case. Pass `--isolation-proof <path>` when an external runner
 or lab has stronger proof bytes to preserve.
 
+Use `--profile lab` for the common safe Lab evidence run. The profile expands to
+the generic destructive evidence defaults: destructive operations allowed,
+isolated mode, evidence gate profile when no stricter gate profile is supplied,
+and required case-log, coverage-summary, and result-envelope artifacts. Route it
+to Lab with the global flags:
+
+```bash
+homeboy --runner <runner-id> --lab-only fuzz run --rig <rig-id> \
+  --workload <workload-id> --profile lab
+```
+
 `homeboy fuzz plan --inventory <path>`, `homeboy fuzz run --inventory <path>`,
 and `homeboy fuzz report --inventory <path>`
 accept a `homeboy/fuzz-target-inventory/v1` JSON file with discovered
@@ -219,7 +230,14 @@ homeboy fuzz plan my-component \
 The resulting `campaign_plan.entries[]` are sorted by workload id, deduplicated,
 and include `run_id`, `tracker_refs`, `artifact_requirements`, `lab_runner`, a
 request copy scoped to the workload, and a command vector suitable for a caller
-or Lab orchestration layer to schedule explicitly.
+to schedule explicitly. When `--lab-runner <id>` is set, each entry also includes
+`lab_command`, the exact `homeboy --runner <id> --lab-only fuzz run ...` vector
+for the same workload.
+
+Plain `homeboy --runner <id> fuzz plan ...` stays local because planning is the
+preflight step operators inspect before execution. Use `--lab-runner <id>` to
+emit Lab run commands, or execute with `fuzz run`, `fuzz run-campaign`, or
+`fuzz plan --execute`.
 
 `homeboy fuzz stable plan --manifest <path>` reads a product-owned stable workload
 manifest and emits deterministic Lab command vectors without executing them. The

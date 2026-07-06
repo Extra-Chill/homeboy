@@ -364,6 +364,84 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
             "measurement",
         ]
     );
+    assert_eq!(
+        plan.entries[0]
+            .lab_command
+            .as_ref()
+            .expect("lab command")
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "homeboy",
+            "--runner",
+            "lab-a",
+            "--lab-only",
+            "fuzz",
+            "run",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--run-id",
+            "campaign-1-api-fuzz",
+            "--tracker-ref",
+            "github_issue:Extra-Chill/homeboy#123",
+            "--seed",
+            "1234",
+            "--gate-profile",
+            "measurement",
+        ]
+    );
+}
+
+#[test]
+fn fuzz_profile_lab_expands_safe_destructive_evidence_defaults() {
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "plan",
+        "component-a",
+        "--workload",
+        "api-fuzz",
+        "--profile",
+        "lab",
+    ])
+    .expect("parse fuzz lab profile");
+
+    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
+        panic!("expected fuzz plan command");
+    };
+    assert_eq!(args.run.profile, FuzzRunProfileArg::Lab);
+    assert!(args.run.effective_allow_destructive());
+    assert_eq!(args.run.effective_isolation(), FuzzIsolationArg::Isolated);
+    assert_eq!(
+        args.run.effective_gate_profile(),
+        FuzzGateProfileArg::Evidence
+    );
+    assert!(args.run.effective_require_case_log());
+    assert!(args.run.effective_require_coverage_summary());
+    assert!(args.run.effective_require_result_envelope());
+
+    let request_metadata = plan_inventory_selection(&args, &destructive_inventory(), None)
+        .expect("profile lab planning metadata");
+    assert_eq!(request_metadata["planner"]["profile"], "lab");
+    assert_eq!(request_metadata["planner"]["gate_profile"], "evidence");
+    assert_eq!(request_metadata["planner"]["allow_destructive"], true);
+    assert_eq!(request_metadata["planner"]["isolation"], "isolated");
+}
+
+#[test]
+fn fuzz_plan_lab_contract_explains_local_planning_path() {
+    let cli =
+        FuzzCli::try_parse_from(["fuzz", "plan", "component-a"]).expect("parse fuzz plan command");
+    let contract = cli.args.lab_contract().expect("fuzz plan lab contract");
+    let crate::command_contract::LabCommandPortability::LocalOnly(reason) = contract.portability
+    else {
+        panic!("plain fuzz plan should be local-only for Lab routing");
+    };
+
+    assert!(reason.contains("fuzz plan` is controller-local planning"));
+    assert!(reason.contains("--lab-runner <runner>"));
+    assert!(reason.contains("--execute"));
 }
 
 #[test]

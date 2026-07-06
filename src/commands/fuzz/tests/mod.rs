@@ -23,8 +23,8 @@ use super::report::{
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
     FuzzListArgs, FuzzListOutput, FuzzMinimizeArgs, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy,
-    FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract,
-    FuzzValidateArgs, FuzzWorkloadOutput,
+    FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunProfileArg,
+    FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
     fuzz_workloads, resolve_component_id, resolve_fuzz_context, rig_component_for_fuzz,
@@ -102,6 +102,7 @@ fn planner_args() -> FuzzPlanArgs {
             require_result_envelope: false,
             max_duration: None,
             gate_profile: FuzzGateProfileArg::Measurement,
+            profile: FuzzRunProfileArg::Default,
             allow_destructive: false,
             isolation: FuzzIsolationArg::Shared,
             isolation_proof: None,
@@ -352,6 +353,7 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         require_result_envelope: false,
         max_duration: None,
         gate_profile: FuzzGateProfileArg::Measurement,
+        profile: FuzzRunProfileArg::Default,
         allow_destructive: false,
         isolation: FuzzIsolationArg::Shared,
         isolation_proof: None,
