@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::env;
 use std::io::ErrorKind;
 use std::net::TcpListener;
@@ -33,6 +34,12 @@ pub struct DomBoxEntrypointReport {
     pub page_path: String,
     pub page_url: String,
     pub viewport: DomBoxViewport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_css_loaded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_capture_valid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stylesheet_status: Option<Value>,
     pub elements: Vec<DomBoxElement>,
 }
 
@@ -77,6 +84,9 @@ pub(crate) struct BrowserEntrypointReport {
     page_path: String,
     page_url: String,
     viewport: DomBoxViewport,
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    stylesheet_status: Option<Value>,
     elements: Vec<BrowserElement>,
 }
 
@@ -181,6 +191,9 @@ pub(crate) fn shape_report(
                 page_path: entrypoint.page_path,
                 page_url: entrypoint.page_url,
                 viewport: entrypoint.viewport,
+                dom_css_loaded: entrypoint.dom_css_loaded,
+                dom_capture_valid: entrypoint.dom_capture_valid,
+                stylesheet_status: entrypoint.stylesheet_status,
                 elements: entrypoint
                     .elements
                     .into_iter()
@@ -356,6 +369,9 @@ mod tests {
                         height: 900,
                         device_scale_factor: 1,
                     },
+                    dom_css_loaded: Some(true),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!({ "body_margin": "0px" })),
                     elements: vec![BrowserElement {
                         node_id: "12:34".to_string(),
                         node_name: Some("Footer text".to_string()),
@@ -373,6 +389,16 @@ mod tests {
         assert_eq!(
             report.entrypoints[0].elements[0].text_sample,
             "Footer text with"
+        );
+        assert_eq!(report.entrypoints[0].dom_css_loaded, Some(true));
+        assert_eq!(report.entrypoints[0].dom_capture_valid, Some(true));
+        assert_eq!(
+            report.entrypoints[0]
+                .stylesheet_status
+                .as_ref()
+                .and_then(|status| status.get("body_margin"))
+                .and_then(|value| value.as_str()),
+            Some("0px")
         );
         assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
     }

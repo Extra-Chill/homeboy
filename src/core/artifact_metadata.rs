@@ -33,6 +33,8 @@ pub(crate) fn content_type_from_path(path: &Path) -> Option<String> {
         "json" => "application/json",
         "md" | "markdown" => "text/markdown",
         "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
         "txt" | "log" => "text/plain",
         "csv" => "text/csv",
         "xml" => "application/xml",
@@ -42,6 +44,9 @@ pub(crate) fn content_type_from_path(path: &Path) -> Option<String> {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
         _ => return None,
     };
     Some(mime.to_string())
