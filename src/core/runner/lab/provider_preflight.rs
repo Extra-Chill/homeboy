@@ -531,8 +531,9 @@ fn refresh_command(runner_id: &str, runner_homeboy: &serde_json::Value) -> Strin
         })
         .unwrap_or_else(|| {
             format!(
-                "homeboy runner refresh-homeboy {} --ref main --reconnect",
-                shell::quote_arg(runner_id)
+                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+                shell::quote_arg(runner_id),
+                env!("CARGO_PKG_VERSION")
             )
         })
 }

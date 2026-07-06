@@ -285,7 +285,10 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
     assert_eq!(
         metadata["refresh_commands"],
         serde_json::json!([
-            "homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect",
+            format!(
+                "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
+                env!("CARGO_PKG_VERSION")
+            ),
             "homeboy runner disconnect 'homeboy lab'",
             "homeboy runner connect 'homeboy lab'"
         ])
@@ -320,10 +323,12 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
         .contains("connected runner daemon reports Homeboy version `homeboy 0.0.0`"));
     assert!(err.message.contains(env!("CARGO_PKG_VERSION")));
     let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried
-        .iter()
-        .any(|hint| hint.as_str().is_some_and(|hint| hint
-            .contains("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect"))));
+    assert!(tried.iter().any(
+        |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            env!("CARGO_PKG_VERSION")
+        )))
+    ));
     assert!(tried.iter().any(|hint| hint
         .as_str()
         .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
@@ -372,7 +377,22 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
     let warning = lab_runner_homeboy_compatible_drift_warning(&status, false)
         .expect("compatible patch drift should warn");
     assert!(warning.contains("wire-compatible"));
+    assert!(warning.contains(&format!(
+        "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(warning.contains("require_exact_homeboy_version"));
+}
+
+#[test]
+fn matching_runner_version_has_no_compatible_drift_warning() {
+    let status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+
+    assert_eq!(
+        classify_runner_homeboy_version_drift(&status),
+        RunnerHomeboyVersionDrift::None
+    );
+    assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
 #[test]
@@ -461,7 +481,10 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
     assert_eq!(
         metadata["primary_remediation_command"],
-        "homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect"
+        format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 
     let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
@@ -469,8 +492,10 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
     assert!(tried
         .first()
         .and_then(|hint| hint.as_str())
-        .is_some_and(|hint| hint
-            .contains("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect")));
+        .is_some_and(|hint| hint.contains(&format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            env!("CARGO_PKG_VERSION")
+        ))));
 }
 
 #[test]
@@ -655,10 +680,12 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
         .is_some_and(|hint| hint.contains(
             "homeboy runner refresh-homeboy 'homeboy lab' --select /home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy --reconnect"
         )));
-    assert!(tried
-        .iter()
-        .any(|hint| hint.as_str().is_some_and(|hint| hint
-            .contains("homeboy runner refresh-homeboy 'homeboy lab' --ref main --reconnect"))));
+    assert!(tried.iter().any(
+        |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
+            "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
+            env!("CARGO_PKG_VERSION")
+        )))
+    ));
     assert!(tried.iter().any(|hint| hint
         .as_str()
         .is_some_and(|hint| hint.contains("refresh or select a clean runner binary"))));
@@ -728,7 +755,10 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     assert_eq!(
         metadata["refresh_commands"],
         serde_json::json!([
-            "homeboy runner refresh-homeboy lab --ref main --reconnect",
+            format!(
+                "homeboy runner refresh-homeboy lab --ref v{} --reconnect",
+                env!("CARGO_PKG_VERSION")
+            ),
             "homeboy runner disconnect lab",
             "homeboy runner connect lab"
         ])

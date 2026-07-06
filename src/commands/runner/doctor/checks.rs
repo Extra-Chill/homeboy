@@ -144,13 +144,14 @@ pub fn homeboy_version_skew_check(
     let mut details = BTreeMap::new();
     details.insert("local_version".to_string(), local_version.to_string());
     details.insert("remote_version".to_string(), remote_version.to_string());
+    let quoted_runner_id = shell::quote_arg(runner_id);
     Some(warning_with_details(
         "homeboy.version_skew",
         format!(
             "Local Homeboy {local_version} differs from remote runner Homeboy {remote_version}"
         ),
         Some(format!(
-            "Upgrade Homeboy on runner `{runner_id}` to match the local client; for example: `homeboy ssh {server_id} -- homeboy upgrade --no-restart`, or rerun the runner setup/upgrade workflow"
+            "Align runner `{runner_id}` to this controller with `homeboy runner refresh-homeboy {quoted_runner_id} --ref v{local_version} --reconnect`; if that fails, inspect the remote runner with `homeboy ssh {server_id} -- homeboy --version`"
         )),
         details,
     ))

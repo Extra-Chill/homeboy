@@ -151,8 +151,7 @@ fn homeboy_version_skew_check_warns_for_different_versions() {
         check.details.get("remote_version").map(String::as_str),
         Some("0.197.7")
     );
-    assert!(check
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("homeboy ssh lab -- homeboy upgrade")));
+    assert!(check.remediation.as_deref().is_some_and(
+        |value| value.contains("homeboy runner refresh-homeboy lab --ref v0.198.7 --reconnect")
+    ));
 }

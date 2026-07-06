@@ -201,10 +201,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
     let controller_version = env!("CARGO_PKG_VERSION");
     let controller_build_identity = crate::core::build_identity::current().display;
     let refresh_commands = vec![
-        format!(
-            "homeboy runner refresh-homeboy {} --ref main --reconnect",
-            shell::quote_arg(runner_id)
-        ),
+        runner_homeboy_align_to_controller_command(runner_id),
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ];
@@ -385,8 +382,15 @@ pub(crate) fn lab_runner_homeboy_compatible_drift_warning(
         .as_ref()
         .map(|session| session.homeboy_version.as_str())
         .unwrap_or("<unknown>");
+    let remediation = runner_homeboy_align_to_controller_command(
+        status
+            .session
+            .as_ref()
+            .map(|session| session.runner_id.as_str())
+            .unwrap_or("<runner-id>"),
+    );
     Some(format!(
-        "Lab offload: runner reports Homeboy `{runner_version}` while the controller is `{controller_version}`; same MAJOR.MINOR (patch drift only) is wire-compatible, proceeding. Set runner setting `require_exact_homeboy_version` or export `{REQUIRE_EXACT_RUNNER_VERSION_ENV}=1` to enforce exact-match."
+        "Lab offload: runner reports Homeboy `{runner_version}` while the controller is `{controller_version}`; same MAJOR.MINOR (patch drift only) is wire-compatible, proceeding. Align the runner with `{remediation}`. Set runner setting `require_exact_homeboy_version` or export `{REQUIRE_EXACT_RUNNER_VERSION_ENV}=1` to enforce exact-match."
     ))
 }
 
@@ -430,12 +434,7 @@ fn runner_homeboy_primary_remediation_command(
     runner_homeboy_refresh_commands(runner_id, status)
         .into_iter()
         .next()
-        .unwrap_or_else(|| {
-            format!(
-                "homeboy runner refresh-homeboy {} --ref main --reconnect",
-                shell::quote_arg(runner_id)
-            )
-        })
+        .unwrap_or_else(|| runner_homeboy_align_to_controller_command(runner_id))
 }
 
 fn runner_homeboy_topology_recovery_command(
@@ -662,7 +661,7 @@ pub(crate) fn stale_runner_homeboy_error(
     ));
     tried.extend([
         format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
-        format!("If the runner binary itself is stale, refresh or select a clean runner binary with `homeboy runner refresh-homeboy {} --ref main --reconnect`.", shell::quote_arg(runner_id)),
+        format!("If the runner binary itself is stale, refresh or select a clean runner binary with `{}`.", runner_homeboy_align_to_controller_command(runner_id)),
         "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
     ]);
     Error::validation_invalid_argument(
@@ -688,13 +687,18 @@ pub(crate) fn runner_homeboy_refresh_commands(
         return commands;
     }
     vec![
-        format!(
-            "homeboy runner refresh-homeboy {} --ref main --reconnect",
-            shell::quote_arg(runner_id)
-        ),
+        runner_homeboy_align_to_controller_command(runner_id),
         format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
         format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
     ]
+}
+
+pub(crate) fn runner_homeboy_align_to_controller_command(runner_id: &str) -> String {
+    format!(
+        "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+        shell::quote_arg(runner_id),
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 pub(crate) fn runner_session_homeboy_display(
