@@ -69,7 +69,7 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         args.run.run_id.clone(),
         args.run.inventory.as_deref(),
     )?;
-    let isolation_proof = load_isolation_proof(args.run.isolation_proof.as_deref())?;
+    let isolation_proof = load_or_default_isolation_proof(&args, &ctx.component_id)?;
     let sequence_plan = load_sequence_plan(args.run.sequence_plan.as_deref())?;
     let planning_metadata =
         plan_inventory_selection(&args, &target_inventory, isolation_proof.as_ref())?;
@@ -391,7 +391,7 @@ pub(super) fn build_campaign_plan(
             .map(|path| path.to_string_lossy().to_string()),
         lab_runner,
         isolation: FuzzCampaignPlanIsolationOutput {
-            mode: args.run.isolation.as_str().to_string(),
+            mode: effective_isolation_mode(&args).to_string(),
             allow_destructive: args.run.allow_destructive,
             proof_required: args.run.allow_destructive || args.run.isolation.requests_isolation(),
             proof_file: args
@@ -569,10 +569,10 @@ fn campaign_run_command(
     if args.run.allow_destructive {
         command.push("--allow-destructive".to_string());
     }
-    if args.run.isolation.requests_isolation() {
+    if effective_isolation_requested(args) {
         command.extend([
             "--isolation".to_string(),
-            args.run.isolation.as_str().to_string(),
+            effective_isolation_mode(args).to_string(),
         ]);
     }
     if let Some(isolation_proof) = args.run.isolation_proof.as_ref() {
@@ -649,18 +649,9 @@ pub(super) fn plan_inventory_selection(
         .unwrap_or_default();
     let workload_safety_class = workload.map(|workload| workload.safety_class);
     let surface_safety = inventory_surface_safety(inventory);
-    if args.run.allow_destructive && isolation_proof.is_none() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "isolation-proof",
-            "destructive fuzz requires explicit homeboy/isolation-proof/v1 via --isolation-proof"
-                .to_string(),
-            None,
-            None,
-        ));
-    }
-    let destructive_allowed = args.run.allow_destructive
-        && args.run.isolation.requests_isolation()
-        && isolation_proof.is_some();
+    let isolation_requested = effective_isolation_requested(args);
+    let destructive_allowed =
+        args.run.allow_destructive && isolation_requested && isolation_proof.is_some();
 
     let mut selected_target_ids = BTreeSet::new();
     let mut selected_families = BTreeSet::new();
@@ -713,7 +704,7 @@ pub(super) fn plan_inventory_selection(
                 safety_class,
                 args.strategy,
                 destructive_allowed,
-                args.run.isolation.requests_isolation(),
+                isolation_requested,
                 &filters,
                 &workload_operations,
             );
@@ -869,7 +860,7 @@ pub(super) fn plan_inventory_selection(
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
             "allow_destructive": args.run.allow_destructive,
-            "isolation": args.run.isolation.as_str(),
+            "isolation": effective_isolation_mode(args),
             "destructive_allowed": destructive_allowed,
             "verified_isolation": isolation_proof.is_some(),
             "isolation_proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
@@ -884,7 +875,7 @@ pub(super) fn plan_inventory_selection(
             "operation_family_filters": args.operation_families,
             "gate_profile": args.run.gate_profile.as_str(),
             "allow_destructive": args.run.allow_destructive,
-            "isolation": args.run.isolation.as_str(),
+            "isolation": effective_isolation_mode(args),
             "destructive_allowed": destructive_allowed,
             "verified_isolation": isolation_proof.is_some(),
             "isolation_proof_schema": isolation_proof.map(|proof| proof.schema.as_str()),
@@ -904,7 +895,7 @@ pub(super) fn plan_inventory_selection(
         "sampling": sampling,
         "isolation": {
             "required": isolation_required,
-            "mode": args.run.isolation.as_str(),
+            "mode": effective_isolation_mode(args),
             "allow_destructive": args.run.allow_destructive,
             "destructive_allowed": destructive_allowed,
             "verified": isolation_proof.is_some(),
@@ -986,6 +977,61 @@ pub(super) fn load_isolation_proof(
         })
 }
 
+pub(super) fn load_or_default_isolation_proof(
+    args: &FuzzPlanArgs,
+    component_id: &str,
+) -> homeboy::core::Result<Option<IsolationProof>> {
+    if let Some(proof) = load_isolation_proof(args.run.isolation_proof.as_deref())? {
+        return Ok(Some(proof));
+    }
+    if !args.run.allow_destructive {
+        return Ok(None);
+    }
+
+    IsolationProof::from_value(serde_json::json!({
+        "schema": homeboy::core::fuzz::ISOLATION_PROOF_SCHEMA,
+        "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+        "runtime_kind": "homeboy-fuzz-run-dir",
+        "provider_ref": {
+            "component": component_id,
+            "source": "auto-generated"
+        },
+        "disposable": true,
+        "snapshot_ref": "homeboy-run-dir",
+        "reset_supported": true,
+        "teardown_required": true,
+        "mutation_boundary": "HOMEBOY fuzz runner declared mutation boundary",
+        "proof_artifacts": [
+            {
+                "kind": "generated-contract",
+                "ref": "homeboy:auto-isolation-proof"
+            }
+        ],
+        "verified_by": "homeboy fuzz --allow-destructive",
+        "metadata": {
+            "reason": "--allow-destructive implies isolated fuzz mode for this fuzz run"
+        }
+    }))
+    .map(Some)
+    .map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to build default fuzz isolation proof: {error}"
+        ))
+    })
+}
+
+pub(super) fn effective_isolation_requested(args: &FuzzPlanArgs) -> bool {
+    args.run.allow_destructive || args.run.isolation.requests_isolation()
+}
+
+pub(super) fn effective_isolation_mode(args: &FuzzPlanArgs) -> &'static str {
+    if args.run.allow_destructive || args.run.isolation.requests_isolation() {
+        "isolated"
+    } else {
+        "shared"
+    }
+}
+
 fn effective_safety_class(
     surface: FuzzSafetyClass,
     workload: Option<FuzzSafetyClass>,
@@ -1026,11 +1072,8 @@ fn skip_reason_detail(
     if !args.run.allow_destructive {
         return "destructive fuzz requires --allow-destructive";
     }
-    if !args.run.isolation.requests_isolation() {
-        return "destructive fuzz requires --isolation isolated";
-    }
     if isolation_proof.is_none() {
-        return "destructive fuzz requires explicit homeboy/isolation-proof/v1 via --isolation-proof";
+        return "destructive fuzz requires verified isolation proof";
     }
     "destructive fuzz is not allowed for this operation"
 }

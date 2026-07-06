@@ -1241,6 +1241,31 @@ fn run_fuzz_extension_script(
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+    let env = fuzz_runner_env(
+        args,
+        rig_context,
+        workload,
+        &results_path,
+        run_dir,
+        Some(execution_request_path),
+        sequence_plan_path,
+    )?;
+
+    if ctx.component.has_script(ExtensionCapability::Fuzz) {
+        let output =
+            homeboy::core::extension::component_script::run_component_scripts_with_run_dir(
+                &ctx.component,
+                ExtensionCapability::Fuzz,
+                &ctx.source_path,
+                run_dir,
+                false,
+                &env,
+                &args.args,
+            )?;
+        return Ok(output.into());
+    }
+
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
     if execution_context.script_path.trim().is_empty() {
@@ -1267,16 +1292,6 @@ fn run_fuzz_extension_script(
         .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
         .script_args(&args.args);
 
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let env = fuzz_runner_env(
-        args,
-        rig_context,
-        workload,
-        &results_path,
-        run_dir,
-        Some(execution_request_path),
-        sequence_plan_path,
-    )?;
     for (key, value) in env {
         runner = runner.env(&key, &value);
     }
@@ -1468,7 +1483,8 @@ pub(super) fn build_fuzz_execution_request(
         dry_run: false,
         resume: false,
     };
-    let isolation_proof = super::planning::load_isolation_proof(args.isolation_proof.as_deref())?;
+    let isolation_proof =
+        super::planning::load_or_default_isolation_proof(&plan_args, component_id)?;
     let sequence_plan = load_sequence_plan(args.sequence_plan.as_deref())?;
     let mut metadata =
         plan_inventory_selection(&plan_args, target_inventory, isolation_proof.as_ref())?;

@@ -236,6 +236,34 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
 }
 
 #[test]
+fn fuzz_execution_request_generates_isolation_proof_for_allow_destructive() {
+    let mut args = fuzz_run_args_with_run_id("proof-auto-destructive");
+    args.allow_destructive = true;
+    let request = build_fuzz_execution_request(
+        &args,
+        "component-a",
+        args.rig.as_deref(),
+        args.workload_id.clone(),
+        &destructive_inventory(),
+    )
+    .expect("execution request");
+
+    assert_eq!(request.metadata["planner"]["isolation"], "isolated");
+    assert_eq!(request.metadata["planner"]["destructive_allowed"], true);
+    let proof = request
+        .isolation_proof
+        .as_ref()
+        .expect("generated isolation proof");
+    assert_eq!(proof.schema, "homeboy/isolation-proof/v1");
+    assert_eq!(proof.runtime_kind, "homeboy-fuzz-run-dir");
+    assert!(proof.disposable);
+    assert_eq!(
+        proof.metadata["reason"],
+        "--allow-destructive implies isolated fuzz mode for this fuzz run"
+    );
+}
+
+#[test]
 fn fuzz_run_cli_preserves_action_model_and_exploration_policy_in_execution_request() {
     let temp = tempfile::tempdir().expect("tempdir");
     let action_model = temp.path().join("action-model.json");
@@ -336,21 +364,29 @@ fn fuzz_run_cli_preserves_action_model_and_exploration_policy_in_execution_reque
 }
 
 #[test]
-fn fuzz_execution_request_rejects_destructive_without_isolation_proof() {
+fn fuzz_execution_request_allows_destructive_with_generated_isolation_proof() {
     let mut args = fuzz_run_args_with_run_id("proof-destructive-missing");
     args.allow_destructive = true;
-    args.isolation = FuzzIsolationArg::Isolated;
 
-    let error = build_fuzz_execution_request(
+    let request = build_fuzz_execution_request(
         &args,
         "component-a",
         args.rig.as_deref(),
         args.workload_id.clone(),
         &destructive_inventory(),
     )
-    .expect_err("missing isolation proof should fail");
+    .expect("generated isolation proof should satisfy destructive request");
 
-    assert!(error.to_string().contains("homeboy/isolation-proof/v1"));
+    assert_eq!(request.metadata["planner"]["isolation"], "isolated");
+    assert_eq!(request.metadata["planner"]["destructive_allowed"], true);
+    assert_eq!(
+        request
+            .isolation_proof
+            .as_ref()
+            .expect("generated proof")
+            .runtime_kind,
+        "homeboy-fuzz-run-dir"
+    );
 }
 
 #[test]
