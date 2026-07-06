@@ -1,45 +1,5 @@
 use crate::core::project::{Project, ProjectComponentOverrides};
 
-/// Apply a single layer of component overrides to a component.
-///
-/// Fields from the overrides are applied only when present (Some), allowing
-/// each config layer to selectively override specific settings.
-fn apply_overrides_layer(
-    component: &mut crate::core::component::Component,
-    overrides: &ProjectComponentOverrides,
-) {
-    if let Some(remote_path) = &overrides.remote_path {
-        component.remote_path = remote_path.clone();
-    }
-    if let Some(build_artifact) = &overrides.build_artifact {
-        component.build_artifact = Some(build_artifact.clone());
-    }
-    if let Some(extract_command) = &overrides.extract_command {
-        component.extract_command = Some(extract_command.clone());
-    }
-    if let Some(remote_owner) = &overrides.remote_owner {
-        component.remote_owner = Some(remote_owner.clone());
-    }
-    if let Some(deploy_strategy) = &overrides.deploy_strategy {
-        component.deploy_strategy = Some(deploy_strategy.clone());
-    }
-    if let Some(git_deploy) = &overrides.git_deploy {
-        component.git_deploy = Some(git_deploy.clone());
-    }
-    if !overrides.hooks.is_empty() {
-        component.hooks = overrides.hooks.clone();
-    }
-    if let Some(scopes) = &overrides.scopes {
-        component.scopes = Some(scopes.clone());
-    }
-    if !overrides.artifact_inputs.is_empty() {
-        component.artifact_inputs = overrides.artifact_inputs.clone();
-    }
-    if let Some(cli_path) = &overrides.cli_path {
-        component.cli_path = Some(cli_path.clone());
-    }
-}
-
 /// Apply component overrides with fleet → project cascade.
 ///
 /// Resolution order: component (repo portable config) → fleet defaults → project overrides.
@@ -67,13 +27,13 @@ pub fn apply_component_overrides(
 
     // Apply fleet-level overrides first (lowest precedence in the cascade)
     if let Some(overrides) = &fleet_overrides {
-        apply_overrides_layer(&mut merged, overrides);
+        overrides.apply_to_component(&mut merged);
     }
 
     // Apply project-level component overrides on top (highest precedence
     // among explicit overrides)
     if let Some(overrides) = project_overrides {
-        apply_overrides_layer(&mut merged, overrides);
+        overrides.apply_to_component(&mut merged);
     }
 
     // cli_path-only fallback: project-scoped CLI path fills in the gap when no
@@ -136,36 +96,36 @@ mod tests {
     }
 
     #[test]
-    fn apply_overrides_layer_sets_remote_path() {
+    fn component_override_config_sets_remote_path() {
         let mut component = base_component("my-plugin");
         let overrides = ProjectComponentOverrides {
             remote_path: Some("wp-content/plugins/my-plugin".to_string()),
             ..Default::default()
         };
 
-        apply_overrides_layer(&mut component, &overrides);
+        overrides.apply_to_component(&mut component);
         assert_eq!(component.remote_path, "wp-content/plugins/my-plugin");
     }
 
     #[test]
-    fn apply_overrides_layer_sets_deploy_strategy() {
+    fn component_override_config_sets_deploy_strategy() {
         let mut component = base_component("my-plugin");
         let overrides = ProjectComponentOverrides {
             deploy_strategy: Some("git".to_string()),
             ..Default::default()
         };
 
-        apply_overrides_layer(&mut component, &overrides);
+        overrides.apply_to_component(&mut component);
         assert_eq!(component.deploy_strategy, Some("git".to_string()));
     }
 
     #[test]
-    fn apply_overrides_layer_skips_none_fields() {
+    fn component_override_config_skips_none_fields() {
         let mut component = base_component("my-plugin");
         component.deploy_strategy = Some("rsync".to_string());
         let overrides = ProjectComponentOverrides::default();
 
-        apply_overrides_layer(&mut component, &overrides);
+        overrides.apply_to_component(&mut component);
         // deploy_strategy should remain unchanged
         assert_eq!(component.deploy_strategy, Some("rsync".to_string()));
         // remote_path should remain unchanged
@@ -173,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_overrides_layer_replaces_hooks() {
+    fn component_override_config_replaces_hooks() {
         let mut component = base_component("my-plugin");
         component
             .hooks
@@ -186,7 +146,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_overrides_layer(&mut component, &overrides);
+        overrides.apply_to_component(&mut component);
         // Hooks should be replaced entirely
         assert!(component.hooks.contains_key("post:deploy"));
         assert!(!component.hooks.contains_key("pre:deploy"));
@@ -222,6 +182,68 @@ mod tests {
     }
 
     #[test]
+    fn project_component_overrides_parse_existing_json_shape() {
+        let project: Project = serde_json::from_str(
+            r#"{
+                "component_overrides": {
+                    "my-plugin": {
+                        "remote_path": "wp-content/plugins/my-plugin",
+                        "build_artifact": "dist/my-plugin.zip",
+                        "extract_command": "unzip -o {{artifact}}",
+                        "remote_owner": "www-data:www-data",
+                        "deploy_strategy": "git",
+                        "git_deploy": { "remote": "deploy", "branch": "stable" },
+                        "hooks": { "post:deploy": ["wp cache flush"] },
+                        "scopes": { "deploy": { "include": ["src/**"] } },
+                        "artifact_inputs": [
+                            { "component": "builder", "artifact": "build.zip", "target": "dist/build.zip" }
+                        ],
+                        "cli_path": "lando wp"
+                    }
+                }
+            }"#,
+        )
+        .expect("existing project override shape should parse");
+
+        let mut component = base_component("my-plugin");
+        let overrides = project
+            .component_overrides
+            .get("my-plugin")
+            .expect("override entry");
+        overrides.apply_to_component(&mut component);
+
+        assert_eq!(component.remote_path, "wp-content/plugins/my-plugin");
+        assert_eq!(
+            component.build_artifact.as_deref(),
+            Some("dist/my-plugin.zip")
+        );
+        assert_eq!(
+            component.extract_command.as_deref(),
+            Some("unzip -o {{artifact}}")
+        );
+        assert_eq!(component.remote_owner.as_deref(), Some("www-data:www-data"));
+        assert_eq!(component.deploy_strategy.as_deref(), Some("git"));
+        assert_eq!(
+            component
+                .git_deploy
+                .as_ref()
+                .map(|config| config.remote.as_str()),
+            Some("deploy")
+        );
+        assert_eq!(
+            component.hooks["post:deploy"],
+            vec!["wp cache flush".to_string()]
+        );
+        assert!(component
+            .scopes
+            .as_ref()
+            .and_then(|scopes| scopes.deploy.as_ref())
+            .is_some());
+        assert_eq!(component.artifact_inputs[0].component, "builder");
+        assert_eq!(component.cli_path.as_deref(), Some("lando wp"));
+    }
+
+    #[test]
     fn unmatched_component_id_not_applied() {
         let component = base_component("my-plugin");
 
@@ -240,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_overrides_layer_sets_cli_path() {
+    fn component_override_config_sets_cli_path() {
         let mut component = base_component("my-plugin");
         assert_eq!(component.cli_path, None);
 
@@ -249,7 +271,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_overrides_layer(&mut component, &overrides);
+        overrides.apply_to_component(&mut component);
         assert_eq!(component.cli_path, Some("lando wp".to_string()));
     }
 

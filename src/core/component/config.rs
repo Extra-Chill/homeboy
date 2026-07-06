@@ -124,6 +124,71 @@ pub struct ComponentScriptsConfig {
     pub deps: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComponentOverrideConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_artifact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_deploy: Option<GitDeployConfig>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hooks: HashMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<ScopeConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<ArtifactInput>,
+    /// Override the CLI path used by extension deploy install steps.
+    /// For example, local wrappers may need "lando wp" instead of the default "wp".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_path: Option<String>,
+}
+
+impl ComponentOverrideConfig {
+    /// Apply one explicit override layer to a component.
+    ///
+    /// `None` and empty collection fields mean "no override" so existing
+    /// on-disk config keeps the same sparse-layer behavior.
+    pub fn apply_to_component(&self, component: &mut crate::core::component::Component) {
+        if let Some(remote_path) = &self.remote_path {
+            component.remote_path = remote_path.clone();
+        }
+        if let Some(build_artifact) = &self.build_artifact {
+            component.build_artifact = Some(build_artifact.clone());
+        }
+        if let Some(extract_command) = &self.extract_command {
+            component.extract_command = Some(extract_command.clone());
+        }
+        if let Some(remote_owner) = &self.remote_owner {
+            component.remote_owner = Some(remote_owner.clone());
+        }
+        if let Some(deploy_strategy) = &self.deploy_strategy {
+            component.deploy_strategy = Some(deploy_strategy.clone());
+        }
+        if let Some(git_deploy) = &self.git_deploy {
+            component.git_deploy = Some(git_deploy.clone());
+        }
+        if !self.hooks.is_empty() {
+            component.hooks = self.hooks.clone();
+        }
+        if let Some(scopes) = &self.scopes {
+            component.scopes = Some(scopes.clone());
+        }
+        if !self.artifact_inputs.is_empty() {
+            component.artifact_inputs = self.artifact_inputs.clone();
+        }
+        if let Some(cli_path) = &self.cli_path {
+            component.cli_path = Some(cli_path.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DependencyStackEdge {
     pub upstream: String,
