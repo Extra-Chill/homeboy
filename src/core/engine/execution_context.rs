@@ -256,42 +256,60 @@ pub fn resolve_with_component(
     // 2. Optionally resolve extension context
     let (extension_id, extension_path, settings, accepted_setting_keys) =
         if let Some(capability) = options.capability {
-            let ext_context = extension::resolve_execution_context(&component, capability)
-                .map_err(|err| {
-                    add_extension_override_hints(
-                        err,
-                        &options.extension_overrides,
-                        &declared_extension_ids,
-                    )
-                })?;
-            let accepted_setting_keys = ext_context.accepted_setting_keys.clone();
-            let mut settings = ext_context.settings.clone();
-            // Merge settings profile files below explicit CLI overrides.
-            for (key, value) in &options.settings_profile_json_overrides {
-                settings.retain(|(k, _)| k != key);
-                settings.push((key.clone(), value.clone()));
+            if component.has_script(capability) {
+                let mut settings = Vec::new();
+                for (key, value) in &options.settings_profile_json_overrides {
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), value.clone()));
+                }
+                for (key, value) in &options.settings_overrides {
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), serde_json::Value::String(value.clone())));
+                }
+                for (key, value) in &options.settings_json_overrides {
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), value.clone()));
+                }
+
+                (None, None, settings, Vec::new())
+            } else {
+                let ext_context = extension::resolve_execution_context(&component, capability)
+                    .map_err(|err| {
+                        add_extension_override_hints(
+                            err,
+                            &options.extension_overrides,
+                            &declared_extension_ids,
+                        )
+                    })?;
+                let accepted_setting_keys = ext_context.accepted_setting_keys.clone();
+                let mut settings = ext_context.settings.clone();
+                // Merge settings profile files below explicit CLI overrides.
+                for (key, value) in &options.settings_profile_json_overrides {
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), value.clone()));
+                }
+                // Merge CLI string overrides on top (CLI string values stay strings).
+                for (key, value) in &options.settings_overrides {
+                    // Remove existing key if present (override semantics)
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), serde_json::Value::String(value.clone())));
+                }
+                // Then merge typed-JSON overrides — these win against both
+                // manifest defaults / component settings AND --setting string
+                // overrides. Strictly more expressive: an --setting-json on the
+                // same key represents intentional type preservation that string
+                // coercion can't represent.
+                for (key, value) in &options.settings_json_overrides {
+                    settings.retain(|(k, _)| k != key);
+                    settings.push((key.clone(), value.clone()));
+                }
+                (
+                    Some(ext_context.extension_id.clone()),
+                    Some(ext_context.extension_path.clone()),
+                    settings,
+                    accepted_setting_keys,
+                )
             }
-            // Merge CLI string overrides on top (CLI string values stay strings).
-            for (key, value) in &options.settings_overrides {
-                // Remove existing key if present (override semantics)
-                settings.retain(|(k, _)| k != key);
-                settings.push((key.clone(), serde_json::Value::String(value.clone())));
-            }
-            // Then merge typed-JSON overrides — these win against both
-            // manifest defaults / component settings AND --setting string
-            // overrides. Strictly more expressive: an --setting-json on the
-            // same key represents intentional type preservation that string
-            // coercion can't represent.
-            for (key, value) in &options.settings_json_overrides {
-                settings.retain(|(k, _)| k != key);
-                settings.push((key.clone(), value.clone()));
-            }
-            (
-                Some(ext_context.extension_id.clone()),
-                Some(ext_context.extension_path.clone()),
-                settings,
-                accepted_setting_keys,
-            )
         } else {
             // No extension context — only CLI overrides, wrapped as JSON strings.
             let mut settings = Vec::new();
@@ -732,6 +750,40 @@ mod tests {
                 .as_ref()
                 .is_some_and(|extensions| extensions.contains_key("rig-node")
                     && !extensions.contains_key("portable-node")));
+        });
+    }
+
+    #[test]
+    fn resolve_with_component_accepts_component_scripts_for_capability() {
+        with_isolated_home(|_| {
+            let dir = TempDir::new().expect("temp dir");
+            let component = Component {
+                id: "script-owned".to_string(),
+                local_path: dir.path().to_string_lossy().to_string(),
+                scripts: Some(crate::core::component::ComponentScriptsConfig {
+                    fuzz: vec!["node fuzz-runner.mjs".to_string()],
+                    ..Default::default()
+                }),
+                ..Component::default()
+            };
+            let options = ResolveOptions::with_capability(
+                "script-owned",
+                None,
+                ExtensionCapability::Fuzz,
+                Vec::new(),
+            );
+
+            let ctx = resolve_with_component(&options, Some(component))
+                .expect("component scripts should satisfy fuzz context");
+
+            assert_eq!(ctx.extension_id, None);
+            assert_eq!(ctx.extension_path, None);
+            assert_eq!(
+                ctx.component
+                    .script_commands(ExtensionCapability::Fuzz)
+                    .len(),
+                1
+            );
         });
     }
 
