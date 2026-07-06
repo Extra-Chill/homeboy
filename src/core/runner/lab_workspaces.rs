@@ -535,29 +535,7 @@ fn run_runtime_overlay_install_step(
 
     let (output, exit_code) = super::exec(
         runner_id,
-        super::RunnerExecOptions {
-            cwd: Some(remote_workdir.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command,
-            env: std::collections::HashMap::new(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+        super::RunnerExecOptions::raw_command(command).with_cwd(remote_workdir),
     )?;
     if exit_code == 0 {
         return Ok(());

@@ -123,6 +123,103 @@ pub struct RunnerExecOptions {
     pub print_handoff: bool,
 }
 
+impl Default for RunnerExecOptions {
+    fn default() -> Self {
+        Self {
+            cwd: None,
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: Vec::new(),
+            env: HashMap::new(),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            env_materialization: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            capability_preflight: None,
+            required_extensions: Vec::new(),
+            accepted_extension_settings: Vec::new(),
+            require_paths: Vec::new(),
+            runner_workload: None,
+            run_id: None,
+            detach_after_handoff: false,
+            mirror_evidence: true,
+            print_handoff: true,
+        }
+    }
+}
+
+impl RunnerExecOptions {
+    pub(crate) fn command(command: Vec<String>) -> Self {
+        Self {
+            command,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn raw_command(command: Vec<String>) -> Self {
+        Self {
+            raw_exec: true,
+            ..Self::command(command)
+        }
+    }
+
+    pub(crate) fn diagnostic_raw_command(command: Vec<String>) -> Self {
+        Self {
+            allow_diagnostic_ssh: true,
+            ..Self::raw_command(command)
+        }
+    }
+
+    pub(crate) fn diagnostic_raw_shell(script: String) -> Self {
+        Self::diagnostic_raw_command(vec!["bash".to_string(), "-lc".to_string(), script])
+    }
+
+    pub(crate) fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub(crate) fn with_env(mut self, env: HashMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    pub(crate) fn with_capability_preflight(
+        mut self,
+        capability_preflight: RunnerCapabilityPreflight,
+    ) -> Self {
+        self.capability_preflight = Some(capability_preflight);
+        self
+    }
+
+    pub(crate) fn with_optional_capability_preflight(
+        mut self,
+        capability_preflight: Option<RunnerCapabilityPreflight>,
+    ) -> Self {
+        self.capability_preflight = capability_preflight;
+        self
+    }
+
+    pub(crate) fn with_source_snapshot(mut self, source_snapshot: SourceSnapshot) -> Self {
+        self.source_snapshot = Some(source_snapshot);
+        self
+    }
+
+    pub(crate) fn with_required_extensions(mut self, required_extensions: Vec<String>) -> Self {
+        self.required_extensions = required_extensions;
+        self
+    }
+
+    pub(crate) fn without_evidence_mirror(mut self) -> Self {
+        self.mirror_evidence = false;
+        self.print_handoff = false;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerExecMode {

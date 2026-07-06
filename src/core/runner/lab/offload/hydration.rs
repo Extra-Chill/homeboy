@@ -15,8 +15,6 @@
 //! runner workspace root, before the executor starts. No new provider knowledge
 //! or framework-specific logic is introduced here; detection stays in `deps.rs`.
 
-use std::collections::HashMap;
-
 use serde::Serialize;
 
 use crate::core::deps;
@@ -99,37 +97,13 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
         let started = std::time::Instant::now();
         let (output, exit_code) = exec(
             runner_id,
-            RunnerExecOptions {
-                cwd: Some(remote_path.to_string()),
-                project_id: None,
-                allow_diagnostic_ssh: false,
-                command: plan_step.command.clone(),
-                env: HashMap::new(),
-                secret_env_names: Vec::new(),
-                secret_env_plan: None,
-                env_materialization: None,
-                capture_patch: false,
-                // The install command is a provider-built shell argv (e.g.
-                // a provider-owned install command, not a Homeboy-routed command, so dispatch
-                // it raw to the runner exactly as the provider produced it.
-                raw_exec: true,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                capability_preflight: None,
-                required_extensions: Vec::new(),
-                accepted_extension_settings: Vec::new(),
-                require_paths: Vec::new(),
-                runner_workload: None,
-                run_id: None,
-                detach_after_handoff: false,
-                // Hydration is a workspace-setup sub-step of the agent-task
-                // offload, not a standalone run. The provider install runs as a
-                // runner daemon job (queryable via `runner job logs <job_id>`),
-                // but it is not mirrored as its own controller-side run record so
-                // `runs list` stays focused on the agent-task run itself.
-                mirror_evidence: false,
-                print_handoff: false,
-            },
+            // The install command is provider-built shell argv, not a
+            // Homeboy-routed command, so dispatch it raw exactly as produced.
+            // Hydration is a workspace-setup sub-step of the agent-task offload,
+            // so do not mirror it as a standalone controller-side run record.
+            RunnerExecOptions::raw_command(plan_step.command.clone())
+                .with_cwd(remote_path)
+                .without_evidence_mirror(),
         )?;
         let step = LabWorkspaceHydrationStep {
             provider_id: plan_step.provider_id.clone(),

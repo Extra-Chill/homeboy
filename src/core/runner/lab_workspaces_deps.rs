@@ -7,7 +7,7 @@
 //! Split out of `lab_workspaces.rs` to keep the workspace-mapping entry points
 //! separate from the dependency-discovery internals.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::component::{self, TargetSpec};
@@ -469,31 +469,11 @@ pub(super) fn bootstrap_source_cli_dependencies(
 
     let (output, exit_code) = exec(
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_path.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command: command.to_vec(),
-            env: HashMap::new(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            // Validate remote capability parity before dispatch. Concrete command
-            // requirements are supplied declaratively by the workspace provider.
-            capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+        // Validate remote capability parity before dispatch. Concrete command
+        // requirements are supplied declaratively by the workspace provider.
+        RunnerExecOptions::raw_command(command.to_vec())
+            .with_cwd(remote_path)
+            .with_capability_preflight(source_cli_bootstrap_capability_preflight()),
     )?;
     if exit_code == 0 {
         return Ok(());

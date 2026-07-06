@@ -5,7 +5,6 @@
 //! metadata, and validating installed source paths. Kept in a sibling module so
 //! the root stays under the structural item-count threshold (#5241).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::core::{Error, Result};
@@ -66,29 +65,7 @@ fn exec_runner_rig_sources_command(
     command.extend(args.iter().map(|arg| arg.to_string()));
     exec(
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_cwd.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command,
-            env: HashMap::new(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+        RunnerExecOptions::command(command).with_cwd(remote_cwd),
     )
 }
 
