@@ -815,20 +815,22 @@ pub(super) fn path_setting_extra_workspaces(
     args: &[String],
     source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
+    path_values_extra_workspaces(path_setting_values(args), source_path, "path_setting")
+}
+
+pub(super) fn path_values_extra_workspaces(
+    values: Vec<String>,
+    source_path: &Path,
+    role: &str,
+) -> Result<Vec<ExtraLabWorkspace>> {
     let source_canon = source_path
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
     let mut seen = BTreeSet::new();
     let mut workspaces = Vec::new();
 
-    for value in path_setting_values(args) {
-        add_candidate_extra_workspace(
-            &value,
-            "path_setting",
-            &source_canon,
-            &mut seen,
-            &mut workspaces,
-        )?;
+    for value in values {
+        add_candidate_extra_workspace(&value, role, &source_canon, &mut seen, &mut workspaces)?;
     }
 
     Ok(workspaces)
