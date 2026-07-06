@@ -332,7 +332,7 @@ pub fn delete_row(
     let row_id: i64 = row_id
         .ok_or_else(|| Error::config("Row ID required".to_string()))?
         .parse()
-        .map_err(|_| Error::config("Row ID must be numeric".to_string()))?;
+        .map_err(|error| Error::config(format!("Row ID must be numeric: {error}")))?;
     let ctx = build_context(project_id, subtarget)?;
 
     let delete_sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table, row_id);

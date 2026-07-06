@@ -123,10 +123,13 @@ fn read_apply_input(path: &str) -> Result<LabPatchApplyInput> {
         Ok(input) => Ok(input),
         Err(contract_error) => {
             let legacy: LegacyLabPatchApplyInput =
-                serde_json::from_str(&contents).map_err(|_| {
-                    Error::internal_json(
+                serde_json::from_str(&contents).map_err(|legacy_error| {
+                    Error::validation_schema_mismatch(
+                        "lab_apply_input",
+                        "current Lab patch apply input or legacy Lab patch apply input",
+                        Some(path.to_string()),
                         contract_error.to_string(),
-                        Some("parse Lab apply input".to_string()),
+                        Some(legacy_error.to_string()),
                     )
                 })?;
             Ok(LabPatchApplyInput {
@@ -507,6 +510,26 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("delta paths"));
+    }
+
+    #[test]
+    fn invalid_apply_input_preserves_current_and_legacy_schema_causes() {
+        let input_dir = tempfile::tempdir().expect("input tempdir");
+        let input = input_dir.path().join("bad-apply.json");
+        fs::write(&input, "{}").expect("write input");
+
+        let err = read_apply_input(input.to_str().expect("path str")).expect_err("schema error");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("current Lab patch apply input"));
+        assert!(err.details["cause"]
+            .as_str()
+            .expect("current schema cause")
+            .contains("missing field"));
+        assert!(err.details["fallback_cause"]
+            .as_str()
+            .expect("legacy schema cause")
+            .contains("missing field"));
     }
 
     fn git_repo() -> tempfile::TempDir {

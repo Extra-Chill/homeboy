@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::core::error::{Error, ErrorCode};
+use crate::core::error::Error;
 use crate::core::redaction::{redact_argv, redact_argv_display};
 
 #[allow(unused_imports)]
@@ -30,6 +30,8 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         "remote_cwd": output.remote_cwd,
         "command": redacted_argv,
         "exit_code": output.exit_code,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
         "execution": execution,
     });
     if let Some(runner_error) = runner_error {
@@ -40,8 +42,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         details["failure_context"] = serde_json::to_value(failure_context).unwrap_or(Value::Null);
     }
 
-    let mut error = Error::new(
-        ErrorCode::RemoteCommandFailed,
+    let mut error = Error::remote_command_failed_with_details(
         format!(
             "Runner command failed on `{}` with exit code {}: {}",
             output.runner_id, output.exit_code, cause

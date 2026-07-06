@@ -84,16 +84,42 @@ pub fn load_materialize_spec_source(source: &str) -> Result<MaterializeSpecSourc
         }),
         Err(spec_error) => {
             let manifest: ControllerSpecGeneratorManifest =
-                serde_json::from_str(&raw).map_err(|_| {
-                    Error::validation_invalid_argument(
+                serde_json::from_str(&raw).map_err(|manifest_error| {
+                    Error::validation_schema_mismatch(
                         "spec",
-                        spec_error.to_string(),
+                        "agent task repo loop spec or controller generator manifest",
                         Some(source.to_string()),
-                        None,
+                        spec_error.to_string(),
+                        Some(manifest_error.to_string()),
                     )
                 })?;
             load_generated_materialize_spec(source, manifest)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_manifest_shape_preserves_primary_and_fallback_serde_causes() {
+        let error = match load_materialize_spec_source("{}") {
+            Ok(_) => panic!("expected schema mismatch error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("agent task repo loop spec"));
+        assert!(error.message.contains("fallback cause"));
+        assert!(error.details["cause"]
+            .as_str()
+            .expect("primary cause")
+            .contains("missing field"));
+        assert!(error.details["fallback_cause"]
+            .as_str()
+            .expect("fallback cause")
+            .contains("missing field"));
     }
 }
 

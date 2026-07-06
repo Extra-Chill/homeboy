@@ -311,7 +311,9 @@ fn delete_row(project_id: &str, args: &[String], apply: bool) -> CmdResult<DbOut
         let row_id: i64 = row_id
             .ok_or_else(|| homeboy::core::Error::config("Row ID required".to_string()))?
             .parse()
-            .map_err(|_| homeboy::core::Error::config("Row ID must be numeric".to_string()))?;
+            .map_err(|error| {
+                homeboy::core::Error::config(format!("Row ID must be numeric: {error}"))
+            })?;
         let sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table, row_id);
 
         return Ok((
