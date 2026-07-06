@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::core::api_jobs::JobArtifactMetadata;
+use crate::core::api_jobs::{JobArtifactMetadata, JobEvent, JobEventKind};
 use crate::core::runner::{
     RunnerExecMode, RunnerExecOutput, RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
@@ -312,22 +312,37 @@ fn reverse_worker_result_attaches_typed_agent_task_lifecycle_event() {
             argv: vec!["homeboy".to_string(), "agent-task".to_string()],
             remote_cwd: "/srv/workspace".to_string(),
             exit_code: 0,
-            stdout: concat!(
-                "runner chatter\n",
-                "{\"success\":true,\"data\":{",
-                "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
-                "\"plan_id\":\"plan-typed\",",
-                "\"status\":\"succeeded\",",
-                "\"totals\":{\"skipped\":0,\"succeeded\":1,\"failed\":0},",
-                "\"outcomes\":[]}}"
-            )
-            .to_string(),
+            stdout: "runner chatter without parseable lifecycle".to_string(),
             stderr: String::new(),
             source_snapshot: None,
             job: None,
             runner_job: None,
             job_id: Some("job-typed".to_string()),
-            job_events: None,
+            job_events: Some(vec![JobEvent {
+                sequence: 1,
+                job_id: uuid::Uuid::nil(),
+                kind: JobEventKind::Progress,
+                timestamp_ms: 1,
+                message: Some("agent-task lifecycle event".to_string()),
+                data: Some(json!({
+                    "schema": "homeboy/runner-workload-agent-task-lifecycle-event/v1",
+                    "agent_task_lifecycle_event": {
+                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                        "identity": {
+                            "runner_id": "lab-default",
+                            "runner_job_id": "job-typed",
+                            "run_id": "run-typed"
+                        },
+                        "aggregate": {
+                            "schema":"homeboy/agent-task-aggregate/v1",
+                            "plan_id":"plan-typed",
+                            "status":"succeeded",
+                            "totals":{"skipped":0,"succeeded":1,"failed":0},
+                            "outcomes":[]
+                        }
+                    }
+                })),
+            }]),
             mirror_run_id: Some("run-typed".to_string()),
             patch: None,
             mutation_artifacts: None,

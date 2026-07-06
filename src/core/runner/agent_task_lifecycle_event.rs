@@ -21,31 +21,6 @@ fn agent_task_run_plan_lifecycle_event_schema() -> String {
     AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA.to_string()
 }
 
-pub(crate) fn agent_task_run_plan_lifecycle_event_from_output(
-    identity: AgentTaskDispatchIdentity,
-    output: &str,
-) -> Result<Option<AgentTaskRunPlanLifecycleEvent>> {
-    let envelope = parse_offloaded_run_plan_envelope(output)?;
-    if !is_agent_task_run_plan_envelope(&envelope) {
-        return Ok(None);
-    }
-    let Some(aggregate_value) = envelope.get("data").cloned() else {
-        return Ok(None);
-    };
-    let aggregate: AgentTaskAggregate =
-        serde_json::from_value(aggregate_value).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse offloaded agent-task aggregate".to_string()),
-            )
-        })?;
-    Ok(Some(AgentTaskRunPlanLifecycleEvent {
-        schema: AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA.to_string(),
-        identity,
-        aggregate,
-    }))
-}
-
 pub(crate) fn parse_offloaded_run_plan_envelope(stdout: &str) -> Result<serde_json::Value> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
         return Ok(value);
@@ -135,25 +110,9 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_workload_result(
         return Ok(Some(event));
     }
 
-    let aggregate =
-        if let Some(aggregate) = result.get("data").and_then(agent_task_aggregate_from_value) {
-            aggregate
-        } else if let Some(stdout) = result.get("stdout").and_then(serde_json::Value::as_str) {
-            match agent_task_run_plan_lifecycle_event_from_output(
-                AgentTaskDispatchIdentity {
-                    runner_id: runner_id.to_string(),
-                    runner_job_id: runner_job_id.to_string(),
-                    run_id: Some(agent_task.run_id.clone()),
-                    ..AgentTaskDispatchIdentity::default()
-                },
-                stdout,
-            )? {
-                Some(event) => return Ok(Some(event)),
-                None => return Ok(None),
-            }
-        } else {
-            return Ok(None);
-        };
+    let Some(aggregate) = result.get("data").and_then(agent_task_aggregate_from_value) else {
+        return Ok(None);
+    };
 
     Ok(Some(AgentTaskRunPlanLifecycleEvent {
         schema: AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA.to_string(),

@@ -332,10 +332,6 @@ pub(super) fn run_provider_command_once(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stdout.is_empty() {
-        if let Some(mut outcome) = parse_provider_outcome_from_mixed_output(&stderr) {
-            normalize_provider_outcome_roles(&mut outcome, provider);
-            return outcome;
-        }
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -712,24 +708,6 @@ fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
         "extension_id": provider.extension_id.as_deref(),
         "extension_path": provider.extension_path.as_deref(),
     })
-}
-
-fn parse_provider_outcome_from_mixed_output(output: &str) -> Option<AgentTaskOutcome> {
-    if output.trim().is_empty() {
-        return None;
-    }
-    if let Ok(outcome) = serde_json::from_str::<AgentTaskOutcome>(output) {
-        return Some(outcome);
-    }
-
-    for (index, _) in output.match_indices('{') {
-        let mut stream =
-            serde_json::Deserializer::from_str(&output[index..]).into_iter::<AgentTaskOutcome>();
-        if let Some(Ok(outcome)) = stream.next() {
-            return Some(outcome);
-        }
-    }
-    None
 }
 pub(super) fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
     if let Some(display) = provider.invocation.display.as_deref() {

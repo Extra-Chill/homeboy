@@ -130,28 +130,6 @@ fn scheduler_normalizes_malformed_provider_output() {
 }
 
 #[test]
-fn provider_preserves_structured_outcome_from_stderr_when_stdout_empty() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stderr.write('diagnostic prefix\\n' + JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'captured provider evidence',failure_classification:'provider',diagnostics:[{class:'sample_runtime.empty_data_packet_returned',message:'empty data packet returned',data:{typed_artifacts:{}}}]}));")
-    );
-    let (request, provider) = request("task-stderr-outcome", command);
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-    assert_eq!(
-        outcome.summary.as_deref(),
-        Some("captured provider evidence")
-    );
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "sample_runtime.empty_data_packet_returned"
-    );
-    assert_eq!(outcome.diagnostics[0].data["typed_artifacts"], json!({}));
-}
-
-#[test]
 fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
     let command = format!(
         "node {}",
@@ -183,6 +161,53 @@ fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
         .evidence_refs
         .iter()
         .any(|reference| reference.kind == "executor-result"));
+}
+
+#[test]
+fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
+    crate::test_support::with_isolated_home(|_| {
+        let command = format!(
+            "node {}",
+            script("process.stderr.write('provider emitted diagnostics but no outcome'); process.exit(42);")
+        );
+        let (request, provider) = request("task-empty-stdout-recorded", command);
+        let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
+        let run_id = "run-empty-provider-output";
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]))
+            .with_run_id(run_id);
+
+        crate::core::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id)).expect("submit plan");
+        crate::core::agent_tasks::lifecycle::mark_running(run_id).expect("mark running");
+        let aggregate = scheduler.run(plan.clone());
+        let record =
+            crate::core::agent_tasks::lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+                .expect("record aggregate");
+
+        assert_eq!(
+            record.state,
+            crate::core::agent_task_lifecycle::AgentTaskRunState::Failed
+        );
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::ProviderError
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.provider_empty_stdout"
+        );
+        assert!(aggregate.outcomes[0]
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.kind == "executor-result"));
+        assert!(record.latest_executor_evidence.is_some());
+        assert!(record
+            .artifact_refs
+            .iter()
+            .any(|reference| reference.kind == "executor-result"));
+    });
 }
 
 #[test]
