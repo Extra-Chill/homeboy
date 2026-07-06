@@ -40,6 +40,8 @@ const executorSource = fs.readFileSync(path.join(runtimeRoot, 'lib', 'codebox-ag
 assert.doesNotMatch(executorSource, /function defaultRuntimeRequirements/);
 assert.doesNotMatch(executorSource, /slug: 'agents-api'/);
 assert.doesNotMatch(executorSource, /pluginFile: 'agents-api\/agents-api\.php'/);
+assert.doesNotMatch(executorSource, /function typedArtifactNameFromDeclaration/);
+assert.match(executorSource, /artifactNameFromDeclaration\(declaration\)/);
 
 assert.deepEqual(wpCodeboxProviderPluginPathsFromEnv({
   WP_CODEBOX_PROVIDER_PLUGIN_PATHS: JSON.stringify(['/tmp/provider-a', '/tmp/provider-b']),
@@ -53,7 +55,10 @@ assert.equal(wpCodeboxBinaryDiagnostic('').class, 'wp-codebox.config.missing_bin
 assert.equal(wpCodeboxBinaryDiagnostic('wp-codebox'), null);
 assert.deepEqual(wpCodeboxResolveCommand('/tmp/wp-codebox.cjs', ['run-agent-task']).args, ['/tmp/wp-codebox.cjs', 'run-agent-task']);
 assert.equal(wpCodeboxBin({
-	env: { HOMEBOY_WP_CODEBOX_BIN: '/tmp/env-wp-codebox' },
+	env: {
+		HOMEBOY_WP_CODEBOX_BIN: '/tmp/env-wp-codebox',
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: path.join(__dirname, '.missing-wp-codebox-install'),
+	},
 	settings: { wp_codebox_bin: '/tmp/settings-wp-codebox' },
 }), '/tmp/env-wp-codebox');
 
