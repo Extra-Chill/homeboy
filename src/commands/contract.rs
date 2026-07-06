@@ -41,9 +41,9 @@ use crate::core::run_outcome_envelope::{
     RunOutcomeEnvelope, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
 };
 use crate::core::runner_execution_envelope::{
-    PathMaterializationPlan, RunnerExecutionEnvelope, RunnerExecutionProjection,
-    RunnerExecutionRecord, PATH_MATERIALIZATION_PLAN_SCHEMA, RUNNER_EXECUTION_ENVELOPE_SCHEMA,
-    RUNNER_EXECUTION_RECORD_SCHEMA,
+    PathMaterializationPlan, PathMaterializationPlanProjection, RunnerExecutionEnvelope,
+    RunnerExecutionProjection, RunnerExecutionRecord, PATH_MATERIALIZATION_PLAN_SCHEMA,
+    RUNNER_EXECUTION_ENVELOPE_SCHEMA, RUNNER_EXECUTION_RECORD_SCHEMA,
 };
 use crate::core::secret_env_plan::{
     SecretEnvMaterializedHandoff, SecretEnvMaterializedHandoffRequest, SecretEnvPlan,
@@ -160,6 +160,7 @@ pub enum ContractMaterializeKind {
 #[clap(rename_all = "kebab-case")]
 pub enum ContractNormalizeKind {
     ArtifactRef,
+    PathMaterializationPlan,
     RunLifecycleStatus,
     RunnerExecutionRecord,
     RunOutcomeEnvelope,
@@ -205,6 +206,7 @@ pub struct ContractValidateOutput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContractNormalizeOutput {
     ArtifactRef(ArtifactRefNormalizeOutput),
+    PathMaterializationPlan(PathMaterializationPlanProjection),
     RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
     RunnerExecutionRecord(RunnerExecutionProjection),
     RunOutcomeEnvelope(RunOutcomeProjection),
@@ -481,6 +483,10 @@ fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
         ContractNormalizeKind::ArtifactRef => {
             normalize_artifact_ref(value).map(ContractNormalizeOutput::ArtifactRef)
         }
+        ContractNormalizeKind::PathMaterializationPlan => {
+            normalize_path_materialization_plan(value)
+                .map(ContractNormalizeOutput::PathMaterializationPlan)
+        }
         ContractNormalizeKind::RunLifecycleStatus => {
             normalize_run_lifecycle_status(value).map(ContractNormalizeOutput::RunLifecycleStatus)
         }
@@ -603,6 +609,18 @@ fn normalize_runner_execution_record(value: Value) -> Result<RunnerExecutionProj
     )?;
 
     Ok(record.projection())
+}
+
+fn normalize_path_materialization_plan(value: Value) -> Result<PathMaterializationPlanProjection> {
+    let plan: PathMaterializationPlan = deserialize_contract_value(
+        value,
+        "path-materialization-plan",
+        "expected a canonical path materialization plan JSON object with schema and entries",
+    )?;
+
+    validate_schema_field(PATH_MATERIALIZATION_PLAN_SCHEMA, &plan.schema)?;
+
+    Ok(plan.projection())
 }
 
 fn normalize_run_outcome_envelope(value: Value) -> Result<RunOutcomeProjection> {
@@ -892,6 +910,7 @@ fn contract_schema_catalog() -> ContractSchemaCatalog {
                     field("entries[].remote_path", "string", "Runner-side path to validate or materialize.", true),
                     field("entries[].materialization_mode", "string", "Materialization mode enum: existing_remote, git, or snapshot.", true),
                     field("entries[].validation_status", "string", "Validation/materialization status enum: validated or materialized.", true),
+                    field("projection.path_remaps", "array", "Normalize-only derived local-to-remote path remaps for runtime consumers. This is not accepted in the canonical input shape.", false),
                 ],
                 required: vec!["schema", "entries"],
                 example: path_materialization_plan_example(),
@@ -1862,6 +1881,7 @@ mod tests {
         assert!(path_materialization["example"]
             .get("runtime_mounts")
             .is_none());
+        assert!(fields.contains(&"projection.path_remaps"));
         assert!(catalog["contracts"]
             .as_array()
             .unwrap()
@@ -2043,6 +2063,96 @@ mod tests {
         assert_eq!(output.materialized_paths.len(), 1);
         assert_eq!(output.materialized_paths[0].remote_path, "/runner/project");
         assert_eq!(output.artifact_refs[0].id, "summary");
+    }
+
+    #[test]
+    fn path_materialization_plan_normalizer_projects_runtime_path_remaps() {
+        let output = normalize_path_materialization_plan(json!({
+            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+            "entries": [
+                {
+                    "role": "primary_workspace",
+                    "owner": "lab.execution_context",
+                    "local_path": "/local/project",
+                    "remote_path": "/runner/project",
+                    "materialization_mode": "snapshot",
+                    "validation_status": "materialized"
+                },
+                {
+                    "role": "required_path",
+                    "owner": "runner_exec.require_paths",
+                    "remote_path": "/runner/cache",
+                    "materialization_mode": "existing_remote",
+                    "validation_status": "validated"
+                }
+            ]
+        }))
+        .expect("path materialization plan should normalize");
+
+        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+        assert_eq!(output.entries.len(), 2);
+        assert_eq!(output.path_remaps.len(), 1);
+        assert_eq!(output.path_remaps[0].local_path, "/local/project");
+        assert_eq!(output.path_remaps[0].remote_path, "/runner/project");
+    }
+
+    #[test]
+    fn normalize_command_projects_path_materialization_plan_remaps() {
+        let input = json!({
+            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+            "entries": [
+                {
+                    "role": "primary_workspace",
+                    "owner": "runner_exec.source_snapshot",
+                    "local_path": "/local/project",
+                    "remote_path": "/runner/project",
+                    "materialization_mode": "snapshot",
+                    "validation_status": "materialized"
+                },
+                {
+                    "role": "required_path",
+                    "owner": "runner_exec.require_paths",
+                    "remote_path": "/runner/cache",
+                    "materialization_mode": "existing_remote",
+                    "validation_status": "validated"
+                }
+            ]
+        });
+
+        let (output, exit_code) = run(
+            ContractArgs {
+                command: ContractCommand::Normalize(ContractNormalizeArgs {
+                    kind: ContractNormalizeKind::PathMaterializationPlan,
+                    input: Some(input.to_string()),
+                    input_file: None,
+                }),
+            },
+            &GlobalArgs {},
+        )
+        .expect("normalize path materialization plan");
+
+        assert_eq!(exit_code, 0);
+        let ContractOutput::Normalize(ContractNormalizeOutput::PathMaterializationPlan(output)) =
+            output
+        else {
+            panic!("expected path materialization normalize output");
+        };
+        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+        assert_eq!(output.entries.len(), 2);
+        assert_eq!(output.path_remaps.len(), 1);
+        assert_eq!(output.path_remaps[0].local_path, "/local/project");
+        assert_eq!(output.path_remaps[0].remote_path, "/runner/project");
+    }
+
+    #[test]
+    fn path_materialization_plan_normalizer_rejects_alias_shape() {
+        let err = normalize_path_materialization_plan(json!({
+            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+            "paths": ["/runner/project"]
+        }))
+        .expect_err("alias-shaped plan should stay invalid");
+
+        assert!(err.message.contains("unknown field `paths`"));
     }
 
     #[test]

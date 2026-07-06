@@ -195,6 +195,20 @@ pub struct PathMaterializationProjection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMaterializationPlanProjection {
+    pub schema: String,
+    pub entries: Vec<PathMaterializationProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_remaps: Vec<PathMaterializationPathRemap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMaterializationPathRemap {
+    pub local_path: String,
+    pub remote_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PathMaterializationPlan {
     #[serde(default = "path_materialization_plan_schema")]
@@ -308,6 +322,21 @@ impl PathMaterializationPlan {
             .iter()
             .map(PathMaterializationProjection::from)
             .collect()
+    }
+
+    pub fn path_remaps(&self) -> Vec<PathMaterializationPathRemap> {
+        self.entries
+            .iter()
+            .filter_map(PathMaterializationPathRemap::from_entry)
+            .collect()
+    }
+
+    pub fn projection(&self) -> PathMaterializationPlanProjection {
+        PathMaterializationPlanProjection {
+            schema: self.schema.clone(),
+            entries: self.projection_entries(),
+            path_remaps: self.path_remaps(),
+        }
     }
 }
 
@@ -572,6 +601,21 @@ impl From<&PathMaterializationEntry> for PathMaterializationProjection {
             materialization_mode: entry.materialization_mode.clone(),
             validation_status: entry.validation_status.clone(),
         }
+    }
+}
+
+impl PathMaterializationPathRemap {
+    fn from_entry(entry: &PathMaterializationEntry) -> Option<Self> {
+        let local_path = entry.local_path.as_deref()?.trim();
+        let remote_path = entry.remote_path.trim();
+        if local_path.is_empty() || remote_path.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
+        })
     }
 }
 
@@ -1026,6 +1070,33 @@ mod tests {
             PATH_MATERIALIZATION_STATUS_VALIDATED
         );
         assert!(PathMaterializationPlan::non_empty(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn path_materialization_plan_projection_exports_runtime_path_remaps() {
+        let plan = PathMaterializationPlan::new(vec![
+            PathMaterializationEntry::primary_workspace_materialized(
+                PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+                Some(" /local/project ".to_string()),
+                " /runner/project ",
+                PathMaterializationMode::Snapshot.to_string(),
+            ),
+            PathMaterializationEntry::required_existing_remote("/runner/cache"),
+            PathMaterializationEntry::primary_workspace_materialized(
+                PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+                Some("".to_string()),
+                "/runner/empty-local",
+                PathMaterializationMode::Snapshot.to_string(),
+            ),
+        ]);
+
+        let projection = plan.projection();
+
+        assert_eq!(projection.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
+        assert_eq!(projection.entries.len(), 3);
+        assert_eq!(projection.path_remaps.len(), 1);
+        assert_eq!(projection.path_remaps[0].local_path, "/local/project");
+        assert_eq!(projection.path_remaps[0].remote_path, "/runner/project");
     }
 
     #[test]

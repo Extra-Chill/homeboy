@@ -137,17 +137,11 @@ pub(in crate::core::runner) fn remap_provider_config_with_materialization_plan_i
 fn provider_config_path_remaps_from_materialization_plan(
     plan: &PathMaterializationPlan,
 ) -> Vec<LabPathRemap> {
-    plan.projection_entries()
+    plan.path_remaps()
         .into_iter()
-        .filter_map(|entry| {
-            let local = entry.local_path?;
-            if local.trim().is_empty() || entry.remote_path.trim().is_empty() {
-                return None;
-            }
-            Some(LabPathRemap {
-                local,
-                remote: entry.remote_path,
-            })
+        .map(|remap| LabPathRemap {
+            local: remap.local_path,
+            remote: remap.remote_path,
         })
         .collect()
 }
