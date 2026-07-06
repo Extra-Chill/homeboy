@@ -116,7 +116,16 @@ pub(crate) fn row_to_artifact_record_at(
 ) -> rusqlite::Result<ArtifactRecord> {
     let artifact_type: String = row.get(offset + 3)?;
     let path: String = row.get(offset + 4)?;
-    let metadata_json = parse_metadata(row.get(offset + 8)?)?;
+    let url: Option<String> = row.get(offset + 5)?;
+    let viewer_links_json: String = row.get(offset + 8)?;
+    let viewer_links = serde_json::from_str(&viewer_links_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            offset + 8,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+    let metadata_json = parse_metadata(row.get(offset + 12)?)?;
     let metadata_url = |key: &str| {
         metadata_json
             .get(key)
@@ -129,19 +138,21 @@ pub(crate) fn row_to_artifact_record_at(
         kind: row.get(offset + 2)?,
         artifact_type: artifact_type.clone(),
         path: path.clone(),
-        url: if artifact_type == "url" {
-            Some(path.clone())
-        } else {
-            metadata_url("url")
-        },
-        public_url: metadata_url("public_url"),
-        viewer_url: metadata_url("viewer_url"),
-        viewer_links: Vec::new(),
-        sha256: row.get(offset + 5)?,
-        size_bytes: row.get(offset + 6)?,
-        mime: row.get(offset + 7)?,
+        url: url
+            .or_else(|| (artifact_type == "url").then_some(path.clone()))
+            .or_else(|| metadata_url("url")),
+        public_url: row
+            .get::<_, Option<String>>(offset + 6)?
+            .or_else(|| metadata_url("public_url")),
+        viewer_url: row
+            .get::<_, Option<String>>(offset + 7)?
+            .or_else(|| metadata_url("viewer_url")),
+        viewer_links,
+        sha256: row.get(offset + 9)?,
+        size_bytes: row.get(offset + 10)?,
+        mime: row.get(offset + 11)?,
         metadata_json,
-        created_at: row.get(offset + 9)?,
+        created_at: row.get(offset + 13)?,
     })
 }
 
@@ -159,10 +170,10 @@ pub(crate) fn row_to_artifact_cleanup_candidate(
 ) -> rusqlite::Result<ArtifactCleanupCandidateRecord> {
     Ok(ArtifactCleanupCandidateRecord {
         artifact: row_to_artifact_record(row)?,
-        run_kind: row.get(10)?,
-        component_id: row.get(11)?,
-        run_started_at: row.get(12)?,
-        run_status: row.get(13)?,
+        run_kind: row.get(14)?,
+        component_id: row.get(15)?,
+        run_started_at: row.get(16)?,
+        run_status: row.get(17)?,
     })
 }
 

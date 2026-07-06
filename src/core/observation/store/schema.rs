@@ -152,6 +152,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: "",
     },
+    Migration {
+        version: 7,
+        sql: "",
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -286,6 +290,24 @@ fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result
                     "#,
                 )
                 .map_err(sqlite_error("apply migration 6"))?;
+        }
+        return Ok(());
+    }
+
+    if migration.version == 7 {
+        for (column, definition) in [
+            ("url", "TEXT"),
+            ("public_url", "TEXT"),
+            ("viewer_url", "TEXT"),
+            ("viewer_links_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ] {
+            if !column_exists(connection, "artifacts", column)? {
+                connection
+                    .execute_batch(&format!(
+                        "ALTER TABLE artifacts ADD COLUMN {column} {definition};"
+                    ))
+                    .map_err(sqlite_error("apply migration 7"))?;
+            }
         }
         return Ok(());
     }
