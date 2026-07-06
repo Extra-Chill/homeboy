@@ -964,6 +964,41 @@ mod tests {
     }
 
     #[test]
+    fn package_preflight_materializes_repo_root_for_subdirectory_component() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo tempdir");
+            std::fs::create_dir(repo.path().join(".git")).expect("git marker");
+            std::fs::write(repo.path().join("build-input.txt"), "repo-root-input")
+                .expect("repo-root input");
+            let component = repo.path().join("packages").join("plugin");
+            std::fs::create_dir_all(&component).expect("component dir");
+            std::fs::write(component.join("fixture.php"), "<?php\n").expect("component file");
+
+            let package = release_package_extension(
+                "wordpress",
+                "test -f ../../build-input.txt; \
+                 test ! -e .git; \
+                 mkdir -p build; \
+                 cp ../../build-input.txt build/root-input.txt; \
+                 printf '[{\"path\":\"build/root-input.txt\",\"type\":\"archive\"}]'",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let result = package_preflight::run_package_preflight(
+                &[package],
+                "fixture",
+                &component.to_string_lossy(),
+                false,
+            )
+            .expect("package preflight");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            let data = result.data.expect("preflight data");
+            assert_eq!(data["validated_action"].as_str(), Some("release.package"));
+        });
+    }
+
+    #[test]
     fn run_package_failure_names_the_failing_package_provider() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
