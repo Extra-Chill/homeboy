@@ -7,6 +7,7 @@ use std::process::Command;
 use homeboy::core::agent_tasks::provider::{
     AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
 };
+use homeboy::core::engine::shell;
 use homeboy::core::runners::{
     self as runner, Runner, RunnerKind, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
 };

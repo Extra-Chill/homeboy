@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::daemon::DaemonFreshnessReport;
 
+use crate::core::engine::shell;
 use crate::core::redaction::redact_argv_display;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
@@ -569,7 +570,7 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_commands = vec![
+        let recovery_commands = [
             format!("homeboy runner disconnect {}", runner_id),
             format!("homeboy runner connect {}", runner_id),
         ];
@@ -588,9 +589,13 @@ impl RunnerStaleDaemonWarning {
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             recovery_commands: vec![
-                format!("homeboy runner refresh-homeboy {} --ref main --reconnect", runner_id),
-                format!("homeboy runner disconnect {}", runner_id),
-                format!("homeboy runner connect {}", runner_id),
+                format!(
+                    "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+                    shell::quote_arg(runner_id),
+                    env!("CARGO_PKG_VERSION")
+                ),
+                format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
+                format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
             ],
         }
     }

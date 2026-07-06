@@ -677,8 +677,9 @@ fn dev_sync_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
 fn dev_sync_next_actions(runner_id: &str, reconnect: bool) -> Vec<String> {
     let mut actions = refresh_followups(runner_id, reconnect);
     actions.push(format!(
-        "homeboy runner refresh-homeboy {} --ref main --reconnect",
-        shell_arg(runner_id)
+        "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+        shell_arg(runner_id),
+        env!("CARGO_PKG_VERSION")
     ));
     actions
 }
