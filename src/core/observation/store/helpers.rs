@@ -114,25 +114,32 @@ pub(crate) fn row_to_artifact_record_at(
     row: &rusqlite::Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<ArtifactRecord> {
+    let artifact_type: String = row.get(offset + 3)?;
+    let path: String = row.get(offset + 4)?;
+    let url: Option<String> = row.get(offset + 5)?;
+    let viewer_links_json: String = row.get(offset + 8)?;
+    let viewer_links = serde_json::from_str(&viewer_links_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            offset + 8,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
     Ok(ArtifactRecord {
         id: row.get(offset)?,
         run_id: row.get(offset + 1)?,
         kind: row.get(offset + 2)?,
-        artifact_type: row.get(offset + 3)?,
-        path: row.get(offset + 4)?,
-        url: if row.get_ref(offset + 3)?.as_str()? == "url" {
-            Some(row.get(offset + 4)?)
-        } else {
-            None
-        },
-        public_url: None,
-        viewer_url: None,
-        viewer_links: Vec::new(),
-        sha256: row.get(offset + 5)?,
-        size_bytes: row.get(offset + 6)?,
-        mime: row.get(offset + 7)?,
-        metadata_json: parse_metadata(row.get(offset + 8)?)?,
-        created_at: row.get(offset + 9)?,
+        artifact_type: artifact_type.clone(),
+        path: path.clone(),
+        url: url.or_else(|| (artifact_type == "url").then_some(path.clone())),
+        public_url: row.get(offset + 6)?,
+        viewer_url: row.get(offset + 7)?,
+        viewer_links,
+        sha256: row.get(offset + 9)?,
+        size_bytes: row.get(offset + 10)?,
+        mime: row.get(offset + 11)?,
+        metadata_json: parse_metadata(row.get(offset + 12)?)?,
+        created_at: row.get(offset + 13)?,
     })
 }
 
@@ -150,10 +157,10 @@ pub(crate) fn row_to_artifact_cleanup_candidate(
 ) -> rusqlite::Result<ArtifactCleanupCandidateRecord> {
     Ok(ArtifactCleanupCandidateRecord {
         artifact: row_to_artifact_record(row)?,
-        run_kind: row.get(10)?,
-        component_id: row.get(11)?,
-        run_started_at: row.get(12)?,
-        run_status: row.get(13)?,
+        run_kind: row.get(14)?,
+        component_id: row.get(15)?,
+        run_started_at: row.get(16)?,
+        run_status: row.get(17)?,
     })
 }
 

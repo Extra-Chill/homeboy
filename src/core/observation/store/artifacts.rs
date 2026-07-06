@@ -22,11 +22,12 @@ impl ObservationStore {
             return ensure_identical("artifact", &artifact.id, &existing, artifact);
         }
         let metadata_json = serialize_metadata(&artifact.metadata_json)?;
+        let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
         execute_with_retry("import artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                 params![
                     artifact.id,
@@ -34,6 +35,10 @@ impl ObservationStore {
                     artifact.kind,
                     artifact.artifact_type,
                     artifact.path,
+                    artifact.url,
+                    artifact.public_url,
+                    artifact.viewer_url,
+                    viewer_links_json,
                     artifact.sha256,
                     artifact.size_bytes,
                     artifact.mime,
@@ -123,11 +128,12 @@ impl ObservationStore {
         crate::core::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
 
         let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
+        let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
         execute_with_retry("insert artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                 params![
                     id,
@@ -135,6 +141,10 @@ impl ObservationStore {
                     kind,
                     "file",
                     path_string,
+                    Option::<String>::None,
+                    artifact.public_url,
+                    artifact.viewer_url,
+                    viewer_links_json,
                     sha256,
                     size_bytes,
                     mime,
@@ -218,11 +228,12 @@ impl ObservationStore {
         let path_string = stored_path.to_string_lossy().to_string();
 
         let metadata_json_str = serialize_metadata(&metadata_json)?;
+        let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
         execute_with_retry("insert directory artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                 params![
                     id,
@@ -230,6 +241,10 @@ impl ObservationStore {
                     kind,
                     "directory",
                     path_string,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    viewer_links_json,
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
@@ -278,11 +293,12 @@ impl ObservationStore {
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let metadata_json_str = serialize_metadata(&metadata_json)?;
+        let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
         execute_with_retry("insert URL artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                 params![
                     id,
@@ -290,6 +306,10 @@ impl ObservationStore {
                     kind,
                     "url",
                     url,
+                    url,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    viewer_links_json,
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
@@ -312,7 +332,7 @@ impl ObservationStore {
             .connection
             .prepare(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE run_id = ?1
                 ORDER BY created_at ASC
@@ -379,7 +399,7 @@ impl ObservationStore {
                 .join(", ");
             let sql = format!(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE run_id IN ({placeholders})
                 ORDER BY run_id ASC, created_at ASC
@@ -422,8 +442,9 @@ impl ObservationStore {
                     SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at,
                            r.status, r.command, r.cwd, r.homeboy_version, r.git_sha,
                            r.rig_id, r.metadata_json,
-                           a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
-                           a.size_bytes, a.mime, a.metadata_json, a.created_at
+                            a.id, a.run_id, a.kind, a.artifact_type, a.path, a.url,
+                            a.public_url, a.viewer_url, a.viewer_links_json, a.sha256,
+                            a.size_bytes, a.mime, a.metadata_json, a.created_at
                     FROM runs r
                     INNER JOIN artifacts a ON a.run_id = r.id
                     WHERE r.started_at >= ?1
@@ -466,8 +487,9 @@ impl ObservationStore {
                 SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at,
                        r.status, r.command, r.cwd, r.homeboy_version, r.git_sha,
                        r.rig_id, r.metadata_json,
-                       a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
-                       a.size_bytes, a.mime, a.metadata_json, a.created_at
+                        a.id, a.run_id, a.kind, a.artifact_type, a.path, a.url,
+                        a.public_url, a.viewer_url, a.viewer_links_json, a.sha256,
+                        a.size_bytes, a.mime, a.metadata_json, a.created_at
                 FROM selected_runs r
                 INNER JOIN artifacts a ON a.run_id = r.id
                 ORDER BY r.started_at DESC, r.run_rowid DESC, a.created_at ASC
@@ -491,7 +513,7 @@ impl ObservationStore {
         self.connection
             .query_row(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE id = ?1
                 "#,
@@ -512,7 +534,7 @@ impl ObservationStore {
         self.connection
             .query_row(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at
                 FROM artifacts
                 WHERE run_id = ?1
                   AND (
@@ -540,7 +562,8 @@ impl ObservationStore {
             .connection
             .prepare(
                 r#"
-                SELECT a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
+                SELECT a.id, a.run_id, a.kind, a.artifact_type, a.path, a.url,
+                       a.public_url, a.viewer_url, a.viewer_links_json, a.sha256,
                        a.size_bytes, a.mime, a.metadata_json, a.created_at,
                        r.kind, r.component_id, r.started_at, r.status
                 FROM artifacts a
@@ -788,5 +811,70 @@ impl ObservationStore {
             )
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::observation::{ArtifactViewerLink, NewRunRecord};
+    use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn import_artifact_round_trips_public_link_metadata() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("fuzz")
+                        .command("homeboy fuzz run component-a")
+                        .cwd_path(home.path())
+                        .build(),
+                )
+                .expect("run");
+
+            store
+                .import_artifact(&ArtifactRecord {
+                    id: "artifact-1".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "fuzz_result_envelope".to_string(),
+                    artifact_type: "remote_file".to_string(),
+                    path: "/runner/private/fuzz-result-envelope.json".to_string(),
+                    url: Some("https://example.com/raw/fuzz-result-envelope.json".to_string()),
+                    public_url: Some("https://example.com/fuzz-result-envelope.json".to_string()),
+                    viewer_url: Some("https://viewer.example.com/fuzz-result-envelope".to_string()),
+                    viewer_links: vec![ArtifactViewerLink {
+                        kind: "json".to_string(),
+                        url: "https://viewer.example.com/fuzz-result-envelope".to_string(),
+                        replay: None,
+                    }],
+                    sha256: None,
+                    size_bytes: None,
+                    mime: Some("application/json".to_string()),
+                    metadata_json: serde_json::json!({ "schema": "test" }),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .expect("import artifact");
+
+            let artifact = store
+                .get_artifact("artifact-1")
+                .expect("get artifact")
+                .expect("artifact exists");
+
+            assert_eq!(
+                artifact.url.as_deref(),
+                Some("https://example.com/raw/fuzz-result-envelope.json")
+            );
+            assert_eq!(
+                artifact.public_url.as_deref(),
+                Some("https://example.com/fuzz-result-envelope.json")
+            );
+            assert_eq!(
+                artifact.viewer_url.as_deref(),
+                Some("https://viewer.example.com/fuzz-result-envelope")
+            );
+            assert_eq!(artifact.viewer_links.len(), 1);
+            assert_eq!(artifact.viewer_links[0].kind, "json");
+        });
     }
 }
