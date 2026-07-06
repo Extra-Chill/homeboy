@@ -162,6 +162,7 @@ pub struct RunnerExecutionRecordConstants {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PathMaterializationPlanConstants {
     pub schema_id: String,
+    pub projection_fields: Vec<String>,
     pub roles: Vec<String>,
     pub owners: Vec<String>,
     pub materialization_modes: Vec<String>,
@@ -384,6 +385,11 @@ pub fn runner_execution_record_constants() -> RunnerExecutionRecordConstants {
 pub fn path_materialization_plan_constants() -> PathMaterializationPlanConstants {
     PathMaterializationPlanConstants {
         schema_id: PATH_MATERIALIZATION_PLAN_SCHEMA.to_string(),
+        projection_fields: vec![
+            "schema".to_string(),
+            "entries".to_string(),
+            "path_remaps".to_string(),
+        ],
         roles: vec![
             PATH_MATERIALIZATION_ROLE_PRIMARY_WORKSPACE.to_string(),
             PATH_MATERIALIZATION_ROLE_REQUIRED_PATH.to_string(),
