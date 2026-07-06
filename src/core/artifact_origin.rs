@@ -382,6 +382,23 @@ mod tests {
     }
 
     #[test]
+    fn serves_css_with_stylesheet_content_type() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("workflow-bench/site/style.css");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"body{margin:0}").expect("write css");
+
+        let response = response_for_request(temp.path(), "HEAD", "/workflow-bench/site/style.css")
+            .expect("response");
+
+        assert_eq!(response.status, 200);
+        assert!(response.body.is_empty());
+        assert!(response
+            .headers
+            .contains(&("content-type".to_string(), "text/css".to_string())));
+    }
+
+    #[test]
     fn handles_playground_preflight_without_file_read() {
         let temp = tempfile::tempdir().expect("tempdir");
         let response = response_for_request(
