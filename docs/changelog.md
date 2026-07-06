@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.281.14] - 2026-07-06
+
+### Changed
+- Clarify review format gate failures
+
+### Fixed
+- Fix release recovery for orphaned tags
+
 ## [0.281.13] - 2026-07-06
 
 ### Changed
