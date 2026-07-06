@@ -168,7 +168,7 @@ impl CliRuntime {
             Ok(cli) => cli,
             Err(err) => err.exit(),
         };
-        normalize_runs_list_runner(&mut cli, &normalized);
+        normalize_runs_runner_options(&mut cli, &normalized);
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;
@@ -616,10 +616,13 @@ fn is_interactive_shell() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-fn normalize_runs_list_runner(cli: &mut Cli, normalized_args: &[String]) {
-    if is_runs_list_runner_option(normalized_args) {
+fn normalize_runs_runner_options(cli: &mut Cli, normalized_args: &[String]) {
+    if is_runs_list_runner_option(normalized_args)
+        || is_runs_artifact_get_runner_option(normalized_args)
+        || matches!(&cli.command, Commands::Runs(args) if args.is_artifact_get())
+    {
         if let Commands::Runs(args) = &mut cli.command {
-            cli.runner = args.absorb_global_runner_for_list(cli.runner.take());
+            cli.runner = args.absorb_global_runner_for_command_option(cli.runner.take());
         }
     }
 }
@@ -635,6 +638,24 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
     list_index > runs_index
         && args.iter().enumerate().any(|(index, arg)| {
             index > list_index && (arg == "--runner" || arg.starts_with("--runner="))
+        })
+}
+
+fn is_runs_artifact_get_runner_option(args: &[String]) -> bool {
+    let Some(runs_index) = args.iter().position(|arg| arg == "runs") else {
+        return false;
+    };
+    let Some(artifact_index) = args.iter().position(|arg| arg == "artifact") else {
+        return false;
+    };
+    let Some(get_index) = args.iter().position(|arg| arg == "get") else {
+        return false;
+    };
+
+    artifact_index > runs_index
+        && get_index > artifact_index
+        && args.iter().enumerate().any(|(index, arg)| {
+            index > get_index && (arg == "--runner" || arg.starts_with("--runner="))
         })
 }
 
@@ -1015,7 +1036,7 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
 
-        normalize_runs_list_runner(
+        normalize_runs_runner_options(
             &mut cli,
             &[
                 "homeboy".into(),
@@ -1047,7 +1068,7 @@ mod tests {
             "run-123",
         ]);
 
-        normalize_runs_list_runner(
+        normalize_runs_runner_options(
             &mut cli,
             &[
                 "homeboy".into(),
@@ -1076,6 +1097,109 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("without --runner"));
+    }
+
+    #[test]
+    fn runs_artifact_get_runner_after_subcommand_is_not_treated_as_global_runner() {
+        let _env = EnvGuard::remove(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "runs",
+            "artifact",
+            "get",
+            "run-123",
+            "report-json",
+            "--runner",
+            "homeboy-lab",
+        ]);
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+
+        normalize_runs_runner_options(
+            &mut cli,
+            &[
+                "homeboy".into(),
+                "runs".into(),
+                "artifact".into(),
+                "get".into(),
+                "run-123".into(),
+                "report-json".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+            ],
+        );
+
+        assert_eq!(cli.runner, None);
+        let Commands::Runs(args) = &cli.command else {
+            panic!("expected runs command");
+        };
+        assert!(args.is_artifact_get());
+        assert_eq!(args.artifact_get_runner(), Some("homeboy-lab"));
+        crate::commands::route::route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "runs".into(),
+                "artifact".into(),
+                "get".into(),
+                "run-123".into(),
+                "report-json".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+            ],
+            None,
+        )
+        .expect("runs artifact get command-local runner is allowed");
+    }
+
+    #[test]
+    fn global_runner_for_runs_artifact_get_is_absorbed_into_command_option() {
+        let _env = EnvGuard::remove(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "runs",
+            "artifact",
+            "get",
+            "run-123",
+            "report-json",
+        ]);
+
+        normalize_runs_runner_options(
+            &mut cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "runs".into(),
+                "artifact".into(),
+                "get".into(),
+                "run-123".into(),
+                "report-json".into(),
+            ],
+        );
+
+        assert_eq!(cli.runner, None);
+        let Commands::Runs(args) = &cli.command else {
+            panic!("expected runs command");
+        };
+        assert_eq!(args.artifact_get_runner(), Some("homeboy-lab"));
+        crate::commands::route::route_after_parse(
+            &cli,
+            &[
+                "homeboy".into(),
+                "--runner".into(),
+                "homeboy-lab".into(),
+                "runs".into(),
+                "artifact".into(),
+                "get".into(),
+                "run-123".into(),
+                "report-json".into(),
+            ],
+            None,
+        )
+        .expect("runs artifact get accepts global runner for command-local fetch");
     }
 
     #[test]
