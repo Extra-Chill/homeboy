@@ -93,12 +93,13 @@ cp "${nested_component_dir}/nested-plugin.php" "${temp_package_dir}/nested-plugi
 
 nested_payload="$(jq -cn \
   --arg tempPath "${temp_package_dir}" \
-  '{release:{version:"2.0.0",tag:"nested-plugin-v2.0.0",component_id:"nested-plugin",local_path:$tempPath}}')"
+  --arg sourcePath "${nested_component_dir}" \
+  '{release:{version:"2.0.0",tag:"nested-plugin-v2.0.0",component_id:"nested-plugin",local_path:$tempPath,source_path:$sourcePath}}')"
 
 (
   cd "${TMP_DIR}"
   HOMEBOY_COMPONENT_ID="nested-plugin" \
-  HOMEBOY_COMPONENT_PATH="${nested_component_dir}" \
+  HOMEBOY_COMPONENT_PATH="${temp_package_dir}" \
   HOMEBOY_RUNTIME_RESOLVE_CONTEXT="${RESOLVE_CONTEXT_CORE_HELPER}" \
   HOMEBOY_SKIP_TESTS=1 \
   HOMEBOY_SETTINGS_JSON="${nested_payload}" \

@@ -26,6 +26,8 @@ set -euo pipefail
 #                            may run from a temporary package context.
 #   HOMEBOY_WORDPRESS_PACKAGE_SOURCE_PATH
 #                          - explicit source checkout override for package builds.
+#   HOMEBOY_RELEASE_SOURCE_PATH
+#                          - generic release source checkout path from Homeboy.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -42,7 +44,8 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 RELEASE_LOCAL_PATH="$(printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -r 'try (.release.local_path // empty) catch empty' 2>/dev/null || true)"
-PACKAGE_SOURCE_PATH="${HOMEBOY_WORDPRESS_PACKAGE_SOURCE_PATH:-${HOMEBOY_COMPONENT_PATH:-${RELEASE_LOCAL_PATH}}}"
+RELEASE_SOURCE_PATH="$(printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -r 'try (.release.source_path // empty) catch empty' 2>/dev/null || true)"
+PACKAGE_SOURCE_PATH="${HOMEBOY_WORDPRESS_PACKAGE_SOURCE_PATH:-${HOMEBOY_RELEASE_SOURCE_PATH:-${RELEASE_SOURCE_PATH:-${HOMEBOY_COMPONENT_PATH:-${RELEASE_LOCAL_PATH}}}}}"
 if [[ -n "${PACKAGE_SOURCE_PATH}" ]]; then
   if [[ ! -d "${PACKAGE_SOURCE_PATH}" ]]; then
     echo "Error: WordPress package source path is not a directory: ${PACKAGE_SOURCE_PATH}" >&2
