@@ -258,29 +258,12 @@ fn probe_agent_task_providers_on_runner(
 ) -> Result<AgentTaskProviderProbeOutput> {
     let (output, exit_code) = exec(
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(remote_cwd.to_string()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command: command.to_vec(),
-            env,
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: Some(source_snapshot),
-            path_materialization_plan: None,
-            capability_preflight,
-            required_extensions,
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+        RunnerExecOptions::command(command.to_vec())
+            .with_cwd(remote_cwd)
+            .with_env(env)
+            .with_source_snapshot(source_snapshot)
+            .with_required_extensions(required_extensions)
+            .with_optional_capability_preflight(capability_preflight),
     )?;
 
     Ok(AgentTaskProviderProbeOutput {

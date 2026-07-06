@@ -229,33 +229,13 @@ pub fn refresh_homeboy_binary(
 
     let (exec_output, exit_code) = exec(
         &plan.runner_id,
-        RunnerExecOptions {
-            cwd: None,
-            project_id: None,
-            allow_diagnostic_ssh: true,
-            command: vec!["bash".to_string(), "-lc".to_string(), plan.script.clone()],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: Some(RunnerCapabilityPreflight {
+        RunnerExecOptions::diagnostic_raw_shell(plan.script.clone()).with_capability_preflight(
+            RunnerCapabilityPreflight {
                 command: "runner.refresh-homeboy".to_string(),
                 required_commands,
                 ..Default::default()
-            }),
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+            },
+        ),
     )?;
     if exit_code != 0 {
         return Ok((
@@ -392,29 +372,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     let chmod_script = format!("chmod 0755 {}", quote_path(&remote_binary));
     let (_chmod, chmod_exit) = exec(
         &options.runner_id,
-        RunnerExecOptions {
-            cwd: None,
-            project_id: None,
-            allow_diagnostic_ssh: true,
-            command: vec!["bash".to_string(), "-lc".to_string(), chmod_script],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
+        RunnerExecOptions::diagnostic_raw_shell(chmod_script),
     )?;
     if chmod_exit != 0 {
         return Ok((

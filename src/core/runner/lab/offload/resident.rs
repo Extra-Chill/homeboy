@@ -322,29 +322,12 @@ pub(crate) fn refresh_managed_runner_sources(
     for source in plans {
         let (output, exit_code) = exec(
             runner_id,
-            RunnerExecOptions {
-                cwd: Some(cwd.to_string()),
-                project_id: None,
-                allow_diagnostic_ssh: false,
-                command: vec!["sh".to_string(), "-lc".to_string(), source.script.clone()],
-                env: Default::default(),
-                secret_env_names: Vec::new(),
-                secret_env_plan: None,
-                env_materialization: None,
-                capture_patch: false,
-                raw_exec: false,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                capability_preflight: None,
-                required_extensions: Vec::new(),
-                accepted_extension_settings: Vec::new(),
-                require_paths: Vec::new(),
-                runner_workload: None,
-                run_id: None,
-                detach_after_handoff: false,
-                mirror_evidence: true,
-                print_handoff: true,
-            },
+            RunnerExecOptions::command(vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                source.script.clone(),
+            ])
+            .with_cwd(cwd),
         )?;
         if exit_code != 0 {
             return Err(Error::validation_invalid_argument(

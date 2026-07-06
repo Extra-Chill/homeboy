@@ -224,32 +224,7 @@ fn upload_snapshot(
         dest = shell::quote_path(&plan.synced_source_path),
         archive = shell::quote_path(&remote_archive),
     );
-    let (_output, exit_code) = exec(
-        &runner.id,
-        RunnerExecOptions {
-            cwd: None,
-            project_id: None,
-            allow_diagnostic_ssh: true,
-            command: vec!["bash".to_string(), "-lc".to_string(), extract],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            env_materialization: None,
-            capture_patch: false,
-            raw_exec: true,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            capability_preflight: None,
-            required_extensions: Vec::new(),
-            accepted_extension_settings: Vec::new(),
-            require_paths: Vec::new(),
-            runner_workload: None,
-            run_id: None,
-            detach_after_handoff: false,
-            mirror_evidence: true,
-            print_handoff: true,
-        },
-    )?;
+    let (_output, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(extract))?;
     if exit_code != 0 {
         return Err(Error::validation_invalid_argument(
             "extensions",
@@ -326,29 +301,7 @@ pub(crate) fn runner_extension_exists(
 }
 
 fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
-    RunnerExecOptions {
-        cwd: None,
-        project_id: None,
-        allow_diagnostic_ssh: true,
-        command,
-        env: runner.env.clone(),
-        secret_env_names: Vec::new(),
-        secret_env_plan: None,
-        env_materialization: None,
-        capture_patch: false,
-        raw_exec: true,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        capability_preflight: None,
-        required_extensions: Vec::new(),
-        accepted_extension_settings: Vec::new(),
-        require_paths: Vec::new(),
-        runner_workload: None,
-        run_id: None,
-        detach_after_handoff: false,
-        mirror_evidence: true,
-        print_handoff: true,
-    }
+    RunnerExecOptions::diagnostic_raw_command(command).with_env(runner.env.clone())
 }
 
 fn runner_exec_detail(output: &super::RunnerExecOutput) -> String {

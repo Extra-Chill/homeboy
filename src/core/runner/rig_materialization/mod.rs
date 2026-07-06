@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::rig;
@@ -257,34 +257,14 @@ pub(super) fn sync_lab_offload_rigs(
 
         let (output, exit_code) = exec(
             runner_id,
-            RunnerExecOptions {
-                cwd: Some(remote_cwd.to_string()),
-                project_id: None,
-                allow_diagnostic_ssh: false,
-                command: install_command,
-                env: HashMap::new(),
-                secret_env_names: Vec::new(),
-                secret_env_plan: None,
-                env_materialization: None,
-                capture_patch: false,
-                raw_exec: false,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                // Validate remote capability parity before dispatch: the install
-                // is executed by the runner-side `homeboy` binary, so require
-                // that tool on the runner. `exec` no-ops this gate for local and
-                // already-capable SSH runners, so behavior is unchanged on a
-                // correctly provisioned runner and fails early otherwise (#5285).
-                capability_preflight: Some(rig_install_capability_preflight()),
-                required_extensions: Vec::new(),
-                accepted_extension_settings: Vec::new(),
-                require_paths: Vec::new(),
-                runner_workload: None,
-                run_id: None,
-                detach_after_handoff: false,
-                mirror_evidence: true,
-                print_handoff: true,
-            },
+            // Validate remote capability parity before dispatch: the install is
+            // executed by the runner-side `homeboy` binary, so require that tool
+            // on the runner. `exec` no-ops this gate for local and already-capable
+            // SSH runners, so behavior is unchanged on a correctly provisioned
+            // runner and fails early otherwise (#5285).
+            RunnerExecOptions::command(install_command)
+                .with_cwd(remote_cwd)
+                .with_capability_preflight(rig_install_capability_preflight()),
         )?;
 
         if exit_code != 0 {

@@ -211,6 +211,36 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) detach_after_handoff: bool,
 }
 
+fn lab_runner_exec_options(
+    context: &LabDispatchExecutionContext<'_>,
+    env: std::collections::HashMap<String, String>,
+    secret_env_names: Vec<String>,
+) -> RunnerExecOptions {
+    RunnerExecOptions {
+        cwd: Some(context.remote_cwd.clone()),
+        project_id: None,
+        allow_diagnostic_ssh: false,
+        command: context.command.clone(),
+        env,
+        secret_env_names,
+        secret_env_plan: Some(context.secret_env_handoff.secret_env_plan.clone()),
+        env_materialization: None,
+        capture_patch: context.request.capture_patch,
+        raw_exec: false,
+        source_snapshot: context.source_snapshot.clone(),
+        path_materialization_plan: context.path_materialization_plan.clone(),
+        capability_preflight: context.capability_preflight.clone(),
+        required_extensions: context.contract.required_extensions.clone(),
+        accepted_extension_settings: context.accepted_extension_settings.clone(),
+        require_paths: Vec::new(),
+        runner_workload: context.runner_workload.clone(),
+        run_id: context.agent_task_run_id.clone(),
+        detach_after_handoff: context.detach_after_handoff,
+        mirror_evidence: context.mirror_evidence,
+        print_handoff: context.print_handoff,
+    }
+}
+
 pub(crate) fn exec_lab_context(
     mut context: LabDispatchExecutionContext<'_>,
 ) -> Result<LabOffloadOutcome> {
@@ -232,7 +262,7 @@ pub(crate) fn exec_lab_context(
             env: base_env,
             secret_names: Vec::new(),
         })
-        .chain(context.env_resolution_layers)
+        .chain(context.env_resolution_layers.clone())
         .chain(std::iter::once(LabEnvResolutionLayer {
             source: "job_override",
             env: request.job_overrides.env.clone(),
@@ -299,29 +329,7 @@ pub(crate) fn exec_lab_context(
     let remote_exec_started = std::time::Instant::now();
     let exec_result = exec(
         runner_id,
-        RunnerExecOptions {
-            cwd: Some(context.remote_cwd.clone()),
-            project_id: None,
-            allow_diagnostic_ssh: false,
-            command: context.command.clone(),
-            env,
-            secret_env_names,
-            secret_env_plan: Some(context.secret_env_handoff.secret_env_plan.clone()),
-            env_materialization: None,
-            capture_patch: request.capture_patch,
-            raw_exec: false,
-            source_snapshot: context.source_snapshot.clone(),
-            path_materialization_plan: context.path_materialization_plan.clone(),
-            capability_preflight: context.capability_preflight.clone(),
-            required_extensions: contract.required_extensions.clone(),
-            accepted_extension_settings: context.accepted_extension_settings.clone(),
-            require_paths: Vec::new(),
-            runner_workload: context.runner_workload.clone(),
-            run_id: context.agent_task_run_id.clone(),
-            detach_after_handoff: context.detach_after_handoff,
-            mirror_evidence: context.mirror_evidence,
-            print_handoff: context.print_handoff,
-        },
+        lab_runner_exec_options(&context, env, secret_env_names),
     );
     context
         .overhead
