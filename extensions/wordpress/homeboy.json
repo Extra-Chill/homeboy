@@ -48,6 +48,7 @@
       "bash tests/audit-dead-guard-fallback-smoke.sh",
       "bash tests/eslint-eqeqeq-null-smoke.sh",
       "bash tests/release-scripts-smoke.sh",
+      "bash ../tests/wordpress-release-package-cwd-smoke.sh",
       "node tests/admin-page-scenarios-smoke.js",
       "node tests/admin-page-fuzz-surfaces-smoke.js",
       "node tests/wordpress-bootstrap-timeline-smoke.js",

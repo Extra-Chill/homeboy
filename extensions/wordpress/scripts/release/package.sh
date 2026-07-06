@@ -36,6 +36,15 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+RELEASE_LOCAL_PATH="$(printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -r 'try (.release.local_path // empty) catch empty' 2>/dev/null || true)"
+if [[ -n "${RELEASE_LOCAL_PATH}" ]]; then
+  if [[ ! -d "${RELEASE_LOCAL_PATH}" ]]; then
+    echo "Error: release.local_path is not a directory: ${RELEASE_LOCAL_PATH}" >&2
+    exit 1
+  fi
+  cd "${RELEASE_LOCAL_PATH}"
+fi
+
 COMPONENT_SETTINGS_JSON="{}"
 if [[ -f homeboy.json ]]; then
   COMPONENT_SETTINGS_JSON="$(jq -c '.extensions.wordpress.settings // {} | if type == "object" then . else {} end' homeboy.json 2>/dev/null || printf '{}')"

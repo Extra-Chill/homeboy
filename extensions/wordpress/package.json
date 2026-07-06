@@ -160,6 +160,7 @@
     "test:wp-codebox-bench-prepare-steps": "node tests/wp-codebox-bench-prepare-steps-smoke.js",
     "test:wp-codebox-phpunit-recipe-builder": "node tests/wp-codebox-phpunit-recipe-builder-smoke.js",
     "test:build-package-artifacts": "bash scripts/build/build-package-artifacts-smoke.sh",
+    "test:release-package-cwd": "bash ../tests/wordpress-release-package-cwd-smoke.sh",
     "test:agent-task-core-contract-drift": "node tests/agent-task-core-contract-drift.test.js",
     "fixture:agent-task-core-contract": "node ../agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs",
     "fixture:agent-task-core-contract:check": "node ../agent-runtimes/fixtures/generate-homeboy-agent-task-core-contract.cjs --check",
