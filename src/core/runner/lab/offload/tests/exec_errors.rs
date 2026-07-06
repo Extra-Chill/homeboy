@@ -716,6 +716,19 @@ fn lab_structured_output_file_is_written_outside_the_checkout() {
 }
 
 #[test]
+fn runner_resident_structured_output_file_stays_inside_workspace_root() {
+    let workspace_root = "/srv/runner/workspaces";
+    let output_file = remote_runner_resident_lab_output_file(workspace_root);
+
+    assert!(
+        output_file.starts_with("/srv/runner/workspaces/.homeboy-artifacts/"),
+        "runner-resident output `{output_file}` must stay inside workspace root `{workspace_root}`"
+    );
+    assert!(output_file.ends_with(".json"));
+    assert!(output_file.contains("homeboy-lab-structured-output-"));
+}
+
+#[test]
 fn lab_cannot_proceed_error_names_runner_workspace_ref_dependency_and_fix_command() {
     // A bare dependency-resolution failure as it surfaces today, before
     // orchestration context is woven in.

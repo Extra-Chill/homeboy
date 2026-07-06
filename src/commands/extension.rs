@@ -273,6 +273,17 @@ pub fn run(
 }
 
 impl ExtensionArgs {
+    pub(crate) fn is_runner_resident_read_command(&self) -> bool {
+        matches!(self.command, ExtensionCommand::Show { .. })
+    }
+
+    pub(crate) fn runner_resident_read_command_label(&self) -> &'static str {
+        match self.command {
+            ExtensionCommand::Show { .. } => "extension show",
+            _ => "extension",
+        }
+    }
+
     pub(crate) fn is_update_command(&self) -> bool {
         matches!(
             self.command,

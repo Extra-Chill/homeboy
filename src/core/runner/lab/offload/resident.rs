@@ -62,7 +62,7 @@ pub(crate) fn run_runner_resident_lab_offload(
 
     let remote_output_file = request
         .output_file_requested
-        .then(|| remote_lab_output_file(runner_workspace_root));
+        .then(|| remote_runner_resident_lab_output_file(runner_workspace_root));
     if let Some(output_file) = remote_output_file.as_deref() {
         ensure_remote_lab_artifact_dir(runner_id, output_file)?;
     }
