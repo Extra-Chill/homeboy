@@ -21,9 +21,13 @@ pub(crate) fn run_package_preflight(
     super::lockfile_guard::guard_committed_lockfiles(Path::new(component_local_path))?;
     super::lockfile_guard::guard_local_file_dependencies(Path::new(component_local_path))?;
 
+    let source_component_path = Path::new(component_local_path);
+    let source_root = release_preflight_source_root(source_component_path)?;
     let temp = create_release_preflight_tempdir()?;
-    let temp_component_path = temp.join("component");
-    copy_release_preflight_tree(Path::new(component_local_path), &temp_component_path)?;
+    let temp_root_path = temp.join("repository");
+    copy_release_preflight_tree(&source_root, &temp_root_path)?;
+    let temp_component_path =
+        release_preflight_component_path(source_component_path, &source_root, &temp_root_path)?;
 
     let mut state = ReleaseState::default();
     let result = run_package(
@@ -50,6 +54,57 @@ pub(crate) fn run_package_preflight(
         Some(data),
         Vec::new(),
     ))
+}
+
+fn release_preflight_source_root(component_path: &Path) -> Result<PathBuf> {
+    let component_path = component_path.canonicalize().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to resolve package preflight component path: {}", e),
+            Some(component_path.display().to_string()),
+        )
+    })?;
+
+    let mut current = component_path.as_path();
+    loop {
+        if current.join(".git").exists() {
+            return Ok(current.to_path_buf());
+        }
+        let Some(parent) = current.parent() else {
+            return Ok(component_path);
+        };
+        current = parent;
+    }
+}
+
+fn release_preflight_component_path(
+    source_component_path: &Path,
+    source_root: &Path,
+    temp_root_path: &Path,
+) -> Result<PathBuf> {
+    let source_component_path = source_component_path.canonicalize().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to resolve package preflight component path: {}", e),
+            Some(source_component_path.display().to_string()),
+        )
+    })?;
+
+    let relative_component_path = source_component_path
+        .strip_prefix(source_root)
+        .map_err(|e| {
+            Error::internal_io(
+                format!(
+                    "Failed to map package preflight component path into staged repo: {}",
+                    e
+                ),
+                Some(format!(
+                    "component: {}; source root: {}",
+                    source_component_path.display(),
+                    source_root.display()
+                )),
+            )
+        })?;
+
+    Ok(temp_root_path.join(relative_component_path))
 }
 
 fn create_release_preflight_tempdir() -> Result<PathBuf> {
