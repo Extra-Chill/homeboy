@@ -9,8 +9,8 @@
 //! `lab_runner_unsupported_reason`, `lab_offload_mutation_flag`).
 
 use crate::cli_surface::Commands;
-use crate::command_contract::{CommandDescriptor, CommandOutputFileMode};
-use crate::commands::agent_task;
+use crate::command_contract::CommandDescriptor;
+use crate::commands::{adapter, agent_task};
 use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
@@ -930,10 +930,8 @@ impl Commands {
             Commands::Worktree(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract());
             }
-            Commands::Fleet(args) => {
-                let contract = crate::commands::fleet::adapter(CommandOutputFileMode::None)
-                    .lab_contract(args);
-                return CommandPortabilityContract::lab_optional(contract);
+            Commands::Fleet(_) => {
+                return CommandPortabilityContract::lab_optional(adapter::lab_contract(self));
             }
             Commands::Review(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Refactor(args) if args.is_hot_resource_command() => {

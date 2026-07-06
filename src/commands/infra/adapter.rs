@@ -132,6 +132,25 @@ pub(crate) fn command_adapter(
     }
 }
 
+pub(crate) fn output_descriptor(
+    command: &Commands,
+    output_file_mode: CommandOutputFileMode,
+) -> Option<CommandOutputDescriptor> {
+    match command {
+        Commands::Fleet(_) => Some(fleet::adapter(output_file_mode).output_descriptor()),
+        Commands::Observe(_) => Some(observe::adapter(output_file_mode).output_descriptor()),
+        Commands::Contract(_) => Some(contract::adapter(output_file_mode).output_descriptor()),
+        _ => None,
+    }
+}
+
+pub(crate) fn lab_contract(command: &Commands) -> Option<LabCommandContract> {
+    match command {
+        Commands::Fleet(args) => fleet::adapter(CommandOutputFileMode::None).lab_contract(args),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +203,50 @@ mod tests {
     }
 
     #[test]
+    fn migrated_adapter_output_descriptor_uses_adapter_contract() {
+        let descriptor = output_descriptor(
+            &parsed_command(&["homeboy", "contract", "manifest"]),
+            CommandOutputFileMode::GenericEnvelope,
+        )
+        .expect("contract is adapter-backed");
+
+        assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
+        assert_eq!(
+            descriptor.output_file_mode,
+            CommandOutputFileMode::GenericEnvelope
+        );
+        assert_eq!(
+            descriptor.output_contract,
+            CommandOutputContractKind::JsonEnvelope
+        );
+    }
+
+    #[test]
+    fn migrated_adapter_output_descriptors_match_command_contracts() {
+        let commands = [
+            parsed_command(&["homeboy", "fleet", "list"]),
+            parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
+            parsed_command(&["homeboy", "contract", "manifest"]),
+        ];
+        let output_file_modes = [
+            CommandOutputFileMode::None,
+            CommandOutputFileMode::GenericEnvelope,
+        ];
+
+        for command in commands {
+            for output_file_mode in output_file_modes {
+                let has_output_file = output_file_mode != CommandOutputFileMode::None;
+
+                assert_eq!(
+                    output_descriptor(&command, output_file_mode),
+                    Some(command.output_descriptor(has_output_file))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fleet_adapter_owns_hot_exec_lab_contract() {
         let Commands::Fleet(args) = parsed_command(&[
             "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
@@ -212,5 +275,14 @@ mod tests {
         assert!(fleet::adapter(CommandOutputFileMode::None)
             .lab_contract(&args)
             .is_none());
+    }
+
+    #[test]
+    fn migrated_adapter_lab_contract_matches_command_contract() {
+        let command = parsed_command(&[
+            "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
+        ]);
+
+        assert_eq!(lab_contract(&command), command.lab_contract());
     }
 }
