@@ -802,6 +802,7 @@ fn fuzz_run_parses_generic_contract_flags() {
         "isolated",
         "--isolation-proof",
         "/tmp/isolation-proof.json",
+        "--allow-local-destructive-fuzz",
         "--expect-metric",
         "side_effect_grouped_created_count=2",
         "--",
@@ -835,6 +836,7 @@ fn fuzz_run_parses_generic_contract_flags() {
                 run.isolation_proof.as_deref(),
                 Some(Path::new("/tmp/isolation-proof.json"))
             );
+            assert!(run.allow_local_destructive_fuzz);
             assert_eq!(
                 run.expect_metric,
                 vec![(

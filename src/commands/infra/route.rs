@@ -132,6 +132,9 @@ pub fn route_after_parse(
 
     match outcome {
         LabRouteOutcome::RunLocal => {
+            if destructive_fuzz_requires_lab(&cli.command) {
+                return Err(destructive_fuzz_local_execution_error());
+            }
             if let Some(warning) = agent_task_local_fanout_warning(&cli.command) {
                 eprintln!("{warning}");
             }
@@ -830,6 +833,26 @@ fn lab_offload_command(
     )))
 }
 
+fn destructive_fuzz_requires_lab(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Fuzz(args) if args.destructive_local_execution_requires_override()
+    )
+}
+
+fn destructive_fuzz_local_execution_error() -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "allow_local_destructive_fuzz",
+        "destructive fuzz refused local controller execution".to_string(),
+        Some("--allow-destructive".to_string()),
+        Some(vec![
+            "Omit --force-hot/--allow-local-hot or pass --runner <runner-id> to run destructive fuzz on Lab.".to_string(),
+            "Configure a default Lab runner so destructive fuzz offloads automatically.".to_string(),
+            "If local execution is absolutely intentional, pass --allow-local-destructive-fuzz together with --allow-destructive.".to_string(),
+        ]),
+    )
+}
+
 fn lab_route_source_path_args(
     command: &Commands,
     normalized_args: &[String],
@@ -1273,6 +1296,61 @@ mod tests {
         assert_eq!(command.hot_label, "review test");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
+        let normalized = vec![
+            "homeboy",
+            "--force-hot",
+            "--allow-local-hot",
+            "fuzz",
+            "run",
+            "component-a",
+            "--allow-destructive",
+            "--isolation",
+            "isolated",
+            "--isolation-proof",
+            "proof.json",
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        assert!(destructive_fuzz_requires_lab(&cli.command));
+
+        let error = crate::test_support::with_isolated_home(|_| {
+            route_after_parse(
+                &cli,
+                &normalized
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect::<Vec<_>>(),
+                None,
+            )
+            .expect_err("destructive fuzz local route should be refused")
+        });
+        assert!(error
+            .to_string()
+            .contains("destructive fuzz refused local controller execution"));
+    }
+
+    #[test]
+    fn destructive_fuzz_local_override_is_command_specific_and_explicit() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--force-hot",
+            "--allow-local-hot",
+            "fuzz",
+            "run",
+            "component-a",
+            "--allow-destructive",
+            "--allow-local-destructive-fuzz",
+            "--isolation",
+            "isolated",
+            "--isolation-proof",
+            "proof.json",
+        ]);
+
+        assert!(!destructive_fuzz_requires_lab(&cli.command));
     }
 
     #[test]

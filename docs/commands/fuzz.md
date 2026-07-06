@@ -5,8 +5,8 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [--allow-local-destructive-fuzz] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive --isolation isolated --isolation-proof <path>] [--allow-local-destructive-fuzz] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--campaign-manifest <path>] [--campaign-workload <id>] [--lab-runner <id>] [--required-artifact <id>] [--execute|--dry-run] [--resume] [--allow-destructive --isolation isolated --isolation-proof <path>]
 homeboy fuzz stable plan --manifest <path> [--stable-id <id[,id]>] [--runner <id>] [--artifact-root <dir>] [--run-id-prefix <id>] [--tracker-ref <kind:id>] [--detach-after-handoff] [--component <id>] [--since <duration>] [--limit <n>] [--hotspot-limit <n>]
@@ -362,6 +362,12 @@ point at a complete `homeboy/isolation-proof/v1` JSON document. Homeboy does not
 infer destructive support from runner environment variables, Lab placement, or
 provider features. Missing or incomplete proof fails planning/request validation;
 it is not downgraded to a compatibility fallback.
+
+Destructive fuzz also refuses local controller execution by default. Use a Lab
+runner by omitting `--force-hot`, configuring a default Lab runner, or passing
+`--runner <runner-id>`. `--force-hot --allow-local-hot` is not enough for
+destructive fuzz; if local execution is absolutely intentional, pass
+`--allow-local-destructive-fuzz` together with `--allow-destructive`.
 
 The proof contract is product-neutral. Provider-specific identifiers can appear
 only as opaque `provider_ref` or artifact refs; Homeboy core interprets the
