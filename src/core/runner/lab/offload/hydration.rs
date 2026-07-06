@@ -1,11 +1,11 @@
-//! Post-materialization dependency hydration for agent-task Lab workspaces.
+//! Post-materialization dependency hydration for Lab workspaces.
 //!
 //! After the runner-side workspace is materialized from a filtered snapshot
 //! (`vendor/`, `node_modules/`, `target/` are excluded by `default_sync_excludes`),
-//! the executor starts immediately. Without hydration the offloaded agent/task
-//! lands in a workspace with manifests/lockfiles but no installed dependency
-//! tree, so a coding agent that fetches dependency source from outside the
-//! workspace trips the tool-permission policy and the run fails (#7366).
+//! the command starts immediately. Without hydration the offloaded command lands
+//! in a workspace with manifests/lockfiles but no installed dependency tree, so
+//! workloads that need package dependencies fail before their own checks can run
+//! (#7366).
 //!
 //! Hydration closes that gap by reusing the existing dependency-provider
 //! detection in `core::deps` (the machinery behind `homeboy deps install`) to
@@ -175,8 +175,8 @@ pub(crate) fn hydration_failure_error(
 }
 
 /// Hydration outcome as recorded by the offload orchestrator. `NotApplied`
-/// captures why hydration was skipped (non-agent-task job or explicit opt-out);
-/// `Applied` carries the per-provider results.
+/// captures why hydration was skipped (explicit opt-out); `Applied` carries the
+/// per-provider results.
 #[derive(Debug, Clone)]
 pub(crate) enum LabWorkspaceHydrationRecord {
     NotApplied { reason: &'static str },
@@ -190,26 +190,20 @@ pub(crate) struct LabOffloadDependencyHydration {
     pub(crate) record: LabWorkspaceHydrationRecord,
 }
 
-/// Decide whether to hydrate and, when applicable, run hydration for an
-/// agent-task exec job.
+/// Decide whether to hydrate and, when applicable, run hydration for a
+/// materialized Lab workspace command.
 ///
-/// Hydration runs only for job kinds that execute agent/task work in the
-/// workspace (`is_agent_task_exec`), and is skipped when the operator passes
-/// `--skip-deps-hydration`. Both skip cases return a `NotApplied` record without
-/// touching the runner, so patch-only/read paths never hydrate.
-pub(crate) fn hydrate_for_agent_task_exec(
-    is_agent_task_exec: bool,
+/// Hydration is skipped when the operator passes `--skip-deps-hydration`.
+/// Runner-resident commands do not call this path because they do not
+/// materialize a source workspace.
+pub(crate) fn hydrate_for_lab_workspace_exec(
     skip_deps_hydration: bool,
     runner_id: &str,
     local_path: &str,
     remote_path: &str,
     plan: HomeboyPlan,
 ) -> Result<LabOffloadDependencyHydration> {
-    let record = if !is_agent_task_exec {
-        LabWorkspaceHydrationRecord::NotApplied {
-            reason: "not_agent_task_exec",
-        }
-    } else if skip_deps_hydration {
+    let record = if skip_deps_hydration {
         LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
     } else {
         LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies(
@@ -472,37 +466,58 @@ mod tests {
         });
     }
 
-    /// Hydration is skipped (`NotApplied`) for job kinds that do not execute
-    /// agent/task work in the workspace, without touching the runner.
+    /// Hydration runs for materialized workspace commands, including non-agent
+    /// workloads such as bench/rig offloads.
     #[test]
-    fn hydration_skipped_for_non_agent_task_jobs() {
-        let result = hydrate_for_agent_task_exec(
-            false,
-            false,
-            "unused-runner",
-            "/unused/local",
-            "/unused/remote",
-            base_lab_plan(None),
-        )
-        .expect("non-agent-task path does not hydrate");
+    fn hydration_runs_for_materialized_workspace_jobs() {
+        crate::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install(
+                "fixture-tool",
+                "#!/bin/sh\nprintf '%s\\n' hydrated > workspace-hydrated.txt\n",
+            );
+            crate::core::runner::create(&path_guard.local_runner_spec("lab-local"), false)
+                .expect("create local runner");
 
-        match result.record {
-            LabWorkspaceHydrationRecord::NotApplied { reason } => {
-                assert_eq!(reason, "not_agent_task_exec");
+            let project = tempfile::tempdir().expect("project tempdir");
+            let manifest = r#"{
+                "provider": "declared-provider",
+                "commands": { "install": { "argv": ["fixture-tool", "install"] } }
+            }"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest)
+                .expect("provider manifest");
+            let remote = tempfile::tempdir().expect("remote workspace");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote provider manifest");
+
+            let result = hydrate_for_lab_workspace_exec(
+                false,
+                "lab-local",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+                base_lab_plan(None),
+            )
+            .expect("workspace command hydrates");
+
+            match result.record {
+                LabWorkspaceHydrationRecord::Applied(output) => {
+                    assert_eq!(output.status, "hydrated");
+                    assert_eq!(output.steps.len(), 1);
+                }
+                other => panic!("expected Applied, got {other:?}"),
             }
-            other => panic!("expected NotApplied, got {other:?}"),
-        }
-        let metadata = dependency_hydration_metadata(&result.record);
-        assert_eq!(metadata["status"], "not_applied");
-        assert_eq!(metadata["reason"], "not_agent_task_exec");
+            assert_eq!(
+                std::fs::read_to_string(remote.path().join("workspace-hydrated.txt"))
+                    .expect("hydration marker"),
+                "hydrated\n"
+            );
+        });
     }
 
     /// Hydration is skipped when the `--skip-deps-hydration` opt-out is set,
-    /// even for an agent-task exec job.
+    /// even for a materialized workspace job.
     #[test]
     fn hydration_skipped_when_opt_out_flag_set() {
-        let result = hydrate_for_agent_task_exec(
-            true,
+        let result = hydrate_for_lab_workspace_exec(
             true,
             "unused-runner",
             "/unused/local",
