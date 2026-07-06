@@ -176,6 +176,22 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.risk_exemption = top_level.safety.risk_exemption;
             metadata.dangerous_flags = top_level.safety.dangerous_flags.to_vec();
         }
+
+        let subcommand_path = path.iter().skip(1).map(String::as_str).collect::<Vec<_>>();
+        if let Some(path_safety) = top_level.path_safety(&subcommand_path) {
+            metadata.mutates = path_safety.safety.mutates;
+            metadata.operator = path_safety.safety.operator;
+            metadata.dry_run_flag = path_safety.safety.dry_run_flag;
+            metadata.risk_exemption = path_safety.safety.risk_exemption;
+            metadata.dangerous_flags = path_safety.safety.dangerous_flags.to_vec();
+            if let Some(output_notes) = path_safety.output_notes {
+                metadata.output_notes = output_notes;
+            }
+            if let Some(lab_notes) = path_safety.lab_notes {
+                metadata.lab_notes = lab_notes;
+            }
+            return metadata;
+        }
     }
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
@@ -186,11 +202,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "default JSON output is non-mutating; pass --write to write markdown docs to disk";
             metadata.dangerous_flags = vec!["--write"];
-        }
-        ["deps", "install"] | ["deps", "update"] | ["deps", "stack", "apply"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates dependency manifests, lockfiles, or installed dependency trees";
         }
         ["review", "ci", "autofix"] => {
             metadata.mutates = true;
@@ -240,18 +251,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "default output is non-mutating; pass --apply to repair or remove artifacts";
             metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["server", "create"]
-        | ["server", "set"]
-        | ["server", "delete"]
-        | ["server", "connect"]
-        | ["server", "disconnect"]
-        | ["server", "key", "generate"]
-        | ["server", "key", "import"]
-        | ["server", "key", "use"]
-        | ["server", "key", "unset"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
         }
         ["extension", "setup"]
         | ["extension", "refresh"]
@@ -379,43 +378,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
-        }
-        ["file", "write"] | ["file", "delete"] | ["file", "mkdir"] | ["file", "rename"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["file", "edit"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "mutates file content unless --dry-run is passed";
-        }
-        ["file", "copy"] | ["file", "sync"] => {
-            metadata.mutates = true;
-        }
-        ["fleet", "exec"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.dry_run_flag = Some("--check");
-            metadata.output_notes = "default output is blocked for remote execution; pass --check to plan or --apply to execute";
-            metadata.dangerous_flags = vec!["--apply"];
-            metadata.lab_notes = "local-only: depends on local fleet/project/server configuration before SSH fan-out";
-        }
-        ["fleet", "create"]
-        | ["fleet", "set"]
-        | ["fleet", "delete"]
-        | ["fleet", "add"]
-        | ["fleet", "remove"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "mutates local fleet configuration";
-        }
-        ["api", "post"] | ["api", "put"] | ["api", "patch"] | ["api", "delete"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutating API requests require --apply";
-            metadata.dangerous_flags = vec!["--apply"];
         }
         ["git", "issue", "create"]
         | ["git", "issue", "comment"]
@@ -557,13 +519,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages";
             metadata.dangerous_flags = vec!["--apply"];
         }
-        ["api", "http", "request"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it";
-            metadata.dangerous_flags =
-                vec!["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
-        }
         ["worktree", "queue-create"] => {
             metadata.mutates = true;
             metadata.dry_run_flag = Some("--dry-run");
@@ -656,17 +611,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["refactor", "undo", "delete"] => {
             metadata.mutates = true;
             metadata.output_notes = "deletes an undo snapshot without restoring it";
-        }
-        ["api", "auth", "login"]
-        | ["api", "auth", "set"]
-        | ["api", "auth", "remove"]
-        | ["api", "auth", "logout"]
-        | ["api", "auth", "profile", "set-basic"]
-        | ["api", "auth", "profile", "set-bearer"]
-        | ["api", "auth", "profile", "remove"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates keychain-backed authentication state";
         }
         _ => {}
     }
