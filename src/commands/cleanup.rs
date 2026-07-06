@@ -201,6 +201,57 @@ pub struct CleanupInventoryCategory {
     pub output: Value,
 }
 
+#[derive(Clone, Copy)]
+struct CleanupInventoryCategoryMetadata {
+    category: &'static str,
+    dry_run_command: &'static str,
+    apply_command: &'static str,
+}
+
+impl CleanupInventoryCategoryMetadata {
+    fn specialist_command(self, apply: bool) -> &'static str {
+        if apply {
+            self.apply_command
+        } else {
+            self.dry_run_command
+        }
+    }
+}
+
+const REPO_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "repo_artifacts",
+        dry_run_command: "homeboy cleanup artifacts",
+        apply_command: "homeboy cleanup artifacts --apply",
+    };
+
+const TASK_WORKTREES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "task_worktrees",
+        dry_run_command: "homeboy worktree cleanup --dry-run --cleanup-branches",
+        apply_command: "homeboy worktree cleanup --cleanup-branches",
+    };
+
+const PERSISTED_RUN_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "persisted_run_artifacts",
+        dry_run_command: "homeboy runs artifact cleanup-persisted",
+        apply_command: "homeboy runs artifact cleanup-persisted --apply",
+    };
+
+const RUNNER_DOWNLOADS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "runner_downloads",
+        dry_run_command: "homeboy runs artifact cleanup-downloads",
+        apply_command: "homeboy runs artifact cleanup-downloads --apply",
+    };
+
+const RUNTIME_TMP_METADATA: CleanupInventoryCategoryMetadata = CleanupInventoryCategoryMetadata {
+    category: "runtime_tmp",
+    dry_run_command: "homeboy self cleanup-runtime-tmp",
+    apply_command: "homeboy self cleanup-runtime-tmp --apply",
+};
+
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
@@ -217,12 +268,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             merged_only: false,
         })?;
         categories.push(category_from_output(
-            "repo_artifacts",
-            if apply {
-                "homeboy cleanup artifacts --apply"
-            } else {
-                "homeboy cleanup artifacts"
-            },
+            REPO_ARTIFACTS_METADATA,
+            apply,
             output.candidate_count,
             output.applied_count,
             output.skipped_count,
@@ -277,12 +324,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             run_id: None,
         })?;
         categories.push(category_from_output(
-            "runner_downloads",
-            if apply {
-                "homeboy runs artifact cleanup-downloads --apply"
-            } else {
-                "homeboy runs artifact cleanup-downloads"
-            },
+            RUNNER_DOWNLOADS_METADATA,
+            apply,
             output.file_count + output.directory_count,
             usize::from(output.removed),
             0,
@@ -299,12 +342,8 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
         let output = engine::temp::cleanup_runtime_tmp(apply, 7, None, 1000)?;
         categories.push(category_from_output(
-            "runtime_tmp",
-            if apply {
-                "homeboy self cleanup-runtime-tmp --apply"
-            } else {
-                "homeboy self cleanup-runtime-tmp"
-            },
+            RUNTIME_TMP_METADATA,
+            apply,
             output.planned_count,
             output.removed_count,
             output.skipped_count,
@@ -369,8 +408,30 @@ impl CleanupCategorySelection {
 }
 
 fn category_from_output<T: Serialize>(
+    metadata: CleanupInventoryCategoryMetadata,
+    apply: bool,
+    candidate_count: usize,
+    applied_count: usize,
+    skipped_count: usize,
+    estimated_bytes: u64,
+    reclaimed_bytes: u64,
+    output: T,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    category_from_command(
+        metadata.category,
+        metadata.specialist_command(apply).to_string(),
+        candidate_count,
+        applied_count,
+        skipped_count,
+        estimated_bytes,
+        reclaimed_bytes,
+        output,
+    )
+}
+
+fn category_from_command<T: Serialize>(
     category: &'static str,
-    specialist_command: &str,
+    specialist_command: String,
     candidate_count: usize,
     applied_count: usize,
     skipped_count: usize,
@@ -380,7 +441,7 @@ fn category_from_output<T: Serialize>(
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     Ok(CleanupInventoryCategory {
         category,
-        specialist_command: specialist_command.to_string(),
+        specialist_command,
         included: true,
         skipped: false,
         skip_reason: None,
@@ -400,12 +461,8 @@ fn task_worktrees_category(
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     category_from_output(
-        "task_worktrees",
-        if apply {
-            "homeboy worktree cleanup --cleanup-branches"
-        } else {
-            "homeboy worktree cleanup --dry-run --cleanup-branches"
-        },
+        TASK_WORKTREES_METADATA,
+        apply,
         output.counts.candidates,
         output.counts.removed + output.counts.branches_deleted,
         output.counts.skipped,
@@ -430,13 +487,10 @@ fn persisted_artifacts_category(
         "resource_lifecycle": resources,
     });
     Ok(CleanupInventoryCategory {
-        category: "persisted_run_artifacts",
-        specialist_command: if apply {
-            "homeboy runs artifact cleanup-persisted --apply"
-        } else {
-            "homeboy runs artifact cleanup-persisted"
-        }
-        .to_string(),
+        category: PERSISTED_RUN_ARTIFACTS_METADATA.category,
+        specialist_command: PERSISTED_RUN_ARTIFACTS_METADATA
+            .specialist_command(apply)
+            .to_string(),
         included: true,
         skipped: false,
         skip_reason: None,
@@ -523,9 +577,9 @@ fn remote_workspace_category(
             quote_arg(&output.runner_id)
         )
     };
-    category_from_output(
+    category_from_command(
         "remote_lab_workspaces",
-        &command,
+        command,
         output.total_candidate_count,
         output.removed.len(),
         output.skipped.len(),
@@ -881,6 +935,48 @@ mod tests {
                 CleanupCategorySelection::new(include, exclude).includes(category),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn cleanup_inventory_static_metadata_preserves_specialist_commands() {
+        let cases = [
+            (
+                REPO_ARTIFACTS_METADATA,
+                "repo_artifacts",
+                "homeboy cleanup artifacts",
+                "homeboy cleanup artifacts --apply",
+            ),
+            (
+                TASK_WORKTREES_METADATA,
+                "task_worktrees",
+                "homeboy worktree cleanup --dry-run --cleanup-branches",
+                "homeboy worktree cleanup --cleanup-branches",
+            ),
+            (
+                PERSISTED_RUN_ARTIFACTS_METADATA,
+                "persisted_run_artifacts",
+                "homeboy runs artifact cleanup-persisted",
+                "homeboy runs artifact cleanup-persisted --apply",
+            ),
+            (
+                RUNNER_DOWNLOADS_METADATA,
+                "runner_downloads",
+                "homeboy runs artifact cleanup-downloads",
+                "homeboy runs artifact cleanup-downloads --apply",
+            ),
+            (
+                RUNTIME_TMP_METADATA,
+                "runtime_tmp",
+                "homeboy self cleanup-runtime-tmp",
+                "homeboy self cleanup-runtime-tmp --apply",
+            ),
+        ];
+
+        for (metadata, category, dry_run_command, apply_command) in cases {
+            assert_eq!(metadata.category, category);
+            assert_eq!(metadata.specialist_command(false), dry_run_command);
+            assert_eq!(metadata.specialist_command(true), apply_command);
         }
     }
 
