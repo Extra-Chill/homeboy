@@ -132,6 +132,18 @@ pub(crate) fn command_adapter(
     }
 }
 
+pub(crate) fn output_descriptor(
+    command: &Commands,
+    output_file_mode: CommandOutputFileMode,
+) -> Option<CommandOutputDescriptor> {
+    match command {
+        Commands::Fleet(_) => Some(fleet::adapter(output_file_mode).output_descriptor()),
+        Commands::Observe(_) => Some(observe::adapter(output_file_mode).output_descriptor()),
+        Commands::Contract(_) => Some(contract::adapter(output_file_mode).output_descriptor()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +193,50 @@ mod tests {
             CommandOutputFileMode::None,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn migrated_adapter_output_descriptor_uses_adapter_contract() {
+        let descriptor = output_descriptor(
+            &parsed_command(&["homeboy", "contract", "manifest"]),
+            CommandOutputFileMode::GenericEnvelope,
+        )
+        .expect("contract is adapter-backed");
+
+        assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
+        assert_eq!(
+            descriptor.output_file_mode,
+            CommandOutputFileMode::GenericEnvelope
+        );
+        assert_eq!(
+            descriptor.output_contract,
+            CommandOutputContractKind::JsonEnvelope
+        );
+    }
+
+    #[test]
+    fn migrated_adapter_output_descriptors_match_command_contracts() {
+        let commands = [
+            parsed_command(&["homeboy", "fleet", "list"]),
+            parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
+            parsed_command(&["homeboy", "contract", "manifest"]),
+        ];
+        let output_file_modes = [
+            CommandOutputFileMode::None,
+            CommandOutputFileMode::GenericEnvelope,
+        ];
+
+        for command in commands {
+            for output_file_mode in output_file_modes {
+                let has_output_file = output_file_mode != CommandOutputFileMode::None;
+
+                assert_eq!(
+                    output_descriptor(&command, output_file_mode),
+                    Some(command.output_descriptor(has_output_file))
+                );
+            }
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! returned from [`Commands::descriptor`].
 
 use crate::cli_surface::Commands;
-use crate::commands::{file, fleet, logs, observe, report, review, runner, runtime, trace};
+use crate::commands::{adapter, file, logs, report, review, runner, runtime, trace};
 
 use super::lab::apply_lab_contract_to_descriptor;
 use super::spec::registered_command;
@@ -154,6 +154,10 @@ impl Commands {
             }
         };
 
+        if let Some(descriptor) = adapter::output_descriptor(self, output_file_mode) {
+            return descriptor;
+        }
+
         match self {
             Commands::Ssh(args) if args.subcommand.is_none() && args.command.is_empty() => {
                 raw_ops_descriptor(
@@ -211,12 +215,8 @@ impl Commands {
             ),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
-            Commands::Observe(_) => observe::adapter(output_file_mode).output_descriptor(),
             Commands::Refactor(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
-            Commands::Contract(_) => {
-                crate::commands::contract::adapter(output_file_mode).output_descriptor()
-            }
             Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
@@ -247,7 +247,9 @@ impl Commands {
             | Commands::Api(_)
             | Commands::Upgrade(_)
             | Commands::Ssh(_) => registered_json_envelope_descriptor(self, output_file_mode),
-            Commands::Fleet(_) => fleet::adapter(output_file_mode).output_descriptor(),
+            Commands::Fleet(_) | Commands::Observe(_) | Commands::Contract(_) => {
+                unreachable!("adapter-backed command descriptor returned before legacy routing")
+            }
             Commands::Triage(_) => registered_json_envelope_descriptor(self, output_file_mode),
         }
     }
