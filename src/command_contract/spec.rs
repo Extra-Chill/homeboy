@@ -285,24 +285,6 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
 ];
 
-const LINT_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[LINT_LAB_LABEL],
-    message_label: LINT_LAB_LABEL,
-    hint_label: LINT_LAB_LABEL,
-}];
-
-const TEST_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[TEST_LAB_LABEL],
-    message_label: TEST_LAB_LABEL,
-    hint_label: TEST_LAB_LABEL,
-}];
-
-const AUDIT_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[AUDIT_LAB_LABEL],
-    message_label: AUDIT_LAB_LABEL,
-    hint_label: AUDIT_LAB_LABEL,
-}];
-
 const REVIEW_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
     contract_labels: &[REVIEW_LAB_LABEL],
     message_label: REVIEW_LAB_LABEL,
@@ -405,7 +387,6 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
     "--force-lower-bump",
 ];
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
-const LINT_DANGEROUS_FLAGS: &[&str] = &["--fix", "--force"];
 const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const TRIAGE_DANGEROUS_FLAGS: &[&str] = &["--auto-merge"];

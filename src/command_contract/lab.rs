@@ -1332,39 +1332,6 @@ mod extension_ids {
         ))
     }
 
-    pub(crate) fn test_lab_extension_ids(
-        args: &crate::commands::test::TestArgs,
-    ) -> crate::core::Result<Vec<String>> {
-        let resolve_for = |capability: Option<ExtensionCapability>| {
-            execution_context::resolve(&ResolveOptions {
-                component_id: args.comp.component.clone(),
-                path_override: args.comp.path.clone(),
-                capability,
-                settings_profile_json_overrides: args
-                    .setting_args
-                    .settings_profile_json_overrides()?,
-                settings_overrides: args.setting_args.settings_overrides()?,
-                settings_json_overrides: args.setting_args.settings_json_overrides()?,
-                extension_overrides: args.extension_override.extensions.clone(),
-            })
-        };
-
-        let source_context = resolve_for(None)?;
-
-        if !args.drift
-            && args.ci_job.is_none()
-            && source_context
-                .component
-                .has_script(ExtensionCapability::Test)
-        {
-            return Ok(Vec::new());
-        }
-
-        let context = resolve_for(Some(ExtensionCapability::Test))?;
-
-        Ok(context.extension_id.into_iter().collect())
-    }
-
     pub(crate) fn review_lab_extension_ids(
         args: &crate::commands::review::ReviewArgs,
     ) -> crate::core::Result<Vec<String>> {
