@@ -114,24 +114,33 @@ pub(crate) fn row_to_artifact_record_at(
     row: &rusqlite::Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<ArtifactRecord> {
+    let artifact_type: String = row.get(offset + 3)?;
+    let path: String = row.get(offset + 4)?;
+    let metadata_json = parse_metadata(row.get(offset + 8)?)?;
+    let metadata_url = |key: &str| {
+        metadata_json
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+    };
     Ok(ArtifactRecord {
         id: row.get(offset)?,
         run_id: row.get(offset + 1)?,
         kind: row.get(offset + 2)?,
-        artifact_type: row.get(offset + 3)?,
-        path: row.get(offset + 4)?,
-        url: if row.get_ref(offset + 3)?.as_str()? == "url" {
-            Some(row.get(offset + 4)?)
+        artifact_type: artifact_type.clone(),
+        path: path.clone(),
+        url: if artifact_type == "url" {
+            Some(path.clone())
         } else {
-            None
+            metadata_url("url")
         },
-        public_url: None,
-        viewer_url: None,
+        public_url: metadata_url("public_url"),
+        viewer_url: metadata_url("viewer_url"),
         viewer_links: Vec::new(),
         sha256: row.get(offset + 5)?,
         size_bytes: row.get(offset + 6)?,
         mime: row.get(offset + 7)?,
-        metadata_json: parse_metadata(row.get(offset + 8)?)?,
+        metadata_json,
         created_at: row.get(offset + 9)?,
     })
 }

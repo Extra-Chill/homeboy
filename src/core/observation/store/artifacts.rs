@@ -9,6 +9,7 @@ use super::*;
 
 impl ObservationStore {
     pub fn import_artifact(&self, artifact: &ArtifactRecord) -> Result<()> {
+        let artifact = artifact_with_link_metadata(artifact);
         validate_required("artifact.id", &artifact.id)?;
         if self.get_run(&artifact.run_id)?.is_none() {
             return Err(Error::validation_invalid_argument(
@@ -19,9 +20,9 @@ impl ObservationStore {
             ));
         }
         if let Some(existing) = self.get_artifact(&artifact.id)? {
-            return ensure_identical("artifact", &artifact.id, &existing, artifact);
+            return ensure_identical("artifact", &artifact.id, &existing, &artifact);
         }
-        let metadata_json = serialize_metadata(&metadata_with_imported_public_url(artifact))?;
+        let metadata_json = serialize_metadata(&artifact.metadata_json)?;
         execute_with_retry("import artifact record", || {
             self.connection.execute(
                 r#"
@@ -791,24 +792,27 @@ impl ObservationStore {
     }
 }
 
-fn metadata_with_imported_public_url(artifact: &ArtifactRecord) -> serde_json::Value {
-    let Some(public_url) = artifact
-        .public_url
-        .as_deref()
-        .or(artifact.url.as_deref())
-        .and_then(crate::core::artifact_address::validated_public_url)
-    else {
-        return artifact.metadata_json.clone();
-    };
-
-    let mut metadata = artifact.metadata_json.clone();
-    if !metadata.is_object() {
-        metadata = serde_json::json!({});
+fn artifact_with_link_metadata(artifact: &ArtifactRecord) -> ArtifactRecord {
+    let mut artifact = artifact.clone();
+    if artifact.metadata_json.is_null() {
+        artifact.metadata_json = serde_json::json!({});
     }
-    if let Some(object) = metadata.as_object_mut() {
-        object
-            .entry("public_url".to_string())
-            .or_insert_with(|| serde_json::Value::String(public_url));
+    if let Some(metadata) = artifact.metadata_json.as_object_mut() {
+        if let Some(url) = artifact.url.as_ref() {
+            metadata
+                .entry("url".to_string())
+                .or_insert_with(|| serde_json::Value::String(url.clone()));
+        }
+        if let Some(public_url) = artifact.public_url.as_ref() {
+            metadata
+                .entry("public_url".to_string())
+                .or_insert_with(|| serde_json::Value::String(public_url.clone()));
+        }
+        if let Some(viewer_url) = artifact.viewer_url.as_ref() {
+            metadata
+                .entry("viewer_url".to_string())
+                .or_insert_with(|| serde_json::Value::String(viewer_url.clone()));
+        }
     }
-    metadata
+    artifact
 }

@@ -257,20 +257,7 @@ pub fn resolve_with_component(
     let (extension_id, extension_path, settings, accepted_setting_keys) =
         if let Some(capability) = options.capability {
             if component.has_script(capability) {
-                let mut settings = Vec::new();
-                for (key, value) in &options.settings_profile_json_overrides {
-                    settings.retain(|(k, _)| k != key);
-                    settings.push((key.clone(), value.clone()));
-                }
-                for (key, value) in &options.settings_overrides {
-                    settings.retain(|(k, _)| k != key);
-                    settings.push((key.clone(), serde_json::Value::String(value.clone())));
-                }
-                for (key, value) in &options.settings_json_overrides {
-                    settings.retain(|(k, _)| k != key);
-                    settings.push((key.clone(), value.clone()));
-                }
-
+                let settings = no_extension_settings(options);
                 (None, None, settings, Vec::new())
             } else {
                 let ext_context = extension::resolve_execution_context(&component, capability)
@@ -312,18 +299,7 @@ pub fn resolve_with_component(
             }
         } else {
             // No extension context — only CLI overrides, wrapped as JSON strings.
-            let mut settings = Vec::new();
-            for (key, value) in &options.settings_profile_json_overrides {
-                settings.retain(|(k, _)| k != key);
-                settings.push((key.clone(), value.clone()));
-            }
-            for (key, value) in &options.settings_overrides {
-                merge_string_setting_override(&mut settings, key, value);
-            }
-            for (key, value) in &options.settings_json_overrides {
-                settings.retain(|(k, _)| k != key);
-                settings.push((key.clone(), value.clone()));
-            }
+            let settings = no_extension_settings(options);
             (None, None, settings, Vec::new())
         };
 
@@ -337,6 +313,22 @@ pub fn resolve_with_component(
         settings,
         accepted_setting_keys,
     })
+}
+
+fn no_extension_settings(options: &ResolveOptions) -> Vec<(String, serde_json::Value)> {
+    let mut settings = Vec::new();
+    for (key, value) in &options.settings_profile_json_overrides {
+        settings.retain(|(k, _)| k != key);
+        settings.push((key.clone(), value.clone()));
+    }
+    for (key, value) in &options.settings_overrides {
+        merge_string_setting_override(&mut settings, key, value);
+    }
+    for (key, value) in &options.settings_json_overrides {
+        settings.retain(|(k, _)| k != key);
+        settings.push((key.clone(), value.clone()));
+    }
+    settings
 }
 
 fn merge_string_setting_override(
@@ -560,6 +552,7 @@ impl<'a> ResolvedSettings<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::component::ComponentScriptsConfig;
     use crate::test_support::with_isolated_home;
     use std::fs;
     use std::process::Command;
@@ -703,6 +696,35 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "marker" && value == "in-memory"));
         });
+    }
+
+    #[test]
+    fn resolve_with_component_uses_component_script_without_extension_provider() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        fs::create_dir_all(root).expect("create dir");
+        let component = Component {
+            id: "script-owned".to_string(),
+            local_path: root.to_string_lossy().to_string(),
+            scripts: Some(ComponentScriptsConfig {
+                fuzz: vec!["node fuzz-runner.mjs".to_string()],
+                ..ComponentScriptsConfig::default()
+            }),
+            ..Component::default()
+        };
+        let options = ResolveOptions::with_capability(
+            "script-owned",
+            None,
+            ExtensionCapability::Fuzz,
+            Vec::new(),
+        );
+
+        let ctx = resolve_with_component(&options, Some(component))
+            .expect("component scripts should satisfy fuzz context");
+
+        assert_eq!(ctx.component_id, "script-owned");
+        assert!(ctx.extension_id.is_none());
+        assert!(ctx.extension_path.is_none());
     }
 
     #[test]

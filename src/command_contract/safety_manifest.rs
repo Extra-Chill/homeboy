@@ -365,7 +365,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "replays or minimizes a persisted fuzz case against local code and may write run artifacts";
         }
         ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] | ["fuzz", "run-campaign"] => {
-            metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive requires explicit disposable homeboy/isolation-proof/v1 input";
+            metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied";
             metadata.dangerous_flags = vec!["--allow-destructive"];
         }
         ["rig", "release-lock"] => {
