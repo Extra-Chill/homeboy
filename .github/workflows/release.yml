@@ -61,6 +61,8 @@ jobs:
       should-release: ${{ steps.check.outputs.should-release }}
       bump-type: ${{ steps.check.outputs['release-bump-type'] }}
       recovery-release: ${{ steps.check.outputs.recovery-release }}
+      release-version: ${{ steps.check.outputs['release-version'] }}
+      release-tag: ${{ steps.check.outputs['release-tag'] }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,6 +134,7 @@ jobs:
           HEAD_SHA="$(git rev-parse HEAD)"
           RECOVERY_TAG="${{ steps.recovery.outputs['release-tag'] }}"
           RELEASE_VERSION="${{ steps.recovery.outputs['release-version'] || steps.release-check.outputs['release-version'] }}"
+          RELEASE_TAG="${{ steps.recovery.outputs['release-tag'] || steps.release-check.outputs['release-tag'] }}"
           BUMP_TYPE="${{ steps.recovery.outputs['release-bump-type'] || steps.release-check.outputs['release-bump-type'] }}"
 
           if [ "${{ steps.failed-release.outputs.blocked }}" = "true" ]; then
@@ -139,6 +142,8 @@ jobs:
           elif [ -n "${RECOVERY_TAG}" ]; then
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
+            echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "release-tag=${RECOVERY_TAG}" >> "$GITHUB_OUTPUT"
             echo "recovery-release=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Release recovery will publish ${RECOVERY_TAG}"
           elif [ -z "${RELEASE_VERSION}" ]; then
@@ -147,9 +152,11 @@ jobs:
           else
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
+            echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "release-tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
             if [ "${BUMP_TYPE}" = "recovery" ]; then
               echo "recovery-release=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::Recovered prepared release tag; bypassing quality gates and publishing artifacts"
+              echo "::notice::Recovered prepared release tag ${RELEASE_TAG}; bypassing quality gates and publishing artifacts"
             else
               echo "recovery-release=false" >> "$GITHUB_OUTPUT"
             fi
@@ -509,7 +516,7 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v2
         id: release
-        if: inputs.release_tag == ''
+        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         with:
           source: '.'
           commands: release
@@ -522,17 +529,20 @@ jobs:
 
       - name: Mark prepared release for downstream publish
         id: prepared
-        if: inputs.release_tag == '' && steps.release.outputs['release-tag'] != ''
+        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true' && steps.release.outputs['release-tag'] != ''
         run: |
           echo "prepared=true" >> "$GITHUB_OUTPUT"
           echo "::notice::Prepared ${{ steps.release.outputs['release-tag'] }}; downstream jobs will publish it in this run"
 
       - name: Use existing release tag
         id: recovery
-        if: inputs.release_tag != ''
+        if: inputs.release_tag != '' || needs.check.outputs.recovery-release == 'true'
         run: |
-          TAG="${{ inputs.release_tag }}"
-          VERSION="${TAG#v}"
+          TAG="${{ inputs.release_tag || needs.check.outputs['release-tag'] }}"
+          VERSION="${{ needs.check.outputs['release-version'] }}"
+          if [ -z "${VERSION}" ]; then
+            VERSION="${TAG#v}"
+          fi
 
           echo "release-version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "release-tag=${TAG}" >> "$GITHUB_OUTPUT"

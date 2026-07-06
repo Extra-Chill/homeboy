@@ -8,12 +8,10 @@ use super::types::{
     ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan, ReleaseOptions, ReleasePlan,
     ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
 };
-use super::workflow_recover::run_recover;
+use super::workflow_recover::{recovery_release_plan, run_recover};
 
 #[cfg(test)]
-use super::workflow_recover::{
-    diagnose_orphan_tag, reconcile_release_branch, recovery_release_plan,
-};
+use super::workflow_recover::{diagnose_orphan_tag, reconcile_release_branch};
 
 /// Process exit code returned when a release is intentionally skipped (no tag,
 /// no package, no GitHub Release produced).
@@ -177,6 +175,16 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     };
 
     if options.dry_run {
+        if let Some(result) = prepared_tag_publish_recovery_result(
+            &input,
+            &component,
+            &release_scope,
+            &execution,
+            &bump_type,
+        )? {
+            return Ok((result, 0));
+        }
+
         let early_plan = super::plan(&input.component_id, &options).ok();
         let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
 
@@ -335,6 +343,81 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         },
         exit_code,
     ))
+}
+
+fn prepared_tag_publish_recovery_result(
+    input: &ReleaseCommandInput,
+    component: &crate::core::component::Component,
+    release_scope: &ReleaseScope,
+    execution: &ReleaseExecutionPlan,
+    bump_type: &str,
+) -> Result<Option<ReleaseCommandResult>> {
+    if input.pipeline.head {
+        return Ok(None);
+    }
+
+    let Some(current_version) = current_component_version(component)? else {
+        return Ok(None);
+    };
+    let tag = release_scope.tag_name(&current_version);
+
+    if !crate::core::git::tag_exists_locally(&release_scope.git_root, &tag)? {
+        return Ok(None);
+    }
+    let tag_commit = crate::core::git::get_tag_commit(&release_scope.git_root, &tag)?;
+    let head_commit = crate::core::git::get_head_commit(&release_scope.git_root)?;
+    if tag_commit != head_commit {
+        return Ok(None);
+    }
+
+    Ok(prepared_tag_publish_recovery_decision(
+        input,
+        &current_version,
+        &tag,
+        execution,
+        bump_type,
+        super::executor::github_release_exists_for_tag(component, &tag),
+    ))
+}
+
+fn prepared_tag_publish_recovery_decision(
+    input: &ReleaseCommandInput,
+    current_version: &str,
+    tag: &str,
+    execution: &ReleaseExecutionPlan,
+    _bump_type: &str,
+    github_release_exists: Option<bool>,
+) -> Option<ReleaseCommandResult> {
+    match github_release_exists {
+        Some(false) => Some(ReleaseCommandResult {
+            phase: execution.phase,
+            component_id: input.component_id.clone(),
+            status: "planned".to_string(),
+            bump_type: "recovery".to_string(),
+            dry_run: true,
+            releasable_commits: 0,
+            new_version: Some(current_version.to_string()),
+            tag: Some(tag.to_string()),
+            skipped_reason: None,
+            plan: Some(recovery_release_plan(
+                &input.component_id,
+                current_version,
+                tag,
+                false,
+                false,
+                false,
+                &[format!(
+                    "Prepared tag {tag} exists at HEAD but has no GitHub Release; publish artifacts for the existing tag"
+                )],
+            )),
+            run: None,
+            deployment: None,
+            release_summary: vec![format!(
+                "Prepared tag {tag} exists at HEAD; GitHub Release is missing and should be published"
+            )],
+        }),
+        Some(true) | None => None,
+    }
 }
 
 fn run_dry_run_preflights(
@@ -1189,6 +1272,71 @@ mod tests {
 
         input.recover = true;
         assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Recover);
+    }
+
+    #[test]
+    fn prepared_tag_without_github_release_plans_publish_recovery() {
+        let input = ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let execution = release_execution_plan(&input);
+
+        let result = prepared_tag_publish_recovery_decision(
+            &input,
+            "1.2.3",
+            "v1.2.3",
+            &execution,
+            "none",
+            Some(false),
+        )
+        .expect("missing GitHub Release should publish existing tag");
+
+        assert_eq!(result.status, "planned");
+        assert_eq!(result.bump_type, "recovery");
+        assert_eq!(result.new_version.as_deref(), Some("1.2.3"));
+        assert_eq!(result.tag.as_deref(), Some("v1.2.3"));
+        assert!(result.skipped_reason.is_none());
+        assert!(result
+            .release_summary
+            .iter()
+            .any(|line| line.contains("GitHub Release is missing")));
+    }
+
+    #[test]
+    fn prepared_tag_with_github_release_is_noop() {
+        let input = ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let execution = release_execution_plan(&input);
+
+        assert!(prepared_tag_publish_recovery_decision(
+            &input,
+            "1.2.3",
+            "v1.2.3",
+            &execution,
+            "none",
+            Some(true),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn prepared_tag_unknown_github_release_state_is_conservative_noop() {
+        let input = ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let execution = release_execution_plan(&input);
+
+        assert!(prepared_tag_publish_recovery_decision(
+            &input, "1.2.3", "v1.2.3", &execution, "none", None,
+        )
+        .is_none());
     }
 
     #[test]
