@@ -25,7 +25,7 @@ pub(super) fn build_initial_preflight_plan(
     if let Some(tag_step) = early_tag_availability_step(options, false) {
         let insert_at = steps
             .iter()
-            .position(|step| step.id == "preflight.lint")
+            .position(|step| step.id == "preflight.dependencies")
             .unwrap_or(steps.len());
         steps.insert(insert_at, tag_step);
     }
@@ -56,6 +56,7 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
         "preflight.working_tree",
         "preflight.remote_sync",
         "preflight.tag_availability",
+        "preflight.dependencies",
         "preflight.lint",
         "preflight.test",
         "preflight.changelog_bootstrap",
@@ -328,6 +329,7 @@ mod tests {
                 "preflight.working_tree",
                 "preflight.remote_sync",
                 "preflight.tag_availability",
+                "preflight.dependencies",
                 "preflight.lint",
                 "preflight.test",
                 "preflight.changelog_bootstrap",
@@ -362,6 +364,27 @@ mod tests {
     }
 
     #[test]
+    fn initial_preflight_plan_hydrates_dependencies_before_lint() {
+        let options = ReleaseOptions {
+            bump_type: "none".to_string(),
+            ..Default::default()
+        };
+        let plan = super::build_initial_preflight_plan("fixture", &options);
+        let steps = plan.plan.steps;
+        let deps = steps
+            .iter()
+            .position(|step| step.id == "preflight.dependencies")
+            .expect("dependency preflight");
+        let lint = steps
+            .iter()
+            .position(|step| step.id == "preflight.lint")
+            .expect("lint preflight");
+
+        assert!(deps < lint, "dependencies must hydrate before lint runs");
+        assert_eq!(steps[lint].needs, vec!["preflight.dependencies"]);
+    }
+
+    #[test]
     fn test_build_initial_preflight_plan() {
         let options = ReleaseOptions {
             bump_type: "none".to_string(),
@@ -386,6 +409,7 @@ mod tests {
                 "preflight.git_identity",
                 "preflight.working_tree",
                 "preflight.remote_sync",
+                "preflight.dependencies",
                 "preflight.lint",
                 "preflight.test",
                 "preflight.changelog_bootstrap",

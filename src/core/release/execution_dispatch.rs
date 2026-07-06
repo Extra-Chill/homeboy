@@ -33,6 +33,7 @@ pub(super) fn execute_release_plan_step(
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
         "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
+        "preflight.dependencies" => Ok(Some(run_dependencies_preflight(step, context))),
         "preflight.lint" => Ok(Some(run_lint_preflight(step, context))),
         "preflight.test" => Ok(Some(run_test_preflight(step, context))),
         "preflight.changelog_bootstrap" => {
@@ -220,6 +221,7 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.working_tree"
         && step.kind != "preflight.remote_sync"
         && step.kind != "preflight.bump_policy"
+        && step.kind != "preflight.dependencies"
         && step.kind != "preflight.lint"
         && step.kind != "preflight.test"
         && step.kind != "preflight.changelog_bootstrap"
@@ -376,6 +378,39 @@ fn run_bump_policy_preflight(step: &PlanStep) -> ReleaseStepResult {
     }
 }
 
+fn run_dependencies_preflight(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+) -> ReleaseStepResult {
+    let component_path = std::path::Path::new(&context.component.local_path);
+    match crate::core::deps::install_for_resolved(context.component, component_path) {
+        Ok(Some(result)) => ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Success,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: Some(serde_json::json!({
+                "ran": !result.installs.is_empty(),
+                "dependencies": result,
+            })),
+            error: None,
+        },
+        Ok(None) => ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Success,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: Some(serde_json::json!({ "ran": false })),
+            error: None,
+        },
+        Err(err) => failed_result(&step.id, &step.kind, err),
+    }
+}
+
 fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> ReleaseStepResult {
     use super::planning_quality::LintQualityOutcome;
 
@@ -482,6 +517,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "preflight.working_tree"
             | "preflight.remote_sync"
             | "preflight.bump_policy"
+            | "preflight.dependencies"
             | "preflight.lint"
             | "preflight.test"
             | "preflight.changelog_bootstrap"
@@ -568,7 +604,12 @@ fn guard_step_dirty_side_effects(
 fn release_step_dirty_side_effects_are_guarded(step: &PlanStep) -> bool {
     matches!(
         step.kind.as_str(),
-        "preflight.lint" | "preflight.test" | "preflight.package" | "release.prepare" | "package"
+        "preflight.dependencies"
+            | "preflight.lint"
+            | "preflight.test"
+            | "preflight.package"
+            | "release.prepare"
+            | "package"
     )
 }
 
@@ -701,6 +742,9 @@ mod tests {
             "preflight.bump_policy"
         )));
         assert!(!release_step_is_plan_only(&plan_step(
+            "preflight.dependencies"
+        )));
+        assert!(!release_step_is_plan_only(&plan_step(
             "preflight.extension.registry.publish_token"
         )));
         assert!(!release_step_is_plan_only(&plan_step("preflight.lint")));
@@ -711,6 +755,56 @@ mod tests {
         assert!(!release_step_is_plan_only(&plan_step("preflight.package")));
         assert!(!release_step_is_plan_only(&plan_step("changelog.finalize")));
         assert!(!release_step_is_plan_only(&plan_step("deploy")));
+    }
+
+    #[test]
+    fn dependency_preflight_hydrates_before_lint_self_check() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("homeboy-deps.json"),
+            r#"{
+                "provider": "fixture",
+                "commands": {
+                    "install": {
+                        "argv": [
+                            "sh",
+                            "-c",
+                            "mkdir -p node_modules/typescript/bin && touch node_modules/typescript/bin/tsc"
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .expect("write deps manifest");
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            scripts: Some(ComponentScriptsConfig {
+                lint: vec!["test -f node_modules/typescript/bin/tsc".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let deps = execute_release_plan_step(&plan_step("preflight.dependencies"), &mut context)
+            .expect("dependency dispatch")
+            .expect("dependency result");
+        assert_eq!(deps.status, ReleaseStepStatus::Success);
+
+        let lint = execute_release_plan_step(&plan_step("preflight.lint"), &mut context)
+            .expect("lint dispatch")
+            .expect("lint result");
+        assert_eq!(lint.status, ReleaseStepStatus::Success);
     }
 
     #[test]
