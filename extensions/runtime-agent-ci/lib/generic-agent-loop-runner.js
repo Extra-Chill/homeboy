@@ -480,7 +480,7 @@ function persistRuntimeInvocationStderr(content, options = {}) {
     return null;
   }
   const taskId = options.request?.task_id || options.plan?.workload_id || options.plan?.task_id || 'runtime-agent-task';
-  const filePath = runtimeAgentArtifactPaths({ ...options, stderrFile: options.stderrFile || options.stderr_file }).stderr || path.join(artifactDir, `${safeFileSegment(taskId)}-runtime-stderr.txt`);
+  const filePath = runtimeAgentArtifactPaths(options).stderr || path.join(artifactDir, `${safeFileSegment(taskId)}-runtime-stderr.txt`);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
   return {

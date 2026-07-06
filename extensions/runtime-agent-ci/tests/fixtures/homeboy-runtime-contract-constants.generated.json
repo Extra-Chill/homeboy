@@ -21,6 +21,9 @@
       "runner_execution_record": {
         "schema_id": "homeboy/runner-execution-record/v1"
       },
+      "path_materialization_plan": {
+        "schema_id": "homeboy/path-materialization-plan/v1"
+      },
       "secret_env_plan": {
         "schema_id": "homeboy/secret-env-plan/v1"
       }

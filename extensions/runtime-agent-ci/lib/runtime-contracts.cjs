@@ -10,6 +10,7 @@ const REQUIRED_RUNTIME_CONTRACT_FIELDS = Object.freeze({
   artifact_paths: Object.freeze(['schema_id']),
   runner_artifact_manifest_ref: Object.freeze(['schema_id']),
   runner_execution_record: Object.freeze(['schema_id']),
+  path_materialization_plan: Object.freeze(['schema_id']),
   run_outcome_envelope: Object.freeze(['schema_id']),
 });
 

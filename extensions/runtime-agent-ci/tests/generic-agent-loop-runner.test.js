@@ -324,7 +324,8 @@ process.stdout.write(JSON.stringify({
           },
         },
       },
-      plan: { ...plan, workload_id: 'manifest-noisy', artifacts_path: noisyArtifactsDir },
+      plan: { ...plan, workload_id: 'manifest-noisy' },
+      artifact_paths: { run_dir: noisyArtifactsDir },
       validationPolicy: { success_completion_outcomes: ['done'] },
       stderrMaxBytes: 256,
     });
@@ -369,6 +370,7 @@ process.stdout.write(JSON.stringify({
   assert.equal(sharedEnvelope.outcome.task_id, 'shared-artifact-paths');
   assert.equal(sharedEnvelope.results.scenarios[0].id, 'shared-artifact-paths');
   assert.equal(sharedEnvelope.artifact_manifest.manifest_schema, ARTIFACT_MANIFEST_SCHEMA);
+  assert.equal(sharedEnvelope.artifact_manifest.path, path.join(sharedArtifactDir, ARTIFACT_MANIFEST_FILE));
   const sharedManifest = JSON.parse(fs.readFileSync(path.join(sharedArtifactDir, ARTIFACT_MANIFEST_FILE), 'utf8'));
   assert.equal(sharedManifest.schema, ARTIFACT_MANIFEST_SCHEMA);
   assert.deepEqual(sharedManifest.artifacts.map((artifact) => artifact.path).sort(), [
@@ -377,6 +379,12 @@ process.stdout.write(JSON.stringify({
     'run-outcome-envelope.json',
     'shared-artifact-paths-runtime-stderr.txt',
     'status.json',
+  ]);
+  assert.deepEqual(sharedManifest.artifacts.map((artifact) => artifact.semantic_key).filter(Boolean).sort(), [
+    'outcome',
+    'results',
+    'run_outcome_envelope',
+    'status',
   ]);
   assert.equal(sharedManifest.artifacts.every((artifact) => !path.isAbsolute(artifact.path)), true);
 

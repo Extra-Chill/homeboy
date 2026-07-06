@@ -85,6 +85,33 @@ const singleContractShape = probeHomeboyContractSurface({
 assert.equal(singleContractShape.status, 'passed');
 assert.deepEqual(singleContractShape.argv, ['contract', 'constants', 'artifact-manifest']);
 
+const missingPathMaterializationPlan = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: {
+        constants: {
+          artifact_manifest: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_manifest,
+          secret_env_plan: CORE_PUBLISHED_CONTRACT_CONSTANTS.secret_env_plan,
+          run_location_index: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_location_index,
+          artifact_paths: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_paths,
+          runner_artifact_manifest_ref: CORE_PUBLISHED_CONTRACT_CONSTANTS.runner_artifact_manifest_ref,
+          runner_execution_record: CORE_PUBLISHED_CONTRACT_CONSTANTS.runner_execution_record,
+          run_outcome_envelope: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_outcome_envelope,
+        },
+        contract_id: 'all',
+        schema: 'homeboy/contract-constants/v1',
+      },
+    }),
+    stderr: '',
+  }),
+});
+
+assert.equal(missingPathMaterializationPlan.status, 'failed');
+assert.match(missingPathMaterializationPlan.message, /path_materialization_plan\.schema_id is missing/);
+
 const drift = probeHomeboyContractSurface({
   homeboyCommand: 'homeboy',
   spawnSync: () => ({

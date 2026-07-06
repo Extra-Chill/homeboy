@@ -667,6 +667,7 @@ jobs:
             ${{ runner.temp }}/runtime-agent-run/events.json
             ${{ runner.temp }}/runtime-agent-run/run-outcome-envelope.json
             ${{ runner.temp }}/runtime-agent-run/runner-execution-record.json
+            ${{ runner.temp }}/runtime-agent-run/homeboy-artifact-manifest.json
             ${{ runner.temp }}/runtime-agent-run/loop-result.json
             ${{ runner.temp }}/runtime-agent-run/loop-policy.json
             ${{ runner.temp }}/runtime-agent-run/*-runtime-stderr.txt

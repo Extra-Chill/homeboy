@@ -384,9 +384,11 @@ try {
   const loopResultFile = path.join(tmpRoot, 'loop-result.json');
   writeHeadlessDeterministicLoopArtifacts({
     result: twoRevolution,
-    loopPolicyFile,
-    statusFile,
-    loopResultFile,
+    artifact_paths: {
+      loop_policy: loopPolicyFile,
+      status: statusFile,
+      loop_result: loopResultFile,
+    },
   });
   const loopPolicyArtifact = JSON.parse(fs.readFileSync(loopPolicyFile, 'utf8'));
   const statusArtifact = JSON.parse(fs.readFileSync(statusFile, 'utf8'));

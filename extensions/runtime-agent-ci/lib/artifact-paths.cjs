@@ -13,36 +13,24 @@ function runtimeAgentArtifactPaths(options = {}) {
   const provided = options.artifact_paths && typeof options.artifact_paths === 'object' && !Array.isArray(options.artifact_paths) ? options.artifact_paths : {};
   const runDir = firstString(
     provided.run_dir,
-    provided.runDir,
-    options.runDir,
     options.run_dir,
-    options.artifactsDir,
-    options.artifacts_dir,
-    options.artifactsPath,
-    options.artifacts_path,
-    options.plan?.artifacts_path,
-    options.plan?.artifacts,
     options.env?.HOMEBOY_RUNTIME_AGENT_RUN_DIR,
-    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
-    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS,
     process.env.HOMEBOY_RUNTIME_AGENT_RUN_DIR,
-    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
-    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS
   );
   return stripUndefined({
     schema: ARTIFACT_PATHS_SCHEMA,
     run_dir: runDir,
-    events: firstString(provided.events, options.eventsFile, options.events_file, options.env?.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, runArtifactPath(runDir, 'events')),
-    status: firstString(provided.status, options.statusFile, options.status_file, options.env?.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, runArtifactPath(runDir, 'status')),
-    results: firstString(provided.results, options.resultsFile, options.results_file, options.env?.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, runArtifactPath(runDir, 'results')),
-    outcome: firstString(provided.outcome, options.outcomeFile, options.outcome_file, options.env?.HOMEBOY_AGENT_TASK_OUTCOME_FILE, process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE, runArtifactPath(runDir, 'outcome')),
-    run_outcome_envelope: firstString(provided.run_outcome_envelope, provided.runOutcomeEnvelope, options.runOutcomeEnvelopeFile, options.run_outcome_envelope_file, options.env?.HOMEBOY_RUNTIME_AGENT_RUN_OUTCOME_ENVELOPE_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RUN_OUTCOME_ENVELOPE_FILE, runArtifactPath(runDir, 'run_outcome_envelope')),
-    runner_execution_record: firstString(provided.runner_execution_record, provided.runnerExecutionRecord, options.runnerExecutionRecordFile, options.runner_execution_record_file, options.env?.HOMEBOY_RUNTIME_AGENT_RUNNER_EXECUTION_RECORD_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RUNNER_EXECUTION_RECORD_FILE, runArtifactPath(runDir, 'runner_execution_record')),
-    stderr: firstString(provided.stderr, options.stderrFile, options.stderr_file, options.env?.HOMEBOY_RUNTIME_AGENT_STDERR_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STDERR_FILE),
-    fanout_run: firstString(provided.fanout_run, provided.fanoutRun, options.fanoutRunFile, options.fanout_run_file, options.runsOutputPath, options.runs_output_path, options.env?.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, process.env.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, runArtifactPath(runDir, 'fanout_run')),
-    loop_result: firstString(provided.loop_result, provided.loopResult, options.loopResultFile, options.loop_result_file, options.resultFile, options.result_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, runArtifactPath(runDir, 'loop_result')),
-    loop_policy: firstString(provided.loop_policy, provided.loopPolicy, options.loopPolicyFile, options.loop_policy_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, runArtifactPath(runDir, 'loop_policy')),
-    artifact_manifest: firstString(provided.artifact_manifest, provided.artifactManifest, options.artifactManifestFile, options.artifact_manifest_file, options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, runDir ? path.join(runDir, ARTIFACT_MANIFEST_FILE) : ''),
+    events: firstString(provided.events, options.events_file, options.env?.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_EVENTS_FILE, runArtifactPath(runDir, 'events')),
+    status: firstString(provided.status, options.status_file, options.env?.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STATUS_FILE, runArtifactPath(runDir, 'status')),
+    results: firstString(provided.results, options.results_file, options.env?.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE, runArtifactPath(runDir, 'results')),
+    outcome: firstString(provided.outcome, options.outcome_file, options.env?.HOMEBOY_AGENT_TASK_OUTCOME_FILE, process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE, runArtifactPath(runDir, 'outcome')),
+    run_outcome_envelope: firstString(provided.run_outcome_envelope, options.run_outcome_envelope_file, options.env?.HOMEBOY_RUNTIME_AGENT_RUN_OUTCOME_ENVELOPE_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RUN_OUTCOME_ENVELOPE_FILE, runArtifactPath(runDir, 'run_outcome_envelope')),
+    runner_execution_record: firstString(provided.runner_execution_record, options.runner_execution_record_file, options.env?.HOMEBOY_RUNTIME_AGENT_RUNNER_EXECUTION_RECORD_FILE, process.env.HOMEBOY_RUNTIME_AGENT_RUNNER_EXECUTION_RECORD_FILE, runArtifactPath(runDir, 'runner_execution_record')),
+    stderr: firstString(provided.stderr, options.stderr_file, options.env?.HOMEBOY_RUNTIME_AGENT_STDERR_FILE, process.env.HOMEBOY_RUNTIME_AGENT_STDERR_FILE),
+    fanout_run: firstString(provided.fanout_run, options.fanout_run_file, options.env?.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, process.env.HOMEBOY_RUNTIME_AGENT_FANOUT_RUN_FILE, runArtifactPath(runDir, 'fanout_run')),
+    loop_result: firstString(provided.loop_result, options.loop_result_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE, runArtifactPath(runDir, 'loop_result')),
+    loop_policy: firstString(provided.loop_policy, options.loop_policy_file, options.env?.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, process.env.HOMEBOY_RUNTIME_AGENT_LOOP_POLICY_FILE, runArtifactPath(runDir, 'loop_policy')),
+    artifact_manifest: firstString(provided.artifact_manifest, options.artifact_manifest_file, options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACT_MANIFEST_FILE, runDir ? path.join(runDir, ARTIFACT_MANIFEST_FILE) : ''),
   });
 }
 
@@ -60,7 +48,7 @@ function artifactManifestForFiles(artifactPaths = {}, files = []) {
   return {
     schema: ARTIFACT_MANIFEST_SCHEMA,
     artifacts: normalizeManifestFiles(files)
-      .map((file) => manifestEntryForFile(root, file))
+      .map((file) => manifestEntryForFile(root, file, artifactPaths))
       .filter(Boolean),
   };
 }
@@ -71,24 +59,38 @@ function normalizeManifestFiles(files) {
     .filter((file) => file && typeof file === 'object' && typeof file.path === 'string' && file.path.trim() !== '');
 }
 
-function manifestEntryForFile(root, file) {
+function manifestEntryForFile(root, file, artifactPaths = {}) {
   const relative = relativeArtifactPath(root, file.path);
   if (!relative) {
     return null;
   }
+  const semanticKey = firstString(file.semantic_key, file.semanticKey, canonicalSemanticKeyForPath(artifactPaths, file.path));
   return stripUndefined({
     id: firstString(file.id, file.name, file.role, path.basename(relative)),
     path: relative,
     kind: firstString(file.kind, file.type, 'file'),
     role: firstString(file.role),
     label: firstString(file.label, file.name),
-    semantic_key: firstString(file.semantic_key, file.semanticKey),
+    semantic_key: semanticKey,
     content_type: firstString(file.content_type, file.contentType),
     public_url: firstString(file.public_url, file.publicUrl),
     size_bytes: Number.isFinite(file.size_bytes) ? file.size_bytes : Number.isFinite(file.bytes) ? file.bytes : undefined,
     sha256: firstString(file.sha256),
     metadata: file.metadata && typeof file.metadata === 'object' && !Array.isArray(file.metadata) ? file.metadata : {},
   });
+}
+
+function canonicalSemanticKeyForPath(artifactPaths, filePath) {
+  const absolute = path.resolve(filePath);
+  for (const [key, value] of Object.entries(artifactPaths || {})) {
+    if (key === 'schema' || key === 'run_dir' || typeof value !== 'string' || value.trim() === '') {
+      continue;
+    }
+    if (path.resolve(value) === absolute) {
+      return key;
+    }
+  }
+  return '';
 }
 
 function relativeArtifactPath(root, filePath) {
