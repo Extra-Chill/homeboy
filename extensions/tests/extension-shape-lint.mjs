@@ -18,6 +18,8 @@ const rootManifest = readJson(path.join(rootDir, 'homeboy-extension-root.json'))
 const allowedTopLevelDirs = new Set([
   '.git',
   '.github',
+  '.claude',
+  '.datamachine',
   'agent-runtimes',
   'datamachine-agent-ci',
   'defaults',
