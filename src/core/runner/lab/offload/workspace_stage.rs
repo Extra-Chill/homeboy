@@ -1402,6 +1402,51 @@ mod tests {
     }
 
     #[test]
+    fn final_remote_command_uses_selected_runner_homeboy_binary_for_fuzz_run() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "fuzz".to_string(),
+            "run".to_string(),
+            "--rig".to_string(),
+            "studio-mysql".to_string(),
+            "--workload".to_string(),
+            "retry".to_string(),
+            "--path".to_string(),
+            "/controller/workspaces/studio".to_string(),
+        ];
+
+        let command = build_lab_offload_remote_command(
+            &["/runner/bin/homeboy-patched".to_string()],
+            &args,
+            "/runner/workspaces/studio",
+            &[],
+            None,
+            &command_plan(&[]),
+        );
+
+        assert_eq!(command[0], "/runner/bin/homeboy-patched");
+        assert!(!command.iter().any(|arg| arg == "--runner"));
+        assert!(!command.iter().any(|arg| arg == "homeboy-lab"));
+        assert_eq!(
+            command,
+            vec![
+                "/runner/bin/homeboy-patched".to_string(),
+                "--force-hot".to_string(),
+                "fuzz".to_string(),
+                "run".to_string(),
+                "--rig".to_string(),
+                "studio-mysql".to_string(),
+                "--workload".to_string(),
+                "retry".to_string(),
+                "--path".to_string(),
+                "/runner/workspaces/studio".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn final_remote_command_forwards_rig_component_bench_extension() {
         crate::test_support::with_isolated_home(|home| {
             let rigs_dir = home.path().join(".config/homeboy/rigs");

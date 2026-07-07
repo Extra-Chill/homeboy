@@ -15,6 +15,7 @@ use super::persistence::{
 use super::remote_runner;
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::core::error::{Error, Result};
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Default)]
@@ -101,19 +102,41 @@ impl JobStore {
         self.create_with_source_snapshot(operation, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn create_with_source_snapshot(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
     ) -> Job {
-        self.create_with_source_snapshot_and_metadata(operation, source_snapshot, None)
+        self.create_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            None,
+            None,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn create_with_source_snapshot_and_metadata(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
         metadata: Option<Value>,
+    ) -> Job {
+        self.create_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            metadata,
+            None,
+        )
+    }
+
+    pub(crate) fn create_with_source_snapshot_metadata_and_path_materialization_plan(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
     ) -> Job {
         let now = timestamp_ms();
         let job = Job {
@@ -126,6 +149,7 @@ impl JobStore {
             finished_at_ms: None,
             event_count: 0,
             source_snapshot,
+            path_materialization_plan,
             stale_reason: None,
             target_runner_id: None,
             target_project_id: None,
@@ -310,25 +334,33 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        self.run_background_with_source_snapshot_and_metadata(operation, source_snapshot, None, run)
+        self.run_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            None,
+            None,
+            run,
+        )
     }
 
-    pub(crate) fn run_background_with_source_snapshot_and_metadata<T, F>(
+    pub(crate) fn run_background_with_source_snapshot_metadata_and_path_materialization_plan<T, F>(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
         metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
         run: F,
     ) -> JobRunner
     where
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let job = if metadata.is_some() {
-            self.create_with_source_snapshot_and_metadata(operation, source_snapshot, metadata)
-        } else {
-            self.create_with_source_snapshot(operation, source_snapshot)
-        };
+        let job = self.create_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+        );
         let job_id = job.id;
         let handle_store = self.clone();
         let worker_store = self.clone();

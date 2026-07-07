@@ -22,6 +22,7 @@ use crate::core::runner::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
     BrokerScope, Runner, RunnerProcessRequest,
 };
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
@@ -208,6 +209,8 @@ struct ExecRequest {
     raw_exec: bool,
     #[serde(default)]
     source_snapshot: Option<SourceSnapshot>,
+    #[serde(default)]
+    path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default)]
     require_paths: Vec<String>,
     #[serde(default)]
@@ -1063,6 +1066,7 @@ fn enqueue_exec_job(
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
+    let path_materialization_plan = request.path_materialization_plan.clone();
 
     let summary = json!({
         "runner_id": plan.runner.id,
@@ -1070,6 +1074,7 @@ fn enqueue_exec_job(
         "command": plan.command,
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
+        "path_materialization_plan": path_materialization_plan,
         "lifecycle": request.lifecycle.clone(),
     });
     let operation = "runner.exec".to_string();
@@ -1078,10 +1083,11 @@ fn enqueue_exec_job(
         request.runner_workload.as_ref(),
         request.metadata.as_ref(),
     );
-    let runner = job_store.run_background_with_source_snapshot_and_metadata(
+    let runner = job_store.run_background_with_source_snapshot_metadata_and_path_materialization_plan(
         operation,
         source_snapshot.clone(),
         run_ref_metadata,
+        path_materialization_plan.clone(),
         move |job| {
             job.progress(json!({
                 "phase": "started",
@@ -1091,6 +1097,7 @@ fn enqueue_exec_job(
                 "capture_patch": request.capture_patch,
                 "job_id": job.job_id(),
                 "source_snapshot": source_snapshot,
+                "path_materialization_plan": path_materialization_plan,
             }))?;
             let baseline = if request.capture_patch {
                 Some(capture_baseline(&plan.cwd)?)
@@ -1125,6 +1132,7 @@ fn enqueue_exec_job(
                     "stdout": stdout,
                     "stderr": stderr,
                     "source_snapshot": source_snapshot,
+                    "path_materialization_plan": path_materialization_plan,
                     "metrics": metrics,
                     "capture": capture,
                     "status": JobStatus::Cancelled,
@@ -1162,6 +1170,7 @@ fn enqueue_exec_job(
                 "stdout": stdout,
                 "stderr": stderr,
                 "source_snapshot": source_snapshot,
+                "path_materialization_plan": path_materialization_plan,
                 "patch": patch,
                 "metrics": metrics,
                 "capture": capture,

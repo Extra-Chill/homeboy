@@ -354,6 +354,7 @@ impl JobStore {
             finished_at_ms: None,
             event_count: 0,
             source_snapshot: request.source_snapshot.clone(),
+            path_materialization_plan: request.path_materialization_plan.clone(),
             stale_reason: None,
             target_runner_id: Some(request.runner_id.clone()),
             target_project_id: request.project_id.clone(),
