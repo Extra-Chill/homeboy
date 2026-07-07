@@ -12,6 +12,7 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceLifecycleIndex, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
     RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
+use homeboy::core::rig::lease::{RigRunLeaseDiagnostic, RigRunLeaseProcessLiveness};
 use homeboy::core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,8 @@ pub struct RunsResourcesOutput {
     pub cleanup_eligible_count: usize,
     pub sources: Vec<RunsResourcesSourceOutput>,
     pub resources: Vec<ResourceLifecycleRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<RunsResourcesDiagnosticOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<RunsResourcesCleanupOutput>,
 }
@@ -159,6 +162,31 @@ pub struct RunsResourcesSourceOutput {
     pub resource_count: usize,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RunsResourcesDiagnosticOutput {
+    pub kind: String,
+    pub rig_id: String,
+    pub command: String,
+    pub pid: u32,
+    pub process_liveness: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    pub reclaimable_without_force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inspect_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safe_cleanup_command: Option<String>,
+    pub reconcile_command: String,
+    pub force_release_warning: String,
+}
+
 pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
     validate_cleanup_args(&args)?;
 
@@ -193,6 +221,7 @@ pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
     } else {
         None
     };
+    let diagnostics = load_runtime_diagnostics(&args)?;
     let mode = if args.apply {
         ResourceCleanupMode::Apply
     } else if args.cleanup_plan {
@@ -212,6 +241,7 @@ pub fn runs_resources(args: RunsResourcesArgs) -> CmdResult<RunsOutput> {
             cleanup_eligible_count,
             sources,
             resources,
+            diagnostics,
             cleanup,
         }),
         0,
@@ -477,6 +507,7 @@ fn load_observation_store_index(
     index
         .resources
         .extend(executor_evidence_resources(store, run_id)?);
+    index.resources.extend(rig_lease_resources(run_id)?);
 
     if index.resources.is_empty() {
         return Ok(Vec::new());
@@ -491,6 +522,135 @@ fn load_observation_store_index(
         },
         index,
     }])
+}
+
+fn rig_lease_resources(run_id: Option<&str>) -> Result<Vec<ResourceLifecycleRecord>> {
+    let mut resources = Vec::new();
+    for diagnostic in homeboy::core::rig::lease::run_lease_diagnostics()? {
+        if run_id.is_some_and(|run_id| diagnostic.run_id.as_deref() != Some(run_id)) {
+            continue;
+        }
+        resources.extend(rig_lease_resource_records(&diagnostic));
+    }
+    Ok(resources)
+}
+
+fn rig_lease_resource_records(diagnostic: &RigRunLeaseDiagnostic) -> Vec<ResourceLifecycleRecord> {
+    let mut records = Vec::new();
+    for token in &diagnostic.resources.exclusive {
+        records.push(rig_lease_resource_record(
+            diagnostic,
+            "rig_lease_exclusive",
+            format!("rig://{}/exclusive/{token}", diagnostic.rig_id),
+        ));
+    }
+    for path in &diagnostic.resources.paths {
+        records.push(rig_lease_resource_record(
+            diagnostic,
+            "rig_lease_path",
+            path.clone(),
+        ));
+    }
+    for port in &diagnostic.resources.ports {
+        records.push(rig_lease_resource_record(
+            diagnostic,
+            "rig_lease_port",
+            format!("tcp://localhost:{port}"),
+        ));
+    }
+    for pattern in &diagnostic.resources.process_patterns {
+        records.push(rig_lease_resource_record(
+            diagnostic,
+            "rig_lease_process_pattern",
+            format!("process-pattern:{pattern}"),
+        ));
+    }
+    records
+}
+
+fn rig_lease_resource_record(
+    diagnostic: &RigRunLeaseDiagnostic,
+    kind: &str,
+    path: String,
+) -> ResourceLifecycleRecord {
+    let status = if diagnostic.reclaimable_without_force {
+        ResourceLifecycleResourceStatus::CleanupPending
+    } else {
+        ResourceLifecycleResourceStatus::Active
+    };
+    ResourceLifecycleRecord {
+        owner: "homeboy.rig.lease".to_string(),
+        run_id: diagnostic
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("rig-lease:{}", diagnostic.rig_id)),
+        runner_id: diagnostic.runner_id.clone(),
+        path,
+        root_bound: None,
+        kind: kind.to_string(),
+        ttl: None,
+        cleanup_policy: ResourceCleanupPolicy::Manual,
+        evidence_retention: ResourceEvidenceRetention::Metadata,
+        cleanup_intent: ResourceCleanupIntent::DryRun,
+        cleanup_command: diagnostic
+            .safe_cleanup_command
+            .clone()
+            .or_else(|| diagnostic.inspect_command.clone())
+            .or_else(|| Some(diagnostic.reconcile_command.clone())),
+        status,
+    }
+}
+
+fn load_runtime_diagnostics(
+    args: &RunsResourcesArgs,
+) -> Result<Vec<RunsResourcesDiagnosticOutput>> {
+    if args.sample || !args.file.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let store = ObservationStore::open_initialized()?;
+    let mut outputs = Vec::new();
+    for diagnostic in homeboy::core::rig::lease::run_lease_diagnostics()? {
+        if args
+            .run_id
+            .as_deref()
+            .is_some_and(|run_id| diagnostic.run_id.as_deref() != Some(run_id))
+        {
+            continue;
+        }
+        outputs.push(rig_lease_diagnostic_output(&store, diagnostic)?);
+    }
+    Ok(outputs)
+}
+
+fn rig_lease_diagnostic_output(
+    store: &ObservationStore,
+    diagnostic: RigRunLeaseDiagnostic,
+) -> Result<RunsResourcesDiagnosticOutput> {
+    let run_status = match diagnostic.run_id.as_deref() {
+        Some(run_id) => store.get_run(run_id)?.map(|run| run.status),
+        None => None,
+    };
+    Ok(RunsResourcesDiagnosticOutput {
+        kind: "rig_lease".to_string(),
+        rig_id: diagnostic.rig_id,
+        command: diagnostic.command,
+        pid: diagnostic.pid,
+        process_liveness: match diagnostic.process_liveness {
+            RigRunLeaseProcessLiveness::Running => "running".to_string(),
+            RigRunLeaseProcessLiveness::NotRunning => "not_running".to_string(),
+        },
+        started_at: diagnostic.started_at,
+        age_seconds: diagnostic.age_seconds,
+        run_id: diagnostic.run_id,
+        run_status,
+        runner_id: diagnostic.runner_id,
+        reclaimable_without_force: diagnostic.reclaimable_without_force,
+        inspect_command: diagnostic.inspect_command,
+        safe_cleanup_command: diagnostic.safe_cleanup_command,
+        reconcile_command: diagnostic.reconcile_command,
+        force_release_warning: diagnostic.force_release_warning,
+    })
 }
 
 fn executor_evidence_resources(
@@ -682,6 +842,8 @@ mod tests {
     use homeboy::core::observation::{NewRunRecord, ObservationStore};
     use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
     use homeboy::core::resource_lifecycle_index::resource_lifecycle_record_is_cleanup_eligible_at;
+    use homeboy::core::rig::lease::RigRunLease;
+    use homeboy::core::rig::spec::RigResourcesSpec;
 
     use super::*;
 
@@ -724,6 +886,37 @@ mod tests {
                 }),
             )
             .expect("artifact with resource lifecycle metadata");
+    }
+
+    fn write_rig_lease(lease: RigRunLease) {
+        let dir = homeboy::core::paths::rig_leases_dir().expect("rig leases dir");
+        std::fs::create_dir_all(&dir).expect("create lease dir");
+        std::fs::write(
+            dir.join(format!("{}.json", lease.rig_id)),
+            serde_json::to_string_pretty(&lease).expect("serialize lease"),
+        )
+        .expect("write lease");
+    }
+
+    fn lease_resources() -> RigResourcesSpec {
+        RigResourcesSpec {
+            exclusive: vec!["studio-runtime".to_string()],
+            paths: vec!["/tmp/homeboy-studio".to_string()],
+            ports: vec![9724],
+            process_patterns: vec!["app-server-child.mjs".to_string()],
+        }
+    }
+
+    fn rig_lease(rig_id: &str, pid: u32, run_id: Option<String>) -> RigRunLease {
+        RigRunLease {
+            rig_id: rig_id.to_string(),
+            command: "bench".to_string(),
+            pid,
+            started_at: "2020-01-01T00:00:00Z".to_string(),
+            run_id,
+            runner_id: Some("lab-local".to_string()),
+            resources: lease_resources(),
+        }
     }
 
     #[test]
@@ -899,6 +1092,101 @@ mod tests {
             );
             assert_eq!(resource.cleanup_intent, ResourceCleanupIntent::DryRun);
             assert_eq!(resource.status, ResourceLifecycleResourceStatus::Active);
+        });
+    }
+
+    #[test]
+    fn default_store_discovery_includes_live_rig_lease_diagnostics() {
+        crate::test_support::with_isolated_home(|_| {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let store = temp_store(&tempdir);
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            write_rig_lease(rig_lease(
+                "studio",
+                std::process::id(),
+                Some(run.id.clone()),
+            ));
+
+            let indexes = load_observation_store_index(&store, Some(&run.id)).expect("store index");
+            let resources = &indexes[0].index.resources;
+            assert_eq!(resources.len(), 4);
+            assert!(resources
+                .iter()
+                .all(|resource| resource.owner == "homeboy.rig.lease"));
+            assert!(resources
+                .iter()
+                .all(|resource| resource.status == ResourceLifecycleResourceStatus::Active));
+            assert_eq!(resources[0].runner_id.as_deref(), Some("lab-local"));
+            assert_eq!(
+                resources[0].cleanup_command.as_deref(),
+                Some(format!("homeboy runs show {}", run.id).as_str())
+            );
+
+            let diagnostic = rig_lease_diagnostic_output(
+                &store,
+                homeboy::core::rig::lease::run_lease_diagnostics()
+                    .expect("lease diagnostics")
+                    .remove(0),
+            )
+            .expect("diagnostic output");
+            assert_eq!(diagnostic.process_liveness, "running");
+            assert_eq!(diagnostic.run_status.as_deref(), Some("running"));
+            assert!(!diagnostic.reclaimable_without_force);
+            assert!(diagnostic.safe_cleanup_command.is_none());
+            assert!(diagnostic.force_release_warning.contains("Do not use"));
+        });
+    }
+
+    #[test]
+    fn stale_rig_lease_gets_non_force_cleanup_command() {
+        crate::test_support::with_isolated_home(|_| {
+            write_rig_lease(rig_lease("studio", u32::MAX, Some("stale-run".to_string())));
+
+            let diagnostics =
+                homeboy::core::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+            assert_eq!(diagnostics.len(), 1);
+            assert!(diagnostics[0].reclaimable_without_force);
+            assert_eq!(
+                diagnostics[0].safe_cleanup_command.as_deref(),
+                Some("homeboy rig release-lock studio")
+            );
+
+            let resources = rig_lease_resources(None).expect("rig lease resources");
+            assert_eq!(resources.len(), 4);
+            assert!(
+                resources
+                    .iter()
+                    .all(|resource| resource.status
+                        == ResourceLifecycleResourceStatus::CleanupPending)
+            );
+            assert_eq!(
+                resources[0].cleanup_command.as_deref(),
+                Some("homeboy rig release-lock studio")
+            );
+        });
+    }
+
+    #[test]
+    fn unknown_rig_lease_holder_stays_conservative() {
+        crate::test_support::with_isolated_home(|_| {
+            write_rig_lease(rig_lease("studio", std::process::id(), None));
+
+            let resources = rig_lease_resources(None).expect("rig lease resources");
+            assert_eq!(resources[0].run_id, "rig-lease:studio");
+            assert_eq!(
+                resources[0].cleanup_command.as_deref(),
+                Some("homeboy runs resources --actionable")
+            );
+
+            let diagnostics =
+                homeboy::core::rig::lease::run_lease_diagnostics().expect("lease diagnostics");
+            assert!(diagnostics[0].inspect_command.is_none());
+            assert!(diagnostics[0].safe_cleanup_command.is_none());
+            assert!(diagnostics[0]
+                .force_release_warning
+                .contains("unless you have independently confirmed"));
         });
     }
 
