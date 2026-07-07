@@ -14,7 +14,7 @@ use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::core::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
-    preflight_plan_provider_config_with_providers, reconcile_staged_runtime_for_plan,
+    enforce_runtime_preflight_checks_for_plan, preflight_plan_provider_config_with_providers,
     AgentTaskProviderCatalog,
 };
 use crate::core::agent_task_scheduler::{
@@ -142,11 +142,7 @@ where
             catalog.provider_requires_cwd_git_checkout(backend, selector)
         })?;
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
-    // Reconcile runtime dependency conflicts before dispatch: refuse a staged
-    // provider plugin that vendors a runtime-owned package which would shadow the
-    // runtime copy and fatal on activation, with an actionable owner/contract
-    // error instead of a raw runtime fatal. Lab and local share this gate (#6223).
-    catalog.reconcile_staged_runtime_for_plan(&plan)?;
+    catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
     let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
@@ -186,9 +182,7 @@ where
         provider_requires_cwd_git_checkout,
     )?;
     apply_provider_runner_secret_env_contracts(&mut plan);
-    // Reconcile runtime dependency conflicts before dispatch (#6223); see
-    // `dispatch_with_provider_catalog` for rationale. Shared with Lab dispatch.
-    reconcile_staged_runtime_for_plan(&plan)?;
+    enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(
         &plan,

@@ -9,7 +9,6 @@ use super::secrets::{
     provider_runner_secret_env_for_plan_with_providers, provider_secret_sources,
     provider_secret_sources_for_plan_with_providers,
 };
-use super::staging_reconciliation::ensure_staged_plugins_reconciled;
 use super::*;
 
 #[cfg(not(test))]
@@ -77,17 +76,12 @@ impl AgentTaskProviderCatalog {
         apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
     }
 
-    /// Reconcile every task's staged plugin component contracts against the
-    /// resolved provider's runtime staging contract before dispatch. Fails with
-    /// an actionable owner/package/contract error when a staged plugin vendors a
-    /// runtime-owned package that would shadow the runtime copy and fatal on
-    /// activation (#6223). Local and Lab dispatch share this single check so the
-    /// reconciled staging contract is enforced identically on both surfaces.
-    pub fn reconcile_staged_runtime_for_plan(
+    /// Run declared runtime preflight checks for each task's resolved provider.
+    pub fn enforce_runtime_preflight_checks_for_plan(
         &self,
         plan: &AgentTaskPlan,
     ) -> crate::core::Result<()> {
-        reconcile_staged_runtime_for_plan_with_providers(plan, &self.providers)
+        enforce_runtime_preflight_checks_for_plan_with_providers(plan, &self.providers)
     }
 
     pub fn provider_secret_sources_for_providers(
@@ -358,18 +352,11 @@ pub fn apply_provider_runner_secret_env_contracts(plan: &mut AgentTaskPlan) {
     AgentTaskProviderCatalog::discover().apply_provider_runner_secret_env_contracts(plan);
 }
 
-/// Reconcile a plan's staged plugin component contracts against the discovered
-/// providers' runtime staging contracts before dispatch (#6223).
-pub fn reconcile_staged_runtime_for_plan(plan: &AgentTaskPlan) -> crate::core::Result<()> {
-    AgentTaskProviderCatalog::discover().reconcile_staged_runtime_for_plan(plan)
+pub fn enforce_runtime_preflight_checks_for_plan(plan: &AgentTaskPlan) -> crate::core::Result<()> {
+    AgentTaskProviderCatalog::discover().enforce_runtime_preflight_checks_for_plan(plan)
 }
 
-/// Per-provider reconciliation of a plan's staged plugins. Resolves the provider
-/// for each task's backend/selector, then validates that task's plugin component
-/// contracts against the provider's runtime staging contract. Keeping this on a
-/// concrete provider slice lets the local dispatch service and the Lab preflight
-/// share one implementation against whichever provider list they hold.
-pub(super) fn reconcile_staged_runtime_for_plan_with_providers(
+pub(super) fn enforce_runtime_preflight_checks_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
 ) -> crate::core::Result<()> {
@@ -377,11 +364,11 @@ pub(super) fn reconcile_staged_runtime_for_plan_with_providers(
         let Some(provider) = select_provider(providers, request) else {
             continue;
         };
-        let contract = &provider.runtime_contract.staging;
-        if contract.is_empty() {
+        let checks = &provider.runtime_contract.preflight_checks;
+        if checks.is_empty() {
             continue;
         }
-        ensure_staged_plugins_reconciled(contract, &request.component_contracts)?;
+        ensure_runtime_preflight_checks(checks, &request.component_contracts)?;
     }
     Ok(())
 }

@@ -142,11 +142,8 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
             observed.component_contracts[0].path.as_deref(),
             Some(component_path.as_str())
         );
-        assert_eq!(
-            observed.component_contracts[0].load_as.as_deref(),
-            Some("plugin")
-        );
-        assert_eq!(observed.component_contracts[0].activate, Some(true));
+        assert_eq!(observed.component_contracts[0].extra["loadAs"], "plugin");
+        assert_eq!(observed.component_contracts[0].extra["activate"], true);
         assert_eq!(
             observed.component_contracts[0].extra["opaque"]["source"],
             "workflow-input"

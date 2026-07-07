@@ -67,12 +67,6 @@ pub struct ResolvedRuntimeDependency {
     /// The ref explicitly declared on the contract, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared_ref: Option<String>,
-    /// How the component is loaded into the runtime (plugin, mu-plugin, …).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub load_as: Option<String>,
-    /// Whether the component should be activated in the runtime.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub activate: Option<bool>,
     /// True when the materialized checkout is a real git work tree carrying
     /// canonical provenance; false for a non-git declared path.
     pub git_provenance: bool,
@@ -170,8 +164,6 @@ fn resolve_one(
         resolved_ref: provenance.resolved_ref.or_else(|| declared_ref.clone()),
         branch: provenance.branch,
         declared_ref,
-        load_as: contract.load_as.clone(),
-        activate: contract.activate,
         git_provenance: provenance.git_provenance,
     })
 }
@@ -395,8 +387,6 @@ mod tests {
         AgentTaskComponentContract {
             slug: Some(slug.to_string()),
             path: Some(path.to_string()),
-            load_as: Some("plugin".to_string()),
-            activate: Some(true),
             extra: extra.as_object().cloned().unwrap_or_default(),
         }
     }
@@ -453,8 +443,6 @@ mod tests {
         assert_eq!(dep.resolved_ref.as_deref(), Some(head.as_str()));
         assert_eq!(dep.branch.as_deref(), Some("main"));
         assert!(dep.git_provenance);
-        assert_eq!(dep.load_as.as_deref(), Some("plugin"));
-        assert_eq!(dep.activate, Some(true));
     }
 
     #[test]
@@ -560,8 +548,6 @@ mod tests {
         let contracts = vec![AgentTaskComponentContract {
             slug: Some("opaque".to_string()),
             path: None,
-            load_as: None,
-            activate: None,
             extra: serde_json::json!({ "hint": "preserve" })
                 .as_object()
                 .cloned()
