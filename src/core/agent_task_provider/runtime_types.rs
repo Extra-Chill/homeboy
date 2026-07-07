@@ -116,17 +116,8 @@ pub struct AgentTaskRuntimeContract {
     pub normalization: AgentTaskRuntimeNormalization,
     #[serde(default, skip_serializing_if = "AgentTaskRuntimeApplyBack::is_empty")]
     pub apply_back: AgentTaskRuntimeApplyBack,
-    /// Runtime dependency reconciliation contract: packages the runtime/overlay
-    /// (e.g. "WordPress 7.0 supplies this Composer package") provides, which a
-    /// staged provider plugin must NOT vendor/shadow. Homeboy validates the
-    /// effective staged plugin against this before dispatch so a stale vendored
-    /// runtime library fails with an actionable owner/contract message instead of
-    /// a raw PHP fatal during plugin activation (#6223).
-    #[serde(
-        default,
-        skip_serializing_if = "AgentTaskRuntimeStagingContract::is_empty"
-    )]
-    pub staging: AgentTaskRuntimeStagingContract,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight_checks: Vec<AgentTaskRuntimePreflightCheck>,
 }
 
 impl AgentTaskRuntimeContract {
@@ -135,101 +126,106 @@ impl AgentTaskRuntimeContract {
             && self.lifecycle_states.is_empty()
             && self.normalization.is_empty()
             && self.apply_back.is_empty()
-            && self.staging.is_empty()
+            && self.preflight_checks.is_empty()
     }
 }
 
-/// Declares the runtime dependency reconciliation surface for a provider's
-/// staged plugins. Core is runtime-agnostic: it does not know that a package is
-/// a Composer dependency or that the owner is WordPress — the declaring
-/// extension supplies the package name, the owner that provides it at runtime,
-/// and the vendor subpaths a staged plugin would use to shadow it. Homeboy uses
-/// this to reconcile staged plugins before dispatch (#6223).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct AgentTaskRuntimeStagingContract {
-    /// Packages the runtime/overlay owns. A staged provider plugin that vendors
-    /// any of these would shadow the runtime-provided version and is refused
-    /// before dispatch with an actionable owner/package/contract error.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reconciled_packages: Vec<AgentTaskRuntimeReconciledPackage>,
-    /// Optional human-facing remediation appended to reconciliation conflict
-    /// errors (e.g. how to rebuild the staged plugin without the vendored copy).
+pub struct AgentTaskRuntimePreflightCheck {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskRuntimePreflightCheckTarget::is_empty"
+    )]
+    pub target: AgentTaskRuntimePreflightCheckTarget,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskRuntimePreflightPathProbes::is_empty"
+    )]
+    pub path_probes: AgentTaskRuntimePreflightPathProbes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
-    /// When true (default), Homeboy validates staged plugins against this
-    /// contract before dispatch. Set false to declare the contract for evidence
-    /// without enforcing the pre-dispatch gate (e.g. when Managed Sandbox owns the
-    /// authoritative readiness check and returns a structured result).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validate_before_dispatch: Option<bool>,
+    pub enforcement: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
 
-impl AgentTaskRuntimeStagingContract {
-    pub fn is_empty(&self) -> bool {
-        self.reconciled_packages.is_empty()
-            && self.remediation.is_none()
-            && self.validate_before_dispatch.is_none()
-            && self.extra.is_empty()
-    }
-
-    /// Whether the pre-dispatch validation gate is enforced. Defaults to true
-    /// when any reconciled package is declared, so declaring a package is enough
-    /// to opt into the gate; an explicit `validate_before_dispatch: false`
-    /// records the contract for evidence/Sandbox delegation without gating.
-    pub fn enforces_pre_dispatch(&self) -> bool {
-        self.validate_before_dispatch.unwrap_or(true) && !self.reconciled_packages.is_empty()
+impl AgentTaskRuntimePreflightCheck {
+    pub fn enforcement_level(&self) -> AgentTaskRuntimePreflightCheckEnforcement {
+        match self.enforcement.as_deref() {
+            Some("warning") => AgentTaskRuntimePreflightCheckEnforcement::Warning,
+            Some("disabled") => AgentTaskRuntimePreflightCheckEnforcement::Disabled,
+            _ => AgentTaskRuntimePreflightCheckEnforcement::Error,
+        }
     }
 }
 
-/// A single package the runtime owns that staged provider plugins must not
-/// vendor. Generic by design: `name` is the package identity, `owner` is the
-/// runtime/overlay that supplies it (named in conflict errors), and
-/// `vendor_subpaths` are the staged-plugin-relative paths whose presence proves
-/// the staged plugin shadows the runtime copy (e.g. `vendor/<org>/<pkg>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskRuntimePreflightCheckEnforcement {
+    Error,
+    Warning,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct AgentTaskRuntimeReconciledPackage {
-    /// Package identity (e.g. a Composer package name `org/library`).
-    pub name: String,
-    /// The runtime/overlay that supplies this package at runtime. Surfaced in
-    /// conflict errors so the operator knows who owns the canonical copy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-    /// Staged-plugin-relative paths that, if present in the effective staged
-    /// plugin, prove it vendors (and would shadow) the runtime-owned package.
-    /// When omitted, `vendor/<name>` is checked by default.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub vendor_subpaths: Vec<String>,
-    /// Optional reason/why this package is reconciled, surfaced in diagnostics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Optional per-package remediation, surfaced when this package conflicts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
+pub struct AgentTaskRuntimePreflightCheckTarget {
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskRuntimePreflightComponentSelector::is_empty"
+    )]
+    pub component: AgentTaskRuntimePreflightComponentSelector,
 }
 
-impl AgentTaskRuntimeReconciledPackage {
-    /// The staged-plugin-relative subpaths whose presence indicates a shadowed
-    /// runtime package. Falls back to `vendor/<name>` when none are declared.
-    pub fn effective_vendor_subpaths(&self) -> Vec<String> {
-        let declared: Vec<String> = self
-            .vendor_subpaths
-            .iter()
-            .map(|subpath| subpath.trim().trim_matches('/').to_string())
-            .filter(|subpath| !subpath.is_empty())
-            .collect();
-        if !declared.is_empty() {
-            return declared;
-        }
-        let name = self.name.trim().trim_matches('/');
-        if name.is_empty() {
-            return Vec::new();
-        }
-        vec![format!("vendor/{name}")]
+impl AgentTaskRuntimePreflightCheckTarget {
+    pub(super) fn is_empty(&self) -> bool {
+        self.component.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimePreflightComponentSelector {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata_equals: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata_any_equals: BTreeMap<String, Value>,
+}
+
+impl AgentTaskRuntimePreflightComponentSelector {
+    pub(super) fn is_empty(&self) -> bool {
+        self.metadata_equals.is_empty() && self.metadata_any_equals.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimePreflightPathProbes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exists: Vec<AgentTaskRuntimePreflightPathProbe>,
+}
+
+impl AgentTaskRuntimePreflightPathProbes {
+    pub(super) fn is_empty(&self) -> bool {
+        self.exists.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimePreflightPathProbe {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remediation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

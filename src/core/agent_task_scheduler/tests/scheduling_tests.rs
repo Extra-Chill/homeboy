@@ -1539,11 +1539,8 @@ mod plan_projection_tests {
             request.component_contracts[0].path.as_deref(),
             Some("/workspace/generic-component")
         );
-        assert_eq!(
-            request.component_contracts[0].load_as.as_deref(),
-            Some("plugin")
-        );
-        assert_eq!(request.component_contracts[0].activate, Some(true));
+        assert_eq!(request.component_contracts[0].extra["loadAs"], "plugin");
+        assert_eq!(request.component_contracts[0].extra["activate"], true);
         assert_eq!(
             request.component_contracts[0].extra["opaque_executor_hint"]["preserve"],
             true

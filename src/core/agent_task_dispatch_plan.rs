@@ -1564,8 +1564,8 @@ mod tests {
         assert_eq!(contracts.len(), 1);
         assert_eq!(contracts[0].slug.as_deref(), Some("agents-api"));
         assert_eq!(contracts[0].path.as_deref(), Some(component_path.as_str()));
-        assert_eq!(contracts[0].load_as.as_deref(), Some("plugin"));
-        assert_eq!(contracts[0].activate, Some(true));
+        assert_eq!(contracts[0].extra["loadAs"], "plugin");
+        assert_eq!(contracts[0].extra["activate"], true);
         assert_eq!(contracts[0].extra["opaque"]["preserve"], "yes");
         assert_eq!(
             plan.tasks[0].executor.config["component_contracts"][0]["path"],
@@ -1620,8 +1620,8 @@ mod tests {
         let contract = &plan.tasks[0].component_contracts[0];
         assert_eq!(contract.slug.as_deref(), Some("runtime-helper"));
         assert_eq!(contract.path.as_deref(), Some(component_path.as_str()));
-        assert_eq!(contract.load_as.as_deref(), Some("mu-plugin"));
-        assert_eq!(contract.activate, Some(false));
+        assert_eq!(contract.extra["loadAs"], "mu-plugin");
+        assert_eq!(contract.extra["activate"], false);
         assert_eq!(contract.extra["opaque_provider_hint"]["preserved"], true);
     }
 

@@ -185,15 +185,6 @@ pub struct AgentTaskComponentContract {
     pub slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(
-        default,
-        rename = "loadAs",
-        alias = "load_as",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub load_as: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activate: Option<bool>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
