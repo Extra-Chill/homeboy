@@ -809,12 +809,12 @@ fn replacement_target_path() -> Result<PathBuf> {
 }
 
 pub(crate) fn upgrade_verification_result(
-    _method: InstallMethod,
+    method: InstallMethod,
     force: bool,
     previous_version: &str,
     active_version: Option<&str>,
-    _previous_build_identity: Option<&str>,
-    _active_build_identity: Option<&str>,
+    previous_build_identity: Option<&str>,
+    active_build_identity: Option<&str>,
 ) -> bool {
     let Some(active_version) = active_version else {
         return false;
@@ -824,7 +824,18 @@ pub(crate) fn upgrade_verification_result(
         return true;
     }
 
-    force && active_version == previous_version
+    if !force || active_version != previous_version {
+        return false;
+    }
+
+    if method == InstallMethod::Source {
+        match (previous_build_identity, active_build_identity) {
+            (Some(previous), Some(active)) => active != previous,
+            _ => true,
+        }
+    } else {
+        true
+    }
 }
 
 fn parse_cli_version_info(output: &str) -> ActiveBinaryInfo {
@@ -978,9 +989,21 @@ mod tests {
     }
 
     #[test]
-    fn forced_upgrade_accepts_same_version_active_binary() {
-        assert!(upgrade_verification_result(
+    fn forced_source_upgrade_rejects_unchanged_same_version_build_identity() {
+        assert!(!upgrade_verification_result(
             InstallMethod::Source,
+            true,
+            "0.157.1",
+            Some("0.157.1"),
+            Some("commit same, dirty=false"),
+            Some("commit same, dirty=false"),
+        ));
+    }
+
+    #[test]
+    fn forced_secondary_upgrade_accepts_same_version_active_binary() {
+        assert!(upgrade_verification_result(
+            InstallMethod::Secondary,
             true,
             "0.157.1",
             Some("0.157.1"),

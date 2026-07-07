@@ -1,4 +1,5 @@
 use crate::core::defaults;
+use crate::core::engine::shell::quote_path;
 use crate::core::error::{Error, Result};
 use crate::core::{build_identity, extension, git};
 use std::path::{Path, PathBuf};
@@ -207,6 +208,18 @@ pub fn run_upgrade_with_method(
                     &extensions_updated,
                 )?
             };
+            let source_drift = same_version_source_checkout_drift(
+                previous_build_identity.as_deref(),
+                source_path,
+                skip_extensions,
+                skip_runners,
+                skip_services,
+            );
+            if let Some(drift) = &source_drift {
+                log_status!("upgrade", "WARNING: {}", drift.detail);
+                log_status!("upgrade", "  Run: {}", drift.recovery_command);
+            }
+
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -215,7 +228,10 @@ pub fn run_upgrade_with_method(
                 previous_build_identity,
                 new_build_identity: None,
                 upgraded: false,
-                message: "Already at latest version".to_string(),
+                message: source_drift
+                    .as_ref()
+                    .map(|drift| drift.message.clone())
+                    .unwrap_or_else(|| "Already at latest version".to_string()),
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
@@ -661,6 +677,69 @@ fn portable_extension_source_url(result: &crate::core::extension::UpdateResult) 
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceCheckoutDriftWarning {
+    message: String,
+    detail: String,
+    recovery_command: String,
+}
+
+fn same_version_source_checkout_drift(
+    active_build_identity: Option<&str>,
+    source_path: Option<&Path>,
+    skip_extensions: bool,
+    skip_runners: bool,
+    skip_services: bool,
+) -> Option<SourceCheckoutDriftWarning> {
+    let checkout = resolve_source_workspace(source_path).ok()?;
+    let source_identity = runners::source_checkout_build_identity(&checkout)?;
+    if active_build_identity == Some(source_identity.as_str()) {
+        return None;
+    }
+
+    let active = active_build_identity.unwrap_or("unknown active build identity");
+    let recovery_command =
+        source_drift_recovery_command(&checkout, skip_extensions, skip_runners, skip_services);
+    let detail = format!(
+        "active binary is {active}, but source checkout is {source_identity}; semver-only upgrade check skipped the local source build"
+    );
+
+    Some(SourceCheckoutDriftWarning {
+        message: format!("Already at latest version; {detail}. Run: {recovery_command}"),
+        detail,
+        recovery_command,
+    })
+}
+
+fn source_drift_recovery_command(
+    checkout: &Path,
+    skip_extensions: bool,
+    skip_runners: bool,
+    skip_services: bool,
+) -> String {
+    let mut parts = vec![
+        "homeboy".to_string(),
+        "upgrade".to_string(),
+        "--force".to_string(),
+        "--method".to_string(),
+        "source".to_string(),
+        "--source-path".to_string(),
+        quote_path(&checkout.display().to_string()),
+    ];
+
+    if skip_extensions {
+        parts.push("--skip-extensions".to_string());
+    }
+    if skip_runners {
+        parts.push("--skip-runners".to_string());
+    }
+    if skip_services {
+        parts.push("--no-restart-services".to_string());
+    }
+
+    parts.join(" ")
+}
+
 #[cfg(not(unix))]
 pub fn restart_with_new_binary() {
     log_status!("upgrade", "Please restart homeboy to use the new version.");
@@ -689,6 +768,7 @@ pub fn restart_with_new_binary() -> ! {
 #[cfg(test)]
 mod runner_source_upgrade_tests {
     use super::*;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -727,6 +807,79 @@ version = "0.0.0"
             .expect("resolved checkout");
 
         assert_eq!(resolved, dir.path());
+    }
+
+    #[test]
+    fn same_version_source_checkout_drift_reports_recovery_command() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "homeboy"
+version = "0.0.0"
+"#,
+        )
+        .unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=homeboy-test",
+                "-c",
+                "user.email=homeboy-test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        let warning = same_version_source_checkout_drift(
+            Some("homeboy 0.0.0"),
+            Some(dir.path()),
+            false,
+            true,
+            true,
+        )
+        .expect("drift warning");
+
+        assert!(warning.detail.contains("source checkout is homeboy"));
+        assert!(warning
+            .detail
+            .contains("semver-only upgrade check skipped the local source build"));
+        assert!(warning.recovery_command.contains("--method source"));
+        assert!(warning.recovery_command.contains("--skip-runners"));
+        assert!(warning.recovery_command.contains("--no-restart-services"));
+    }
+
+    #[test]
+    fn source_drift_recovery_command_preserves_skip_flags() {
+        let command =
+            source_drift_recovery_command(Path::new("/tmp/homeboy checkout"), true, false, true);
+
+        assert_eq!(
+            command,
+            "homeboy upgrade --force --method source --source-path '/tmp/homeboy checkout' --skip-extensions --no-restart-services"
+        );
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
