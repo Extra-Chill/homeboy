@@ -94,6 +94,7 @@ pub(crate) const TRACE_LAB_LABEL: &str = "trace";
 pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
 pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
+pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_LABEL: &str = "rig source management";
 pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
 pub(crate) const EXTENSION_DEV_RUN_LAB_LABEL: &str = "extension dev-run";
 pub(crate) const EXTENSION_REFRESH_LAB_LABEL: &str = "extension refresh";
