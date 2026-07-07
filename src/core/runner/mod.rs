@@ -105,9 +105,9 @@ pub use execution::{
 };
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{
-    materialize_runner_extension, materialize_runner_extension_with_exec,
-    plan_controller_snapshot_extension, RunnerExtensionMaterializationRequest,
-    RunnerExtensionMaterializationSource,
+    materialize_runner_extension, materialize_runner_extension_with_env,
+    materialize_runner_extension_with_exec, plan_controller_snapshot_extension,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
 };
 pub(crate) use git_dependency_materialization::{
     dependency_cache_save, dependency_cache_save_request, materialize_git_dependency,

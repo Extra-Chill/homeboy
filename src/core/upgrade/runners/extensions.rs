@@ -49,7 +49,8 @@ pub fn sync_runner_extensions(
                 git_ref: source_revision.to_string(),
             },
         };
-        let result = materialize_runner_extension_with_exec(runner, homeboy_path, &request, exec);
+        let result =
+            materialize_runner_extension_with_exec(runner, homeboy_path, None, &request, exec);
         match result {
             Ok(_provenance) => {
                 crate::log_status!(
