@@ -41,6 +41,31 @@ pub struct RigRunLease {
     pub resources: RigResourcesSpec,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RigRunLeaseProcessLiveness {
+    Running,
+    NotRunning,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RigRunLeaseDiagnostic {
+    pub rig_id: String,
+    pub command: String,
+    pub pid: u32,
+    pub process_liveness: RigRunLeaseProcessLiveness,
+    pub started_at: String,
+    pub age_seconds: Option<i64>,
+    pub run_id: Option<String>,
+    pub runner_id: Option<String>,
+    pub reclaimable_without_force: bool,
+    pub inspect_command: Option<String>,
+    pub safe_cleanup_command: Option<String>,
+    pub reconcile_command: String,
+    pub force_release_warning: String,
+    pub resources: RigResourcesSpec,
+}
+
 /// RAII guard that removes the lease when the command exits normally or with an
 /// error. Process crashes are handled by stale-PID cleanup on the next acquire.
 #[derive(Debug)]
@@ -392,6 +417,60 @@ pub fn release_active_run_lease(rig_id: &str, force: bool) -> Result<ReleaseLeas
 /// List active rig run leases without acquiring or mutating leases.
 pub fn active_run_leases() -> Result<Vec<RigRunLease>> {
     live_leases()
+}
+
+pub fn run_lease_diagnostics() -> Result<Vec<RigRunLeaseDiagnostic>> {
+    let mut diagnostics = Vec::new();
+    for path in lease_files()? {
+        let Some(lease) = read_lease(&path)? else {
+            continue;
+        };
+        diagnostics.push(run_lease_diagnostic(lease));
+    }
+    Ok(diagnostics)
+}
+
+fn run_lease_diagnostic(lease: RigRunLease) -> RigRunLeaseDiagnostic {
+    let process_running = crate::core::process::pid_is_running(lease.pid);
+    let reclaimable_without_force = lease_is_reclaimable(&lease);
+    let run_id = lease.run_id.clone();
+    RigRunLeaseDiagnostic {
+        rig_id: lease.rig_id.clone(),
+        command: lease.command.clone(),
+        pid: lease.pid,
+        process_liveness: if process_running {
+            RigRunLeaseProcessLiveness::Running
+        } else {
+            RigRunLeaseProcessLiveness::NotRunning
+        },
+        started_at: lease.started_at.clone(),
+        age_seconds: lease_age_seconds(&lease.started_at),
+        run_id: run_id.clone(),
+        runner_id: lease.runner_id.clone(),
+        reclaimable_without_force,
+        inspect_command: run_id.map(|run_id| format!("homeboy runs show {run_id}")),
+        safe_cleanup_command: reclaimable_without_force.then(|| {
+            format!("homeboy rig release-lock {}", shell_quote(&lease.rig_id))
+        }),
+        reconcile_command: "homeboy runs resources --actionable".to_string(),
+        force_release_warning: format!(
+            "Do not use `homeboy rig release-lock {} --force` while pid {} is still running unless you have independently confirmed the holder is wedged and will never finish; force-release only removes the local guardrail and does not stop the holder process.",
+            shell_quote(&lease.rig_id),
+            lease.pid
+        ),
+        resources: lease.resources,
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn lease_files() -> Result<Vec<PathBuf>> {
