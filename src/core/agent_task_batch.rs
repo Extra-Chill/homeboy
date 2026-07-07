@@ -53,6 +53,10 @@ pub struct AgentTaskBatchStatusReport {
     pub schema: &'static str,
     pub batch: AgentTaskBatchRecord,
     pub totals: AgentTaskBatchTotals,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_child_runs: Vec<AgentTaskBatchChildIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
     pub commands: AgentTaskBatchCommands,
 }
 
@@ -64,6 +68,7 @@ pub struct AgentTaskBatchTotals {
     pub partial_failure: usize,
     pub failed: usize,
     pub cancelled: usize,
+    pub unavailable: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -79,6 +84,10 @@ pub struct AgentTaskBatchArtifactsReport {
     pub batch_id: String,
     pub summary: AgentTaskBatchArtifactsSummary,
     pub manifest: AgentTaskBatchArtifactsManifest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable_child_runs: Vec<AgentTaskBatchChildIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
     pub child_runs: Vec<AgentTaskBatchChildArtifacts>,
 }
 
@@ -119,6 +128,17 @@ pub struct AgentTaskBatchChildArtifacts {
     pub artifact_count: usize,
     pub evidence_ref_count: usize,
     pub artifacts: AgentTaskRunArtifacts,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskBatchChildIssue {
+    pub task_id: String,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_known_state: Option<AgentTaskRunState>,
+    pub status_command: String,
+    pub artifacts_command: String,
+    pub problem: String,
 }
 
 pub fn submit_plan_batch(
@@ -207,14 +227,25 @@ pub fn submit_plan_batch(
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut batch = read_batch(batch_id)?;
     let mut changed = false;
+    let mut unavailable_child_runs = Vec::new();
     for child in &mut batch.child_runs {
-        let record = agent_task_lifecycle::status(&child.run_id)?;
-        if child.state != record.state {
-            child.state = record.state;
-            changed = true;
+        match agent_task_lifecycle::status(&child.run_id) {
+            Ok(record) => {
+                if child.state != record.state {
+                    child.state = record.state;
+                    changed = true;
+                }
+            }
+            Err(error) => {
+                unavailable_child_runs.push(child_issue(
+                    child,
+                    format!("unable to read child run status: {}", error.message),
+                ));
+            }
         }
     }
-    let totals = totals_for_children(&batch.child_runs);
+    let mut totals = totals_for_children(&batch.child_runs);
+    totals.unavailable = unavailable_child_runs.len();
     let state = state_for_totals(&totals);
     if batch.state != state {
         batch.state = state;
@@ -228,30 +259,48 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
         commands: commands(&batch.batch_id),
+        next_actions: next_actions(&unavailable_child_runs),
         batch,
         totals,
+        unavailable_child_runs,
     })
 }
 
 pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
     let report = status(batch_id)?;
+    let mut unavailable_child_runs = report.unavailable_child_runs.clone();
     let child_runs = report
         .batch
         .child_runs
         .into_iter()
-        .map(|child| {
-            let artifacts = agent_task_lifecycle::artifacts(&child.run_id)?;
-            let artifact_count = artifacts.artifacts.len();
-            let evidence_ref_count = artifacts.evidence_refs.len();
-            Ok(AgentTaskBatchChildArtifacts {
-                task_id: child.task_id,
-                run_id: child.run_id,
-                state: child.state,
-                artifact_count,
-                evidence_ref_count,
-                artifacts,
-            })
-        })
+        .filter_map(
+            |child| match agent_task_lifecycle::artifacts(&child.run_id) {
+                Ok(artifacts) => {
+                    let artifact_count = artifacts.artifacts.len();
+                    let evidence_ref_count = artifacts.evidence_refs.len();
+                    Some(Ok(AgentTaskBatchChildArtifacts {
+                        task_id: child.task_id,
+                        run_id: child.run_id,
+                        state: child.state,
+                        artifact_count,
+                        evidence_ref_count,
+                        artifacts,
+                    }))
+                }
+                Err(error) => {
+                    if !unavailable_child_runs
+                        .iter()
+                        .any(|issue| issue.run_id == child.run_id)
+                    {
+                        unavailable_child_runs.push(child_issue(
+                            &child,
+                            format!("unable to read child run artifacts: {}", error.message),
+                        ));
+                    }
+                    None
+                }
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
     let manifest = artifacts_manifest(&child_runs);
     let summary = AgentTaskBatchArtifactsSummary {
@@ -265,6 +314,8 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
         batch_id: report.batch.batch_id,
         summary,
         manifest,
+        next_actions: next_actions(&unavailable_child_runs),
+        unavailable_child_runs,
         child_runs,
     })
 }
@@ -361,6 +412,8 @@ fn state_for_totals(totals: &AgentTaskBatchTotals) -> AgentTaskBatchState {
         AgentTaskBatchState::Running
     } else if totals.queued > 0 {
         AgentTaskBatchState::Queued
+    } else if totals.unavailable > 0 {
+        AgentTaskBatchState::PartialFailure
     } else if totals.failed > 0 || totals.partial_failure > 0 {
         AgentTaskBatchState::PartialFailure
     } else if totals.cancelled > 0 && totals.succeeded == 0 {
@@ -369,6 +422,29 @@ fn state_for_totals(totals: &AgentTaskBatchTotals) -> AgentTaskBatchState {
         AgentTaskBatchState::PartialFailure
     } else {
         AgentTaskBatchState::Succeeded
+    }
+}
+
+fn child_issue(child: &AgentTaskBatchChildRun, problem: String) -> AgentTaskBatchChildIssue {
+    AgentTaskBatchChildIssue {
+        task_id: child.task_id.clone(),
+        run_id: child.run_id.clone(),
+        last_known_state: Some(child.state),
+        status_command: format!("homeboy agent-task status {}", child.run_id),
+        artifacts_command: format!("homeboy agent-task artifacts {}", child.run_id),
+        problem,
+    }
+}
+
+fn next_actions(unavailable_child_runs: &[AgentTaskBatchChildIssue]) -> Vec<String> {
+    if unavailable_child_runs.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            "partial results only: one or more child runs could not be read from the durable run store".to_string(),
+            "inspect unavailable_child_runs for child run ids, last known states, status commands, artifacts commands, and error details".to_string(),
+            "if a Lab runner daemon restarted, reconcile runner-side jobs/artifacts before treating the fanout as terminal".to_string(),
+        ]
     }
 }
 
@@ -470,6 +546,45 @@ mod tests {
     }
 
     #[test]
+    fn batch_status_returns_partial_envelope_when_child_record_is_unavailable() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = isolated_homeboy_data();
+        let plan = AgentTaskPlan::new("fanout/restart", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/restart")).expect("batch submitted");
+        let mut batch = read_batch("batch/restart").expect("batch record");
+        batch.child_runs.push(AgentTaskBatchChildRun {
+            task_id: "orphan".to_string(),
+            run_id: "batch_restart-orphan".to_string(),
+            state: AgentTaskRunState::Running,
+        });
+        batch.task_count = batch.child_runs.len();
+        write_batch(&batch).expect("batch rewritten with orphan child");
+
+        let report = status("batch/restart").expect("partial batch status");
+
+        assert_eq!(report.batch.state, AgentTaskBatchState::Running);
+        assert_eq!(report.totals.queued, 1);
+        assert_eq!(report.totals.running, 1);
+        assert_eq!(report.totals.unavailable, 1);
+        assert_eq!(report.unavailable_child_runs.len(), 1);
+        let issue = &report.unavailable_child_runs[0];
+        assert_eq!(issue.task_id, "orphan");
+        assert_eq!(issue.run_id, "batch_restart-orphan");
+        assert_eq!(issue.last_known_state, Some(AgentTaskRunState::Running));
+        assert!(issue.problem.contains("unable to read child run status"));
+        assert_eq!(
+            issue.status_command,
+            "homeboy agent-task status batch_restart-orphan"
+        );
+        assert!(report
+            .next_actions
+            .iter()
+            .any(|action| action.contains("partial results only")));
+    }
+
+    #[test]
     fn batch_artifacts_report_exposes_stable_manifest_and_counts() {
         let _lock = TEST_ENV_LOCK
             .lock()
@@ -498,6 +613,50 @@ mod tests {
             report.manifest.evidence_refs[4].evidence_ref.kind,
             "executor-log"
         );
+    }
+
+    #[test]
+    fn batch_artifacts_preserves_available_refs_when_child_record_is_unavailable() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = isolated_homeboy_data();
+        let plan = AgentTaskPlan::new("fanout/artifacts-partial", vec![request("a")]);
+        submit_plan_batch(&plan, Some("batch/artifacts-partial")).expect("batch submitted");
+        agent_task_service::run_submitted(
+            "batch_artifacts-partial-a".to_string(),
+            ArtifactExecutor,
+        )
+        .expect("available child run");
+        let mut batch = read_batch("batch/artifacts-partial").expect("batch record");
+        batch.child_runs.push(AgentTaskBatchChildRun {
+            task_id: "orphan".to_string(),
+            run_id: "batch_artifacts-partial-orphan".to_string(),
+            state: AgentTaskRunState::Running,
+        });
+        batch.task_count = batch.child_runs.len();
+        write_batch(&batch).expect("batch rewritten with orphan child");
+
+        let report = artifacts("batch/artifacts-partial").expect("partial batch artifacts");
+
+        assert_eq!(report.summary.child_runs, 1);
+        assert_eq!(report.summary.artifacts, 1);
+        assert_eq!(report.summary.evidence_refs, 4);
+        assert_eq!(
+            report.manifest.artifacts[0].run_id,
+            "batch_artifacts-partial-a"
+        );
+        assert_eq!(report.child_runs[0].run_id, "batch_artifacts-partial-a");
+        assert_eq!(report.unavailable_child_runs.len(), 1);
+        assert_eq!(report.unavailable_child_runs[0].task_id, "orphan");
+        assert_eq!(
+            report.unavailable_child_runs[0].artifacts_command,
+            "homeboy agent-task artifacts batch_artifacts-partial-orphan"
+        );
+        assert!(report
+            .next_actions
+            .iter()
+            .any(|action| action.contains("runner daemon restarted")));
     }
 
     #[test]
