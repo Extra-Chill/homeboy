@@ -29,6 +29,11 @@ assert.doesNotMatch(descriptorSource, /run-agent-task', '--help/);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'wp-codebox.json'), 'utf8'));
 assert.equal(manifest.component_path_defaults, undefined);
+const runtimePreflightCheck = manifest.agent_task_executors[0].runtime_contract.preflight_checks.find((check) => check.id === 'wp-codebox.provider_plugin.runtime_package_shadow');
+assert.equal(runtimePreflightCheck.enforcement, 'error');
+assert.deepEqual(runtimePreflightCheck.target.component.metadata_equals, { loadAs: 'plugin' });
+assert.deepEqual(runtimePreflightCheck.target.component.metadata_any_equals, { activate: true });
+assert.deepEqual(runtimePreflightCheck.path_probes.exists.map((probe) => probe.path), ['vendor/automattic/php-ai-client']);
 const providerPreflight = manifest.agent_task_executors[0].config_preflights.find((preflight) => preflight.id === 'recipe-command-compatibility');
 assert.equal(providerPreflight.label, 'WP Codebox recipe command compatibility');
 assert.deepEqual(providerPreflight.required_values.keys, ['command']);
