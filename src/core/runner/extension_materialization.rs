@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -77,9 +78,19 @@ pub(crate) fn materialize_runner_extension(
     homeboy_path: &str,
     request: &RunnerExtensionMaterializationRequest,
 ) -> Result<RunnerExtensionMaterializationProvenance> {
+    materialize_runner_extension_with_env(runner, homeboy_path, None, request)
+}
+
+pub(crate) fn materialize_runner_extension_with_env(
+    runner: &Runner,
+    homeboy_path: &str,
+    env: Option<HashMap<String, String>>,
+    request: &RunnerExtensionMaterializationRequest,
+) -> Result<RunnerExtensionMaterializationProvenance> {
     materialize_runner_extension_with_exec(
         runner,
         homeboy_path,
+        env,
         request,
         &mut |runner_id, options| exec(runner_id, options),
     )
@@ -88,6 +99,7 @@ pub(crate) fn materialize_runner_extension(
 pub(crate) fn materialize_runner_extension_with_exec(
     runner: &Runner,
     homeboy_path: &str,
+    env: Option<HashMap<String, String>>,
     request: &RunnerExtensionMaterializationRequest,
     exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(super::RunnerExecOutput, i32)>,
 ) -> Result<RunnerExtensionMaterializationProvenance> {
@@ -113,7 +125,7 @@ pub(crate) fn materialize_runner_extension_with_exec(
                 "--ref".to_string(),
                 plan.content_hash.clone(),
             ];
-            run_materialization_command(runner, command, exec_runner)?;
+            run_materialization_command(runner, env.as_ref(), command, exec_runner)?;
             Ok(controller_snapshot_provenance(&runner.id, &plan))
         }
         RunnerExtensionMaterializationSource::RunnerPath { path } => {
@@ -127,19 +139,25 @@ pub(crate) fn materialize_runner_extension_with_exec(
                 "--ref".to_string(),
                 request.revision.clone(),
             ];
-            run_materialization_command(runner, command, exec_runner)?;
+            run_materialization_command(runner, env.as_ref(), command, exec_runner)?;
             Ok(runner_path_provenance(&runner.id, request, path))
         }
         RunnerExtensionMaterializationSource::RemoteGit { url, git_ref } => {
-            let exists = runner_extension_exists(runner, homeboy_path, &request.id, exec_runner)
-                .map_err(|detail| {
-                    Error::validation_invalid_argument(
-                        "extensions",
-                        detail,
-                        Some(request.id.clone()),
-                        None,
-                    )
-                })?;
+            let exists = runner_extension_exists(
+                runner,
+                env.as_ref(),
+                homeboy_path,
+                &request.id,
+                exec_runner,
+            )
+            .map_err(|detail| {
+                Error::validation_invalid_argument(
+                    "extensions",
+                    detail,
+                    Some(request.id.clone()),
+                    None,
+                )
+            })?;
             let mut command = vec![
                 homeboy_path.to_string(),
                 "extension".to_string(),
@@ -153,7 +171,7 @@ pub(crate) fn materialize_runner_extension_with_exec(
             if exists {
                 command.push("--replace".to_string());
             }
-            run_materialization_command(runner, command, exec_runner)?;
+            run_materialization_command(runner, env.as_ref(), command, exec_runner)?;
             Ok(remote_git_provenance(
                 &runner.id, request, url, git_ref, exists,
             ))
@@ -241,10 +259,14 @@ fn upload_snapshot(
 
 fn run_materialization_command(
     runner: &Runner,
+    env: Option<&HashMap<String, String>>,
     command: Vec<String>,
     exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(super::RunnerExecOutput, i32)>,
 ) -> Result<()> {
-    let result = exec_runner(&runner.id, runner_exec_options(runner, command.clone()));
+    let result = exec_runner(
+        &runner.id,
+        runner_exec_options(runner, env, command.clone()),
+    );
     match result {
         Ok((_output, 0)) => Ok(()),
         Ok((output, exit_code)) => Err(Error::validation_invalid_argument(
@@ -267,6 +289,7 @@ fn run_materialization_command(
 
 pub(crate) fn runner_extension_exists(
     runner: &Runner,
+    env: Option<&HashMap<String, String>>,
     homeboy_path: &str,
     extension_id: &str,
     exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(super::RunnerExecOutput, i32)>,
@@ -275,6 +298,7 @@ pub(crate) fn runner_extension_exists(
         &runner.id,
         runner_exec_options(
             runner,
+            env,
             vec![
                 homeboy_path.to_string(),
                 "extension".to_string(),
@@ -300,8 +324,13 @@ pub(crate) fn runner_extension_exists(
     }
 }
 
-fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
-    RunnerExecOptions::diagnostic_raw_command(command).with_env(runner.env.clone())
+fn runner_exec_options(
+    runner: &Runner,
+    env: Option<&HashMap<String, String>>,
+    command: Vec<String>,
+) -> RunnerExecOptions {
+    RunnerExecOptions::diagnostic_raw_command(command)
+        .with_env(env.cloned().unwrap_or_else(|| runner.env.clone()))
 }
 
 fn runner_exec_detail(output: &super::RunnerExecOutput) -> String {
@@ -618,6 +647,7 @@ mod tests {
         let provenance = materialize_runner_extension_with_exec(
             &runner,
             "homeboy",
+            None,
             &request,
             &mut |_runner_id, options| {
                 commands.push(options.command.clone());
@@ -657,6 +687,7 @@ mod tests {
         materialize_runner_extension_with_exec(
             &runner,
             "homeboy",
+            None,
             &request,
             &mut |_runner_id, options| {
                 command = options.command;
@@ -694,5 +725,38 @@ mod tests {
             .synced_source_path
             .starts_with("/runner/ws/_lab_workspaces/dev-extensions/rust/"));
         assert!(plan.synced_source_path.ends_with('/'));
+    }
+
+    #[test]
+    fn materialization_can_use_explicit_command_env() {
+        let runner = runner();
+        let request = RunnerExtensionMaterializationRequest {
+            id: "rust".to_string(),
+            revision: "abc123".to_string(),
+            source: RunnerExtensionMaterializationSource::RunnerPath {
+                path: "/runner/extensions/rust".to_string(),
+            },
+        };
+        let mut env = std::collections::HashMap::new();
+        env.insert("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string());
+        let mut captured_env = std::collections::HashMap::new();
+
+        materialize_runner_extension_with_exec(
+            &runner,
+            "homeboy",
+            Some(env),
+            &request,
+            &mut |_runner_id, options| {
+                captured_env = options.env;
+                Ok((output(), 0))
+            },
+        )
+        .expect("materializes");
+
+        assert_eq!(
+            captured_env.get("PATH").map(String::as_str),
+            Some("/usr/local/bin:/usr/bin")
+        );
+        assert_eq!(captured_env.get("HOMEBOY_COMMAND"), None);
     }
 }

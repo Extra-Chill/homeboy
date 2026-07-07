@@ -13,7 +13,7 @@ use crate::core::git::{run_git, run_git_output};
 use crate::core::output::MergeOutput;
 
 use super::{
-    connect, disconnect, exec, load, materialize_runner_extension, merge,
+    connect, disconnect, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
     RunnerCapabilityPreflight, RunnerExecOptions, RunnerExtensionMaterializationRequest,
     RunnerExtensionMaterializationSource, RunnerFileTransfer,
@@ -508,11 +508,13 @@ fn sync_extension_overlays(
     plan: &RunnerDevSyncPlan,
 ) -> Result<Vec<RunnerDevSyncExtensionProvenance>> {
     let runner = load(runner_id)?;
+    let homeboy_env = installed_homeboy_env(&runner.env, runner.settings.homeboy_path.as_deref());
     let mut overlays = Vec::new();
     for extension in &plan.extensions {
-        overlays.push(materialize_runner_extension(
+        overlays.push(materialize_runner_extension_with_env(
             &runner,
-            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy"),
+            "homeboy",
+            Some(homeboy_env.clone()),
             &RunnerExtensionMaterializationRequest {
                 id: extension.id.clone(),
                 revision: extension.content_hash.clone(),
@@ -523,6 +525,33 @@ fn sync_extension_overlays(
         )?);
     }
     Ok(overlays)
+}
+
+fn installed_homeboy_env(
+    env: &std::collections::HashMap<String, String>,
+    configured_homeboy_path: Option<&str>,
+) -> std::collections::HashMap<String, String> {
+    let mut env = env.clone();
+    env.remove("HOMEBOY_COMMAND");
+    let Some(configured_homeboy_path) = configured_homeboy_path else {
+        return env;
+    };
+    let configured_homeboy_path = Path::new(configured_homeboy_path);
+    if !configured_homeboy_path.is_absolute() {
+        return env;
+    }
+    let Some(parent) = configured_homeboy_path.parent().and_then(Path::to_str) else {
+        return env;
+    };
+    if let Some(path) = env.get_mut("PATH") {
+        let filtered = path
+            .split(':')
+            .filter(|part| *part != parent)
+            .collect::<Vec<_>>()
+            .join(":");
+        *path = filtered;
+    }
+    env
 }
 
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
@@ -929,6 +958,32 @@ mod tests {
             assert_eq!(plan.extensions.len(), 1);
             assert_eq!(plan.extensions[0].id, "nodejs");
         });
+    }
+
+    #[test]
+    fn extension_only_dev_sync_scrubs_dev_binary_env() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            "/runner/ws/_homeboy_binaries/dev/darwin:/usr/local/bin:/usr/bin".to_string(),
+        );
+        env.insert(
+            "HOMEBOY_COMMAND".to_string(),
+            "/runner/ws/_homeboy_binaries/dev/darwin/homeboy".to_string(),
+        );
+        env.insert("KEEP".to_string(), "yes".to_string());
+
+        let scrubbed = installed_homeboy_env(
+            &env,
+            Some("/runner/ws/_homeboy_binaries/dev/darwin/homeboy"),
+        );
+
+        assert_eq!(scrubbed.get("HOMEBOY_COMMAND"), None);
+        assert_eq!(
+            scrubbed.get("PATH").map(String::as_str),
+            Some("/usr/local/bin:/usr/bin")
+        );
+        assert_eq!(scrubbed.get("KEEP").map(String::as_str), Some("yes"));
     }
 
     #[test]
