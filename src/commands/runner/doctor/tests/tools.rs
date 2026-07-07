@@ -82,3 +82,89 @@ fn local_doctor_honors_required_tool_errors() {
             && check.status == RunnerDoctorStatus::Error
     }));
 }
+
+#[test]
+fn declared_runtime_diagnostic_tools_are_grouped_by_source() {
+    let manifest = serde_json::from_value(serde_json::json!({
+        "schema": homeboy::core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+        "id": "nodejs",
+        "extension_id": "nodejs",
+        "agent_task_executors": [],
+        "materialization": {
+            "diagnostics": {
+                "tools": [
+                    {
+                        "tool": "node",
+                        "managed_cache_source": "runtime",
+                        "managed_cache_binary": "node",
+                        "effective_binary_rule": "PATH",
+                        "diagnostic_script": "node --version"
+                    },
+                    {
+                        "tool": "npm",
+                        "managed_cache_source": "runtime",
+                        "managed_cache_binary": "npm",
+                        "effective_binary_rule": "PATH",
+                        "diagnostic_script": "npm --version"
+                    },
+                    {
+                        "tool": "gh",
+                        "managed_cache_source": "workflow",
+                        "managed_cache_binary": "gh",
+                        "effective_binary_rule": "PATH",
+                        "diagnostic_script": "gh --version"
+                    }
+                ]
+            }
+        }
+    }))
+    .expect("runtime manifest");
+
+    let specs = probes::declared_tool_specs_by_source_from_manifests(&[manifest]);
+    let tools = specs.get("nodejs/nodejs").expect("source tools");
+    let ids = tools
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["gh", "node", "npm"]);
+    assert!(tools
+        .iter()
+        .all(|spec| spec.check_id.starts_with("tool.declared.nodejs/nodejs.")));
+}
+
+#[test]
+fn declared_extension_diagnostic_tools_are_grouped_by_extension() {
+    let extension = serde_json::from_value(serde_json::json!({
+        "id": "wordpress",
+        "name": "WordPress",
+        "version": "1.0.0",
+        "diagnostics": {
+            "tools": [
+                {
+                    "id": "php",
+                    "version_args": ["--version"],
+                    "remediation": "Install PHP and ensure it is on PATH"
+                },
+                {
+                    "id": "composer",
+                    "version_args": ["--version"],
+                    "remediation": "Install Composer and ensure it is on PATH"
+                }
+            ]
+        }
+    }))
+    .expect("extension manifest");
+
+    let specs = probes::declared_extension_tool_specs_by_source(&[extension]);
+    let tools = specs.get("wordpress").expect("extension tools");
+    let ids = tools
+        .iter()
+        .map(|spec| spec.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["composer", "php"]);
+    assert!(tools
+        .iter()
+        .all(|spec| spec.check_id.starts_with("tool.declared.wordpress.")));
+}
