@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.39] - 2026-07-07
+
+### Changed
+- Declare extension tool diagnostics
+
 ## [3.23.38] - 2026-07-07
 
 ### Changed
