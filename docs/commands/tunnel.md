@@ -39,6 +39,14 @@ HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.co
   --fail-on-missing
 ```
 
+`inspect` returns a concise handoff summary with the mapped request path,
+filesystem path, public URL, HTTP-style status, detected content type, byte size,
+and `reviewer_safe`. A result is reviewer-safe only when the mapped file exists,
+`HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` is set, and the derived public URL is not a
+local-only URL such as `localhost` or `127.0.0.1`. Treat filesystem paths and
+local-only URLs as operator notes; mirror the artifact root or route it through a
+reviewer-reachable tunnel before pasting links into PRs, issues, or reports.
+
 Serve the artifact root behind an operator-managed TLS/proxy/tunnel:
 
 ```sh
