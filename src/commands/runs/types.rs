@@ -641,6 +641,9 @@ pub struct RunsArtifactCleanupDownloadsArgs {
 #[derive(Serialize)]
 pub struct RunsArtifactCleanupDownloadsOutput {
     pub command: &'static str,
+    pub cleanup_category: &'static str,
+    pub canonical_cleanup_command: String,
+    pub specialist_cleanup_command: &'static str,
     pub dry_run: bool,
     pub root: String,
     pub removed: bool,

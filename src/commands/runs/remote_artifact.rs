@@ -29,6 +29,7 @@ use super::types::{
     RunsArtifactPreviewOutput, RunsOutput,
 };
 use super::CmdResult;
+use crate::commands::cleanup::RUNNER_DOWNLOADS_METADATA;
 
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runs_service::download_remote_artifact(artifact, output)?;
@@ -834,6 +835,10 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
     Ok((
         RunsOutput::ArtifactCleanupDownloads(RunsArtifactCleanupDownloadsOutput {
             command: "runs.artifact.cleanup-downloads",
+            cleanup_category: RUNNER_DOWNLOADS_METADATA.category,
+            canonical_cleanup_command: RUNNER_DOWNLOADS_METADATA
+                .canonical_cleanup_command(args.apply),
+            specialist_cleanup_command: RUNNER_DOWNLOADS_METADATA.specialist_command(args.apply),
             dry_run: outcome.dry_run,
             root: outcome.root.display().to_string(),
             removed: outcome.removed,
@@ -1379,11 +1384,42 @@ mod tests {
                 panic!("unexpected output");
             };
             assert!(dry.dry_run);
+            assert_eq!(dry.command, "runs.artifact.cleanup-downloads");
+            assert_eq!(dry.cleanup_category, RUNNER_DOWNLOADS_METADATA.category);
+            assert_eq!(
+                dry.specialist_cleanup_command,
+                RUNNER_DOWNLOADS_METADATA.specialist_command(false)
+            );
+            assert_eq!(
+                dry.canonical_cleanup_command,
+                RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(false)
+            );
             assert!(!dry.removed);
             assert_eq!(dry.file_count, 2);
             assert_eq!(dry.directory_count, 0);
             assert_eq!(dry.size_bytes, 7);
             assert!(run_dir.exists());
+
+            let (inventory, _) = crate::commands::cleanup::run(
+                crate::commands::cleanup::CleanupArgs {
+                    apply: false,
+                    include: vec![crate::commands::cleanup::CleanupCategoryArg::RunnerDownloads],
+                    exclude: Vec::new(),
+                    command: None,
+                },
+                &crate::commands::GlobalArgs {},
+            )
+            .expect("canonical cleanup inventory");
+            assert_eq!(inventory["category_count"], 1);
+            assert_eq!(inventory["categories"][0]["category"], dry.cleanup_category);
+            assert_eq!(
+                inventory["categories"][0]["canonical_cleanup_command"],
+                dry.canonical_cleanup_command
+            );
+            assert_eq!(
+                inventory["categories"][0]["specialist_command"],
+                dry.specialist_cleanup_command
+            );
 
             let applied = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
                 apply: true,
@@ -1396,6 +1432,14 @@ mod tests {
                 panic!("unexpected output");
             };
             assert!(!applied.dry_run);
+            assert_eq!(
+                applied.canonical_cleanup_command,
+                RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true)
+            );
+            assert_eq!(
+                applied.specialist_cleanup_command,
+                RUNNER_DOWNLOADS_METADATA.specialist_command(true)
+            );
             assert!(applied.removed);
             assert_eq!(applied.file_count, 2);
             assert_eq!(applied.size_bytes, 7);
