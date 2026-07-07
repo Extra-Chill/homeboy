@@ -593,7 +593,7 @@ function fanoutWorkerRuntimeTaskDefaults(worker = {}, request = {}, config = {},
 function expectedArtifactsForCodeboxTask(request, artifactDeclarations = []) {
   const declarationNames = artifactDeclarations
     .filter((declaration) => declaration && declaration.required === true)
-    .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+    .map((declaration) => artifactNameFromDeclaration(declaration))
     .filter(Boolean);
   if (declarationNames.length > 0) {
     return Array.from(new Set(declarationNames));
@@ -619,7 +619,7 @@ function runtimeAbilityRequirements(runtimeTask, request = {}, config = {}, inpu
 function codeboxTaskArtifactDeclarations(artifactDeclarations = []) {
   const declarations = normalizeArray(artifactDeclarations);
   const taskSpecificDeclarations = declarations.filter((declaration) => {
-    const name = typedArtifactNameFromDeclaration(declaration);
+    const name = artifactNameFromDeclaration(declaration);
     return name && !WP_CODEBOX_BUILTIN_ARTIFACT_DECLARATION_NAMES.has(name);
   });
   return taskSpecificDeclarations.length > 0 ? taskSpecificDeclarations : declarations;
@@ -690,7 +690,7 @@ function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs =
 function uniqueArtifactDeclarations(declarations) {
   const seen = new Set();
   return declarations.filter((declaration) => {
-    const name = typedArtifactNameFromDeclaration(declaration);
+    const name = artifactNameFromDeclaration(declaration);
     const schema = declaration?.artifact_schema || declaration?.artifactSchema || declaration?.schema || '';
     const key = `${name}:${schema}`;
     if (!name || seen.has(key)) {
@@ -1062,7 +1062,7 @@ function relativeRuntimePackagePath(value) {
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
   input = runtimePackageInputWithInlineBundle(input, config, inputs);
   const declarations = codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, inputs))
-    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
+    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && artifactNameFromDeclaration(declaration));
   if (declarations.length === 0) {
     return {
       ...input,
@@ -1137,7 +1137,7 @@ function runtimePackageRequiredArtifacts(requiredArtifacts, artifactDeclarations
     ...normalizeArray(requiredArtifacts),
     ...artifactDeclarations
       .filter((declaration) => declaration && declaration.required === true)
-      .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+      .map((declaration) => artifactNameFromDeclaration(declaration))
       .filter(Boolean),
   ]));
 }
@@ -2550,21 +2550,17 @@ function codeboxBundleDirectoryFromResult(result) {
   return artifactBundle?.path || artifactBundle?.uri || '';
 }
 
-function typedArtifactNameFromDeclaration(declaration) {
-  return artifactNameFromDeclaration(declaration);
-}
-
 function requiredArtifactDeclarationsFromRequest(request) {
   const config = request.executor?.config || {};
   return codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, request.inputs || {}))
-    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
+    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && artifactNameFromDeclaration(declaration));
 }
 
 function requiredArtifactDeclarationsFromResultTaskInput(result) {
   const taskInput = result?.task_input || result?.taskInput || {};
   return normalizeArray(taskInput.artifact_declarations || taskInput.artifactDeclarations)
     .map((declaration) => wpCodeboxArtifactDeclarationFromHomeboy(declaration))
-    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
+    .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && artifactNameFromDeclaration(declaration));
 }
 
 function requiredArtifactDeclarationsForResult(request, result) {
@@ -2574,7 +2570,7 @@ function requiredArtifactDeclarationsForResult(request, result) {
   ];
   const seen = new Set();
   return declarations.filter((declaration) => {
-    const key = `${typedArtifactNameFromDeclaration(declaration)}:${declaration.artifact_schema || declaration.artifactSchema || declaration.schema || ''}`;
+    const key = `${artifactNameFromDeclaration(declaration)}:${declaration.artifact_schema || declaration.artifactSchema || declaration.schema || ''}`;
     if (seen.has(key)) {
       return false;
     }
@@ -2598,7 +2594,7 @@ function missingRequiredTypedArtifactDiagnostic(request, outputs) {
     : {};
   const missing = required
     .map((declaration) => ({
-      name: typedArtifactNameFromDeclaration(declaration),
+      name: artifactNameFromDeclaration(declaration),
       type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || '',
       artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema || '',
     }))
@@ -2618,7 +2614,7 @@ function invalidRequiredTypedArtifactDiagnostic(request, outputs) {
     ? outputs.typed_artifacts
     : {};
   const invalid = requiredArtifactDeclarationsFromRequest(request)
-    .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+    .map((declaration) => artifactNameFromDeclaration(declaration))
     .filter((name) => name && unexecutedWorkspaceToolCallArtifact(typedArtifacts[name]));
   if (invalid.length === 0) {
     return null;
