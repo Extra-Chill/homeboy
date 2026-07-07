@@ -115,30 +115,54 @@ pub(crate) fn materialize_runner_extension_with_exec(
             })?;
             let plan = plan_controller_snapshot_extension(workspace_root, &request.id, local_path)?;
             sync_controller_snapshot(runner, &plan)?;
-            let command = vec![
-                homeboy_path.to_string(),
-                "extension".to_string(),
-                "refresh".to_string(),
-                plan.synced_source_path.clone(),
-                "--id".to_string(),
-                request.id.clone(),
-                "--ref".to_string(),
-                plan.content_hash.clone(),
-            ];
+            let exists = runner_extension_exists(
+                runner,
+                env.as_ref(),
+                homeboy_path,
+                &request.id,
+                exec_runner,
+            )
+            .map_err(|detail| {
+                Error::validation_invalid_argument(
+                    "extensions",
+                    detail,
+                    Some(request.id.clone()),
+                    None,
+                )
+            })?;
+            let command = local_path_install_command(
+                homeboy_path,
+                &plan.synced_source_path,
+                &request.id,
+                &plan.content_hash,
+                exists,
+            );
             run_materialization_command(runner, env.as_ref(), command, exec_runner)?;
             Ok(controller_snapshot_provenance(&runner.id, &plan))
         }
         RunnerExtensionMaterializationSource::RunnerPath { path } => {
-            let command = vec![
-                homeboy_path.to_string(),
-                "extension".to_string(),
-                "refresh".to_string(),
-                path.clone(),
-                "--id".to_string(),
-                request.id.clone(),
-                "--ref".to_string(),
-                request.revision.clone(),
-            ];
+            let exists = runner_extension_exists(
+                runner,
+                env.as_ref(),
+                homeboy_path,
+                &request.id,
+                exec_runner,
+            )
+            .map_err(|detail| {
+                Error::validation_invalid_argument(
+                    "extensions",
+                    detail,
+                    Some(request.id.clone()),
+                    None,
+                )
+            })?;
+            let command = local_path_install_command(
+                homeboy_path,
+                path,
+                &request.id,
+                &request.revision,
+                exists,
+            );
             run_materialization_command(runner, env.as_ref(), command, exec_runner)?;
             Ok(runner_path_provenance(&runner.id, request, path))
         }
@@ -179,14 +203,38 @@ pub(crate) fn materialize_runner_extension_with_exec(
     }
 }
 
+fn local_path_install_command(
+    homeboy_path: &str,
+    source_path: &str,
+    extension_id: &str,
+    revision: &str,
+    replace: bool,
+) -> Vec<String> {
+    let mut command = vec![
+        homeboy_path.to_string(),
+        "extension".to_string(),
+        "install".to_string(),
+        source_path.to_string(),
+        "--id".to_string(),
+        extension_id.to_string(),
+        "--ref".to_string(),
+        revision.to_string(),
+    ];
+    if replace {
+        command.push("--replace".to_string());
+    }
+    command
+}
+
 fn sync_controller_snapshot(
     runner: &Runner,
     plan: &RunnerExtensionMaterializationPlan,
 ) -> Result<()> {
+    let synced_source_path = plan.synced_source_path.trim_end_matches('/');
     match runner.kind {
         RunnerKind::Local => copy_snapshot_to_directory(
             Path::new(&plan.source_path),
-            Path::new(&plan.synced_source_path),
+            Path::new(synced_source_path),
             &[],
         ),
         RunnerKind::Ssh => {
@@ -674,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_path_materialization_refreshes_path() {
+    fn runner_path_materialization_links_active_path() {
         let runner = runner();
         let request = RunnerExtensionMaterializationRequest {
             id: "rust".to_string(),
@@ -683,32 +731,80 @@ mod tests {
                 path: "/runner/extensions/rust".to_string(),
             },
         };
-        let mut command = Vec::new();
+        let mut commands = Vec::new();
         materialize_runner_extension_with_exec(
             &runner,
             "homeboy",
             None,
             &request,
             &mut |_runner_id, options| {
-                command = options.command;
+                commands.push(options.command);
                 Ok((output(), 0))
             },
         )
         .expect("materializes");
 
+        assert_eq!(commands[0], vec!["homeboy", "extension", "show", "rust"]);
         assert_eq!(
-            command,
+            commands[1],
             vec![
                 "homeboy",
                 "extension",
-                "refresh",
+                "install",
                 "/runner/extensions/rust",
                 "--id",
                 "rust",
                 "--ref",
-                "abc123"
+                "abc123",
+                "--replace"
             ]
         );
+    }
+
+    #[test]
+    fn controller_snapshot_materialization_links_synced_dev_overlay() {
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let mut runner = runner();
+        runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
+        let dir = tempfile::tempdir().expect("extension source");
+        std::fs::write(dir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
+        std::fs::write(dir.path().join("bench-runner.sh"), "echo bench\n").expect("script");
+        let request = RunnerExtensionMaterializationRequest {
+            id: "nodejs".to_string(),
+            revision: "24ebb9fdaa53c3387669ec3222a5cb7fe26e8884".to_string(),
+            source: RunnerExtensionMaterializationSource::ControllerSnapshot {
+                local_path: dir.path().to_path_buf(),
+            },
+        };
+        let mut commands = Vec::new();
+
+        let provenance = materialize_runner_extension_with_exec(
+            &runner,
+            "homeboy",
+            None,
+            &request,
+            &mut |_runner_id, options| {
+                commands.push(options.command);
+                Ok((output(), 0))
+            },
+        )
+        .expect("materializes");
+
+        assert_eq!(commands[0], vec!["homeboy", "extension", "show", "nodejs"]);
+        assert_eq!(commands[1][..3], ["homeboy", "extension", "install"]);
+        assert_eq!(commands[1][4], "--id");
+        assert_eq!(commands[1][5], "nodejs");
+        assert_eq!(commands[1][6], "--ref");
+        assert_eq!(commands[1][8], "--replace");
+        assert!(commands[1][3].starts_with(&format!(
+            "{}/_lab_workspaces/dev-extensions/nodejs/",
+            workspace.path().display()
+        )));
+        assert!(provenance.dev_overlay);
+        assert!(provenance.synced_source_path.starts_with(&format!(
+            "{}/_lab_workspaces/dev-extensions/nodejs/",
+            workspace.path().display()
+        )));
     }
 
     #[test]
