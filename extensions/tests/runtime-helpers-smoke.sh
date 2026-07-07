@@ -332,6 +332,7 @@ done
 
 for runner in \
     nodejs/scripts/bench/bench-runner.sh \
+    nodejs/scripts/fuzz/fuzz-runner.sh \
     nodejs/scripts/trace/trace-runner.sh \
     rust/scripts/bench/bench-runner.sh \
     wordpress/scripts/bench/bench-runner.sh; do
@@ -341,6 +342,7 @@ done
 for runner in \
     nodejs/scripts/bench/bench-runner.sh \
     nodejs/scripts/format.sh \
+    nodejs/scripts/fuzz/fuzz-runner.sh \
     nodejs/scripts/trace/trace-runner.sh \
     nodejs/scripts/validate.sh \
     rust/scripts/bench/bench-runner.sh \
@@ -366,6 +368,7 @@ for runner in \
 done
 
 for runner in \
+    nodejs/scripts/fuzz/fuzz-runner.sh \
     nodejs/scripts/test/test-runner.sh \
     rust/scripts/bench/bench-runner.sh \
     rust/scripts/test-runner.sh \

@@ -14,9 +14,13 @@ cp -R "$REPO_ROOT/dependency-adapters" "$INSTALL_ROOT/dependency-adapters"
 
 NODE_HELPERS="${INSTALL_ROOT}/nodejs/scripts/lib/node-helpers.sh"
 PROJECT_SCRIPTS="${INSTALL_ROOT}/scripts/lib/project-scripts.sh"
+PACKAGED_PROJECT_SCRIPTS="${INSTALL_ROOT}/nodejs/scripts/lib/project-scripts.sh"
+PACKAGED_NODE_ADAPTER="${INSTALL_ROOT}/nodejs/dependency-adapters/examples/nodejs.json"
 
 test -f "$NODE_HELPERS"
 test -f "$PROJECT_SCRIPTS"
+test -f "$PACKAGED_PROJECT_SCRIPTS"
+test -f "$PACKAGED_NODE_ADAPTER"
 test -f "${INSTALL_ROOT}/dependency-adapters/examples/nodejs.json"
 
 bash -c '
@@ -79,3 +83,21 @@ bash -c '
     [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = "pnpm" ]
     [ "$(homeboy_project_run_script_command test)" = "pnpm run test" ]
 ' _ "$PROJECT_SCRIPTS" "$WORKSPACE_PROJECT"
+
+INSTALLED_ROOT="$TMP_DIR/installed/extensions"
+mkdir -p "$INSTALLED_ROOT"
+cp -R "$ROOT_DIR" "$INSTALLED_ROOT/nodejs"
+INSTALLED_NODE_HELPERS="$INSTALLED_ROOT/nodejs/scripts/lib/node-helpers.sh"
+
+test ! -e "$INSTALLED_ROOT/scripts/lib/project-scripts.sh"
+
+bash -c '
+    source "$1"
+    homeboy_project_init --ecosystem nodejs --path "$2/packages/plugin/subdir"
+    [ "$PROJECT_SCRIPTS_HELPER" = "$3/scripts/lib/project-scripts.sh" ]
+    [ "$HOMEBOY_DEPENDENCY_ADAPTERS_PATH" = "" ]
+    [ "$HOMEBOY_PROJECT_ROOT" = "$2/packages/plugin" ]
+    [ "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" = "$2" ]
+    [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = "pnpm" ]
+    [ "$(homeboy_project_run_script_command test)" = "pnpm run test" ]
+' _ "$INSTALLED_NODE_HELPERS" "$WORKSPACE_PROJECT" "$INSTALLED_ROOT/nodejs"

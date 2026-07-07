@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_DIR}/../.." && pwd)/homeboy}"
+BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/bash-preflight.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
+MANIFEST="${EXTENSION_DIR}/nodejs.json"
+RUNNER="${SCRIPT_DIR}/fuzz-runner.sh"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-node-fuzz.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+if [ ! -f "$BASH_PREFLIGHT_HELPER" ]; then
+    echo "Missing bash preflight helper: $BASH_PREFLIGHT_HELPER" >&2
+    exit 1
+fi
+if [ ! -f "$RESOLVE_CONTEXT_HELPER" ]; then
+    echo "Missing resolve context helper: $RESOLVE_CONTEXT_HELPER" >&2
+    exit 1
+fi
+
+assert_json() {
+    local file="$1"
+    local script="$2"
+    node -e "const fs = require('fs'); const data = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); ${script}" "$file"
+}
+
+make_project() {
+    local name="$1"
+    local project_dir="$TMP_DIR/$name"
+    mkdir -p "$project_dir"
+    cat > "$project_dir/package.json" <<'JSON'
+{"name":"node-fuzz-smoke","scripts":{"fuzz":"node fuzz-package.mjs","fuzz:configured":"node configured-fuzz.mjs"}}
+JSON
+    printf '%s\n' "$project_dir"
+}
+
+run_fuzz() {
+    local project_dir="$1"
+    local results_file="$2"
+    local workload_path="${3:-}"
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="$project_dir" \
+    HOMEBOY_COMPONENT_ID="node-fuzz-smoke" \
+    HOMEBOY_FUZZ_RESULTS_FILE="$results_file" \
+    HOMEBOY_FUZZ_ARTIFACTS_DIR="$TMP_DIR/artifacts" \
+    HOMEBOY_FUZZ_WORKLOAD_PATH="$workload_path" \
+    HOMEBOY_RUNTIME_BASH_PREFLIGHT="$BASH_PREFLIGHT_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+        bash "$RUNNER" --flag
+}
+
+node - "$MANIFEST" "$RUNNER" <<'NODE'
+const fs = require('fs');
+const [manifestPath, runnerPath] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const runner = fs.readFileSync(runnerPath, 'utf8');
+if (!manifest.provides?.capabilities?.includes('fuzz')) throw new Error('Node.js manifest does not advertise fuzz capability');
+if (manifest.fuzz?.extension_script !== 'scripts/fuzz/fuzz-runner.sh') throw new Error('fuzz runner path is not declared in nodejs.json');
+if (!manifest.fuzz?.capabilities?.includes('nodejs-fuzz-workload')) throw new Error('Node.js fuzz workload capability missing');
+for (const token of [
+  'HOMEBOY_FUZZ_RESULTS_FILE',
+  'HOMEBOY_FUZZ_WORKLOAD_PATH',
+  'HOMEBOY_FUZZ_ARTIFACTS_DIR',
+  'HOMEBOY_NODE_FUZZ_SCRIPT',
+  'HOMEBOY_NODE_FUZZ_COMMAND',
+]) {
+  if (!runner.includes(token)) throw new Error(`runner missing env contract token ${token}`);
+}
+NODE
+
+SCRIPT_PROJECT="$(make_project script-workload)"
+WORKLOAD_SCRIPT="$SCRIPT_PROJECT/rig-fuzz.mjs"
+cat > "$WORKLOAD_SCRIPT" <<'JS'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_FUZZ_RESULTS_FILE, JSON.stringify({
+  schema: 'homeboy/fuzz-campaign/v1',
+  status: 'pass',
+  source: 'script-workload',
+  args: process.argv.slice(2),
+}, null, 2));
+JS
+SCRIPT_RESULTS="$TMP_DIR/script-results.json"
+run_fuzz "$SCRIPT_PROJECT" "$SCRIPT_RESULTS" "$WORKLOAD_SCRIPT" >/dev/null
+assert_json "$SCRIPT_RESULTS" '
+if (data.schema !== "homeboy/fuzz-campaign/v1") throw new Error("script workload schema missing");
+if (data.source !== "script-workload") throw new Error("script workload did not run");
+if (data.args.join(",") !== "--flag") throw new Error(`script args not forwarded: ${data.args.join(",")}`);
+'
+
+PACKAGE_PROJECT="$(make_project package-script)"
+cat > "$PACKAGE_PROJECT/fuzz-package.mjs" <<'JS'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_FUZZ_RESULTS_FILE, JSON.stringify({
+  schema: 'homeboy/fuzz-campaign/v1',
+  status: 'pass',
+  source: 'package-script',
+  args: process.argv.slice(2),
+}, null, 2));
+JS
+PACKAGE_RESULTS="$TMP_DIR/package-results.json"
+run_fuzz "$PACKAGE_PROJECT" "$PACKAGE_RESULTS" >/dev/null
+assert_json "$PACKAGE_RESULTS" '
+if (data.source !== "package-script") throw new Error("package scripts.fuzz did not run");
+if (data.args.join(",") !== "--flag") throw new Error(`package args not forwarded: ${data.args.join(",")}`);
+'
+
+CONFIG_PROJECT="$(make_project configured-script)"
+cat > "$CONFIG_PROJECT/configured-fuzz.mjs" <<'JS'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_FUZZ_RESULTS_FILE, JSON.stringify({
+  schema: 'homeboy/fuzz-campaign/v1',
+  status: 'pass',
+  source: 'configured-script',
+}, null, 2));
+JS
+CONFIG_RESULTS="$TMP_DIR/config-results.json"
+HOMEBOY_NODE_FUZZ_SCRIPT="fuzz:configured" run_fuzz "$CONFIG_PROJECT" "$CONFIG_RESULTS" >/dev/null
+assert_json "$CONFIG_RESULTS" '
+if (data.source !== "configured-script") throw new Error("configured fuzz script did not run");
+'
+
+JSON_PROJECT="$(make_project json-workload)"
+cat > "$JSON_PROJECT/json-fuzz.mjs" <<'JS'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_FUZZ_RESULTS_FILE, JSON.stringify({
+  schema: 'homeboy/fuzz-campaign/v1',
+  status: 'pass',
+  source: 'json-workload',
+  args: process.argv.slice(2),
+}, null, 2));
+JS
+JSON_WORKLOAD="$JSON_PROJECT/workload.json"
+cat > "$JSON_WORKLOAD" <<'JSON'
+{"path":"json-fuzz.mjs","args":["--from-json"]}
+JSON
+JSON_RESULTS="$TMP_DIR/json-results.json"
+run_fuzz "$JSON_PROJECT" "$JSON_RESULTS" "$JSON_WORKLOAD" >/dev/null
+assert_json "$JSON_RESULTS" '
+if (data.source !== "json-workload") throw new Error("json workload path did not run");
+if (data.args.join(",") !== "--from-json,--flag") throw new Error(`json workload args not forwarded: ${data.args.join(",")}`);
+'
+
+echo "Node.js fuzz runner smoke passed."
