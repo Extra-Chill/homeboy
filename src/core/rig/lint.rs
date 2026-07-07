@@ -63,6 +63,7 @@ pub fn run_package_lint_at_with_ignores(
     let conflict_failures = conflict_marker_failures(root, &files)?;
     let json_failures = json_parse_failures(root, &files)?;
     let template_failures = template_materialization_failures(root, &files)?;
+    let unknown_field_failures = unknown_top_level_field_failures(root, &files)?;
     let contract_failures = contract_validation_failures(root)?;
     let portability_failures = portability_failures(root, &files)?;
     let reference_failures = workload_reference_failures(root, &files)?;
@@ -85,7 +86,7 @@ pub fn run_package_lint_at_with_ignores(
         aggregate_step(
             "rig-package-lint",
             "rig package specs satisfy the Homeboy rig contract",
-            contract_failures,
+            [unknown_field_failures, contract_failures].concat(),
         ),
         aggregate_step(
             "rig-package-lint",
@@ -105,6 +106,65 @@ pub fn run_package_lint_at_with_ignores(
         failed: steps.iter().filter(|step| step.status == "fail").count(),
         steps,
     })
+}
+
+const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
+    "app_launcher",
+    "bench",
+    "bench_profiles",
+    "bench_workloads",
+    "components",
+    "description",
+    "extends",
+    "fuzz",
+    "fuzz_profiles",
+    "fuzz_workloads",
+    "id",
+    "lifecycle",
+    "package_dependencies",
+    "pipeline",
+    "requirements",
+    "resources",
+    "services",
+    "shared_paths",
+    "symlinks",
+    "trace",
+    "trace_experiments",
+    "trace_guardrails",
+    "trace_phase_templates",
+    "trace_profiles",
+    "trace_variants",
+    "trace_workload_defaults",
+    "trace_workloads",
+];
+
+fn unknown_top_level_field_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
+    for file in files
+        .iter()
+        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
+    {
+        let content = fs::read_to_string(file).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
+        })?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        for key in object.keys() {
+            if KNOWN_RIG_TOP_LEVEL_FIELDS.contains(&key.as_str()) || key.starts_with("x-") {
+                continue;
+            }
+            failures.push(format!(
+                "{}: unknown top-level rig field `{}` (use `x-*` for extension-owned metadata)",
+                display_relative(root, file),
+                key
+            ));
+        }
+    }
+    Ok(failures)
 }
 
 fn contract_validation_failures(root: &Path) -> Result<Vec<String>> {
@@ -394,7 +454,8 @@ fn template_materialization_failures(root: &Path, files: &[PathBuf]) -> Result<V
         if !content.contains("\"extends\"") {
             continue;
         }
-        if let Err(error) = super::install::materialize_rig_spec(file, root) {
+        let source_root = template_source_root(root, file)?;
+        if let Err(error) = super::install::materialize_rig_spec(file, &source_root) {
             failures.push(format!(
                 "{} template materialization failed: {}",
                 display_relative(root, file),
@@ -403,6 +464,21 @@ fn template_materialization_failures(root: &Path, files: &[PathBuf]) -> Result<V
         }
     }
     Ok(failures)
+}
+
+fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
+    let id = file
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_string();
+    let rig = super::DiscoveredRig {
+        id,
+        description: String::new(),
+        rig_path: file.to_path_buf(),
+    };
+    super::install::local_package_source_root_for_dependencies(root, &[rig])
 }
 
 fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -971,6 +1047,101 @@ mod tests {
             .as_ref()
             .expect("contract error")
             .contains("dependency materialization"));
+    }
+
+    #[test]
+    fn package_lint_reports_unknown_top_level_rig_fields() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("bad");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "bad",
+                "components": {},
+                "lifecycle": { "cleanup": "dry_run" },
+                "trace": { "default_component": "app" },
+                "x-owner": { "team": "fixtures" },
+                "typoed_field": true
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let contract_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+
+        assert_eq!(contract_step.status, "fail");
+        let error = contract_step.error.as_ref().expect("contract error");
+        assert!(error.contains("unknown top-level rig field `typoed_field`"));
+        assert!(!error.contains("x-owner"));
+        assert!(!error.contains("lifecycle"));
+        assert!(!error.contains("trace"));
+    }
+
+    #[test]
+    fn package_lint_materializes_extends_from_declared_repo_shared_root() {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        git(temp.path(), &["init", "--quiet"]);
+        let package = temp.path().join("Product").join("plugin");
+        let rig_dir = package.join("rigs").join("browser-coverage");
+        let shared = temp.path().join("shared").join("wordpress-plugin");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::create_dir_all(&shared).expect("shared dir");
+        fs::write(
+            shared.join("browser-coverage.base.json"),
+            r#"{
+                "components": {
+                    "plugin": { "path": "${env.PLUGIN_PATH}" }
+                },
+                "trace": { "default_component": "plugin" },
+                "trace_workloads": {
+                    "nodejs": [
+                        { "path": "${package.root}/bench/browser-coverage.trace.mjs" }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write shared base");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "browser-coverage",
+                "package_dependencies": ["../../shared/wordpress-plugin"],
+                "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json",
+                "trace_profiles": { "smoke": { "scenario": "browser-coverage" } }
+            }"#,
+        )
+        .expect("write rig");
+        fs::create_dir_all(package.join("bench")).expect("bench dir");
+        fs::write(
+            package.join("bench/browser-coverage.trace.mjs"),
+            "// fixture\n",
+        )
+        .expect("workload");
+        git(temp.path(), &["add", "."]);
+
+        let outcome = run_package_lint_at(&package).expect("lint package");
+        let template_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("template specs materialize"))
+            .expect("template step");
+        let contract_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+
+        assert_eq!(template_step.status, "pass");
+        assert_eq!(
+            contract_step.status, "pass",
+            "contract error: {:?}",
+            contract_step.error
+        );
     }
 
     #[test]

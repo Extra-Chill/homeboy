@@ -993,11 +993,11 @@ impl RigRunObserver {
             "down" => ResourceLifecycleResourceStatus::CleanupPending,
             _ => return,
         };
-        let index = rig_resource_lifecycle_index(
-            &rig.id,
-            &resources,
-            RigResourceLifecycleOptions::new(&self.run_id, lifecycle_status),
-        );
+        let mut options = RigResourceLifecycleOptions::new(&self.run_id, lifecycle_status);
+        if let Some(cleanup_intent) = rig.lifecycle.cleanup {
+            options.cleanup_intent = cleanup_intent;
+        }
+        let index = rig_resource_lifecycle_index(&rig.id, &resources, options);
         if index.resources.is_empty() || index.validate().is_err() {
             return;
         }

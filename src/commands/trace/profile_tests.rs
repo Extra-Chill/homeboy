@@ -150,6 +150,38 @@ fn trace_profile_cli_fields_override_profile_fields() {
 }
 
 #[test]
+fn trace_profile_uses_rig_trace_default_component_for_multi_component_rig() {
+    with_isolated_home(|home| {
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        fs::write(
+            rig_dir.join("stripe-rig.json"),
+            r#"{
+                "components": {
+                    "woocommerce-gateway-stripe": { "path": "/tmp/stripe" },
+                    "woocommerce": { "path": "/tmp/woocommerce" }
+                },
+                "trace": { "default_component": "woocommerce-gateway-stripe" },
+                "trace_profiles": {
+                    "smoke": { "scenario": "ece-product-page-waterfall" }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let mut args = trace_args_for_profile("smoke");
+        resolve_trace_profile_args(&mut args).expect("profile resolves");
+
+        assert_eq!(args.rig.as_deref(), Some("stripe-rig"));
+        assert_eq!(
+            args.comp.component.as_deref(),
+            Some("woocommerce-gateway-stripe")
+        );
+        assert_eq!(args.scenario.as_deref(), Some("ece-product-page-waterfall"));
+    });
+}
+
+#[test]
 fn trace_profile_required_env_fails_before_run() {
     with_isolated_home(|home| {
         let rig_dir = home.path().join(".config").join("homeboy").join("rigs");

@@ -943,7 +943,20 @@ fn resolve_trace_profile_args(args: &mut TraceArgs) -> homeboy::core::Result<()>
     if args.comp.component.is_none() {
         if let Some(rig_id) = args.rig.as_deref() {
             let rig_spec = rig::load(rig_id)?;
-            if rig_spec.components.len() == 1 {
+            if let Some(component) = rig_spec.trace.default_component.as_deref() {
+                if !rig_spec.components.contains_key(component) {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "trace.default_component",
+                        format!(
+                            "rig '{}' declares trace.default_component '{}' but no matching component exists",
+                            rig_spec.id, component
+                        ),
+                        Some(component.to_string()),
+                        None,
+                    ));
+                }
+                args.comp.component = Some(component.to_string());
+            } else if rig_spec.components.len() == 1 {
                 args.comp.component = rig_spec.components.keys().next().cloned();
             }
         }

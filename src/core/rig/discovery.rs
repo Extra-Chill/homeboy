@@ -180,19 +180,29 @@ fn discovered_from_path(
     fallback_name: Option<&std::ffi::OsStr>,
     source_root: &Path,
 ) -> Result<DiscoveredRig> {
-    let mut spec = parse_discovered_rig_spec(path, source_root)?;
+    let fallback_id = fallback_name
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let discovered = DiscoveredRig {
+        id: fallback_id.clone(),
+        description: String::new(),
+        rig_path: path.to_path_buf(),
+    };
+    let effective_source_root =
+        super::install::local_package_source_root_for_dependencies(source_root, &[discovered])?;
+    let mut spec = parse_discovered_rig_spec(path, &effective_source_root)?;
     if spec.id.is_empty() {
-        spec.id = fallback_name
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "rig_id",
-                    "Rig spec has no id and no directory name fallback",
-                    None,
-                    None,
-                )
-            })?
-            .to_string();
+        spec.id = if fallback_id.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "rig_id",
+                "Rig spec has no id and no directory name fallback",
+                None,
+                None,
+            ));
+        } else {
+            fallback_id
+        };
     }
     Ok(DiscoveredRig {
         id: extension::slugify_id(&spec.id)?,

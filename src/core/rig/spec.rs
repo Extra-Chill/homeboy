@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::extension::trace::TraceProbeConfig;
 use crate::core::extension::trace::TraceSpanMetadata;
+use crate::core::resource_cleanup_intent::ResourceCleanupIntent;
 use std::collections::{BTreeMap, HashMap};
 
 pub use crate::core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
@@ -77,6 +78,11 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "RigResourcesSpec::is_empty")]
     pub resources: RigResourcesSpec,
 
+    /// Rig-owned resource lifecycle defaults consumed when Homeboy emits
+    /// resource lifecycle index artifacts for rig up/check/down runs.
+    #[serde(default, skip_serializing_if = "RigLifecycleSpec::is_empty")]
+    pub lifecycle: RigLifecycleSpec,
+
     /// Generic environment requirements and filesystem assertions checked by
     /// Homeboy core before rig-specific check pipelines run.
     #[serde(default, skip_serializing_if = "RigRequirementsSpec::is_empty")]
@@ -96,6 +102,11 @@ pub struct RigSpec {
     /// populated when the rig is meant to drive fuzz workloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fuzz: Option<FuzzSpec>,
+
+    /// Trace composition defaults shared by trace profiles and profile-only
+    /// invocations.
+    #[serde(default, skip_serializing_if = "RigTraceSpec::is_empty")]
+    pub trace: RigTraceSpec,
 
     /// Out-of-tree bench workloads keyed by extension id.
     ///
@@ -176,6 +187,35 @@ pub struct RigSpec {
     /// `homeboy rig up` before opening the target app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_launcher: Option<AppLauncherSpec>,
+}
+
+/// Rig-level resource lifecycle defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RigLifecycleSpec {
+    /// Cleanup intent applied to generated rig resource lifecycle records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<ResourceCleanupIntent>,
+}
+
+impl RigLifecycleSpec {
+    pub fn is_empty(&self) -> bool {
+        self.cleanup.is_none()
+    }
+}
+
+/// Rig-level trace defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RigTraceSpec {
+    /// Component ID selected when a trace profile omits its own component and
+    /// the invocation does not pass one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_component: Option<String>,
+}
+
+impl RigTraceSpec {
+    pub fn is_empty(&self) -> bool {
+        self.default_component.is_none()
+    }
 }
 
 /// Declarative resources a rig owns or touches while active.
@@ -502,6 +542,14 @@ pub struct FuzzSpec {
     /// positional component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_component: Option<String>,
+
+    /// Optional fuzz workload manifest schema identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+
+    /// Optional fuzz workload manifest path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1130,45 @@ mod tests {
                 .as_deref(),
             Some("npm run smoke:install")
         );
+    }
+
+    #[test]
+    fn test_rig_lifecycle_trace_and_fuzz_contract_fields_round_trip() {
+        let spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "wordpress-core-fuzz-coverage",
+                "components": {
+                    "wordpress-develop": { "path": "/tmp/wordpress-develop" }
+                },
+                "lifecycle": { "cleanup": "apply" },
+                "trace": { "default_component": "wordpress-develop" },
+                "fuzz": {
+                    "default_component": "wordpress-develop",
+                    "schema": "homeboy/fuzz-workload/v1",
+                    "manifest": "${package.root}/manifests/fuzzer-profile.json"
+                }
+            }"#,
+        )
+        .expect("parse rig contract fields");
+
+        assert_eq!(spec.lifecycle.cleanup, Some(ResourceCleanupIntent::Apply));
+        assert_eq!(
+            spec.trace.default_component.as_deref(),
+            Some("wordpress-develop")
+        );
+        let fuzz = spec.fuzz.as_ref().expect("fuzz spec");
+        assert_eq!(fuzz.default_component.as_deref(), Some("wordpress-develop"));
+        assert_eq!(fuzz.schema.as_deref(), Some("homeboy/fuzz-workload/v1"));
+        assert_eq!(
+            fuzz.manifest.as_deref(),
+            Some("${package.root}/manifests/fuzzer-profile.json")
+        );
+
+        let json = serde_json::to_string(&spec).expect("serialize rig");
+        assert!(json.contains("\"lifecycle\""));
+        assert!(json.contains("\"trace\""));
+        assert!(json.contains("\"schema\""));
+        assert!(json.contains("\"manifest\""));
     }
 }
 
