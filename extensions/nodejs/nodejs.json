@@ -1,12 +1,15 @@
 {
   "name": "Node.js",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
     "capabilities": ["format", "validate", "fuzz"]
+  },
+  "source_snapshot": {
+    "sync_excludes": ["node_modules/", "node_modules/**"]
   },
   "structured_sidecars": {
     "lint.findings": true,

@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.23.38",
+  "version": "3.23.39",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -10,6 +10,9 @@
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
     "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"]
+  },
+  "source_snapshot": {
+    "sync_excludes": ["vendor/", "vendor/**"]
   },
   "structured_sidecars": {
     "lint.findings": true,
