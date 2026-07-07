@@ -421,15 +421,12 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     let extensions = sync_extension_overlays(&options.runner_id, &plan)?;
 
     let mut runner = load(&options.runner_id)?;
-    runner.resources.insert(
-        "dev_sync".to_string(),
-        serde_json::json!({
-            "schema": "homeboy/runner-dev-sync/v1",
-            "homeboy": binary.clone(),
-            "extensions": extensions,
-            "extensions_deferred": [],
-        }),
-    );
+    let dev_sync = updated_dev_sync_resource(
+        runner.resources.get("dev_sync").cloned(),
+        binary.clone(),
+        &extensions,
+    )?;
+    runner.resources.insert("dev_sync".to_string(), dev_sync);
     let patch = serde_json::json!({ "resources": runner.resources });
     let mut updated_fields = refresh_output
         .as_ref()
@@ -525,6 +522,68 @@ fn sync_extension_overlays(
         )?);
     }
     Ok(overlays)
+}
+
+fn updated_dev_sync_resource(
+    existing: Option<Value>,
+    binary: Option<RunnerDevSyncBinaryProvenance>,
+    synced_extensions: &[RunnerDevSyncExtensionProvenance],
+) -> Result<Value> {
+    let mut dev_sync = existing.unwrap_or_else(|| serde_json::json!({}));
+    if !dev_sync.is_object() {
+        dev_sync = serde_json::json!({});
+    }
+
+    dev_sync["schema"] = Value::String("homeboy/runner-dev-sync/v1".to_string());
+    if let Some(binary) = binary {
+        dev_sync["homeboy"] = serde_json::to_value(binary)
+            .map_err(|err| Error::internal_json(err.to_string(), None))?;
+    } else if dev_sync.get("homeboy").is_none() {
+        dev_sync["homeboy"] = Value::Null;
+    }
+
+    let mut extensions = dev_sync
+        .get("extensions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let synced_extension_ids = synced_extensions
+        .iter()
+        .map(|extension| extension.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    extensions.retain(|entry| {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| !synced_extension_ids.contains(id))
+    });
+    for extension in synced_extensions {
+        extensions.push(
+            serde_json::to_value(extension)
+                .map_err(|err| Error::internal_json(err.to_string(), None))?,
+        );
+    }
+    dev_sync["extensions"] = Value::Array(dedup_extension_metadata_by_id(extensions));
+    dev_sync["extensions_deferred"] = Value::Array(Vec::new());
+    Ok(dev_sync)
+}
+
+fn dedup_extension_metadata_by_id(extensions: Vec<Value>) -> Vec<Value> {
+    let mut deduped = Vec::new();
+    for extension in extensions {
+        let Some(extension_id) = extension.get("id").and_then(Value::as_str) else {
+            deduped.push(extension);
+            continue;
+        };
+        if let Some(index) = deduped
+            .iter()
+            .position(|entry: &Value| entry.get("id").and_then(Value::as_str) == Some(extension_id))
+        {
+            deduped.remove(index);
+        }
+        deduped.push(extension);
+    }
+    deduped
 }
 
 fn installed_homeboy_env(
@@ -923,6 +982,67 @@ mod tests {
             .synced_source_path
             .starts_with("/runner/ws/_lab_workspaces/dev-extensions/rust/"));
         assert!(plan[0].synced_source_path.ends_with('/'));
+    }
+
+    #[test]
+    fn dev_sync_resource_replaces_existing_extension_overlay_by_id() {
+        let existing = serde_json::json!({
+            "schema": "homeboy/runner-dev-sync/v1",
+            "homeboy": {"hash": "old-binary"},
+            "extensions": [
+                {"id": "nodejs", "source_path": "/old/nodejs", "content_hash": "old"},
+                {"id": "rust", "source_path": "/extensions/rust", "content_hash": "rust-hash"}
+            ]
+        });
+        let extension =
+            super::super::extension_materialization::RunnerExtensionMaterializationProvenance {
+                id: "nodejs".to_string(),
+                source_path: "/new/nodejs".to_string(),
+                synced_source_path: "/runner/ws/_lab_workspaces/dev-extensions/nodejs/newhash/"
+                    .to_string(),
+                content_hash: "new".to_string(),
+                source_revision: None,
+                dirty: false,
+                dirty_fingerprint: None,
+                synced_at: "2026-07-07T00:00:00Z".to_string(),
+                dev_overlay: true,
+                lifecycle: super::super::extension_materialization::dev_extension_lifecycle(
+                    "lab",
+                    "/runner/ws/_lab_workspaces/dev-extensions/nodejs/newhash/",
+                    "nodejs",
+                ),
+                materialization_source: None,
+            };
+
+        let updated = updated_dev_sync_resource(Some(existing), None, &[extension])
+            .expect("updates dev-sync resource");
+        let extensions = updated["extensions"].as_array().expect("extensions array");
+
+        assert_eq!(updated["homeboy"]["hash"], "old-binary");
+        assert_eq!(extensions.len(), 2);
+        assert_eq!(extensions[0]["id"], "rust");
+        assert_eq!(extensions[1]["id"], "nodejs");
+        assert_eq!(extensions[1]["source_path"], "/new/nodejs");
+        assert_eq!(extensions[1]["content_hash"], "new");
+    }
+
+    #[test]
+    fn dev_sync_resource_keeps_last_duplicate_overlay_for_same_id() {
+        let existing = serde_json::json!({
+            "schema": "homeboy/runner-dev-sync/v1",
+            "extensions": [
+                {"id": "nodejs", "source_path": "/old/nodejs", "content_hash": "old"},
+                {"id": "nodejs", "source_path": "/newer/nodejs", "content_hash": "newer"}
+            ]
+        });
+
+        let updated = updated_dev_sync_resource(Some(existing), None, &[])
+            .expect("normalizes dev-sync resource");
+        let extensions = updated["extensions"].as_array().expect("extensions array");
+
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0]["source_path"], "/newer/nodejs");
+        assert_eq!(extensions[0]["content_hash"], "newer");
     }
 
     #[test]
