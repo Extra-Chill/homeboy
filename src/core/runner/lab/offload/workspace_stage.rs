@@ -1043,6 +1043,11 @@ fn rig_workload_command(args: &[String]) -> Option<RigWorkloadCommand> {
 }
 
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
+    if !primary_source_path.join("rig.json").is_file() && !primary_source_path.join("rigs").is_dir()
+    {
+        return Ok(None);
+    }
+
     let Some(discovered) = rig::discover_rigs(primary_source_path)?
         .into_iter()
         .find(|candidate| candidate.id == rig_id)
@@ -1383,6 +1388,17 @@ mod tests {
                 "wordpress-fixture".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn primary_rig_lookup_ignores_component_checkout_without_rig_package_shape() {
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        std::fs::create_dir_all(checkout.path().join("src")).expect("checkout content");
+
+        let spec = load_primary_rig_spec(checkout.path(), "fixture-matrix")
+            .expect("lookup should not fail for a plain component checkout");
+
+        assert!(spec.is_none());
     }
 
     #[test]

@@ -239,3 +239,121 @@ fn cross_rig_profile_selects_profile_for_each_rig() {
         }
     });
 }
+
+#[test]
+fn cross_rig_profile_uses_enclosing_local_rig_package() {
+    let _guard = current_dir_lock().lock().expect("lock current dir");
+    let original_dir = std::env::current_dir().expect("current dir");
+
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_a = tempfile::TempDir::new().expect("component a");
+        let component_b = tempfile::TempDir::new().expect("component b");
+        let local_package = tempfile::TempDir::new().expect("local package");
+        write_local_rig_package(
+            local_package.path(),
+            "rig-a",
+            "studio",
+            component_a.path(),
+            "local-a",
+        );
+        write_local_rig_package(
+            local_package.path(),
+            "rig-b",
+            "studio",
+            component_b.path(),
+            "local-b",
+        );
+        std::fs::write(
+            local_package.path().join("workloads/local-a.bench.mjs"),
+            "// fixture\n",
+        )
+        .expect("write local a mjs workload");
+        std::fs::write(
+            local_package.path().join("workloads/local-b.bench.mjs"),
+            "// fixture\n",
+        )
+        .expect("write local b mjs workload");
+
+        std::fs::write(
+            local_package.path().join("rigs/rig-a/rig.json"),
+            format!(
+                r#"{{
+                    "components": {{
+                        "studio": {{
+                            "path": "{}",
+                            "extensions": {{ "fixture-bench": {{}} }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "studio" }},
+                    "bench_profiles": {{ "substrate": ["local-a"] }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "id": "local-a", "path": "workloads/local-a.bench.mjs" }}
+                    ] }}
+                }}"#,
+                component_a.path().display()
+            ),
+        )
+        .expect("write local rig a profile");
+        std::fs::write(
+            local_package.path().join("rigs/rig-b/rig.json"),
+            format!(
+                r#"{{
+                    "components": {{
+                        "studio": {{
+                            "path": "{}",
+                            "extensions": {{ "fixture-bench": {{}} }}
+                        }}
+                    }},
+                    "bench": {{ "default_component": "studio" }},
+                    "bench_profiles": {{ "substrate": ["local-b"] }},
+                    "bench_workloads": {{ "fixture-bench": [
+                        {{ "id": "local-b", "path": "workloads/local-b.bench.mjs" }}
+                    ] }}
+                }}"#,
+                component_b.path().display()
+            ),
+        )
+        .expect("write local rig b profile");
+        std::env::set_current_dir(local_package.path()).expect("enter local package");
+
+        let result = run(
+            run_args_with_profile(
+                None,
+                vec!["rig-a".to_string(), "rig-b".to_string()],
+                "substrate",
+            ),
+            &GlobalArgs {},
+        );
+        std::env::set_current_dir(&original_dir).expect("restore current dir");
+        let (output, exit_code) = result.expect("cross-rig local package profile should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Comparison(result) => {
+                assert_eq!(result.rigs.len(), 2);
+                assert_eq!(
+                    result.rigs[0]
+                        .results
+                        .as_ref()
+                        .expect("rig a results")
+                        .scenarios[0]
+                        .id,
+                    "local-a"
+                );
+                assert_eq!(
+                    result.rigs[1]
+                        .results
+                        .as_ref()
+                        .expect("rig b results")
+                        .scenarios[0]
+                        .id,
+                    "local-b"
+                );
+            }
+            _ => panic!("expected comparison output"),
+        }
+    });
+
+    std::env::set_current_dir(original_dir).expect("restore current dir");
+}

@@ -236,8 +236,11 @@ pub(crate) fn extension_guidance_hints(
     vec![
         link_hint,
         "List installed extensions: homeboy extension list".to_string(),
+        format!(
+            "Component config lives at ~/.config/homeboy/components/{}.json or in a portable homeboy.json discovered from the component path.",
+            component.id
+        ),
         "The component path resolved correctly; the requested command needs an extension provider.".to_string(),
-        "Use `scripts.build` for component-owned build commands; component-level `build_command` is unsupported.".to_string(),
     ]
 }
 
