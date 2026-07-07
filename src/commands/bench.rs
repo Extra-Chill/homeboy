@@ -116,7 +116,7 @@ impl BenchArgs {
 
         let mut extension_ids = BTreeSet::new();
         for rig_id in &run.rig {
-            let spec = rig::load(rig_id)?;
+            let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
             let workload_extension_ids =
                 rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench);
             for extension_id in &workload_extension_ids {
@@ -807,7 +807,7 @@ fn run_cross_rig_bench(
 }
 
 fn rig_axes(rig_id: &str) -> homeboy::core::Result<Option<BTreeMap<String, String>>> {
-    let spec = rig::load(rig_id)?;
+    let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
     let Some(bench) = spec.bench else {
         return Ok(None);
     };

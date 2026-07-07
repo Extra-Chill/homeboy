@@ -154,7 +154,7 @@ pub(super) fn validate_profile_available_for_rigs(
     let mut available_by_rig = Vec::new();
 
     for rig_id in rig_ids {
-        let spec = rig::load(rig_id)?;
+        let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
         if !spec.bench_profiles.contains_key(profile) {
             missing.push(rig_id.clone());
         }

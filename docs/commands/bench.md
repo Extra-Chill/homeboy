@@ -114,6 +114,16 @@ the other capabilities.
   run the same component + workload + iteration count against each rig in
   sequence and emit a cross-rig comparison envelope. See "Cross-rig
   comparison" below.
+- Rig package discovery expects a package root containing `rig.json` or
+  `rigs/<id>/rig.json`. Install reusable rigs with
+  `homeboy rig install <package-path> --id <rig-id>`, or run Homeboy from
+  inside a local package checkout that contains the requested rig. `--path`
+  overrides the component checkout used by the workload; it does not make an
+  arbitrary component directory a rig package.
+- Rig components still need an extension provider for `bench` unless the rig
+  component itself declares extensions. Link one with
+  `homeboy component set <component> --extension <extension_id>` and inspect
+  installed extensions with `homeboy extension list`.
 - `--rig-concurrency <N>`: For multi-rig comparisons, run up to `N` rigs
   concurrently. Default `1` preserves sequential CI behavior. Values greater
   than `1` are opt-in and preserve output ordering by the selected rig order.

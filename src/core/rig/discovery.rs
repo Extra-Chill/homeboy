@@ -105,7 +105,15 @@ fn discover_rigs_matching(
                 package_path.display()
             ),
             Some(package_path.to_string_lossy().to_string()),
-            None,
+            Some(vec![
+                format!("Expected one of: {}/rig.json", package_path.display()),
+                format!(
+                    "Expected one of: {}/rigs/<id>/rig.json",
+                    package_path.display()
+                ),
+                "Install a package-shaped source with: homeboy rig install <package-path> --id <rig-id>".to_string(),
+                "For command-local package discovery, run Homeboy from inside a checkout that contains rigs/<id>/rig.json.".to_string(),
+            ]),
         ));
     }
 
