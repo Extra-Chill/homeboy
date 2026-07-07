@@ -135,6 +135,7 @@
     "test:wordpress-fuzz-campaign": "node tests/wordpress-fuzz-campaign-smoke.js",
     "test:wordpress-fuzz-campaign-orchestrator": "node tests/wordpress-fuzz-campaign-orchestrator-smoke.js",
     "test:wordpress-dependency-materialization-recipes": "node tests/wordpress-dependency-materialization-recipes-smoke.js",
+    "test:wordpress-deps-provider": "bash tests/wordpress-deps-provider-smoke.sh",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:wp-codebox-visual-compare": "node tests/wp-codebox-visual-compare-smoke.js",
     "test:wordpress-codebox-visual-parity-workload": "node tests/wordpress-codebox-visual-parity-workload-smoke.mjs",
