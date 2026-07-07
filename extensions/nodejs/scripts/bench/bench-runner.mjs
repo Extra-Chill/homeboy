@@ -54,7 +54,7 @@ import { pathToFileURL } from 'node:url';
 import {
     normalizeBenchArtifact,
     normalizeBrowserBenchWorkloadResult,
-} from '../../../scripts/lib/browser-result-shapes.mjs';
+} from '../lib/browser-result-shapes.mjs';
 
 const helperPath = process.env.HOMEBOY_RUNTIME_BENCH_HELPER_JS;
 if (!helperPath) {

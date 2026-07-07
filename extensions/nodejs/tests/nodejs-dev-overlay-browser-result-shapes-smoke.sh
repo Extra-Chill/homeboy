@@ -8,12 +8,11 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 DEV_EXTENSION_ROOT="$TMP_DIR/dev-extensions/nodejs"
 SNAPSHOT_DIR="$DEV_EXTENSION_ROOT/c976416565de9af3"
 
-mkdir -p "$DEV_EXTENSION_ROOT/scripts/lib" "$SNAPSHOT_DIR/scripts/bench"
-cp "$ROOT_DIR/scripts/lib/browser-result-shapes.mjs" "$DEV_EXTENSION_ROOT/scripts/lib/browser-result-shapes.mjs"
-cp "$ROOT_DIR/scripts/lib/browser-result-shapes.cjs" "$DEV_EXTENSION_ROOT/scripts/lib/browser-result-shapes.cjs"
-cp "$ROOT_DIR/scripts/bench/bench-runner.mjs" "$SNAPSHOT_DIR/scripts/bench/bench-runner.mjs"
+mkdir -p "$DEV_EXTENSION_ROOT"
+cp -R "$ROOT_DIR/." "$SNAPSHOT_DIR"
+test ! -e "$DEV_EXTENSION_ROOT/scripts/lib/browser-result-shapes.mjs"
 
-node --input-type=module - "$SNAPSHOT_DIR/scripts/bench/bench-runner.mjs" <<'NODE'
+node --input-type=module - "$SNAPSHOT_DIR/scripts/bench/bench-runner.mjs" "$SNAPSHOT_DIR" <<'NODE'
 import { readFile } from 'node:fs/promises';
 
 const runner = await readFile(process.argv[2], 'utf8');
@@ -37,5 +36,13 @@ const normalized = shapes.normalizeBrowserBenchWorkloadResult({
 });
 if (normalized.browser_profile?.page_url !== 'https://example.test/') {
     throw new Error('browser result normalization returned an invalid shape');
+}
+
+for (const relativeModule of [
+    'scripts/bench/browser-helper.mjs',
+    'scripts/trace/lib/browser-waterfall.mjs',
+    'scripts/trace/lib/timeline.mjs',
+]) {
+    await import(new URL(relativeModule, `file://${process.argv[3]}/`).href);
 }
 NODE

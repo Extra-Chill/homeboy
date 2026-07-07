@@ -9,7 +9,7 @@ import {
     normalizeBrowserArtifact,
     normalizeBrowserBottleneck,
     normalizeBrowserPerformanceProfile,
-} from '../../../scripts/lib/browser-result-shapes.mjs';
+} from '../lib/browser-result-shapes.mjs';
 
 export { buildBrowserBenchResult };
 
