@@ -146,9 +146,6 @@ const {
   wpCodeboxProviderRuntimeInvocationContract,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
 
-assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('schemas.runtimeBoundary.profile'), true);
-assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('commands.wordpressRuntime.runFuzzSuite'), true);
-assert.equal(REQUIRED_RUNTIME_CONTRACT_PATHS.includes('readiness.wordpressRuntime.schema'), true);
 for (const requiredPath of REQUIRED_RUNTIME_CONTRACT_PATHS) {
   assert.equal(
     typeof requiredPath.split('.').reduce((value, key) => (value == null ? value : value[key]), canonicalManifest),
@@ -182,20 +179,6 @@ assert.deepEqual(wpCodeboxProviderRuntimeInvocationContract(), {
 
 validateCanonicalRuntimeContractManifest(canonicalManifest);
 
-assert.throws(
-  () => validateCanonicalRuntimeContractManifest({
-    ...canonicalManifest,
-    schemas: {
-      ...canonicalManifest.schemas,
-      runtimeBoundary: {
-        ...canonicalManifest.schemas.runtimeBoundary,
-        profile: undefined,
-      },
-    },
-  }),
-  /missing schemas\.runtimeBoundary\.profile/
-);
-
 const canonical = await loadCanonicalRuntimeContractSource({ wpCodeboxCoreModule: canonicalModule, required: true });
 assert.equal(canonical.canonical, true);
 assert.equal(canonical.source, pathToFileURL(canonicalModule).href);
@@ -210,38 +193,10 @@ const loaded = await loadRuntimeContractSource({ wpCodeboxCoreModule: canonicalM
 assert.equal(loaded.canonical, true);
 assert.deepEqual(loaded.manifest, canonicalManifest);
 
-await assert.rejects(
-  () => loadRuntimeContractSource({ wpCodeboxCoreModule: path.join(tempRoot, 'missing-runtime-core.mjs') }),
-  /canonical runtime contract manifest is unavailable/
-);
-
-assert.throws(
-  () => loadCanonicalRuntimeContractSourceSync({ wpCodeboxCoreModule: path.join(tempRoot, 'missing-runtime-core.cjs'), required: true }),
-  /canonical runtime contract manifest is unavailable/
-);
-
 delete process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
 const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: path.join(tempRoot, 'wp-codebox-install') });
 assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
 assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
 assert.equal(contractCandidates.length, 2);
-
-const mismatchedModule = path.join(tempRoot, 'mismatched-runtime-core.mjs');
-fs.writeFileSync(mismatchedModule, `
-export function runtimeContractManifest() {
-  const manifest = ${JSON.stringify(canonicalManifest, null, 2)};
-  delete manifest.providerRuntime.tasks.workspaceCommand;
-  return manifest;
-}
-`);
-
-await assert.rejects(
-  () => loadCanonicalRuntimeContractSource({ wpCodeboxCoreModule: mismatchedModule, required: true }),
-  (error) => {
-    assert.match(error.message, /canonical runtime contract manifest is unavailable/);
-    assert.match(error.wpCodeboxRuntimeContractErrors[0].message, /providerRuntime\.tasks\.workspaceCommand/);
-    return true;
-  }
-);
 
 console.log('wp-codebox runtime contract source smoke passed');

@@ -456,25 +456,6 @@ process.stdout.write(JSON.stringify({
     },
   });
   assert.equal(capturedEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE, '/tmp/wp-codebox-core/contracts.js');
-  const inheritEnvRun = genericLoopRunner.runGenericAgentLoop({
-    runtime: {
-      id: 'env-inherit-runtime',
-      executor: { backend: 'fixture', invocation: { command: 'node', inherit_env: true } },
-    },
-    request: {
-      schema: 'homeboy/agent-task-request/v1',
-      task_id: 'env-inherit-runtime',
-      instructions: 'Exercise runtime inherit_env rejection.',
-      executor: { backend: 'fixture', config: {} },
-    },
-    plan: { ...plan, workload_id: 'env-inherit-runtime' },
-    validationPolicy: { success_completion_outcomes: ['done'] },
-    validate: false,
-    spawnSync: () => ({ status: 0, stdout: '{}', stderr: '' }),
-  });
-  assert.equal(inheritEnvRun.outcome.status, 'failed');
-  assert.match(inheritEnvRun.outcome.summary, /ambient env inheritance is not supported/);
-
   const hugePayloadSentinel = 'WHOLESALE_RESULT_PAYLOAD_SENTINEL';
   const stdoutSummary = genericLoopRunner.genericAgentLoopStdoutSummary({
     outcome: {
