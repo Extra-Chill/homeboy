@@ -1,3 +1,4 @@
+use homeboy::core::api_jobs;
 use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
@@ -18,6 +19,7 @@ pub fn list_runner_runs(
     command: &'static str,
 ) -> CmdResult<RunsOutput> {
     let mut query = Vec::new();
+    let kind_filter = args.kind.clone();
     if let Some(kind) = args.kind {
         query.push(("kind", kind));
     }
@@ -29,6 +31,7 @@ pub fn list_runner_runs(
     } else {
         args.status
     };
+    let status_filter = status.clone();
     if let Some(status) = status {
         query.push(("status", status));
     }
@@ -42,13 +45,20 @@ pub fn list_runner_runs(
         .collect::<Vec<_>>()
         .join("&");
     let data = runner::daemon_api_get(runner_id, &format!("/runs?{query}"))?;
-    let runs: Vec<RunSummary> =
+    let mut runs: Vec<RunSummary> =
         serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {
             Error::internal_json(
                 err.to_string(),
                 Some("parse runner daemon runs list".to_string()),
             )
         })?;
+    merge_active_runner_jobs(
+        &mut runs,
+        runner_id,
+        kind_filter.as_deref(),
+        status_filter.as_deref(),
+        args.limit as usize,
+    );
 
     let actionable = actionable_for_run_list(&runs);
     Ok((
@@ -59,6 +69,68 @@ pub fn list_runner_runs(
         }),
         0,
     ))
+}
+
+fn merge_active_runner_jobs(
+    runs: &mut Vec<RunSummary>,
+    runner_id: &str,
+    kind: Option<&str>,
+    status: Option<&str>,
+    limit: usize,
+) {
+    if runs.len() >= limit {
+        return;
+    }
+    let Ok(report) = runner::status(runner_id) else {
+        return;
+    };
+    if !report.connected {
+        return;
+    }
+    let jobs = report
+        .active_jobs
+        .into_iter()
+        .filter(|job| job.runner_id == runner_id)
+        .filter(|job| match kind {
+            Some(kind) => kind == job.kind,
+            None => true,
+        })
+        .filter(|job| match status {
+            Some(status) => status == job.status.run_status_label(),
+            None => true,
+        })
+        .map(active_runner_job_run_summary)
+        .collect::<Vec<_>>();
+    append_missing_run_summaries(runs, jobs, limit);
+}
+
+fn append_missing_run_summaries(runs: &mut Vec<RunSummary>, jobs: Vec<RunSummary>, limit: usize) {
+    for job in jobs {
+        if runs.len() >= limit {
+            break;
+        }
+        if !runs.iter().any(|run| run.id == job.id) {
+            runs.push(job);
+        }
+    }
+}
+
+fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSummary {
+    let summary = api_jobs::active_runner_job_run_summary(job);
+    RunSummary {
+        id: summary.id,
+        kind: summary.kind,
+        status: summary.status,
+        started_at: summary.started_at,
+        finished_at: None,
+        component_id: None,
+        rig_id: None,
+        git_sha: None,
+        command: Some(summary.command),
+        cwd: summary.cwd,
+        status_note: Some(summary.status_note),
+        artifact_index: None,
+    }
 }
 
 pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> {
@@ -175,6 +247,7 @@ fn url_encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus};
     use serde_json::json;
 
     #[test]
@@ -221,5 +294,139 @@ mod tests {
             .runner_path_scope
             .contains("not operator-local filesystem paths"));
         assert!(guide.fetch_hint.contains("--runner <runner-id>"));
+    }
+
+    #[test]
+    fn append_missing_run_summaries_adds_active_runner_jobs_without_duplicates() {
+        let mut runs = vec![RunSummary {
+            id: "durable-run-1".to_string(),
+            kind: "bench".to_string(),
+            status: "running".to_string(),
+            started_at: "2026-07-06T00:00:00Z".to_string(),
+            finished_at: None,
+            component_id: Some("homeboy".to_string()),
+            rig_id: None,
+            git_sha: None,
+            command: Some("homeboy bench homeboy".to_string()),
+            cwd: None,
+            status_note: None,
+            artifact_index: None,
+        }];
+        let jobs = vec![
+            RunSummary {
+                id: "durable-run-1".to_string(),
+                kind: "runner.exec".to_string(),
+                status: "running".to_string(),
+                started_at: "2026-07-06T00:00:00Z".to_string(),
+                finished_at: None,
+                component_id: None,
+                rig_id: None,
+                git_sha: None,
+                command: Some("duplicate active job".to_string()),
+                cwd: None,
+                status_note: Some("active runner job".to_string()),
+                artifact_index: None,
+            },
+            RunSummary {
+                id: "runner-job-job-2".to_string(),
+                kind: "runner.exec".to_string(),
+                status: "running".to_string(),
+                started_at: "2026-07-06T00:00:01Z".to_string(),
+                finished_at: None,
+                component_id: None,
+                rig_id: None,
+                git_sha: None,
+                command: Some("new active job".to_string()),
+                cwd: Some("/srv/homeboy".to_string()),
+                status_note: Some("active runner job".to_string()),
+                artifact_index: None,
+            },
+        ];
+
+        append_missing_run_summaries(&mut runs, jobs, 20);
+
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, "durable-run-1");
+        assert_eq!(runs[1].id, "runner-job-job-2");
+        assert_eq!(runs[1].cwd.as_deref(), Some("/srv/homeboy"));
+    }
+
+    #[test]
+    fn append_missing_run_summaries_honors_limit() {
+        let mut runs = vec![RunSummary {
+            id: "persisted-run".to_string(),
+            kind: "bench".to_string(),
+            status: "running".to_string(),
+            started_at: "2026-07-06T00:00:00Z".to_string(),
+            finished_at: None,
+            component_id: Some("homeboy".to_string()),
+            rig_id: None,
+            git_sha: None,
+            command: Some("homeboy bench homeboy".to_string()),
+            cwd: None,
+            status_note: None,
+            artifact_index: None,
+        }];
+        let jobs = vec![RunSummary {
+            id: "runner-job-job-2".to_string(),
+            kind: "bench".to_string(),
+            status: "queued".to_string(),
+            started_at: "2026-07-06T00:00:01Z".to_string(),
+            finished_at: None,
+            component_id: None,
+            rig_id: None,
+            git_sha: None,
+            command: Some("queued remote bench job".to_string()),
+            cwd: Some("/srv/homeboy".to_string()),
+            status_note: Some("active runner job".to_string()),
+            artifact_index: None,
+        }];
+
+        append_missing_run_summaries(&mut runs, jobs, 1);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "persisted-run");
+    }
+
+    #[test]
+    fn active_runner_job_summary_uses_durable_run_id_when_available() {
+        let job = ActiveRunnerJobSummary {
+            runner_id: "homeboy-lab".to_string(),
+            job_id: "job-123".to_string(),
+            operation: "runner.exec".to_string(),
+            source: "runner-daemon".to_string(),
+            kind: "runner.exec".to_string(),
+            status: JobStatus::Running,
+            command: "homeboy bench homeboy".to_string(),
+            cwd: Some("/srv/homeboy".to_string()),
+            started_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            elapsed_ms: 1_000,
+            heartbeat_age_ms: 0,
+            claim: JobClaimMetadata::default(),
+            claim_expires_in_ms: None,
+            lifecycle: None,
+            durable_run_id: Some("bench-run-123".to_string()),
+            stale_reason: None,
+            lifecycle_state: Some("active".to_string()),
+            retryable: Some(true),
+            active_child_count: None,
+            active_cell_count: None,
+        };
+
+        let summary = active_runner_job_run_summary(job);
+
+        assert_eq!(summary.id, "bench-run-123");
+        assert_eq!(summary.status, "running");
+        assert!(summary
+            .status_note
+            .as_deref()
+            .unwrap()
+            .contains("job=job-123"));
+        assert!(summary
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("durable_run=bench-run-123"));
     }
 }
