@@ -3,10 +3,12 @@
 
 use std::collections::BTreeSet;
 
+use crate::core::component;
 use crate::core::deploy::release_download::{parse_github_url, GitHubRepo};
 use crate::core::error::{Error, Result};
 use crate::core::observation::TriagePullRequestSignals;
 use crate::core::scope::ScopeOutput;
+use crate::core::worktree::{self, TaskWorktreeRecord, TaskWorktreeState};
 
 use super::gh::{ensure_gh_ready, non_empty, run_gh, summarize_checks};
 use super::observation::usize_to_i64;
@@ -15,9 +17,9 @@ use super::shared::{
     latest_comment_at, latest_review_at, RawNamedNode, RawPr, RawPrHeadRepository,
 };
 use super::types::{
-    TriageLandingCheckState, TriageLandingClassification, TriageLandingMergeabilityState,
-    TriageLandingOptions, TriageLandingOutput, TriageLandingPr, TriageLandingRebasePlan,
-    TriageLandingSummary, TriageUnresolved,
+    TriageLandingCheckState, TriageLandingClassification, TriageLandingLocalWorktree,
+    TriageLandingMergeabilityState, TriageLandingOptions, TriageLandingOutput, TriageLandingPr,
+    TriageLandingRebasePlan, TriageLandingSummary, TriageUnresolved,
 };
 
 pub fn landing(options: TriageLandingOptions) -> Result<TriageLandingOutput> {
@@ -57,6 +59,8 @@ pub fn landing(options: TriageLandingOptions) -> Result<TriageLandingOutput> {
         pull_requests.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.number.cmp(&b.number)));
         pull_requests.dedup_by(|a, b| a.repo == b.repo && a.number == b.number);
     }
+    let local_worktrees = landing_local_worktrees_for(&pull_requests);
+    annotate_local_worktrees(&mut pull_requests, &local_worktrees);
     let summary = summarize_landing(&pull_requests);
 
     Ok(TriageLandingOutput {
@@ -336,8 +340,86 @@ fn raw_pr_to_landing_pr(item: RawPr, repo: &GitHubRepo, drilldown: bool) -> Tria
         classification,
         suggested_next_command: landing_next_command(classification, repo, item.number),
         dependent_rebase: None,
+        local_worktrees: Vec::new(),
         signals,
         check_failures,
+    }
+}
+
+fn landing_local_worktrees_for(items: &[TriageLandingPr]) -> Vec<TriageLandingLocalWorktree> {
+    let wanted: BTreeSet<(String, String)> = items
+        .iter()
+        .filter_map(|item| {
+            let branch = item.head_branch.as_ref()?;
+            let repo = item.head_repo.as_ref().unwrap_or(&item.repo);
+            Some((repo.clone(), branch.clone()))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let Ok(list) = worktree::list() else {
+        return Vec::new();
+    };
+    list.worktrees
+        .into_iter()
+        .filter(|record| record.state == TaskWorktreeState::Active)
+        .filter(|record| {
+            worktree_record_repo(record)
+                .is_some_and(|repo| wanted.contains(&(repo, record.branch.clone())))
+        })
+        .filter_map(|record| landing_local_worktree(record).ok())
+        .collect()
+}
+
+fn landing_local_worktree(record: TaskWorktreeRecord) -> Result<TriageLandingLocalWorktree> {
+    let repo = worktree_record_repo(&record).ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree component has no GitHub remote: {}",
+            record.component_id
+        ))
+    })?;
+    let safety = worktree::status(&record.id)?.safety;
+    Ok(TriageLandingLocalWorktree {
+        id: record.id,
+        component_id: record.component_id,
+        repo,
+        path: record.worktree_path,
+        branch: record.branch,
+        base_ref: record.base_ref,
+        dirty: safety.dirty,
+        unpushed_commits: safety.unpushed_commits,
+        safe: safety.safe,
+        reasons: safety.reasons,
+        task_url: record.task_url,
+        run_id: record.run_id,
+    })
+}
+
+fn worktree_record_repo(record: &TaskWorktreeRecord) -> Option<String> {
+    let component = component::load(&record.component_id).ok()?;
+    let remote = component
+        .triage_remote_url
+        .as_deref()
+        .or(component.remote_url.as_deref())?;
+    let repo = parse_github_url(remote)?;
+    Some(format!("{}/{}", repo.owner, repo.repo))
+}
+
+pub(super) fn annotate_local_worktrees(
+    items: &mut [TriageLandingPr],
+    worktrees: &[TriageLandingLocalWorktree],
+) {
+    for item in items {
+        let Some(head_branch) = item.head_branch.as_deref() else {
+            continue;
+        };
+        let head_repo = item.head_repo.as_deref().unwrap_or(item.repo.as_str());
+        item.local_worktrees = worktrees
+            .iter()
+            .filter(|worktree| worktree.repo == head_repo && worktree.branch == head_branch)
+            .cloned()
+            .collect();
     }
 }
 
@@ -504,6 +586,17 @@ fn summarize_landing(items: &[TriageLandingPr]) -> TriageLandingSummary {
         ..Default::default()
     };
     for item in items {
+        summary.local_worktrees += item.local_worktrees.len();
+        summary.local_worktrees_dirty += item
+            .local_worktrees
+            .iter()
+            .filter(|worktree| worktree.dirty)
+            .count();
+        summary.local_worktrees_unpushed += item
+            .local_worktrees
+            .iter()
+            .filter(|worktree| worktree.unpushed_commits > 0)
+            .count();
         match item.mergeability_state {
             TriageLandingMergeabilityState::Clean => summary.mergeability_clean += 1,
             TriageLandingMergeabilityState::Conflicting => summary.mergeability_conflicting += 1,

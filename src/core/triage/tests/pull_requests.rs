@@ -550,6 +550,58 @@ fn branch_matcher_supports_simple_globs_and_contains() {
 }
 
 #[test]
+fn landing_annotations_match_local_worktrees_by_head_repo_and_branch() {
+    let mut items = vec![
+        landing_pr(
+            10,
+            "Extra-Chill/homeboy",
+            "main",
+            "feature/ready",
+            "Extra-Chill/homeboy",
+        ),
+        landing_pr(
+            11,
+            "Extra-Chill/homeboy",
+            "main",
+            "feature/fork",
+            "contributor/homeboy",
+        ),
+    ];
+    let worktrees = vec![
+        landing_worktree(
+            "homeboy@ready",
+            "Extra-Chill/homeboy",
+            "feature/ready",
+            false,
+            0,
+        ),
+        landing_worktree(
+            "homeboy@fork",
+            "contributor/homeboy",
+            "feature/fork",
+            true,
+            2,
+        ),
+        landing_worktree(
+            "homeboy@other",
+            "Extra-Chill/homeboy",
+            "feature/other",
+            false,
+            0,
+        ),
+    ];
+
+    annotate_local_worktrees(&mut items, &worktrees);
+
+    assert_eq!(items[0].local_worktrees.len(), 1);
+    assert_eq!(items[0].local_worktrees[0].id, "homeboy@ready");
+    assert_eq!(items[1].local_worktrees.len(), 1);
+    assert_eq!(items[1].local_worktrees[0].id, "homeboy@fork");
+    assert!(items[1].local_worktrees[0].dirty);
+    assert_eq!(items[1].local_worktrees[0].unpushed_commits, 2);
+}
+
+#[test]
 fn parse_prs_flags_clean_with_zero_checks_as_not_reported() {
     // Reproduces the #4872 force-push window: GitHub reports mergeStateStatus
     // CLEAN with an empty statusCheckRollup before CI registers on the new head.
@@ -699,7 +751,31 @@ fn landing_pr(
             "homeboy triage --watch {repo}#{number} --until green-mergeable"
         ),
         dependent_rebase: None,
+        local_worktrees: Vec::new(),
         signals: TriagePullRequestSignals::default(),
         check_failures: Vec::new(),
+    }
+}
+
+fn landing_worktree(
+    id: &str,
+    repo: &str,
+    branch: &str,
+    dirty: bool,
+    unpushed_commits: u32,
+) -> TriageLandingLocalWorktree {
+    TriageLandingLocalWorktree {
+        id: id.to_string(),
+        component_id: "homeboy".to_string(),
+        repo: repo.to_string(),
+        path: format!("/tmp/{id}"),
+        branch: branch.to_string(),
+        base_ref: "origin/main".to_string(),
+        dirty,
+        unpushed_commits,
+        safe: !dirty && unpushed_commits == 0,
+        reasons: Vec::new(),
+        task_url: None,
+        run_id: None,
     }
 }

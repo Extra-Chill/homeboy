@@ -25,6 +25,7 @@ When no command is provided, `homeboy triage` defaults to `homeboy triage worksp
 - `fleet` — triage unique components used across a fleet
 - `rig` — triage components declared in a local rig spec
 - `workspace` — triage every configured project, rig, and registered component once per repo
+- `landing` — summarize mergeability/check blockers for an explicit PR fleet or branch pattern
 
 See [Scope model](../architecture/scope-model.md) for how these scopes relate to
 component-first, target-first, environment, and workspace commands.
@@ -63,6 +64,19 @@ Supported `--until` states:
 Watch output is structured JSON with `command: "triage.watch"`, final watched target states, and an `events` array. Events include `watch.started`, `item.state_changed`, `pr.commit.pushed`, `pr.ci.transitioned`, `pr.merged`, optional `pr.merge_requested`, and `watch.exit`.
 
 `--auto-merge` uses the GitHub REST merge endpoint with `--merge-method squash` by default. When `--auto-merge` is passed without `--until`, Homeboy watches for `green-mergeable`. This avoids depending on `gh pr merge`'s GraphQL path for the actual merge operation.
+
+## Landing PR Fleets
+
+`homeboy triage landing` is the compact holding dashboard for many PR branches. It accepts explicit PR refs, source branch patterns, issue-linked PRs, and normal Homeboy scopes. Each PR row includes the PR URL, base/head branch, mergeability, check classification, next suggested command, and matching local task worktrees when they exist.
+
+```sh
+homeboy triage landing Extra-Chill/homeboy#2238 Automattic/static-site-importer#118 --drilldown
+homeboy triage landing --repo Extra-Chill/homeboy --branch 'fixture/*' --drilldown
+homeboy triage landing --workspace --branch 'e2e/*' --limit 100 --output ./landing-fleet.json
+homeboy triage landing --repo Extra-Chill/homeboy --ordered 2238 2239 2240
+```
+
+When a PR head branch matches a persisted `homeboy worktree` record for the same GitHub repo, the JSON row gains `local_worktrees` entries with the task worktree ID, local path, branch, base ref, dirty state, unpushed commit count, safety reasons, and optional task/run provenance. The summary also reports `local_worktrees`, `local_worktrees_dirty`, and `local_worktrees_unpushed` counts so an orchestrator can quickly see which PRs need local cleanup or pushes before landing.
 
 ## Output Signals
 

@@ -57,6 +57,9 @@ pub struct TriageLandingOutput {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TriageLandingSummary {
     pub total: usize,
+    pub local_worktrees: usize,
+    pub local_worktrees_dirty: usize,
+    pub local_worktrees_unpushed: usize,
     pub merged: usize,
     pub clean_mergeable: usize,
     pub mergeability_clean: usize,
@@ -92,10 +95,31 @@ pub struct TriageLandingPr {
     pub suggested_next_command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependent_rebase: Option<TriageLandingRebasePlan>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local_worktrees: Vec<TriageLandingLocalWorktree>,
     #[serde(flatten)]
     pub signals: TriagePullRequestSignals,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub check_failures: Vec<TriageCheckFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TriageLandingLocalWorktree {
+    pub id: String,
+    pub component_id: String,
+    pub repo: String,
+    pub path: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub dirty: bool,
+    pub unpushed_commits: u32,
+    pub safe: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

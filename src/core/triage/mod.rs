@@ -22,11 +22,11 @@ pub use types::{
     TriageAction, TriageCheckFailure, TriageCiCheckStateCounts, TriageCiReadiness,
     TriageCiReadinessBuckets, TriageCommandOutput, TriageComponentReport, TriageIssueBucket,
     TriageIssueItem, TriageLandingCheckState, TriageLandingClassification,
-    TriageLandingMergeabilityState, TriageLandingOptions, TriageLandingOutput, TriageLandingPr,
-    TriageLandingRebasePlan, TriageLandingSummary, TriageLinkedPr, TriageObservationChangedItem,
-    TriageObservationComparison, TriageObservationItemRef, TriageObservationOutput, TriageOptions,
-    TriageOutput, TriagePrBucket, TriagePrItem, TriageRepo, TriageRepoRef, TriageSummary,
-    TriageUnresolved,
+    TriageLandingLocalWorktree, TriageLandingMergeabilityState, TriageLandingOptions,
+    TriageLandingOutput, TriageLandingPr, TriageLandingRebasePlan, TriageLandingSummary,
+    TriageLinkedPr, TriageObservationChangedItem, TriageObservationComparison,
+    TriageObservationItemRef, TriageObservationOutput, TriageOptions, TriageOutput, TriagePrBucket,
+    TriagePrItem, TriageRepo, TriageRepoRef, TriageSummary, TriageUnresolved,
 };
 
 pub use watch::{
@@ -50,10 +50,10 @@ mod test_reexports {
     pub(super) use crate::core::observation::TriagePullRequestSignals;
 
     pub(super) use super::landing::{
-        annotate_ordered_dependent_rebases, branch_matches, classify_landing_pr,
-        dedupe_landing_prs_preserving_order, dependent_rebase_plan, is_bare_pr_number,
-        landing_check_state, landing_mergeability_state, parse_landing_pr, parse_landing_pr_ref,
-        LandingPrRef,
+        annotate_local_worktrees, annotate_ordered_dependent_rebases, branch_matches,
+        classify_landing_pr, dedupe_landing_prs_preserving_order, dependent_rebase_plan,
+        is_bare_pr_number, landing_check_state, landing_mergeability_state, parse_landing_pr,
+        parse_landing_pr_ref, LandingPrRef,
     };
     pub(super) use super::report::{
         build_actions, dedupe_refs_by_repo, fetch_component_report, issue_bucket,
