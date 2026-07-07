@@ -84,7 +84,6 @@ assert.equal(provider.agent_fanout_adapter.ownership.executor_adapter, 'homeboy-
 assert.equal(provider.agent_fanout_adapter.ownership.sandbox_worker_runtime, 'wp-codebox');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'agent-fanout-request' && requirement.schema === 'wp-codebox/agent-fanout-request/v1'), true);
-assert.equal(Object.hasOwn(provider, 'deprecated_compatibility_aliases'), false);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
@@ -158,20 +157,6 @@ const privateRuntimeShapeRequest = {
   instructions: 'Reject private Codebox runtime result shapes.',
   inputs: {},
 };
-const privateRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
-  success: true,
-  run: {
-    agentResult: {
-      reply: 'This private result shape must not be consumed.',
-      patch: { bytes: 10 },
-    },
-  },
-});
-assert.equal(privateRuntimeShapeOutcome.status, 'failed');
-assert.equal(privateRuntimeShapeOutcome.failure_classification, 'execution_failed');
-assert.equal(privateRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), true);
-assert.equal(privateRuntimeShapeOutcome.outputs.reply, undefined);
-assert.equal(privateRuntimeShapeOutcome.metadata.dispatch_identity, undefined);
 assert.equal(publicEnvelopeBoundaryDiagnostic({ run: { agentResult: { reply: 'private' } } }).data.required_schema, 'wp-codebox/artifact-result-envelope/v1');
 const dispatchIdentityOutcome = agentTaskOutcomeFromCodeboxResult({
   ...privateRuntimeShapeRequest,

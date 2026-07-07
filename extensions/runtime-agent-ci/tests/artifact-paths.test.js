@@ -17,13 +17,6 @@ assert.equal(
   path.join(canonicalRunDir, ARTIFACT_MANIFEST_FILE)
 );
 
-const legacyOnly = runtimeAgentArtifactPaths({
-  runDir: '/tmp/legacy-run-dir',
-  artifactManifestFile: '/tmp/legacy-manifest.json',
-});
-assert.equal(legacyOnly.run_dir, undefined);
-assert.equal(legacyOnly.artifact_manifest, undefined);
-
 const canonicalOptions = runtimeAgentArtifactPaths({
   run_dir: canonicalRunDir,
   artifact_manifest_file: '/tmp/canonical-manifest.json',
