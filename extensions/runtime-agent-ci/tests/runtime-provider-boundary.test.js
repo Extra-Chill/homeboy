@@ -46,6 +46,7 @@ fs.writeFileSync(path.join(overlayPackageRoot, 'package.json'), JSON.stringify({
 fs.writeFileSync(path.join(overlayPackageRoot, 'runtime.json'), JSON.stringify({
   schema: 'homeboy/agent-runtime-manifest/v1',
   id: 'overlay-runtime',
+  version: '1.2.3',
   agent_task_executors: [{ id: 'overlay-executor', backend: 'local', invocation: { command: 'node', argv: ['node', '{{runtime_path}}/executor.js'] } }],
   workload_profiles: { default: { runtime_profile: 'default' } },
   workflow_input_projection: { adapter: { module: 'lib/workflow-inputs.cjs', export: 'renderInputs' } },
@@ -69,6 +70,13 @@ const overlayRuntime = resolveRuntimeProvider('overlay-runtime', {
 });
 const expectedOverlayPackageRoot = fs.realpathSync(overlayPackageRoot);
 assert.equal(overlayRuntime.source.source_path, expectedOverlayPackageRoot);
+assert.deepEqual(overlayRuntime.source_state, {
+  source_type: 'release',
+  package: '@example/runtime-overlay',
+  source_path: expectedOverlayPackageRoot,
+  manifest_path: path.join(expectedOverlayPackageRoot, 'runtime.json'),
+  manifest_version: '1.2.3',
+});
 assert.deepEqual(renderRuntimeWorkflowInputs({
   runtime: overlayRuntime,
   runtime_profile: 'default',
@@ -77,6 +85,53 @@ assert.deepEqual(renderRuntimeWorkflowInputs({
 const overlaySetupCalls = [];
 runtimeSetupAdapter(overlayRuntime)({ runtime: overlayRuntime, run: (...args) => overlaySetupCalls.push(args) });
 assert.deepEqual(overlaySetupCalls, [['overlay-setup', [expectedOverlayPackageRoot], { cwd: expectedOverlayPackageRoot }]]);
+
+const localManifestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-local-manifest-'));
+const localManifestPath = path.join(localManifestRoot, 'runtime.json');
+fs.writeFileSync(localManifestPath, JSON.stringify({
+  schema: 'homeboy/agent-runtime-manifest/v1',
+  id: 'local-manifest-runtime',
+  agent_task_executors: [{ id: 'local-manifest-executor', backend: 'local', invocation: { command: 'node', argv: ['node', '{{runtime_path}}/executor.js'] } }],
+}, null, 2));
+const localManifestRuntime = resolveRuntimeProvider('local-manifest-runtime', {
+  runtimeManifests: [localManifestPath],
+  env: {},
+});
+assert.deepEqual(localManifestRuntime.source_state, {
+  source_type: 'local',
+  source_path: localManifestRoot,
+  manifest_path: localManifestPath,
+});
+
+const linkedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-linked-'));
+const linkedSourceRoot = path.join(linkedRoot, 'source-runtime');
+const linkedNodeModulesRoot = path.join(linkedRoot, 'consumer/node_modules/@example');
+const linkedPackageRoot = path.join(linkedNodeModulesRoot, 'runtime-linked');
+fs.mkdirSync(linkedSourceRoot, { recursive: true });
+fs.mkdirSync(linkedNodeModulesRoot, { recursive: true });
+fs.writeFileSync(path.join(linkedSourceRoot, 'package.json'), JSON.stringify({
+  name: '@example/runtime-linked',
+  version: '1.0.0',
+  homeboy: { agent_runtime_manifest: 'runtime.json' },
+}, null, 2));
+fs.writeFileSync(path.join(linkedSourceRoot, 'runtime.json'), JSON.stringify({
+  schema: 'homeboy/agent-runtime-manifest/v1',
+  id: 'linked-runtime',
+  version: '2.0.0',
+  agent_task_executors: [{ id: 'linked-executor', backend: 'local', invocation: { command: 'node', argv: ['node', '{{runtime_path}}/executor.js'] } }],
+}, null, 2));
+fs.symlinkSync(linkedSourceRoot, linkedPackageRoot, 'dir');
+const linkedRuntime = resolveRuntimeProvider('linked-runtime', {
+  runtimePackages: ['@example/runtime-linked'],
+  env: { AGENT_RUNTIME_PACKAGE_BASE_PATHS: path.join(linkedRoot, 'consumer') },
+});
+assert.deepEqual(linkedRuntime.source_state, {
+  source_type: 'linked',
+  package: '@example/runtime-linked',
+  source_path: fs.realpathSync(linkedSourceRoot),
+  manifest_path: path.join(fs.realpathSync(linkedSourceRoot), 'runtime.json'),
+  manifest_version: '2.0.0',
+});
 
 const setupCalls = [];
 runRuntimeSetup({ manifest: { ci_materialization: {} } }, {

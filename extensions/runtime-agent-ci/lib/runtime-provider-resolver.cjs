@@ -69,6 +69,7 @@ function loadRuntimeManifest(manifestPath, source = {}) {
 	}
 	return attachRuntimeSourceMetadata(manifest, {
 		...source,
+		manifest_version: manifest.version,
 		manifest_path: resolvedManifestPath,
 		source_path: source.source_path ? path.resolve(source.source_path) : path.dirname(resolvedManifestPath),
 		...gitSourceRevision(source.source_path || path.dirname(resolvedManifestPath)),
@@ -96,6 +97,7 @@ function loadRuntimePackageManifest(runtimePackage, options = {}) {
 	const manifest = loadRuntimeManifest(manifestPath, {
 		kind: 'package',
 		package: spec,
+		linked: runtimePackageLinked(spec, options),
 		source_path: packageRoot,
 	});
 	if (!manifest) {
@@ -208,11 +210,48 @@ function normalizeRuntimeSource(source = {}) {
 	return {
 		kind: firstString(source.kind, 'registry'),
 		...(source.package ? { package: source.package } : {}),
+		...(source.linked === true ? { linked: true } : {}),
 		...(sourcePath ? { source_path: sourcePath } : {}),
 		...(source.manifest_path ? { manifest_path: source.manifest_path } : {}),
+		...(source.manifest_version ? { manifest_version: source.manifest_version } : {}),
 		...(source.revision ? { revision: source.revision } : {}),
 		...(source.ref ? { ref: source.ref } : {}),
 	};
+}
+
+function runtimeSourceState(source = {}) {
+	return {
+		source_type: runtimeSourceType(source),
+		...(source.package ? { package: source.package } : {}),
+		...(source.source_path ? { source_path: source.source_path } : {}),
+		...(source.manifest_path ? { manifest_path: source.manifest_path } : {}),
+		...(source.manifest_version ? { manifest_version: source.manifest_version } : {}),
+		...(source.revision ? { revision: source.revision } : {}),
+		...(source.ref ? { ref: source.ref } : {}),
+	};
+}
+
+function runtimeSourceType(source = {}) {
+	if (source.linked === true) {
+		return 'linked';
+	}
+	if (source.kind === 'package') {
+		return 'release';
+	}
+	return 'local';
+}
+
+function runtimePackageLinked(spec, options = {}) {
+	for (const basePath of runtimePackageBasePaths(options)) {
+		try {
+			if (fs.lstatSync(path.join(basePath, 'node_modules', ...spec.split('/'))).isSymbolicLink()) {
+				return true;
+			}
+		} catch {
+			// Missing package roots are handled by require.resolve in resolveRuntimePackageRoot().
+		}
+	}
+	return false;
 }
 
 function gitSourceRevision(sourcePath) {
@@ -318,6 +357,7 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		id,
 		requested_id: requestedId,
 		source,
+		source_state: runtimeSourceState(source),
 		manifest,
 		checkout,
 		setupCommands: normalizeCommands(materialization.setup_commands || []),
