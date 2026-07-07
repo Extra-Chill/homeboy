@@ -231,6 +231,35 @@ fn release_plan_records_explicit_quality_preflights() {
 }
 
 #[test]
+fn release_plan_disables_dependency_preflight_when_hydration_is_skipped() {
+    let options = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        skip_deps_hydration: true,
+        ..Default::default()
+    };
+
+    let steps = build_preflight_steps(&options, None, &[]);
+    let dependencies = steps
+        .iter()
+        .find(|step| step.id == "preflight.dependencies")
+        .expect("dependencies step");
+    let lint = steps
+        .iter()
+        .find(|step| step.id == "preflight.lint")
+        .expect("lint step");
+
+    assert_eq!(dependencies.status, PlanStepStatus::Disabled);
+    assert_eq!(
+        dependencies
+            .inputs
+            .get("reason")
+            .and_then(|value| value.as_str()),
+        Some("--skip-deps-hydration")
+    );
+    assert_eq!(lint.needs, vec!["preflight.bump_policy"]);
+}
+
+#[test]
 fn release_plan_records_unforced_lower_bump_policy() {
     let options = ReleaseOptions {
         bump_type: "patch".to_string(),

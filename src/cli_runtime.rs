@@ -168,6 +168,7 @@ impl CliRuntime {
             Ok(cli) => cli,
             Err(err) => err.exit(),
         };
+        commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {

@@ -383,6 +383,22 @@ fn run_dependencies_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
 ) -> ReleaseStepResult {
+    if context.options.skip_deps_hydration {
+        return ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Skipped,
+            missing: Vec::new(),
+            warnings: Vec::new(),
+            hints: Vec::new(),
+            data: Some(serde_json::json!({
+                "ran": false,
+                "reason": "--skip-deps-hydration",
+            })),
+            error: None,
+        };
+    }
+
     let component_path = std::path::Path::new(&context.component.local_path);
     match crate::core::deps::install_for_resolved(context.component, component_path) {
         Ok(Some(result)) => ReleaseStepResult {
@@ -806,6 +822,40 @@ mod tests {
             .expect("lint dispatch")
             .expect("lint result");
         assert_eq!(lint.status, ReleaseStepStatus::Success);
+    }
+
+    #[test]
+    fn dependency_preflight_is_skipped_when_hydration_is_disabled() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/fixture".to_string(),
+            ..Default::default()
+        };
+        let options = ReleaseOptions {
+            skip_deps_hydration: true,
+            ..Default::default()
+        };
+        let mut context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let deps = execute_release_plan_step(&plan_step("preflight.dependencies"), &mut context)
+            .expect("dependency dispatch")
+            .expect("dependency result");
+
+        assert_eq!(deps.status, ReleaseStepStatus::Skipped);
+        assert_eq!(
+            deps.data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(|value| value.as_str()),
+            Some("--skip-deps-hydration")
+        );
     }
 
     #[test]

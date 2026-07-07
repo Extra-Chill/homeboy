@@ -62,7 +62,18 @@ pub fn parse_runs_count(s: &str) -> Result<u64, String> {
     })
 }
 
+static SKIP_DEPS_HYDRATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct GlobalArgs {}
+
+pub(crate) fn set_skip_deps_hydration(value: bool) {
+    SKIP_DEPS_HYDRATION.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn skip_deps_hydration() -> bool {
+    SKIP_DEPS_HYDRATION.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Shared arguments for dynamic set commands.
 #[derive(Args, Default, Debug)]
