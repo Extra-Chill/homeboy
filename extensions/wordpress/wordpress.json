@@ -24,6 +24,30 @@
     "trace.results": true,
     "annotations": false
   },
+  "diagnostics": {
+    "tools": [
+      {
+        "id": "php",
+        "version_args": ["--version"],
+        "remediation": "Install PHP and ensure php is on PATH"
+      },
+      {
+        "id": "composer",
+        "version_args": ["--version"],
+        "remediation": "Install Composer and ensure composer is on PATH"
+      },
+      {
+        "id": "node",
+        "version_args": ["--version"],
+        "remediation": "Install Node.js and ensure node is on PATH"
+      },
+      {
+        "id": "npm",
+        "version_args": ["--version"],
+        "remediation": "Install npm and ensure npm is on PATH"
+      }
+    ]
+  },
   "contract_producers": [
     {
       "id": "wordpress.live-surface-discovery",

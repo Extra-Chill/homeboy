@@ -21,6 +21,25 @@
     "trace.artifacts": true,
     "annotations": false
   },
+  "diagnostics": {
+    "tools": [
+      {
+        "id": "node",
+        "version_args": ["--version"],
+        "remediation": "Install Node.js and ensure node is on PATH"
+      },
+      {
+        "id": "npm",
+        "version_args": ["--version"],
+        "remediation": "Install npm and ensure npm is on PATH"
+      },
+      {
+        "id": "pnpm",
+        "version_args": ["--version"],
+        "remediation": "Install pnpm and ensure pnpm is on PATH when the project uses pnpm"
+      }
+    ]
+  },
   "contract_producers": [
     {
       "id": "nodejs.lint-results",
