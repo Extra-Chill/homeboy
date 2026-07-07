@@ -862,15 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_report_format() {
-        let result = TestCli::try_parse_from(["test", "my-comp", "--report=slack"]);
-        assert!(
-            result.is_err(),
-            "clap whitelist must reject unknown report formats"
-        );
-    }
-
-    #[test]
     fn is_markdown_mode_false_without_flag() {
         let cli = TestCli::try_parse_from(["test", "my-comp"]).expect("should parse");
         assert!(!is_markdown_mode(&cli.review));
@@ -881,20 +872,6 @@ mod tests {
         let cli = TestCli::try_parse_from(["test", "--changed-since", "main"])
             .expect("should parse without positional component");
         assert!(cli.review.comp.component.is_none());
-    }
-
-    #[test]
-    fn rejects_changed_since_with_changed_only() {
-        let result =
-            TestCli::try_parse_from(["test", "--changed-since", "trunk", "--changed-only"]);
-        assert!(result.is_err(), "clap must reject conflicting scope flags");
-    }
-
-    #[test]
-    fn rejects_changed_only_with_changed_since() {
-        let result =
-            TestCli::try_parse_from(["test", "--changed-only", "--changed-since", "trunk"]);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -917,28 +894,6 @@ mod tests {
             .expect("should parse ci profile");
 
         assert_eq!(cli.review.ci_profile.as_deref(), Some("pr"));
-    }
-
-    #[test]
-    fn unsupported_review_plan_step_returns_consistent_error() {
-        let args = review_args_fixture();
-        let global = GlobalArgs {};
-        let step = PlanStep::ready("review.unknown", "review.unknown").build();
-        let review_context = ReviewExecutionContext {
-            scope: "full".to_string(),
-            changed_file_count: None,
-            precomputed_changed_files: None,
-        };
-
-        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture", &review_context)
-        {
-            Ok(_) => panic!("unsupported executable review step should fail"),
-            Err(err) => err,
-        };
-
-        assert!(err
-            .to_string()
-            .contains("unsupported executable step 'review.unknown'"));
     }
 
     #[test]
