@@ -225,6 +225,169 @@ fn resolve_fuzz_context_infers_single_rig_fuzz_workload_extension() {
 }
 
 #[test]
+fn resolve_fuzz_context_reports_explicit_extension_without_fuzz_capability() {
+    with_isolated_home(|home| {
+        let extension_dir = home.path().join(".config/homeboy/extensions/generic");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("generic.json"),
+            serde_json::json!({
+                "name": "generic",
+                "version": "0.0.0",
+                "test": { "extension_script": "test.sh" }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+        let component_dir = tempfile::tempdir().expect("component dir");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": component_dir.path().to_string_lossy()
+                }
+            },
+            "fuzz": { "default_component": "package" },
+            "fuzz_workloads": {
+                "generic": [{ "path": "fuzz/parser.json" }]
+            }
+        }))
+        .expect("parse rig spec");
+        let context = FuzzRigContext {
+            spec,
+            package_root: Some(home.path().join("rig-package")),
+        };
+        let comp = PositionalComponentArgs {
+            component: Some("package".to_string()),
+            path: None,
+        };
+        let extension_override = ExtensionOverrideArgs {
+            extensions: vec!["generic".to_string()],
+        };
+
+        let err = resolve_fuzz_context(
+            "package",
+            &comp,
+            &SettingArgs::default(),
+            &extension_override,
+            homeboy::core::extension::ExtensionCapability::Fuzz,
+            Some(&context),
+        )
+        .expect_err("old extension manifest should fail explicitly");
+
+        assert!(err.message.contains(
+            "explicit extension override 'generic' is installed but does not declare fuzz support"
+        ));
+        assert!(err.hints.iter().any(|hint| hint
+            .message
+            .contains("Upgrade or refresh the runner extension")));
+    });
+}
+
+#[test]
+fn fuzz_lab_required_extensions_include_rig_workload_and_component_extensions() {
+    with_isolated_home(|home| {
+        let rig_dir = home.path().join(".config/homeboy/rigs");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("package-fuzz.json"),
+            serde_json::json!({
+                "id": "package-fuzz",
+                "components": {
+                    "package": {
+                        "path": "/tmp/package",
+                        "extensions": {
+                            "component-helper": { "settings": {} }
+                        }
+                    }
+                },
+                "fuzz": { "default_component": "package" },
+                "fuzz_workloads": {
+                    "generic": [
+                        {
+                            "path": "fuzz/parser.json",
+                            "env_provider_extensions": ["runtime-helper"]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write rig");
+        let args = FuzzArgs {
+            command: None,
+            run: FuzzRunArgs {
+                comp: PositionalComponentArgs {
+                    component: None,
+                    path: None,
+                },
+                rig: Some("package-fuzz".to_string()),
+                extension_override: ExtensionOverrideArgs::default(),
+                setting_args: SettingArgs::default(),
+                workload_id: None,
+                profile: Some("lab".to_string()),
+                shared_state: None,
+                run_id: None,
+                tracker_refs: vec![],
+                seed: None,
+                inventory: None,
+                sequence_plan: None,
+                require_case_log: false,
+                require_coverage_summary: false,
+                require_result_envelope: false,
+                max_duration: None,
+                gate_profile: FuzzGateProfileArg::Measurement,
+                allow_destructive: false,
+                isolation: FuzzIsolationArg::Shared,
+                isolation_proof: None,
+                allow_local_destructive_fuzz: false,
+                expect_metric: vec![],
+                action_model: None,
+                exploration_policy: None,
+                args: vec![],
+            },
+        };
+
+        let required = args
+            .lab_required_extension_ids()
+            .expect("resolve lab required extensions");
+
+        assert_eq!(
+            required,
+            vec![
+                "component-helper".to_string(),
+                "generic".to_string(),
+                "runtime-helper".to_string()
+            ]
+        );
+    });
+}
+
+#[test]
+fn fuzz_list_lab_required_extensions_preserve_explicit_extension_override() {
+    let args = FuzzArgs {
+        command: Some(FuzzCommand::List(FuzzListArgs {
+            comp: PositionalComponentArgs {
+                component: Some("package".to_string()),
+                path: None,
+            },
+            rig: None,
+            extension_override: ExtensionOverrideArgs {
+                extensions: vec!["generic".to_string()],
+            },
+            setting_args: SettingArgs::default(),
+        })),
+        run: fuzz_run_args_with_run_id("unused"),
+    };
+
+    let required = args
+        .lab_required_extension_ids()
+        .expect("resolve explicit list extension");
+
+    assert_eq!(required, vec!["generic".to_string()]);
+}
+
+#[test]
 fn resolve_profile_workload_id_uses_single_fuzz_profile_entry() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",

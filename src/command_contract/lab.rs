@@ -1288,9 +1288,7 @@ impl Commands {
         let mut extension_ids = BTreeSet::new();
         match self {
             Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
-            Commands::Fuzz(args) => {
-                extension_ids.extend(args.extension_override_ids().iter().cloned())
-            }
+            Commands::Fuzz(args) => extension_ids.extend(args.lab_required_extension_ids()?),
             Commands::Review(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone());
                 match args.command.as_ref() {
