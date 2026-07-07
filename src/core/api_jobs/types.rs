@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::remote_runner::JobArtifactMetadata;
 use super::remote_runner::RunnerJobLifecycleMetadata;
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +70,8 @@ pub struct Job {
     pub event_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_snapshot: Option<SourceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
