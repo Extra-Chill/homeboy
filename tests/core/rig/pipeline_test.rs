@@ -42,63 +42,36 @@ fn test_run_pipeline_check_groups() {
 }
 
 #[test]
-fn test_command_if_missing_runs_when_path_is_missing() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let marker = tmp.path().join("installed.txt");
-    let marker_arg = marker.to_string_lossy();
-    let cwd_arg = tmp.path().to_string_lossy();
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "command-if-missing-run",
-            "pipeline": {{
-                "bench_prepare": [{{
-                    "kind": "command-if-missing",
-                    "cwd": "{}",
-                    "missing": "node_modules/.bin/project-env",
-                    "command": "printf installed > {}"
-                }}]
-            }}
-        }}"#,
-        cwd_arg, marker_arg
-    ))
-    .expect("parse rig");
+fn test_command_if_missing_runs_only_when_guard_path_is_missing() {
+    for guard_exists in [false, true] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let tool_bin = tmp.path().join("node_modules/.bin/project-env");
+        if guard_exists {
+            std::fs::create_dir_all(tool_bin.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&tool_bin, "#!/bin/sh\n").expect("write");
+        }
+        let marker = tmp.path().join("installed.txt");
+        let rig: RigSpec = serde_json::from_str(&format!(
+            r#"{{
+                "id": "command-if-missing",
+                "pipeline": {{
+                    "bench_prepare": [{{
+                        "kind": "command-if-missing",
+                        "cwd": "{}",
+                        "missing": "node_modules/.bin/project-env",
+                        "command": "printf installed > {}"
+                    }}]
+                }}
+            }}"#,
+            tmp.path().to_string_lossy(),
+            marker.to_string_lossy()
+        ))
+        .expect("parse rig");
 
-    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-    assert_eq!(
-        std::fs::read_to_string(marker).expect("marker"),
-        "installed"
-    );
-}
-
-#[test]
-fn test_command_if_missing_skips_when_path_exists() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let tool_bin = tmp.path().join("node_modules/.bin/project-env");
-    std::fs::create_dir_all(tool_bin.parent().expect("parent")).expect("mkdir");
-    std::fs::write(&tool_bin, "#!/bin/sh\n").expect("write");
-    let marker = tmp.path().join("installed.txt");
-    let marker_arg = marker.to_string_lossy();
-    let cwd_arg = tmp.path().to_string_lossy();
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "command-if-missing-skip",
-            "pipeline": {{
-                "bench_prepare": [{{
-                    "kind": "command-if-missing",
-                    "cwd": "{}",
-                    "missing": "node_modules/.bin/project-env",
-                    "command": "printf installed > {}"
-                }}]
-            }}
-        }}"#,
-        cwd_arg, marker_arg
-    ))
-    .expect("parse rig");
-
-    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-    assert!(!marker.exists(), "guarded command should not run");
+        let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+        assert!(out.is_success(), "outcomes: {:?}", out.steps);
+        assert_eq!(marker.exists(), !guard_exists);
+    }
 }
 
 #[test]

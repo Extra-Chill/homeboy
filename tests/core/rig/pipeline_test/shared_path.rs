@@ -107,51 +107,62 @@ fn test_shared_path_ensure_leaves_existing_local_directory_unowned() {
 }
 
 #[test]
-fn test_shared_path_cleanup_removes_only_state_owned_symlink() {
-    with_isolated_home(|_home| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let owned_link = tmp.path().join("owned-node_modules");
-        let unowned_link = tmp.path().join("unowned-node_modules");
-        fs::create_dir(&target).expect("target dir");
-        std::os::unix::fs::symlink(&target, &unowned_link).expect("preexisting symlink");
+fn test_shared_path_symlink_ownership_cases() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        OwnedCleanup,
+        UnownedMatchingCleanup,
+        WrongTargetRefused,
+    }
+    use Case::*;
 
-        let rig = rig_with_shared_path(
-            "shared-cleanup",
-            shared(&owned_link, &target),
-            SharedPathOp::Ensure,
-        );
-        run_pipeline(&rig, "up", true).expect("ensure");
-        assert!(owned_link.is_symlink());
+    for (id, case) in [
+        ("shared-cleanup", OwnedCleanup),
+        ("shared-unowned", UnownedMatchingCleanup),
+        ("shared-wrong-symlink", WrongTargetRefused),
+    ] {
+        with_isolated_home(|_home| {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let target = tmp.path().join("primary-node_modules");
+            let other = tmp.path().join("other-node_modules");
+            let link = tmp.path().join("worktree-node_modules");
+            fs::create_dir(&target).expect("target dir");
+            fs::create_dir(&other).expect("other dir");
 
-        cleanup_shared_paths(&rig).expect("cleanup");
-        assert!(!owned_link.exists(), "owned symlink removed");
-        assert!(unowned_link.is_symlink(), "unowned symlink is left alone");
-        let state = RigState::load(&rig.id).expect("state");
-        assert!(state.shared_paths.is_empty(), "ownership marker cleared");
-    });
-}
+            match case {
+                Case::UnownedMatchingCleanup => {
+                    std::os::unix::fs::symlink(&target, &link).expect("preexisting symlink")
+                }
+                Case::WrongTargetRefused => {
+                    std::os::unix::fs::symlink(&other, &link).expect("preexisting symlink")
+                }
+                Case::OwnedCleanup => {}
+            }
 
-#[test]
-fn test_shared_path_ensure_refuses_existing_symlink_to_other_target() {
-    with_isolated_home(|_home| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let other = tmp.path().join("other-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        fs::create_dir(&target).expect("target dir");
-        fs::create_dir(&other).expect("other dir");
-        std::os::unix::fs::symlink(&other, &link).expect("preexisting symlink");
+            let rig = rig_with_shared_path(id, shared(&link, &target), SharedPathOp::Ensure);
+            let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
 
-        let rig = rig_with_shared_path(
-            "shared-wrong-symlink",
-            shared(&link, &target),
-            SharedPathOp::Ensure,
-        );
-        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
-        assert!(!out.is_success(), "wrong symlink should fail");
-        assert_eq!(fs::read_link(&link).expect("read link"), other);
-    });
+            match case {
+                Case::OwnedCleanup => {
+                    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+                    assert!(link.is_symlink());
+                    cleanup_shared_paths(&rig).expect("cleanup");
+                    assert!(!link.exists(), "owned symlink removed");
+                    let state = RigState::load(&rig.id).expect("state");
+                    assert!(state.shared_paths.is_empty(), "ownership marker cleared");
+                }
+                Case::UnownedMatchingCleanup => {
+                    assert!(out.is_success(), "existing matching symlink should pass");
+                    cleanup_shared_paths(&rig).expect("cleanup");
+                    assert!(link.is_symlink(), "unowned symlink is left alone");
+                }
+                Case::WrongTargetRefused => {
+                    assert!(!out.is_success(), "wrong symlink should fail");
+                    assert_eq!(fs::read_link(&link).expect("read link"), other);
+                }
+            }
+        });
+    }
 }
 
 #[test]
