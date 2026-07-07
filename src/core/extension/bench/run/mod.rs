@@ -390,6 +390,7 @@ mod tests {
             &["rest-product-batch-import".to_string()],
             false,
             None,
+            None,
         )
         .expect("failed runner parse should not validate unselected duplicates")
         .expect("parsed results");
@@ -429,7 +430,7 @@ mod tests {
         )
         .expect("write results file");
 
-        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+        let parsed = parse_execution_results_file(&results_file, &[], false, None, None)
             .expect("failed inventory parse should succeed");
 
         assert!(
@@ -465,7 +466,7 @@ mod tests {
         )
         .expect("write results file");
 
-        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+        let parsed = parse_execution_results_file(&results_file, &[], false, None, None)
             .expect("failed measured parse should succeed")
             .expect("measured results");
 

@@ -1,6 +1,6 @@
 //! Bench scenario list (discovery-only) workflow.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
 use crate::core::engine::baseline::BaselineFlags;
@@ -20,6 +20,8 @@ pub fn run_bench_list_workflow(
     run_dir: &RunDir,
 ) -> Result<BenchListWorkflowResult> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+    let preferred_workspace_path =
+        preferred_workspace_path(component, &args).map(Path::to_path_buf);
     if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         let list_env = bench_component_script_list_env(&args)?;
         let source_path = crate::core::extension::component_script::source_path(
@@ -45,6 +47,7 @@ pub fn run_bench_list_workflow(
             args.component_label,
             results_file,
             &args.scenario_ids,
+            preferred_workspace_path.as_deref(),
             args.rig_package,
             args.profiles,
         );
@@ -100,6 +103,7 @@ pub fn run_bench_list_workflow(
         args.component_label,
         results_file,
         &args.scenario_ids,
+        preferred_workspace_path.as_deref(),
         args.rig_package,
         args.profiles,
     )
@@ -127,10 +131,17 @@ pub(crate) fn bench_list_result(
     component_label: String,
     results_file: PathBuf,
     scenario_ids: &[String],
+    preferred_workspace_path: Option<&Path>,
     rig_package: Option<crate::core::extension::bench::parsing::RigPackageEvidence>,
     profiles: Vec<super::types::BenchListProfile>,
 ) -> Result<BenchListWorkflowResult> {
-    let mut parsed = parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?;
+    let mut parsed =
+        parsing::parse_bench_results_file_with_artifact_context_scenarios_and_workspace(
+            &results_file,
+            None,
+            scenario_ids,
+            preferred_workspace_path,
+        )?;
     normalize_workload_json_scenario_ids(&mut parsed);
     let parsed = apply_scenario_filter(parsed, scenario_ids)?;
     let count = parsed.scenarios.len();
@@ -144,6 +155,16 @@ pub(crate) fn bench_list_result(
         hints: Vec::new(),
         rig_package,
     })
+}
+
+fn preferred_workspace_path<'a>(
+    component: &'a Component,
+    args: &'a BenchListWorkflowArgs,
+) -> Option<&'a Path> {
+    args.path_override
+        .as_deref()
+        .map(Path::new)
+        .or_else(|| (!component.local_path.is_empty()).then(|| Path::new(&component.local_path)))
 }
 
 pub(crate) fn bench_component_script_list_env(
