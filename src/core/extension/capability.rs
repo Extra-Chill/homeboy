@@ -267,6 +267,18 @@ fn capability_ambiguous_error(
     ))
 }
 
+fn explicit_capability_extension(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Option<&str> {
+    component
+        .capability_extensions
+        .get(capability.label())
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|extension_id| !extension_id.is_empty())
+}
+
 fn linked_extensions(
     component: &Component,
 ) -> Result<&HashMap<String, crate::core::component::ScopedExtensionConfig>> {
@@ -301,6 +313,43 @@ pub fn resolve_extension_for_capability(
     let extensions = linked_extensions(component)?;
     if extensions.is_empty() {
         return Err(no_extensions_error(component));
+    }
+
+    if let Some(extension_id) = explicit_capability_extension(component, capability) {
+        if !extensions.contains_key(extension_id) {
+            return Err(Error::validation_invalid_argument(
+                format!("capability_extensions.{}", capability.label()),
+                format!(
+                    "Component '{}' selects extension '{}' for {} support, but it is not linked",
+                    component.id,
+                    extension_id,
+                    capability.label()
+                ),
+                Some(extension_id.to_string()),
+                Some(vec![format!(
+                    "Add '{}' to extensions or choose one of: {}",
+                    extension_id,
+                    extensions.keys().cloned().collect::<Vec<_>>().join(", ")
+                )]),
+            ));
+        }
+
+        let manifest = load_extension(extension_id)?;
+        if !capability.has_manifest_support(&manifest) {
+            return Err(Error::validation_invalid_argument(
+                format!("capability_extensions.{}", capability.label()),
+                format!(
+                    "Component '{}' selects extension '{}' for {} support, but that extension does not provide it",
+                    component.id,
+                    extension_id,
+                    capability.label()
+                ),
+                Some(extension_id.to_string()),
+                None,
+            ));
+        }
+
+        return Ok(extension_id.to_string());
     }
 
     let mut matching = Vec::new();
@@ -373,4 +422,88 @@ pub fn resolve_execution_context(
         settings: extract_component_extension_settings(component, &extension_id),
         accepted_setting_keys: manifest.accepted_setting_keys(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::ScopedExtensionConfig;
+
+    fn write_extension_manifest(home: &Path, extension_id: &str, capability: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(extension_id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{extension_id}.json")),
+            format!(
+                r#"{{"name":"{extension_id}","version":"1.0.0","{capability}":{{"extension_script":"{capability}.sh"}}}}"#
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn component_with_extensions(extension_ids: &[&str]) -> Component {
+        let extensions = extension_ids
+            .iter()
+            .map(|extension_id| {
+                (
+                    (*extension_id).to_string(),
+                    ScopedExtensionConfig::default(),
+                )
+            })
+            .collect();
+
+        Component {
+            id: "consumer".to_string(),
+            extensions: Some(extensions),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explicit_capability_extension_resolves_ambiguous_deps_owner() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest(home.path(), "wordpress", "deps");
+            write_extension_manifest(home.path(), "nodejs", "deps");
+
+            let mut component = component_with_extensions(&["wordpress", "nodejs"]);
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("multiple deps providers should be ambiguous without ownership");
+            assert!(err
+                .message
+                .contains("multiple linked extensions with deps support"));
+
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "nodejs".to_string());
+
+            assert_eq!(
+                resolve_extension_for_capability(&component, ExtensionCapability::Deps).unwrap(),
+                "nodejs"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_capability_extension_must_be_linked_and_supported() {
+        crate::test_support::with_isolated_home(|home| {
+            write_extension_manifest(home.path(), "nodejs", "deps");
+            write_extension_manifest(home.path(), "wordpress", "bench");
+
+            let mut component = component_with_extensions(&["nodejs"]);
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "wordpress".to_string());
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("selected extension must be linked");
+            assert!(err.message.contains("but it is not linked"));
+
+            component = component_with_extensions(&["wordpress"]);
+            component
+                .capability_extensions
+                .insert("deps".to_string(), "wordpress".to_string());
+            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
+                .expect_err("selected extension must provide selected capability");
+            assert!(err.message.contains("does not provide it"));
+        });
+    }
 }
