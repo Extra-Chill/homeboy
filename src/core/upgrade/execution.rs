@@ -68,7 +68,7 @@ pub(crate) fn execute_upgrade(
     let defaults = defaults::load_defaults();
     let mut source_workspace_root = None;
     let source_replacement_target = if method == InstallMethod::Source {
-        replacement_target_path().ok()
+        active_binary_path().ok()
     } else {
         None
     };
@@ -146,25 +146,28 @@ pub(crate) fn execute_upgrade(
     // false-negative `upgraded: false` / `new_version: null` on a successful
     // upgrade. Retry the read-back until it reports a verifiable version before
     // giving up. See issue #3463.
-    let (success, active_binary) = verify_upgrade_with_retry(
+    let (mut success, active_binary) = verify_upgrade_with_retry(
         method,
         force,
         current_version(),
         previous_build_identity,
         VERIFY_READBACK_ATTEMPTS,
         VERIFY_READBACK_DELAY,
-        || {
-            if let Some(path) = source_replacement_target.as_deref() {
-                active_binary_info_at(path).ok().flatten()
-            } else {
-                active_binary_info().ok().flatten()
-            }
-        },
+        || active_binary_info().ok().flatten(),
         std::thread::sleep,
     );
 
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary.and_then(|info| info.build_identity);
+
+    if method == InstallMethod::Source {
+        success = verify_source_install_with_retry(
+            source_workspace_root.as_deref(),
+            VERIFY_READBACK_ATTEMPTS,
+            VERIFY_READBACK_DELAY,
+            std::thread::sleep,
+        );
+    }
 
     // A source upgrade's command is responsible for swapping the freshly built
     // artifact into the active binary on disk. When that command exits 0 but the
@@ -801,13 +804,6 @@ fn active_binary_path() -> Result<PathBuf> {
     })
 }
 
-fn replacement_target_path() -> Result<PathBuf> {
-    match std::env::current_exe() {
-        Ok(path) => Ok(path),
-        Err(_) => active_binary_path(),
-    }
-}
-
 pub(crate) fn upgrade_verification_result(
     method: InstallMethod,
     force: bool,
@@ -836,6 +832,76 @@ pub(crate) fn upgrade_verification_result(
     } else {
         true
     }
+}
+
+fn verify_source_install_with_retry<S>(
+    source_workspace: Option<&Path>,
+    attempts: u32,
+    delay: Duration,
+    mut sleep: S,
+) -> bool
+where
+    S: FnMut(Duration),
+{
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        if source_install_matches_shell_resolved_binary(source_workspace).unwrap_or(false) {
+            return true;
+        }
+
+        if attempt + 1 < attempts {
+            sleep(delay);
+        }
+    }
+
+    false
+}
+
+fn source_install_matches_shell_resolved_binary(source_workspace: Option<&Path>) -> Result<bool> {
+    let Some(source_workspace) = source_workspace else {
+        return Ok(false);
+    };
+    let active_binary = active_binary_path()?;
+
+    source_install_matches_binary_path(source_workspace, &active_binary)
+}
+
+fn source_install_matches_binary_path(
+    source_workspace: &Path,
+    active_binary: &Path,
+) -> Result<bool> {
+    let built_binary = source_workspace.join("target/release/homeboy");
+
+    binary_files_match(&built_binary, active_binary)
+}
+
+fn binary_files_match(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata = match std::fs::metadata(left) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(false),
+    };
+    let right_metadata = match std::fs::metadata(right) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(false),
+    };
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let left_contents = std::fs::read(left).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("verify source-built binary install".to_string()),
+        )
+    })?;
+    let right_contents = std::fs::read(right).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("verify source-built binary install".to_string()),
+        )
+    })?;
+
+    Ok(left_contents == right_contents)
 }
 
 fn parse_cli_version_info(output: &str) -> ActiveBinaryInfo {
@@ -1046,6 +1112,44 @@ mod tests {
             Some("homeboy 0.157.1+old"),
             Some("homeboy 0.157.1+new"),
         ));
+    }
+
+    #[test]
+    fn source_install_byte_match_rejects_same_version_stale_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let built = source.join("target/release/homeboy");
+        let active = dir.path().join("bin/homeboy");
+        std::fs::create_dir_all(built.parent().expect("built parent")).expect("built parent dir");
+        std::fs::create_dir_all(active.parent().expect("active parent"))
+            .expect("active parent dir");
+        std::fs::write(&built, b"homeboy 0.281.20 with new source behavior")
+            .expect("write built binary");
+        std::fs::write(&active, b"homeboy 0.281.20 stale installed binary")
+            .expect("write active binary");
+
+        assert!(
+            !upgrade_verification_result(
+                InstallMethod::Source,
+                true,
+                "0.281.20",
+                Some("0.281.20"),
+                Some("homeboy 0.281.20"),
+                Some("homeboy 0.281.20"),
+            ),
+            "identity-only verification cannot prove same-version source replacement"
+        );
+        assert!(
+            !source_install_matches_binary_path(&source, &active).expect("compare binaries"),
+            "same-version stale active binary must not verify"
+        );
+
+        std::fs::copy(&built, &active).expect("install built binary");
+
+        assert!(
+            source_install_matches_binary_path(&source, &active).expect("compare binaries"),
+            "source upgrade only verifies after the active binary is the built artifact"
+        );
     }
 
     #[test]
