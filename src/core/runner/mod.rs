@@ -338,7 +338,81 @@ pub fn load(id: &str) -> Result<Runner> {
         }
     }
 
-    load_server_runner(id)
+    if let Ok(runner) = load_server_runner(id) {
+        return Ok(runner);
+    }
+
+    if let Some(runner_id) = resolve_reserved_runner_alias(id)? {
+        return load_server_runner(&runner_id);
+    }
+
+    Err(Error::runner_not_found(
+        id.to_string(),
+        runner_suggestions(id),
+    ))
+}
+
+fn resolve_reserved_runner_alias(id: &str) -> Result<Option<String>> {
+    if !id.eq_ignore_ascii_case("lab") {
+        return Ok(None);
+    }
+
+    let lab_runner_ids = configured_lab_runner_ids()?;
+    if lab_runner_ids.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(runner_id) = resolve_default_lab_runner()? {
+        return Ok(Some(runner_id));
+    }
+
+    if let Some(preferred) = defaults::load_config().lab.preferred_runner {
+        if lab_runner_ids
+            .iter()
+            .any(|runner_id| runner_id == &preferred)
+        {
+            return Ok(Some(preferred));
+        }
+    }
+
+    if lab_runner_ids.len() == 1 {
+        return Ok(Some(lab_runner_ids[0].clone()));
+    }
+
+    Err(Error::runner_not_found(id.to_string(), lab_runner_ids))
+}
+
+fn configured_lab_runner_ids() -> Result<Vec<String>> {
+    let mut ids: Vec<String> = list()?
+        .into_iter()
+        .filter(|runner| runner.kind == RunnerKind::Ssh)
+        .map(|runner| runner.id)
+        .collect();
+    ids.sort();
+    Ok(ids)
+}
+
+fn runner_suggestions(id: &str) -> Vec<String> {
+    list()
+        .map(|runners| {
+            let id_lower = id.to_lowercase();
+            let mut matches: Vec<String> = runners
+                .into_iter()
+                .filter_map(|runner| {
+                    let runner_id_lower = runner.id.to_lowercase();
+                    (runner_id_lower.starts_with(&id_lower)
+                        || runner_id_lower.ends_with(&id_lower)
+                        || runner_id_lower.contains(&format!("-{id_lower}"))
+                        || (id_lower.starts_with("lab") && runner_id_lower.contains("lab")))
+                    .then_some(runner.id)
+                })
+                .collect();
+            matches.sort();
+            matches.dedup();
+            matches.truncate(3);
+            matches
+        })
+        .unwrap_or_default()
 }
 
 fn builtin_local_runner() -> Runner {
@@ -871,6 +945,16 @@ mod tests {
         }
     }
 
+    fn create_ssh_runner(id: &str) {
+        server::create(
+            &format!(r#"{{"id":"{id}","host":"192.168.86.63","user":"user"}}"#),
+            false,
+        )
+        .expect("create server");
+        create(&format!(r#"{{"id":"{id}","kind":"ssh"}}"#), false)
+            .expect("enable runner capability");
+    }
+
     #[test]
     fn runner_registry_persists_local_runner() {
         test_support::with_isolated_home(|_| {
@@ -997,6 +1081,88 @@ mod tests {
             let stored_server = server::load("homeboy-lab").expect("load server");
             assert!(stored_server.runner.is_some());
         });
+    }
+
+    #[test]
+    fn runner_load_keeps_exact_runner_id_first() {
+        test_support::with_isolated_home(|_| {
+            create_ssh_runner("lab");
+            create_ssh_runner("homeboy-lab");
+
+            let runner = load("lab").expect("exact runner id wins over reserved alias");
+
+            assert_eq!(runner.id, "lab");
+        });
+    }
+
+    #[test]
+    fn runner_load_resolves_lab_alias_to_single_ssh_runner() {
+        test_support::with_isolated_home(|_| {
+            create_ssh_runner("homeboy-lab");
+
+            let runner = load("lab").expect("lab alias resolves to only configured Lab runner");
+
+            assert_eq!(runner.id, "homeboy-lab");
+            assert_eq!(runner.kind, RunnerKind::Ssh);
+        });
+    }
+
+    #[test]
+    fn runner_load_resolves_lab_alias_to_configured_preferred_runner() {
+        test_support::with_isolated_home(|_| {
+            create_ssh_runner("backup-lab");
+            create_ssh_runner("homeboy-lab");
+            defaults::save_config(&defaults::HomeboyConfig {
+                lab: defaults::LabConfig {
+                    preferred_runner: Some("homeboy-lab".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("save preferred Lab runner");
+
+            let runner = load("lab").expect("lab alias resolves to preferred Lab runner");
+
+            assert_eq!(runner.id, "homeboy-lab");
+            assert_eq!(runner.kind, RunnerKind::Ssh);
+        });
+    }
+
+    #[test]
+    fn runner_load_suggests_single_matching_runner() {
+        test_support::with_isolated_home(|_| {
+            create_ssh_runner("homeboy-lab");
+
+            let err = load("labx").expect_err("unknown runner id returns suggestions");
+
+            assert_eq!(err.code.as_str(), "runner.not_found");
+            let hints = error_hints(&err);
+            assert!(hints.contains("homeboy-lab"));
+            assert!(!hints.contains("Server not found"));
+        });
+    }
+
+    #[test]
+    fn runner_load_rejects_ambiguous_lab_alias_with_runner_list() {
+        test_support::with_isolated_home(|_| {
+            create_ssh_runner("homeboy-lab");
+            create_ssh_runner("backup-lab");
+
+            let err = load("lab").expect_err("ambiguous Lab alias rejects");
+
+            assert_eq!(err.code.as_str(), "runner.not_found");
+            let hints = error_hints(&err);
+            assert!(hints.contains("homeboy-lab"));
+            assert!(hints.contains("backup-lab"));
+        });
+    }
+
+    fn error_hints(err: &Error) -> String {
+        err.hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
