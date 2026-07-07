@@ -209,6 +209,9 @@
     "validate": "scripts/validation/validate-syntax.sh",
     "format": "scripts/format.sh"
   },
+  "deps": {
+    "extension_script": "scripts/deps/deps-runner.sh"
+  },
   "component_env": {
     "detect_script": "scripts/env/detect.sh"
   },
