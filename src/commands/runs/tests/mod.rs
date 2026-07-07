@@ -813,6 +813,76 @@ fn artifacts_command_marks_directory_publication_status_and_command() {
 }
 
 #[test]
+fn artifacts_command_lists_copy_paste_get_commands_with_names() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+        let named_path = home.path().join("named-report.json");
+        std::fs::write(&named_path, br#"{"named":true}"#).expect("named artifact");
+        let named = store
+            .record_artifact_with_metadata(
+                &run.id,
+                "bench_results",
+                &named_path,
+                serde_json::json!({ "name": "readable-report" }),
+            )
+            .expect("named record");
+        let duplicate_path = home.path().join("duplicate-report.json");
+        std::fs::write(&duplicate_path, br#"{"duplicate":true}"#).expect("duplicate artifact");
+        let duplicate = store
+            .record_artifact(&run.id, "bench_results", &duplicate_path)
+            .expect("duplicate record");
+
+        let (output, _) = artifacts(&run.id).expect("artifacts");
+
+        let RunsOutput::Artifacts(output) = output else {
+            panic!("expected artifacts output");
+        };
+        let named_command = output
+            .next_commands
+            .iter()
+            .find(|command| command.artifact_id == named.id)
+            .expect("named command");
+        assert_eq!(named_command.token, "readable-report");
+        assert_eq!(
+            named_command.get_command,
+            format!("homeboy runs artifact get {} readable-report", run.id)
+        );
+        let duplicate_command = output
+            .next_commands
+            .iter()
+            .find(|command| command.artifact_id == duplicate.id)
+            .expect("duplicate command");
+        assert_eq!(duplicate_command.token, duplicate.id);
+        assert_eq!(
+            duplicate_command.get_command,
+            format!("homeboy runs artifact get {} {}", run.id, duplicate.id)
+        );
+
+        let downloaded = home.path().join("downloaded-named.json");
+        let (output, _) = artifact_get(RunsArtifactGetArgs {
+            run_id: run.id.clone(),
+            artifact_id: "readable-report".to_string(),
+            runner: None,
+            output: Some(downloaded.clone()),
+            field: Vec::new(),
+        })
+        .expect("get by readable name");
+        let RunsOutput::ArtifactGet(output) = output else {
+            panic!("expected artifact get output");
+        };
+        assert_eq!(output.artifact_id, named.id);
+        assert_eq!(
+            std::fs::read(&downloaded).expect("downloaded named"),
+            br#"{"named":true}"#
+        );
+    });
+}
+
+#[test]
 fn artifact_get_copies_registered_file_without_raw_path_lookup() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();

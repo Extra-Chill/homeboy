@@ -77,6 +77,7 @@ pub fn runner_artifacts(runner_id: &str, run_id: &str) -> CmdResult<RunsOutput> 
             runner_id: Some(runner_id.to_string()),
             path_guide: RunsArtifactPathGuide::for_listing(run_id, Some(runner_id)),
             artifacts,
+            next_commands: Vec::new(),
             resource_lifecycle_index,
             directory_publication,
             preview_entrypoints: Vec::new(),
