@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::worktree;
+use crate::core::{git, worktree};
 use crate::core::{Error, Result};
 
 use super::path_remap::{remap_local_path, LabPathRemap};
@@ -79,6 +79,9 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     mappings: &[LabPathRemap],
     remote_output_file: Option<&str>,
 ) -> Vec<String> {
+    let extension_refresh_revision = extension_refresh_local_source_path(args)
+        .filter(|_| !extension_refresh_has_ref(args))
+        .and_then(|source| git::short_head_revision(&source));
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
     ordered.sort_by_key(|mapping| {
         (
@@ -182,10 +185,38 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         }
         stripped.push(remap_lab_offload_arg(arg, &ordered));
     }
+    if let Some(revision) = extension_refresh_revision {
+        stripped.push("--ref".to_string());
+        stripped.push(revision);
+    }
     if !has_force_hot {
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+fn extension_refresh_has_ref(args: &[String]) -> bool {
+    let Some(refresh_index) = args
+        .windows(2)
+        .position(|window| matches!(window, [command, subcommand] if command == "extension" && subcommand == "refresh"))
+    else {
+        return false;
+    };
+
+    let mut iter = args.iter().skip(refresh_index + 3);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--ref" {
+            return iter.next().is_some();
+        }
+        if arg.starts_with("--ref=") {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn remote_lab_shared_state_dir(remote_path: &str) -> String {
