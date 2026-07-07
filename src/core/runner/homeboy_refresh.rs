@@ -433,7 +433,11 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
         .as_ref()
         .map(|output| output.updated_fields.clone())
         .unwrap_or_default();
-    if let MergeOutput::Single(result) = merge(Some(&options.runner_id), &patch.to_string(), &[])? {
+    if let MergeOutput::Single(result) = merge(
+        Some(&options.runner_id),
+        &patch.to_string(),
+        &["resources".to_string()],
+    )? {
         updated_fields.extend(result.updated_fields);
     }
 
@@ -1090,6 +1094,50 @@ mod tests {
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0]["source_path"], "/newer/nodejs");
         assert_eq!(extensions[0]["content_hash"], "newer");
+    }
+
+    #[test]
+    fn dev_sync_resource_replacement_persists_reconciled_overlay_records() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{
+                    "id": "lab-local",
+                    "kind": "local",
+                    "workspace_root": "/runner/ws",
+                    "resources": {
+                        "dev_sync": {
+                            "schema": "homeboy/runner-dev-sync/v1",
+                            "extensions": [
+                                {"id": "nodejs", "source_path": "/old/nodejs", "content_hash": "old"},
+                                {"id": "nodejs", "source_path": "/newer/nodejs", "content_hash": "newer"}
+                            ]
+                        }
+                    }
+                }"#,
+                false,
+            )
+            .expect("create runner");
+
+            let runner = crate::core::runner::load("lab-local").expect("load runner");
+            let dev_sync =
+                updated_dev_sync_resource(runner.resources.get("dev_sync").cloned(), None, &[])
+                    .expect("reconcile dev-sync resource");
+            let patch = serde_json::json!({ "resources": { "dev_sync": dev_sync } });
+
+            crate::core::runner::merge(
+                Some("lab-local"),
+                &patch.to_string(),
+                &["resources".to_string()],
+            )
+            .expect("replace resources");
+
+            let runner = crate::core::runner::load("lab-local").expect("reload runner");
+            let extensions = runner.resources["dev_sync"]["extensions"]
+                .as_array()
+                .expect("extensions array");
+            assert_eq!(extensions.len(), 1);
+            assert_eq!(extensions[0]["source_path"], "/newer/nodejs");
+        });
     }
 
     #[test]
