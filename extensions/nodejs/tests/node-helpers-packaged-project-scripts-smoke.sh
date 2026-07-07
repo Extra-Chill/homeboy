@@ -2,13 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE_HELPERS="${ROOT_DIR}/scripts/lib/node-helpers.sh"
-PROJECT_SCRIPTS="${ROOT_DIR}/../scripts/lib/project-scripts.sh"
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+INSTALL_ROOT="$TMP_DIR/home/.config/homeboy/extensions"
+mkdir -p "$INSTALL_ROOT"
+cp -R "$ROOT_DIR" "$INSTALL_ROOT/nodejs"
+cp -R "$REPO_ROOT/scripts" "$INSTALL_ROOT/scripts"
+cp -R "$REPO_ROOT/dependency-adapters" "$INSTALL_ROOT/dependency-adapters"
+
+NODE_HELPERS="${INSTALL_ROOT}/nodejs/scripts/lib/node-helpers.sh"
+PROJECT_SCRIPTS="${INSTALL_ROOT}/scripts/lib/project-scripts.sh"
+
 test -f "$NODE_HELPERS"
 test -f "$PROJECT_SCRIPTS"
+test -f "${INSTALL_ROOT}/dependency-adapters/examples/nodejs.json"
 
 bash -c '
     source "$1"
