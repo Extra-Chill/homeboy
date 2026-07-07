@@ -124,6 +124,7 @@ pub fn run_main_bench_workflow(
                 &args.scenario_ids,
                 script_output.success,
                 args.rig_id.as_deref(),
+                Some(source_path),
             )?
         } else {
             None
@@ -272,6 +273,7 @@ pub fn run_main_bench_workflow(
             &execution_args.scenario_ids,
             runner_output.success,
             execution_args.rig_id.as_deref(),
+            preferred_workspace_path(component, &execution_args),
         )?;
         let mut parsed = parsed;
         if let Some(results) = parsed.as_mut() {
@@ -460,6 +462,16 @@ pub fn run_main_bench_workflow(
         failure,
         diagnostics,
     })
+}
+
+fn preferred_workspace_path<'a>(
+    component: &'a Component,
+    args: &'a BenchRunWorkflowArgs,
+) -> Option<&'a Path> {
+    args.path_override
+        .as_deref()
+        .map(Path::new)
+        .or_else(|| (!component.local_path.is_empty()).then(|| Path::new(&component.local_path)))
 }
 
 pub(crate) fn bench_component_script_env(

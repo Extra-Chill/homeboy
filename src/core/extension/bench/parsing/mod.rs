@@ -64,7 +64,8 @@
 mod normalize;
 mod validate;
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::error::{Error, Result};
 use crate::core::structured_sidecar;
@@ -104,6 +105,20 @@ pub fn parse_bench_results_file_with_artifact_context_and_scenarios(
     rig_id: Option<&str>,
     scenario_ids: &[String],
 ) -> Result<BenchResults> {
+    parse_bench_results_file_with_artifact_context_scenarios_and_workspace(
+        path,
+        rig_id,
+        scenario_ids,
+        None,
+    )
+}
+
+pub(crate) fn parse_bench_results_file_with_artifact_context_scenarios_and_workspace(
+    path: &Path,
+    rig_id: Option<&str>,
+    scenario_ids: &[String],
+    preferred_workspace_path: Option<&Path>,
+) -> Result<BenchResults> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         Error::internal_io(
             format!(
@@ -114,7 +129,12 @@ pub fn parse_bench_results_file_with_artifact_context_and_scenarios(
             Some("bench.parsing.read".to_string()),
         )
     })?;
-    parse_bench_results_str_with_artifact_context_and_scenarios(&content, rig_id, scenario_ids)
+    parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+        &content,
+        rig_id,
+        scenario_ids,
+        preferred_workspace_path,
+    )
 }
 
 /// Parse a raw JSON string into a `BenchResults`.
@@ -133,6 +153,20 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     raw: &str,
     rig_id: Option<&str>,
     scenario_ids: &[String],
+) -> Result<BenchResults> {
+    parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+        raw,
+        rig_id,
+        scenario_ids,
+        None,
+    )
+}
+
+fn parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+    raw: &str,
+    rig_id: Option<&str>,
+    scenario_ids: &[String],
+    preferred_workspace_path: Option<&Path>,
 ) -> Result<BenchResults> {
     let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
         Error::internal_json(
@@ -154,6 +188,7 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
         }
     }
     filter_value_scenarios_by_ids(&mut value, scenario_ids);
+    resolve_duplicate_scenario_ids(&mut value, preferred_workspace_path)?;
     normalize_extension_sample_metrics(&mut value);
     normalize_diagnostic_producer_sources(&mut value);
     normalize_inline_artifact_payloads(&mut value);
@@ -170,6 +205,172 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn resolve_duplicate_scenario_ids(
+    value: &mut serde_json::Value,
+    preferred_workspace_path: Option<&Path>,
+) -> Result<()> {
+    let Some(scenarios) = value
+        .get_mut("scenarios")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+
+    let preferred_workspace_path = preferred_workspace_path.map(lexical_normalize_path);
+    let mut seen_id_paths = BTreeSet::new();
+    scenarios.retain(|scenario| {
+        let Some(id) = scenario.get("id").and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        let source_path = scenario_source_path(scenario);
+        let Some(path) = source_path.as_deref() else {
+            return true;
+        };
+        let key = (
+            id.to_string(),
+            display_path_key(path, preferred_workspace_path.as_deref()),
+        );
+        seen_id_paths.insert(key)
+    });
+
+    if let Some(workspace) = preferred_workspace_path.as_deref() {
+        let preferred_ids =
+            scenario_ids_with_single_preferred_workspace_source(scenarios, workspace);
+        if !preferred_ids.is_empty() {
+            scenarios.retain(|scenario| {
+                let Some(id) = scenario.get("id").and_then(serde_json::Value::as_str) else {
+                    return true;
+                };
+                if !preferred_ids.contains(id) {
+                    return true;
+                }
+                scenario_source_path(scenario)
+                    .as_deref()
+                    .is_some_and(|path| path_is_in_workspace(path, workspace))
+            });
+        }
+    }
+
+    let duplicates = duplicate_scenario_sources(scenarios, preferred_workspace_path.as_deref());
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+
+    let details = duplicates
+        .iter()
+        .map(|(id, sources)| format!("`{id}` from {}", sources.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let source_paths = duplicates.into_values().flatten().collect::<Vec<_>>();
+
+    Err(Error::validation_invalid_argument(
+        "scenarios.id",
+        format!(
+            "duplicate_scenario_id: duplicate bench scenario id(s) discovered: {details}. Choose one workspace with `homeboy bench --path <workspace>` or pin the rig with `--rig <id>`."
+        ),
+        Some("duplicate_scenario_id".to_string()),
+        Some(source_paths),
+    ))
+}
+
+fn scenario_ids_with_single_preferred_workspace_source(
+    scenarios: &[serde_json::Value],
+    workspace: &Path,
+) -> BTreeSet<String> {
+    let duplicates = duplicate_scenario_sources(scenarios, Some(workspace));
+    duplicates
+        .into_iter()
+        .filter_map(|(id, _)| {
+            let preferred_paths = scenarios
+                .iter()
+                .filter(|scenario| {
+                    scenario
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|scenario_id| scenario_id == id)
+                })
+                .filter_map(scenario_source_path)
+                .filter(|path| path_is_in_workspace(path, workspace))
+                .map(|path| display_path_key(&path, Some(workspace)))
+                .collect::<BTreeSet<_>>();
+            (preferred_paths.len() == 1).then_some(id)
+        })
+        .collect()
+}
+
+fn duplicate_scenario_sources(
+    scenarios: &[serde_json::Value],
+    base_path: Option<&Path>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut sources_by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for scenario in scenarios {
+        let Some(id) = scenario.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        sources_by_id.entry(id.to_string()).or_default().push(
+            scenario_source_path(scenario).map_or_else(
+                || "<unknown>".to_string(),
+                |path| display_path_key(&path, base_path),
+            ),
+        );
+    }
+
+    sources_by_id
+        .into_iter()
+        .filter_map(|(id, sources)| {
+            if sources.len() <= 1 {
+                return None;
+            }
+            let unique = sources.into_iter().collect::<BTreeSet<_>>();
+            Some((id, unique.into_iter().collect()))
+        })
+        .collect()
+}
+
+fn scenario_source_path(scenario: &serde_json::Value) -> Option<String> {
+    scenario
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| scenario.get("source").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn path_is_in_workspace(path: &str, workspace: &Path) -> bool {
+    let path = path_with_base(path, Some(workspace));
+    path.starts_with(workspace)
+}
+
+fn display_path_key(path: &str, base_path: Option<&Path>) -> String {
+    path_with_base(path, base_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn path_with_base(path: &str, base_path: Option<&Path>) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        lexical_normalize_path(&path)
+    } else if let Some(base_path) = base_path {
+        lexical_normalize_path(&base_path.join(path))
+    } else {
+        lexical_normalize_path(&path)
+    }
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -215,6 +416,123 @@ mod tests {
         assert_eq!(scenario.memory.as_ref().unwrap().peak_bytes, 41943040);
         assert!(scenario.metadata.is_empty());
         assert!(scenario.artifacts.is_empty());
+    }
+
+    #[test]
+    fn duplicate_scenario_ids_from_same_path_are_deduped() {
+        let raw = r#"{
+            "component_id": "static-site-importer",
+            "iterations": 0,
+            "scenarios": [
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/ssi/bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": { "p95_ms": 1.0 }
+                },
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/ssi/bench/../bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": { "p95_ms": 2.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+            raw,
+            None,
+            &["static-site-fixture-matrix".to_string()],
+            Some(Path::new("/workspace/ssi")),
+        )
+        .expect("same-path duplicate should be deduped");
+
+        assert_eq!(parsed.scenarios.len(), 1);
+        assert_eq!(parsed.scenarios[0].id, "static-site-fixture-matrix");
+        assert_eq!(parsed.scenarios[0].metrics.get("p95_ms"), Some(1.0));
+    }
+
+    #[test]
+    fn duplicate_scenario_ids_prefer_selected_workspace_path() {
+        let raw = r#"{
+            "component_id": "static-site-importer",
+            "iterations": 0,
+            "scenarios": [
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/old-ssi/bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": { "p95_ms": 1.0 }
+                },
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/current-ssi/bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": { "p95_ms": 2.0 }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+            raw,
+            None,
+            &["static-site-fixture-matrix".to_string()],
+            Some(Path::new("/workspace/current-ssi")),
+        )
+        .expect("selected workspace duplicate should win");
+
+        assert_eq!(parsed.scenarios.len(), 1);
+        assert_eq!(parsed.scenarios[0].metrics.get("p95_ms"), Some(2.0));
+        assert_eq!(
+            parsed.scenarios[0].file.as_deref(),
+            Some("/workspace/current-ssi/bench/static-site-fixture-matrix.bench.mjs")
+        );
+    }
+
+    #[test]
+    fn duplicate_scenario_ids_without_single_workspace_match_are_diagnostic() {
+        let raw = r#"{
+            "component_id": "static-site-importer",
+            "iterations": 0,
+            "scenarios": [
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/one/bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": {}
+                },
+                {
+                    "id": "static-site-fixture-matrix",
+                    "file": "/workspace/two/bench/static-site-fixture-matrix.bench.mjs",
+                    "iterations": 0,
+                    "metrics": {}
+                }
+            ]
+        }"#;
+
+        let err = parse_bench_results_str_with_artifact_context_scenarios_and_workspace(
+            raw,
+            None,
+            &["static-site-fixture-matrix".to_string()],
+            Some(Path::new("/workspace/missing")),
+        )
+        .expect_err("ambiguous duplicates should fail before execution");
+        let message = err.to_string();
+
+        assert!(message.contains("duplicate_scenario_id"), "got: {message}");
+        assert!(
+            message.contains("static-site-fixture-matrix"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("/workspace/one/bench/static-site-fixture-matrix.bench.mjs"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("/workspace/two/bench/static-site-fixture-matrix.bench.mjs"),
+            "got: {message}"
+        );
+        assert!(message.contains("--path <workspace>"), "got: {message}");
     }
 
     #[test]

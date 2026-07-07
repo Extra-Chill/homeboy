@@ -111,6 +111,7 @@ pub(crate) fn run_single_dispatcher(
         &args.scenario_ids,
         runner_output.success,
         args.rig_id.as_deref(),
+        preferred_workspace_path(component, args),
     )?;
     let failure_stderr_tail = if !runner_output.success {
         Some(bench_failure_stderr_tail(&runner_output.stderr, args))
@@ -128,6 +129,18 @@ pub(crate) fn run_single_dispatcher(
             .as_ref()
             .map(|resource| resource.duration_ms),
     ))
+}
+
+fn preferred_workspace_path<'a>(
+    component: &'a Component,
+    args: &'a BenchRunWorkflowArgs,
+) -> Option<&'a std::path::Path> {
+    args.path_override
+        .as_deref()
+        .map(std::path::Path::new)
+        .or_else(|| {
+            (!component.local_path.is_empty()).then(|| std::path::Path::new(&component.local_path))
+        })
 }
 
 /// Per-instance results filename within the run dir.

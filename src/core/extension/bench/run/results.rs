@@ -12,27 +12,32 @@ pub(crate) fn parse_execution_results_file(
     scenario_ids: &[String],
     runner_success: bool,
     rig_id: Option<&str>,
+    preferred_workspace_path: Option<&Path>,
 ) -> Result<Option<BenchResults>> {
     if !results_file.exists() {
         return Ok(None);
     }
 
     if runner_success {
-        let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-            results_file,
-            rig_id,
-            scenario_ids,
-        )?;
+        let mut results =
+            parsing::parse_bench_results_file_with_artifact_context_scenarios_and_workspace(
+                results_file,
+                rig_id,
+                scenario_ids,
+                preferred_workspace_path,
+            )?;
         normalize_workload_json_scenario_ids(&mut results);
         return Ok(Some(apply_scenario_filter(results, scenario_ids)?));
     }
 
-    let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-        results_file,
-        rig_id,
-        scenario_ids,
-    )
-    .ok();
+    let mut results =
+        parsing::parse_bench_results_file_with_artifact_context_scenarios_and_workspace(
+            results_file,
+            rig_id,
+            scenario_ids,
+            preferred_workspace_path,
+        )
+        .ok();
     if let Some(results) = &mut results {
         normalize_workload_json_scenario_ids(results);
         if is_unmeasured_inventory_results(results) {
