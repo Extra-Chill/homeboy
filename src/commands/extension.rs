@@ -1392,6 +1392,8 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn extension_runtime_diagnostics_reports_generic_materialization_guidance() {
@@ -1554,6 +1556,41 @@ mod tests {
                 extension.contract_producers[0].produces[0].kind,
                 homeboy::core::extension::ExtensionContractProducerOutputKind::RunnerEnvelopeAddition
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_show_reports_symlink_sidecar_source_revision_before_copied_marker() {
+        with_isolated_home(|home| {
+            let extension_id = "nodejs";
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            let source_dir = home
+                .path()
+                .join(".config/homeboy/extension-sources/nodejs/nodejs");
+            fs::create_dir_all(&source_dir).expect("source dir");
+            fs::write(
+                source_dir.join("nodejs.json"),
+                r#"{"name":"Node.js extension","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+            fs::write(source_dir.join(".source-revision"), "stale-marker\n")
+                .expect("copied stale marker");
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            symlink(&source_dir, extensions_dir.join(extension_id)).expect("extension symlink");
+            fs::write(
+                extensions_dir.join(".nodejs.source-revision"),
+                "fresh-revision\n",
+            )
+            .expect("sidecar revision");
+
+            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+
+            assert_eq!(exit_code, 0);
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+            assert_eq!(extension.source_revision.as_deref(), Some("fresh-revision"));
         });
     }
 

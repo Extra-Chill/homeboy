@@ -136,11 +136,11 @@ pub(crate) fn write_source_metadata(
     source_revision: Option<String>,
 ) {
     let metadata_dir = source_metadata_dir(extension_dir);
+    let revision_path = metadata_dir.join(source_metadata_file(extension_dir, "revision"));
     if let Some(rev) = source_revision {
-        let _ = std::fs::write(
-            metadata_dir.join(source_metadata_file(extension_dir, "revision")),
-            rev,
-        );
+        let _ = std::fs::write(revision_path, rev);
+    } else {
+        let _ = std::fs::remove_file(revision_path);
     }
     let _ = std::fs::write(
         metadata_dir.join(source_metadata_file(extension_dir, "url")),
@@ -153,10 +153,16 @@ pub fn read_source_url(extension_dir: &Path) -> Option<String> {
 }
 
 fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
-    for path in [
-        extension_dir.join(format!(".source-{kind}")),
-        source_metadata_dir(extension_dir).join(source_metadata_file(extension_dir, kind)),
-    ] {
+    let sidecar =
+        source_metadata_dir(extension_dir).join(source_metadata_file(extension_dir, kind));
+    let embedded = extension_dir.join(format!(".source-{kind}"));
+    let paths = if extension_dir.is_symlink() {
+        [sidecar, embedded]
+    } else {
+        [embedded, sidecar]
+    };
+
+    for path in paths {
         if let Some(value) = std::fs::read_to_string(path)
             .ok()
             .map(|s| s.trim().to_string())
