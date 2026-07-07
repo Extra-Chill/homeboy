@@ -40,8 +40,16 @@ pub struct ArtifactOriginInspect {
     pub filesystem_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     pub exists: bool,
     pub status_code: u16,
+    pub reviewer_safe: bool,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn serve(spec: ArtifactOriginServeSpec) -> Result<ArtifactOriginStatus> {
@@ -115,6 +123,41 @@ pub fn inspect(root: PathBuf, input: &str) -> ArtifactOriginInspect {
         crate::core::artifacts::public_artifact_path_url(&root, base, &filesystem_path)
     });
     let exists = filesystem_path.is_file();
+    let content_type = exists.then(|| {
+        crate::core::artifact_metadata::content_type_from_path(&filesystem_path)
+            .unwrap_or_else(|| "application/octet-stream".to_string())
+    });
+    let size_bytes = exists
+        .then(|| {
+            std::fs::metadata(&filesystem_path)
+                .ok()
+                .map(|metadata| metadata.len())
+        })
+        .flatten();
+    let mut warnings = Vec::new();
+    if !exists {
+        warnings.push("mapped artifact file is missing; do not hand off this URL".to_string());
+    }
+    if public_base_url.is_none() {
+        warnings.push(format!(
+            "{} is not set; filesystem paths are operator notes, not reviewer-facing evidence",
+            crate::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV
+        ));
+    }
+    if public_url.as_deref().is_some_and(is_local_only_url) {
+        warnings.push(
+            "public URL is local-only; mirror or tunnel it before sharing with reviewers"
+                .to_string(),
+        );
+    }
+    let reviewer_safe = exists && public_url.is_some() && warnings.is_empty();
+    let summary = inspect_summary(
+        if exists { 200 } else { 404 },
+        content_type.as_deref(),
+        size_bytes,
+        public_url.as_deref(),
+        reviewer_safe,
+    );
     ArtifactOriginInspect {
         command: "tunnel.artifact_origin.inspect",
         root: root.display().to_string(),
@@ -122,9 +165,52 @@ pub fn inspect(root: PathBuf, input: &str) -> ArtifactOriginInspect {
         request_path,
         filesystem_path: filesystem_path.display().to_string(),
         public_url,
+        content_type,
+        size_bytes,
         exists,
         status_code: if exists { 200 } else { 404 },
+        reviewer_safe,
+        summary,
+        warnings,
     }
+}
+
+fn inspect_summary(
+    status_code: u16,
+    content_type: Option<&str>,
+    size_bytes: Option<u64>,
+    public_url: Option<&str>,
+    reviewer_safe: bool,
+) -> String {
+    let mut parts = vec![status_code.to_string()];
+    if let Some(content_type) = content_type {
+        parts.push(content_type.to_string());
+    }
+    if let Some(size_bytes) = size_bytes {
+        parts.push(format!("{size_bytes} bytes"));
+    }
+    parts.push(if reviewer_safe {
+        "reviewer-safe".to_string()
+    } else {
+        "operator-note-only".to_string()
+    });
+    if let Some(public_url) = public_url {
+        parts.push(public_url.to_string());
+    }
+    parts.join(" | ")
+}
+
+fn is_local_only_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() == "file" {
+        return true;
+    }
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+    host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 pub(crate) fn handle_stream(mut stream: TcpStream, root: &Path) -> Result<()> {
@@ -355,6 +441,9 @@ fn reason(status: u16) -> &'static str {
 mod tests {
     use super::*;
     use crate::core::observation::{NewRunRecord, ObservationStore};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn serves_json_with_cors_headers() {
@@ -396,6 +485,50 @@ mod tests {
         assert!(response
             .headers
             .contains(&("content-type".to_string(), "text/css".to_string())));
+    }
+
+    #[test]
+    fn inspect_reports_content_type_size_and_reviewer_safe_summary() {
+        let _env = EnvGuard::set(
+            crate::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "https://artifacts.example.test",
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("workflow-bench/site/style.css");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, b"body{margin:0}").expect("write css");
+
+        let output = inspect(temp.path().to_path_buf(), "workflow-bench/site/style.css");
+
+        assert_eq!(output.status_code, 200);
+        assert_eq!(output.content_type.as_deref(), Some("text/css"));
+        assert_eq!(output.size_bytes, Some(14));
+        assert!(output.reviewer_safe);
+        assert!(output.warnings.is_empty());
+        assert_eq!(
+            output.summary,
+            "200 | text/css | 14 bytes | reviewer-safe | https://artifacts.example.test/workflow-bench/site/style.css"
+        );
+    }
+
+    #[test]
+    fn inspect_warns_when_public_url_is_local_only() {
+        let _env = EnvGuard::set(
+            crate::core::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "http://localhost:7351",
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("report.html");
+        std::fs::write(&path, b"<html></html>").expect("write html");
+
+        let output = inspect(temp.path().to_path_buf(), "report.html");
+
+        assert!(!output.reviewer_safe);
+        assert!(output.summary.contains("operator-note-only"));
+        assert_eq!(
+            output.warnings,
+            vec!["public URL is local-only; mirror or tunnel it before sharing with reviewers"]
+        );
     }
 
     #[test]
@@ -509,5 +642,33 @@ mod tests {
                 .display()
                 .to_string()
         );
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock");
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }
