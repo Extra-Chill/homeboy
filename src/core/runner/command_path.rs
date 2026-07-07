@@ -165,6 +165,7 @@ pub(crate) fn preflight_remote_path_bearing_surfaces(
             failure.path, failure.surface
         )
     }));
+    hints.push("Controller-local macOS temp/user paths cannot be interpreted by a remote Linux runner; use a runner-local path, omit controller-only options such as --artifact-root, or add a Lab workspace mapping before dispatch.".to_string());
     hints.push("Materialize each controller-local path through Lab workspace sync/remapping before dispatch, or replace it with a runner-local path that is valid on the selected runner.".to_string());
 
     Err(Error::validation_invalid_argument(
@@ -196,9 +197,6 @@ fn collect_path_setting_failures(
     let mut iter = command.iter().peekable();
     let mut passthrough = false;
     while let Some(arg) = iter.next() {
-        if passthrough {
-            continue;
-        }
         if arg == "--" {
             passthrough = true;
             continue;
@@ -211,6 +209,7 @@ fn collect_path_setting_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    !passthrough,
                     failures,
                 );
             }
@@ -224,6 +223,7 @@ fn collect_path_setting_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    !passthrough,
                     failures,
                 );
             }
@@ -236,6 +236,7 @@ fn collect_path_setting_failures(
                 source_path,
                 remote_cwd,
                 mappings,
+                !passthrough,
                 failures,
             );
         } else if let Some(raw) = arg.strip_prefix("--setting-json=") {
@@ -245,6 +246,7 @@ fn collect_path_setting_failures(
                 source_path,
                 remote_cwd,
                 mappings,
+                !passthrough,
                 failures,
             );
         } else if let Some((flag, value)) = arg.split_once('=') {
@@ -256,6 +258,7 @@ fn collect_path_setting_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    !passthrough,
                     failures,
                 );
             }
@@ -268,6 +271,7 @@ fn collect_path_setting_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    !passthrough,
                     failures,
                 );
             }
@@ -281,6 +285,7 @@ fn collect_setting_pair_failures(
     source_path: &Path,
     remote_cwd: &str,
     mappings: &[LabPathRemap],
+    include_existing_local: bool,
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
     let Some((key, value)) = raw.split_once('=') else {
@@ -296,6 +301,7 @@ fn collect_setting_pair_failures(
         source_path,
         remote_cwd,
         mappings,
+        include_existing_local,
         failures,
     );
 }
@@ -306,6 +312,7 @@ fn collect_json_setting_pair_failures(
     source_path: &Path,
     remote_cwd: &str,
     mappings: &[LabPathRemap],
+    include_existing_local: bool,
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
     let Some((key, value)) = raw.split_once('=') else {
@@ -322,6 +329,7 @@ fn collect_json_setting_pair_failures(
             source_path,
             remote_cwd,
             mappings,
+            include_existing_local,
             failures,
         ),
         Err(_) => collect_value_path_failures(
@@ -331,6 +339,7 @@ fn collect_json_setting_pair_failures(
             source_path,
             remote_cwd,
             mappings,
+            include_existing_local,
             failures,
         ),
     }
@@ -343,6 +352,7 @@ fn collect_json_value_path_failures(
     source_path: &Path,
     remote_cwd: &str,
     mappings: &[LabPathRemap],
+    include_existing_local: bool,
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
     match value {
@@ -353,6 +363,7 @@ fn collect_json_value_path_failures(
             source_path,
             remote_cwd,
             mappings,
+            include_existing_local,
             failures,
         ),
         serde_json::Value::Array(items) => {
@@ -364,6 +375,7 @@ fn collect_json_value_path_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    include_existing_local,
                     failures,
                 );
             }
@@ -377,6 +389,7 @@ fn collect_json_value_path_failures(
                     source_path,
                     remote_cwd,
                     mappings,
+                    include_existing_local,
                     failures,
                 );
             }
@@ -403,6 +416,7 @@ fn collect_path_env_failures(
             source_path,
             remote_cwd,
             mappings,
+            true,
             failures,
         );
     }
@@ -415,10 +429,17 @@ fn collect_value_path_failures(
     source_path: &Path,
     remote_cwd: &str,
     mappings: &[LabPathRemap],
+    include_existing_local: bool,
     failures: &mut Vec<PathSurfaceFailure>,
 ) {
     for path in path_candidates(value) {
-        if !is_unmapped_controller_path(&path, source_path, remote_cwd, mappings) {
+        if !is_unmapped_controller_path(
+            &path,
+            source_path,
+            remote_cwd,
+            mappings,
+            include_existing_local,
+        ) {
             continue;
         }
         failures.push(PathSurfaceFailure {
@@ -450,6 +471,7 @@ fn is_unmapped_controller_path(
     source_path: &Path,
     remote_cwd: &str,
     mappings: &[LabPathRemap],
+    include_existing_local: bool,
 ) -> bool {
     if path_is_under_remote_root(value, remote_cwd, mappings) {
         return false;
@@ -463,8 +485,11 @@ fn is_unmapped_controller_path(
     {
         return true;
     }
+    if is_obvious_controller_local_path(value) {
+        return true;
+    }
     let expanded = expanded_path(value);
-    if expanded.exists() {
+    if include_existing_local && expanded.exists() {
         return true;
     }
     std::env::var_os("HOME").is_some_and(|home| {
@@ -484,6 +509,11 @@ fn path_is_under_local_root(value: &str, root: &str) -> bool {
     !root.is_empty() && (value == root || value.starts_with(&format!("{root}/")))
 }
 
+fn is_obvious_controller_local_path(value: &str) -> bool {
+    path_is_under_local_root(value, "/var/folders")
+        || path_is_under_local_root(value, "/private/var/folders")
+}
+
 fn expanded_path(value: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(value).to_string())
 }
@@ -499,6 +529,7 @@ fn is_path_bearing_key(key: &str) -> bool {
         || key == "files"
         || key == "root"
         || key == "roots"
+        || key == "shared_state"
         || key.ends_with("_path")
         || key.ends_with("_paths")
         || key.ends_with("_dir")
@@ -835,6 +866,79 @@ mod tests {
             .unwrap_or_default();
         assert!(id.contains("arg `--cwd`"));
         assert!(id.contains(&cwd.display().to_string()));
+    }
+
+    #[test]
+    fn preflight_rejects_macos_temp_shared_state_after_passthrough() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        fs::create_dir_all(&source).expect("source");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "sample".to_string(),
+            "--path".to_string(),
+            "/runner/workspaces/primary".to_string(),
+            "--".to_string(),
+            "--shared-state".to_string(),
+            "/var/folders/ab/cd/T/homeboy-shared-state".to_string(),
+        ];
+
+        let err = preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "linux-lab",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect_err("macOS controller temp path after passthrough must fail before dispatch");
+
+        let id = err
+            .details
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(err.message.contains("linux-lab"));
+        assert!(err.message.contains("controller-local absolute paths"));
+        assert!(id.contains("arg `--shared-state`"));
+        assert!(id.contains("/var/folders/ab/cd/T/homeboy-shared-state"));
+        assert!(err
+            .details
+            .get("tried")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|hints| hints.iter().any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("use a runner-local path")))));
+    }
+
+    #[test]
+    fn preflight_allows_runner_local_tmp_path_after_passthrough() {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        fs::create_dir_all(&source).expect("source");
+        let command = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "sample".to_string(),
+            "--path".to_string(),
+            "/runner/workspaces/primary".to_string(),
+            "--".to_string(),
+            "--fixture-root".to_string(),
+            "/tmp/runner-fixtures".to_string(),
+        ];
+
+        preflight_remote_path_bearing_surfaces(
+            "Lab offload",
+            "linux-lab",
+            &command,
+            &HashMap::new(),
+            &source,
+            "/runner/workspaces/primary",
+            &[],
+        )
+        .expect("runner-local passthrough paths should remain valid for remote Lab workloads");
     }
 
     #[test]
