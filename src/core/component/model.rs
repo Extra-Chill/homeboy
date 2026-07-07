@@ -73,6 +73,12 @@ pub struct Component {
     pub build_artifact: Option<String>,
     pub build_command: Option<String>,
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
+    /// Explicit extension ownership by capability label.
+    ///
+    /// When multiple linked extensions advertise the same capability, Homeboy
+    /// requires the component to choose the owner here instead of guessing.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub capability_extensions: HashMap<String, String>,
     pub version_targets: Option<Vec<VersionTarget>>,
     pub changelog_target: Option<String>,
     pub changelog_next_section_label: Option<String>,
@@ -174,6 +180,8 @@ struct RawComponent {
     build_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extensions: Option<HashMap<String, ScopedExtensionConfig>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    capability_extensions: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version_targets: Option<Vec<VersionTarget>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,6 +254,7 @@ impl From<RawComponent> for Component {
             build_artifact: raw.build_artifact,
             build_command: raw.build_command,
             extensions: raw.extensions,
+            capability_extensions: raw.capability_extensions,
             version_targets: raw.version_targets,
             changelog_target: raw.changelog_target,
             changelog_next_section_label: raw.changelog_next_section_label,
@@ -291,6 +300,7 @@ impl From<Component> for RawComponent {
             build_artifact: c.build_artifact,
             build_command: c.build_command,
             extensions: c.extensions,
+            capability_extensions: c.capability_extensions,
             version_targets: c.version_targets,
             changelog_target: c.changelog_target,
             changelog_next_section_label: c.changelog_next_section_label,
@@ -341,6 +351,7 @@ impl Component {
             build_artifact,
             build_command: None,
             extensions: None,
+            capability_extensions: HashMap::new(),
             version_targets: None,
             changelog_target: None,
             changelog_next_section_label: None,
