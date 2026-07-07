@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_SCRIPTS_HELPER="${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh}"
+if [ -n "${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-}" ]; then
+    PROJECT_SCRIPTS_HELPER="$HOMEBOY_RUNTIME_PROJECT_SCRIPTS"
+elif [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -f "${HOMEBOY_EXTENSION_PATH}/../scripts/lib/project-scripts.sh" ]; then
+    PROJECT_SCRIPTS_HELPER="${HOMEBOY_EXTENSION_PATH}/../scripts/lib/project-scripts.sh"
+else
+    PROJECT_SCRIPTS_HELPER="${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh"
+fi
 # shellcheck source=/dev/null
 source "$PROJECT_SCRIPTS_HELPER"
 

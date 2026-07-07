@@ -27,6 +27,22 @@ bash -c '
     type homeboy_require_package_json >/dev/null
 ' _ "$NODE_HELPERS"
 
+DEV_ROOT="$TMP_DIR/dev-overlay-src"
+mkdir -p "$DEV_ROOT"
+cp -R "$ROOT_DIR" "$DEV_ROOT/nodejs"
+DEV_NODE_HELPERS="${DEV_ROOT}/nodejs/scripts/lib/node-helpers.sh"
+
+test -f "$DEV_NODE_HELPERS"
+
+bash -c '
+    export HOMEBOY_EXTENSION_PATH="$1/nodejs"
+    source "$2"
+    type homeboy_project_init >/dev/null
+    type homeboy_project_has_script >/dev/null
+    type homeboy_project_run_script_command >/dev/null
+    type homeboy_require_package_json >/dev/null
+' _ "$INSTALL_ROOT" "$DEV_NODE_HELPERS"
+
 PNPM_PROJECT="$TMP_DIR/pnpm-project"
 mkdir -p "$PNPM_PROJECT/subdir"
 cat > "$PNPM_PROJECT/package.json" <<'EOF'
