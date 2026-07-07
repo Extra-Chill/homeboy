@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.38] - 2026-07-07
+
+### Changed
+- Trim WP Codebox smoke test fixtures
+
 ## [3.23.37] - 2026-07-07
 
 ### Changed
