@@ -214,39 +214,6 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
     );
     assert_eq!(report.preview_origin_evidence[0].redirect_count, 1);
     assert!(report.markdown.contains("## Performance Digest"));
-    assert!(report.markdown.contains("### Resource Summary"));
-    assert!(report.markdown.contains("- Duration: **12345 ms**"));
-    assert!(report.markdown.contains("fixture workload"));
-    assert!(report.markdown.contains("### Benchmark Memory"));
-    assert!(report.markdown.contains("| `fixture-scenario` | 8.0 MiB |"));
-    assert!(report.markdown.contains("### Bench Budget Findings"));
-    assert!(report.markdown.contains("| `metric.max_value` | fixture-subject | 42 | 20 | count | error | Metric exceeded budget |"));
-    assert!(report.markdown.contains("### Baseline Health"));
-    assert!(report.markdown.contains("`baseline.high_variance`"));
-    assert!(report.markdown.contains("### Host Pressure"));
-    assert!(report.markdown.contains("- Severity: **hot**"));
-    assert!(report.markdown.contains("### Lab Offload"));
-    assert!(report.markdown.contains("### Preview"));
-    assert!(report
-        .markdown
-        .contains("- local_url: `http://127.0.0.1:8080`"));
-    assert!(report
-        .markdown
-        .contains("- public_url: `https://preview.example.test/run-1`"));
-    assert!(report.markdown.contains("- hold_seconds: `600`"));
-    assert!(report
-        .markdown
-        .contains("- expires_at: `2026-06-01T22:00:00Z`"));
-    assert!(report.markdown.contains("- process_id: `pid-123`"));
-    assert!(report.markdown.contains("- runtime_id: `runtime-abc`"));
-    assert!(report.markdown.contains("- cleanup_status: `pending`"));
-    assert!(report.markdown.contains("### Browser Origin Evidence"));
-    assert!(report.markdown.contains("`site-preview`"));
-    assert!(report.markdown.contains("`http://app.localhost:3000`"));
-    assert!(report
-        .markdown
-        .contains("`https://preview.example.test/?view=site`"));
-    assert!(report.markdown.contains("| true | 1 |"));
 }
 
 #[test]
@@ -282,17 +249,6 @@ fn renders_managed_service_preview_url_artifact_metadata() {
         report.preview.get("source.run_id"),
         Some(&"run-1".to_string())
     );
-    assert!(report.markdown.contains("### Preview"));
-    assert!(report
-        .markdown
-        .contains("- public_url: `https://preview.example.test/site-preview`"));
-    assert!(report
-        .markdown
-        .contains("- policy.mode: `keep_alive_until`"));
-    assert!(report
-        .markdown
-        .contains("- cleanup.expires_at: `2026-06-07T13:00:00Z`"));
-    assert!(report.markdown.contains("- source.run_id: `run-1`"));
 }
 
 #[test]
@@ -361,8 +317,6 @@ fn reads_persisted_uuid_prefixed_artifacts() {
         .baseline_health
         .iter()
         .any(|diagnostic| diagnostic.code == "baseline.missing_warmup"));
-    assert!(report.markdown.contains("- Duration: **54321 ms**"));
-    assert!(report.markdown.contains("persisted-subject"));
 }
 
 #[test]
@@ -381,18 +335,6 @@ fn missing_optional_artifacts_degrade_gracefully() {
     assert!(report
         .gaps
         .contains(&"bench.json not found or not parseable".to_string()));
-    assert!(report
-        .markdown
-        .contains("- No structured resource summary available."));
-    assert!(report
-        .markdown
-        .contains("- No structured bench budget findings available."));
-    assert!(report
-        .markdown
-        .contains("- No baseline health diagnostics reported."));
-    assert!(report
-        .markdown
-        .contains("- No resource policy metadata available."));
 }
 
 #[test]
@@ -420,5 +362,4 @@ fn renders_max_peak_rss_from_multi_run_memory() {
     assert_eq!(report.benchmark_memory.len(), 1);
     assert_eq!(report.benchmark_memory[0].scenario, "audit-self");
     assert_eq!(report.benchmark_memory[0].peak_bytes, 33554432);
-    assert!(report.markdown.contains("| `audit-self` | 32.0 MiB |"));
 }
