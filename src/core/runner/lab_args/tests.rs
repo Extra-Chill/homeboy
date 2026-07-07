@@ -1701,8 +1701,7 @@ mod lab_args_rewrite_tests {
         if !git(source.path(), &["init", "--quiet"]) || !commit_all(source.path(), "init") {
             return;
         }
-        let revision =
-            git_output(source.path(), &["rev-parse", "--short", "HEAD"]).expect("source revision");
+        let revision = git_output(source.path(), &["rev-parse", "HEAD"]).expect("source revision");
         let local_source = source.path().display().to_string();
         let remote_source = "/runner/workspaces/nodejs";
         let args = vec![

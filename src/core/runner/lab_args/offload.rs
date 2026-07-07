@@ -81,7 +81,7 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
 ) -> Vec<String> {
     let extension_refresh_revision = extension_refresh_local_source_path(args)
         .filter(|_| !extension_refresh_has_ref(args))
-        .and_then(|source| git::short_head_revision(&source));
+        .and_then(|source| git::head_sha(&source));
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
     ordered.sort_by_key(|mapping| {
         (
