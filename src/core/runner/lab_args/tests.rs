@@ -1549,6 +1549,44 @@ mod path_settings_tests {
 
 mod lab_args_rewrite_tests {
     use super::*;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn commit_all(dir: &std::path::Path, message: &str) -> bool {
+        git(dir, &["add", "."])
+            && git(
+                dir,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+            )
+    }
+
+    fn git_output(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
 
     #[test]
     fn lab_args_rewrite_preserves_nested_review_quality_command_label() {
@@ -1651,6 +1689,94 @@ mod lab_args_rewrite_tests {
                 "opencode".to_string(),
                 "--source".to_string(),
                 "/runner/workspaces/homeboy-extensions".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn lab_args_rewrite_extension_refresh_adds_local_source_revision_ref() {
+        let source = tempfile::tempdir().expect("source dir");
+        std::fs::write(source.path().join("nodejs.json"), r#"{"name":"Node.js"}"#)
+            .expect("manifest");
+        if !git(source.path(), &["init", "--quiet"]) || !commit_all(source.path(), "init") {
+            return;
+        }
+        let revision =
+            git_output(source.path(), &["rev-parse", "--short", "HEAD"]).expect("source revision");
+        let local_source = source.path().display().to_string();
+        let remote_source = "/runner/workspaces/nodejs";
+        let args = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "refresh".to_string(),
+            local_source.clone(),
+            "--id".to_string(),
+            "nodejs".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--lab-only".to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: local_source,
+            remote: remote_source.to_string(),
+        }];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, remote_source, &mappings, None),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "extension".to_string(),
+                "refresh".to_string(),
+                remote_source.to_string(),
+                "--id".to_string(),
+                "nodejs".to_string(),
+                "--ref".to_string(),
+                revision,
+            ]
+        );
+    }
+
+    #[test]
+    fn lab_args_rewrite_extension_refresh_preserves_explicit_ref() {
+        let source = tempfile::tempdir().expect("source dir");
+        std::fs::write(source.path().join("nodejs.json"), r#"{"name":"Node.js"}"#)
+            .expect("manifest");
+        if !git(source.path(), &["init", "--quiet"]) || !commit_all(source.path(), "init") {
+            return;
+        }
+        let local_source = source.path().display().to_string();
+        let remote_source = "/runner/workspaces/nodejs";
+        let args = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "refresh".to_string(),
+            local_source.clone(),
+            "--id".to_string(),
+            "nodejs".to_string(),
+            "--ref".to_string(),
+            "operator-ref".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--lab-only".to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: local_source,
+            remote: remote_source.to_string(),
+        }];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&args, remote_source, &mappings, None),
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "extension".to_string(),
+                "refresh".to_string(),
+                remote_source.to_string(),
+                "--id".to_string(),
+                "nodejs".to_string(),
+                "--ref".to_string(),
+                "operator-ref".to_string(),
             ]
         );
     }
