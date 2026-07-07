@@ -63,8 +63,19 @@ pub struct ResourcePolicyContext {
     /// Human-readable warning message produced by the policy, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Controller-side routing decision available at resource-policy preflight.
+    pub runner_selection: ResourcePolicyRunnerSelection,
     /// Structured host snapshot used to derive the severity.
     pub host: ResourcePolicyHostSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourcePolicyRunnerSelection {
+    /// Runner selected before command execution, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    /// Why this command is expected to run locally or through Lab.
+    pub reason: String,
 }
 
 /// Subset of the doctor resource report that explains why the resource policy
@@ -112,13 +123,18 @@ impl ResourcePolicyContext {
         resources: &DoctorOutput,
         warning: Option<&ResourcePolicyWarning>,
         force_hot: bool,
+        default_runner: Option<&str>,
+        runner_hosted: bool,
     ) -> Self {
+        let runner_selection =
+            runner_selection_context(command, force_hot, default_runner, runner_hosted);
         Self {
             command: command.label.to_string(),
             severity: severity_str(resources.recommendation).to_string(),
             force_hot,
             warned: warning.is_some(),
             message: warning.map(|warning| warning.message.clone()),
+            runner_selection,
             host: ResourcePolicyHostSnapshot {
                 load_severity: severity_str(resources.load.recommendation).to_string(),
                 load_one: resources.load.one,
@@ -143,6 +159,42 @@ impl ResourcePolicyContext {
     /// `metadata_json["resource_policy"]`.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+fn runner_selection_context(
+    command: HotCommand,
+    force_hot: bool,
+    default_runner: Option<&str>,
+    runner_hosted: bool,
+) -> ResourcePolicyRunnerSelection {
+    if runner_hosted {
+        return ResourcePolicyRunnerSelection {
+            runner_id: None,
+            reason: "runner_hosted".to_string(),
+        };
+    }
+    if force_hot {
+        return ResourcePolicyRunnerSelection {
+            runner_id: None,
+            reason: "force_hot_local".to_string(),
+        };
+    }
+    if command.lab_offload_supported {
+        if let Some(runner_id) = default_runner {
+            return ResourcePolicyRunnerSelection {
+                runner_id: Some(runner_id.to_string()),
+                reason: "default_lab_runner".to_string(),
+            };
+        }
+        return ResourcePolicyRunnerSelection {
+            runner_id: None,
+            reason: "local_no_default_runner".to_string(),
+        };
+    }
+    ResourcePolicyRunnerSelection {
+        runner_id: None,
+        reason: "local_only_contract".to_string(),
     }
 }
 
@@ -636,6 +688,8 @@ mod tests {
             &resources,
             Some(&warning),
             false,
+            Some("homeboy-lab"),
+            false,
         );
 
         assert_eq!(context.command, "bench");
@@ -647,6 +701,13 @@ mod tests {
             .as_deref()
             .expect("message")
             .contains("Resource policy warning"));
+        assert_eq!(
+            context.runner_selection,
+            ResourcePolicyRunnerSelection {
+                runner_id: Some("homeboy-lab".to_string()),
+                reason: "default_lab_runner".to_string(),
+            }
+        );
         assert_eq!(context.host.load_severity, "hot");
         assert_eq!(context.host.load_one, Some(9.0));
         assert_eq!(context.host.cpu_count, 4);
@@ -666,12 +727,16 @@ mod tests {
             &resources,
             Some(&warning),
             true,
+            Some("homeboy-lab"),
+            false,
         );
 
         assert!(context.force_hot);
         assert!(context.warned);
         assert_eq!(context.severity, "hot");
         assert!(context.message.is_some());
+        assert_eq!(context.runner_selection.reason, "force_hot_local");
+        assert_eq!(context.runner_selection.runner_id, None);
     }
 
     #[test]
@@ -683,12 +748,15 @@ mod tests {
             &resources,
             None,
             false,
+            None,
+            false,
         );
 
         assert_eq!(context.severity, "ok");
         assert!(!context.warned);
         assert!(context.message.is_none());
         assert!(!context.force_hot);
+        assert_eq!(context.runner_selection.reason, "local_no_default_runner");
     }
 
     #[test]
@@ -703,6 +771,8 @@ mod tests {
         let context = ResourcePolicyContext::from_evaluation(
             lab_supported_hot("bench"),
             &resources,
+            None,
+            false,
             None,
             false,
         );
@@ -721,6 +791,8 @@ mod tests {
             &resources,
             Some(&warning),
             false,
+            Some("homeboy-lab"),
+            false,
         );
         let value = context.to_json();
 
@@ -729,6 +801,8 @@ mod tests {
         assert_eq!(value["force_hot"], false);
         assert_eq!(value["warned"], true);
         assert!(value["message"].is_string());
+        assert_eq!(value["runner_selection"]["runner_id"], "homeboy-lab");
+        assert_eq!(value["runner_selection"]["reason"], "default_lab_runner");
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
     }

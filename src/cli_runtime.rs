@@ -557,6 +557,8 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         warning.as_ref()
                     },
                     cli.force_hot,
+                    default_lab_runner.as_deref(),
+                    runner_hosted,
                 ),
             );
             if let Some(warning) = warning.as_ref() {

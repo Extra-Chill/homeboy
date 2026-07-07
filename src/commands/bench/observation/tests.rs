@@ -928,6 +928,8 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
             &synthetic,
             Some(&warning),
             false,
+            Some("homeboy-lab"),
+            false,
         ));
 
         let run_dir = RunDir::create().expect("run dir");
@@ -969,6 +971,8 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
         assert_eq!(policy["severity"], "hot");
         assert_eq!(policy["force_hot"], false);
         assert_eq!(policy["warned"], true);
+        assert_eq!(policy["runner_selection"]["runner_id"], "homeboy-lab");
+        assert_eq!(policy["runner_selection"]["reason"], "default_lab_runner");
         assert!(policy["message"]
             .as_str()
             .expect("message string")
@@ -995,6 +999,8 @@ fn bench_observation_records_force_hot_bypass() {
             &synthetic,
             Some(&warning),
             true,
+            Some("homeboy-lab"),
+            false,
         ));
 
         let run_dir = RunDir::create().expect("run dir");
@@ -1035,6 +1041,7 @@ fn bench_observation_records_force_hot_bypass() {
         assert_eq!(policy["severity"], "hot");
         assert_eq!(policy["force_hot"], true);
         assert_eq!(policy["warned"], true);
+        assert_eq!(policy["runner_selection"]["reason"], "force_hot_local");
 
         resource_policy::reset_captured_context_for_test();
     });
