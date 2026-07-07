@@ -17,10 +17,7 @@ use super::utils::args::{
 use super::utils::observed_workflow::WorkflowObservationAdapter;
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-    AUDIT_LAB_LABEL,
-};
+use crate::command_contract::{LabCommandContract, AUDIT_LAB_LABEL};
 
 const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
 
@@ -70,13 +67,6 @@ pub struct AuditArgs {
 }
 
 impl AuditArgs {
-    pub(crate) fn output_descriptor(
-        &self,
-        output_file_mode: CommandOutputFileMode,
-    ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
-    }
-
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.changed_since.is_some() {
             return Some(LabCommandContract::local_only(
