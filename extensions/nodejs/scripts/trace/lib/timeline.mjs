@@ -7,7 +7,7 @@ import {
     normalizeTraceAssertion,
     normalizeTraceEnvelope,
     normalizeTraceEvent,
-} from '../../../../scripts/lib/browser-result-shapes.mjs';
+} from '../../lib/browser-result-shapes.mjs';
 
 export class TraceRecorder {
     constructor(options = {}) {

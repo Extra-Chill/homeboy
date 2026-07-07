@@ -5,7 +5,7 @@ import {
     normalizeBrowserProfileTimings,
     normalizeBrowserTiming,
     stableJson,
-} from '../../../../scripts/lib/browser-result-shapes.mjs';
+} from '../../lib/browser-result-shapes.mjs';
 
 export async function collectBrowserWaterfall(page, options = {}) {
     if (!page || typeof page.evaluate !== 'function') {
