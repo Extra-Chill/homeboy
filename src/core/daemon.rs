@@ -1083,116 +1083,117 @@ fn enqueue_exec_job(
         request.runner_workload.as_ref(),
         request.metadata.as_ref(),
     );
-    let runner = job_store.run_background_with_source_snapshot_metadata_and_path_materialization_plan(
-        operation,
-        source_snapshot.clone(),
-        run_ref_metadata,
-        path_materialization_plan.clone(),
-        move |job| {
-            job.progress(json!({
-                "phase": "started",
-                "runner_id": plan.runner.id,
-                "cwd": plan.cwd,
-                "command": plan.command,
-                "capture_patch": request.capture_patch,
-                "job_id": job.job_id(),
-                "source_snapshot": source_snapshot,
-                "path_materialization_plan": path_materialization_plan,
-            }))?;
-            let baseline = if request.capture_patch {
-                Some(capture_baseline(&plan.cwd)?)
-            } else {
-                None
-            };
-            let progress_job = job.clone();
-            let progress_sink = Arc::new(move |data| {
-                let _ = progress_job.progress(data);
-            });
-            let process_output = execute_runner_process_until_cancelled_with_progress(
-                &plan,
-                || job.is_cancelled(),
-                Some(progress_sink),
-            )?;
-            let stdout = process_output.stdout.clone();
-            let stderr = process_output.stderr.clone();
-            let exit_code = process_output.exit_code;
-            let metrics = process_output.metrics.clone();
-            let capture = process_output.capture.clone();
-            if job.is_cancelled() {
-                let _ = job.progress(json!({
-                    "phase": "cancelled",
+    let runner = job_store
+        .run_background_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot.clone(),
+            run_ref_metadata,
+            path_materialization_plan.clone(),
+            move |job| {
+                job.progress(json!({
+                    "phase": "started",
+                    "runner_id": plan.runner.id,
+                    "cwd": plan.cwd,
+                    "command": plan.command,
+                    "capture_patch": request.capture_patch,
+                    "job_id": job.job_id(),
+                    "source_snapshot": source_snapshot,
+                    "path_materialization_plan": path_materialization_plan,
+                }))?;
+                let baseline = if request.capture_patch {
+                    Some(capture_baseline(&plan.cwd)?)
+                } else {
+                    None
+                };
+                let progress_job = job.clone();
+                let progress_sink = Arc::new(move |data| {
+                    let _ = progress_job.progress(data);
+                });
+                let process_output = execute_runner_process_until_cancelled_with_progress(
+                    &plan,
+                    || job.is_cancelled(),
+                    Some(progress_sink),
+                )?;
+                let stdout = process_output.stdout.clone();
+                let stderr = process_output.stderr.clone();
+                let exit_code = process_output.exit_code;
+                let metrics = process_output.metrics.clone();
+                let capture = process_output.capture.clone();
+                if job.is_cancelled() {
+                    let _ = job.progress(json!({
+                        "phase": "cancelled",
+                        "exit_code": exit_code,
+                        "metrics": metrics.clone(),
+                    }));
+                    return Ok(json!({
+                        "runner_id": plan.runner.id.clone(),
+                        "cwd": plan.cwd.clone(),
+                        "command": plan.command.clone(),
+                        "exit_code": exit_code,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "source_snapshot": source_snapshot,
+                        "path_materialization_plan": path_materialization_plan,
+                        "metrics": metrics,
+                        "capture": capture,
+                        "status": JobStatus::Cancelled,
+                    }));
+                }
+                if !stdout.is_empty() {
+                    job.stdout(stdout.clone())?;
+                }
+                if !stderr.is_empty() {
+                    job.stderr(stderr.clone())?;
+                }
+                job.progress(json!({
+                    "phase": "finished",
                     "exit_code": exit_code,
                     "metrics": metrics.clone(),
-                }));
-                return Ok(json!({
-                    "runner_id": plan.runner.id.clone(),
-                    "cwd": plan.cwd.clone(),
-                    "command": plan.command.clone(),
+                }))?;
+                let patch = if let Some(baseline) = baseline {
+                    Some(capture_patch_report(
+                        job.job_id(),
+                        &plan.runner.id,
+                        &plan.cwd,
+                        &plan.command,
+                        source_snapshot.as_ref(),
+                        &baseline,
+                        exit_code,
+                    )?)
+                } else {
+                    None
+                };
+                let result = json!({
+                    "runner_id": plan.runner.id,
+                    "cwd": plan.cwd,
+                    "command": plan.command,
                     "exit_code": exit_code,
                     "stdout": stdout,
                     "stderr": stderr,
                     "source_snapshot": source_snapshot,
                     "path_materialization_plan": path_materialization_plan,
+                    "patch": patch,
                     "metrics": metrics,
                     "capture": capture,
-                    "status": JobStatus::Cancelled,
-                }));
-            }
-            if !stdout.is_empty() {
-                job.stdout(stdout.clone())?;
-            }
-            if !stderr.is_empty() {
-                job.stderr(stderr.clone())?;
-            }
-            job.progress(json!({
-                "phase": "finished",
-                "exit_code": exit_code,
-                "metrics": metrics.clone(),
-            }))?;
-            let patch = if let Some(baseline) = baseline {
-                Some(capture_patch_report(
-                    job.job_id(),
-                    &plan.runner.id,
-                    &plan.cwd,
-                    &plan.command,
-                    source_snapshot.as_ref(),
-                    &baseline,
-                    exit_code,
-                )?)
-            } else {
-                None
-            };
-            let result = json!({
-                "runner_id": plan.runner.id,
-                "cwd": plan.cwd,
-                "command": plan.command,
-                "exit_code": exit_code,
-                "stdout": stdout,
-                "stderr": stderr,
-                "source_snapshot": source_snapshot,
-                "path_materialization_plan": path_materialization_plan,
-                "patch": patch,
-                "metrics": metrics,
-                "capture": capture,
-            });
-            if exit_code != 0 {
-                job.result(result.clone())?;
-                return Err(Error::remote_command_failed(RemoteCommandFailedDetails {
-                    command: plan.command.join(" "),
-                    exit_code,
-                    stdout,
-                    stderr,
-                    target: TargetDetails {
-                        project_id: None,
-                        server_id: Some(plan.runner.id.clone()),
-                        host: None,
-                    },
-                }));
-            }
+                });
+                if exit_code != 0 {
+                    job.result(result.clone())?;
+                    return Err(Error::remote_command_failed(RemoteCommandFailedDetails {
+                        command: plan.command.join(" "),
+                        exit_code,
+                        stdout,
+                        stderr,
+                        target: TargetDetails {
+                            project_id: None,
+                            server_id: Some(plan.runner.id.clone()),
+                            host: None,
+                        },
+                    }));
+                }
 
-            Ok(result)
-        },
-    );
+                Ok(result)
+            },
+        );
     let job = job_store.get(runner.job_id)?;
 
     Ok(json!({
