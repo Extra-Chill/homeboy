@@ -718,6 +718,22 @@ fn validate_runner_extension_revision(
     extension_id: &str,
     remote_stdout: &str,
 ) -> Result<()> {
+    let local_revision = extension::read_source_revision(extension_id);
+    let remote_revision = remote_extension_source_revision(remote_stdout);
+    if matches!(
+        (
+            local_revision
+                .as_deref()
+                .filter(|revision| !revision.trim().is_empty()),
+            remote_revision
+                .as_deref()
+                .filter(|revision| !revision.trim().is_empty()),
+        ),
+        (Some(local), Some(remote)) if local == remote
+    ) {
+        return Ok(());
+    }
+
     if let Some(overlay) = dev_sync_extension_overlay(runner, extension_id) {
         return validate_dev_overlay_extension_revision(
             runner_id,
@@ -727,8 +743,6 @@ fn validate_runner_extension_revision(
             &overlay,
         );
     }
-    let local_revision = extension::read_source_revision(extension_id);
-    let remote_revision = remote_extension_source_revision(remote_stdout);
     let Some(local_revision) = local_revision.filter(|revision| !revision.trim().is_empty()) else {
         return Ok(());
     };
@@ -1355,6 +1369,30 @@ mod tests {
             &remote_stdout,
         )
         .expect("matching dev overlay hash should pass parity");
+    }
+
+    #[test]
+    fn revision_parity_ignores_stale_dev_overlay_when_installed_revision_is_current() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/nodejs");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join(".source-revision"), "1fad4a12\n").expect("revision");
+            let runner = runner_with_overlay(
+                "nodejs",
+                "/Users/chubes/Developer/homeboy-extensions@fix-nodejs-fuzz-runner/nodejs",
+                "stale-dev-overlay-hash",
+            );
+            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"1fad4a12"}}}"#;
+
+            validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "nodejs",
+                remote_stdout,
+            )
+            .expect("current installed revision should supersede stale dev overlay metadata");
+        });
     }
 
     #[test]
