@@ -379,6 +379,7 @@ JSON
             component_env: None,
             env_provider: None,
             ci: None,
+            diagnostics: Default::default(),
             runtime: None,
             cli: None,
             build: None,

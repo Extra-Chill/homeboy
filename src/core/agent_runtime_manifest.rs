@@ -287,6 +287,14 @@ pub(crate) fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
     }
 }
 
+pub fn discover_agent_runtime_tool_diagnostic_manifests() -> Vec<AgentRuntimeManifest> {
+    discover_agent_runtime_catalog()
+        .manifests
+        .into_iter()
+        .filter(|manifest| !manifest.materialization.diagnostics.tools.is_empty())
+        .collect()
+}
+
 fn merge_agent_runtime_manifests(
     standalone_manifests: Vec<AgentRuntimeManifest>,
     extension_manifests: Vec<AgentRuntimeManifest>,
@@ -738,6 +746,7 @@ mod tests {
             component_env: None,
             env_provider: None,
             ci: None,
+            diagnostics: Default::default(),
             runtime: None,
             cli: None,
             build: None,

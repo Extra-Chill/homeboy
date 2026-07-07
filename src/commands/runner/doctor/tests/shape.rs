@@ -35,6 +35,23 @@ fn doctor_output_omits_empty_repairs() {
 }
 
 #[test]
+fn capabilities_are_runner_substrate_only() {
+    let (report, _) = run("local").expect("local doctor report");
+    let value = serde_json::to_value(report).expect("serialize report");
+    let capabilities = value["capabilities"]
+        .as_object()
+        .expect("capabilities object");
+
+    assert!(capabilities.contains_key("local_execution"));
+    assert!(capabilities.contains_key("homeboy_available"));
+    assert!(!capabilities.contains_key("github_cli"));
+    assert!(!capabilities.contains_key("node"));
+    assert!(!capabilities.contains_key("npm"));
+    assert!(!capabilities.contains_key("php"));
+    assert!(!capabilities.contains_key("docker"));
+}
+
+#[test]
 fn overall_status_promotes_errors_over_warnings() {
     let checks = vec![
         checks::warning("optional", "optional missing".to_string(), None),

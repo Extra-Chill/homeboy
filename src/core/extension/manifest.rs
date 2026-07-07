@@ -512,6 +512,29 @@ pub struct AgentRuntimeManifestConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExtensionDiagnosticsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ExtensionToolDiagnosticDeclaration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExtensionToolDiagnosticDeclaration {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+impl ExtensionDiagnosticsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct AgentTaskPolicyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_backend: Option<String>,
@@ -668,6 +691,11 @@ pub struct ExtensionManifest {
     pub env_provider: Option<EnvProviderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiCapability>,
+
+    /// Optional diagnostics this extension wants runner doctor to probe without
+    /// core learning the extension's ecosystem or toolchain.
+    #[serde(default, skip_serializing_if = "ExtensionDiagnosticsConfig::is_empty")]
+    pub diagnostics: ExtensionDiagnosticsConfig,
 
     /// Runtime requirements needed to execute this extension's runner scripts.
     /// Component-declared requirements still win; these are fallbacks for the
