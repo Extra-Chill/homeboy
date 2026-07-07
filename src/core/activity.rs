@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::agent_task_lifecycle::{self, AgentTaskRunRecord, AgentTaskRunState};
-use crate::core::api_jobs::{self, ActiveRunnerJobSummary, Job, JobStatus};
+use crate::core::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent, JobStatus};
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::core::{paths, runners, Error, Result};
 
@@ -539,16 +539,16 @@ mod daemon_jobs {
         }
         let store = api_jobs::JobStore::open(path)?;
         for job in store.list() {
-            collector.insert(item_from_job(job));
+            collector.insert(item_from_job(&store, job)?);
         }
         Ok(())
     }
 
-    fn item_from_job(job: Job) -> ActivityItem {
+    pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<ActivityItem> {
         let state = state_from_job(job.status);
         let job_id = job.id.to_string();
-        let durable_run_id = durable_run_id(&job);
-        ActivityItem {
+        let (durable_run_id, agent_task_run_id) = job_run_refs(store, &job);
+        Ok(ActivityItem {
             id: job_id.clone(),
             kind: job.operation.clone(),
             source_store: "daemon.jobs-json".to_string(),
@@ -568,7 +568,7 @@ mod daemon_jobs {
             },
             refs: ActivityCrossRefs {
                 run_id: durable_run_id,
-                agent_task_run_id: None,
+                agent_task_run_id,
                 runner_job_id: Some(job_id.clone()),
             },
             artifacts: job
@@ -585,11 +585,26 @@ mod daemon_jobs {
                 .collect(),
             evidence: Vec::new(),
             next_actions: actions_for_job(None, &job_id, state),
-        }
+        })
     }
 
-    fn durable_run_id(job: &Job) -> Option<String> {
-        job.source_snapshot.as_ref().and_then(|_| None)
+    fn job_run_refs(store: &api_jobs::JobStore, job: &Job) -> (Option<String>, Option<String>) {
+        store.events(job.id).unwrap_or_default().iter().fold(
+            (None, None),
+            |(durable, agent_task), event| {
+                (
+                    durable.or_else(|| event_metadata_string(event, &["durable_run_id", "run_id"])),
+                    agent_task.or_else(|| event_metadata_string(event, &["agent_task_run_id"])),
+                )
+            },
+        )
+    }
+
+    fn event_metadata_string(event: &JobEvent, keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .find_map(|key| event.data.as_ref()?.get(*key)?.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
     }
 
     fn state_from_job(status: JobStatus) -> ActivityState {
@@ -800,6 +815,27 @@ mod tests {
         let report = report_from_items(vec![item("run-1", ActivityState::Running)], "activity");
         assert_eq!(report.next_actions, vec!["homeboy runs show run-1"]);
         assert_eq!(report.items[0].next_actions[0].label, "show");
+    }
+
+    #[test]
+    fn daemon_job_projects_durable_and_agent_task_run_ids_from_metadata() {
+        let store = api_jobs::JobStore::default();
+        let job = store.create_with_source_snapshot_and_metadata(
+            "runner.exec",
+            None,
+            Some(serde_json::json!({
+                "durable_run_id": "agent-task-run-123",
+                "agent_task_run_id": "agent-task-run-123",
+            })),
+        );
+
+        let item = daemon_jobs::item_from_job(&store, job).expect("activity item");
+
+        assert_eq!(item.refs.run_id.as_deref(), Some("agent-task-run-123"));
+        assert_eq!(
+            item.refs.agent_task_run_id.as_deref(),
+            Some("agent-task-run-123")
+        );
     }
 
     #[test]

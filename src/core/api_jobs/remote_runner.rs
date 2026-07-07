@@ -207,6 +207,35 @@ impl RemoteRunnerJobRequest {
         }
         public
     }
+
+    pub(crate) fn run_ref_metadata(&self) -> Option<Value> {
+        let durable_run_id = self
+            .lifecycle
+            .as_ref()
+            .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
+            .or_else(|| self.metadata.as_ref().and_then(metadata_run_id));
+        let agent_task_run_id = self
+            .runner_workload
+            .as_ref()
+            .and_then(|workload| workload.agent_task.as_ref())
+            .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
+            .or_else(|| {
+                self.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("agent_task_run_id"))
+                    .and_then(|run_id| non_empty_string(run_id.as_str()))
+            })
+            .or_else(|| durable_run_id.clone());
+
+        if durable_run_id.is_none() && agent_task_run_id.is_none() {
+            return None;
+        }
+
+        Some(serde_json::json!({
+            "durable_run_id": durable_run_id,
+            "agent_task_run_id": agent_task_run_id,
+        }))
+    }
 }
 
 impl From<RunnerJobLifecycleMetadata> for RunnerExecutionLifecycle {
@@ -229,8 +258,9 @@ fn non_empty_string(value: Option<&str>) -> Option<String> {
 }
 
 fn metadata_run_id(metadata: &Value) -> Option<String> {
-    metadata
-        .get("run_id")
+    ["durable_run_id", "run_id", "record_run_id"]
+        .iter()
+        .find_map(|key| metadata.get(*key))
         .and_then(|run_id| non_empty_string(run_id.as_str()))
 }
 
@@ -336,6 +366,7 @@ impl JobStore {
         };
 
         let public_request = request.public_metadata();
+        let run_ref_metadata = public_request.run_ref_metadata();
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         inner.jobs.insert(
             job.id,
@@ -350,7 +381,16 @@ impl JobStore {
         );
         drop(inner);
 
-        self.append_status_event(job.id, JobStatus::Queued, "remote runner job queued")?;
+        if let Some(metadata) = run_ref_metadata {
+            self.append_status_event_with_data(
+                job.id,
+                JobStatus::Queued,
+                "remote runner job queued",
+                metadata,
+            )?;
+        } else {
+            self.append_status_event(job.id, JobStatus::Queued, "remote runner job queued")?;
+        }
         self.get(job.id)
     }
 

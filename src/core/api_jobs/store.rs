@@ -102,22 +102,40 @@ impl JobStore {
         self.create_with_source_snapshot(operation, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn create_with_source_snapshot(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
     ) -> Job {
-        self.create_with_source_snapshot_and_path_materialization_plan(
+        self.create_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot,
+            None,
             None,
         )
     }
 
-    pub(crate) fn create_with_source_snapshot_and_path_materialization_plan(
+    #[cfg(test)]
+    pub(crate) fn create_with_source_snapshot_and_metadata(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+    ) -> Job {
+        self.create_with_source_snapshot_metadata_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            metadata,
+            None,
+        )
+    }
+
+    pub(crate) fn create_with_source_snapshot_metadata_and_path_materialization_plan(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
     ) -> Job {
         let now = timestamp_ms();
@@ -153,8 +171,12 @@ impl JobStore {
         );
         drop(inner);
 
-        self.append_status_event(job.id, JobStatus::Queued, "job queued")
-            .expect("newly-created job must accept queued status event");
+        if let Some(metadata) = metadata {
+            self.append_status_event_with_data(job.id, JobStatus::Queued, "job queued", metadata)
+        } else {
+            self.append_status_event(job.id, JobStatus::Queued, "job queued")
+        }
+        .expect("newly-created job must accept queued status event");
         self.get(job.id)
             .expect("newly-created job must be readable after insert")
     }
@@ -312,18 +334,20 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        self.run_background_with_source_snapshot_and_path_materialization_plan(
+        self.run_background_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot,
+            None,
             None,
             run,
         )
     }
 
-    pub(crate) fn run_background_with_source_snapshot_and_path_materialization_plan<T, F>(
+    pub(crate) fn run_background_with_source_snapshot_metadata_and_path_materialization_plan<T, F>(
         &self,
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
         path_materialization_plan: Option<PathMaterializationPlan>,
         run: F,
     ) -> JobRunner
@@ -331,9 +355,10 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let job = self.create_with_source_snapshot_and_path_materialization_plan(
+        let job = self.create_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot,
+            metadata,
             path_materialization_plan,
         );
         let job_id = job.id;
@@ -410,11 +435,32 @@ impl JobStore {
         status: JobStatus,
         message: impl Into<String>,
     ) -> Result<JobEvent> {
+        self.append_status_event_with_data(
+            job_id,
+            status,
+            message,
+            serde_json::json!({ "status": status }),
+        )
+    }
+
+    pub(super) fn append_status_event_with_data(
+        &self,
+        job_id: Uuid,
+        status: JobStatus,
+        message: impl Into<String>,
+        mut data: Value,
+    ) -> Result<JobEvent> {
+        if !data.is_object() {
+            data = serde_json::json!({ "metadata": data });
+        }
+        if let Some(object) = data.as_object_mut() {
+            object.insert("status".to_string(), serde_json::json!(status));
+        }
         self.append_event(
             job_id,
             JobEventKind::Status,
             Some(message.into()),
-            Some(serde_json::json!({ "status": status })),
+            Some(data),
         )
     }
 
