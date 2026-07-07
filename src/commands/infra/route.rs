@@ -1356,6 +1356,11 @@ mod tests {
     #[test]
     fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
         crate::test_support::with_isolated_home(|home| {
+            runners::create(
+                r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
+                false,
+            )
+            .expect("runner");
             write_command_only_rig(home.path(), "script-matrix");
             let output = home.path().join("plan.json");
             let normalized = vec![
@@ -1379,8 +1384,12 @@ mod tests {
             assert_eq!(plan["variant"], "up_plan");
             assert_eq!(plan["payload"]["runner_id"], "homeboy-lab");
             assert_eq!(
+                plan["payload"]["selected_homeboy_binary"],
+                "/runner/bin/homeboy-patched"
+            );
+            assert_eq!(
                 plan["payload"]["commands"][0],
-                "homeboy runner exec homeboy-lab --cwd tools --env MATRIX=portable -- sh -c ./scripts/run-matrix.sh"
+                "/runner/bin/homeboy-patched runner exec homeboy-lab --cwd tools --env MATRIX=portable -- sh -c ./scripts/run-matrix.sh"
             );
         });
     }
