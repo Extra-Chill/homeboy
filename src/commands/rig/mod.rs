@@ -21,7 +21,8 @@ use super::utils::args::SettingArgs;
 use super::CmdResult;
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_CAPABILITIES, RIG_CHECK_LAB_LABEL,
-    RIG_RUN_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON,
+    RIG_RUN_LAB_LABEL, RIG_SOURCE_MANAGEMENT_LAB_LABEL,
+    RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON, RIG_UP_LAB_UNSUPPORTED_REASON,
 };
 
 #[derive(Args)]
@@ -45,7 +46,10 @@ impl RigArgs {
     pub fn is_runner_source_management_command(&self) -> bool {
         matches!(
             self.command,
-            RigCommand::Install { .. } | RigCommand::Sync { .. } | RigCommand::Sources { .. }
+            RigCommand::Install { .. }
+                | RigCommand::Update { .. }
+                | RigCommand::Sync { .. }
+                | RigCommand::Sources { .. }
         )
     }
 
@@ -90,6 +94,12 @@ impl RigArgs {
             return CommandPortabilityContract::lab(LabCommandContract::local_only(
                 "rig up",
                 RIG_UP_LAB_UNSUPPORTED_REASON,
+            ));
+        }
+        if self.is_runner_source_management_command() {
+            return CommandPortabilityContract::lab(LabCommandContract::local_only(
+                RIG_SOURCE_MANAGEMENT_LAB_LABEL,
+                RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON,
             ));
         }
         CommandPortabilityContract::none()

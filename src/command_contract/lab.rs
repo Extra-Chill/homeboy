@@ -672,6 +672,7 @@ pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
 pub(crate) const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
 pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
+pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, `rig sync`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON: &str =
@@ -1469,6 +1470,30 @@ mod low_noise_polling_tests {
             .expect("no-finalize cook should remain portable");
 
         assert_eq!(contract.portability, LabCommandPortability::Portable);
+    }
+
+    #[test]
+    fn rig_source_management_explains_lab_only_setup_boundary() {
+        for args in [
+            ["homeboy", "rig", "install", "./rig-package"].as_slice(),
+            ["homeboy", "rig", "update", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "sync", "demo-rig"].as_slice(),
+            ["homeboy", "rig", "sources"].as_slice(),
+        ] {
+            let command = parsed_command(args);
+            let contract = command
+                .lab_contract()
+                .expect("rig setup/source command should explain Lab boundary");
+
+            assert_eq!(
+                contract.hot_label,
+                crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_LABEL
+            );
+            assert_eq!(
+                contract.portability,
+                LabCommandPortability::LocalOnly(RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON)
+            );
+        }
     }
 }
 pub(crate) use extension_ids::*;

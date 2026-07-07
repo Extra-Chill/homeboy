@@ -414,6 +414,42 @@ fn lab_only_refuses_local_execution_without_lab_contract() {
 }
 
 #[test]
+fn lab_only_refuses_local_only_rig_install_with_actionable_boundary() {
+    let reason = crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
+    let outcome = execute_lab_offload(LabOffloadRequest {
+        command: Some(local_only_lab_command(reason)),
+        normalized_args: &[
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "./rig-package".to_string(),
+        ],
+        explicit_runner: None,
+        force_hot: false,
+        local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+        allow_dirty_lab_workspace: false,
+        skip_deps_hydration: false,
+        capture_patch: false,
+        mutation_flag: None,
+        detach_after_handoff: false,
+        output_file_requested: false,
+        read_only_polling: false,
+        local_output_file: None,
+        job_overrides: LabJobOverrides::default(),
+    });
+
+    let Err(err) = outcome else {
+        panic!("rig install --lab-only should fail before local execution");
+    };
+    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+    assert!(err.message.contains("rig install"));
+    assert!(err.message.contains("not Lab-portable yet"));
+    assert!(err
+        .message
+        .contains("homeboy rig check <rig-id> --runner <runner-id>"));
+}
+
+#[test]
 fn build_runner_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: None,
