@@ -16,7 +16,7 @@ use super::{
     connect, disconnect, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
     RunnerCapabilityPreflight, RunnerExecOptions, RunnerExtensionMaterializationRequest,
-    RunnerExtensionMaterializationSource, RunnerFileTransfer,
+    RunnerExtensionMaterializationSource, RunnerFileTransfer, RunnerKind,
 };
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
@@ -358,13 +358,14 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             Some(path) => expand_path(path),
             None => build_local_homeboy_binary(source_path.as_deref())?,
         };
+        let runner = load(&options.runner_id)?;
+        validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
         let sha256 = sha256_file(&local_binary)?;
         let hash = sha256[..16].to_string();
         let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
         plan.local_binary = Some(local_binary.display().to_string());
         plan.remote_binary = Some(remote_binary.clone());
 
-        let runner = load(&options.runner_id)?;
         let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
         let remote_parent = Path::new(&remote_binary)
             .parent()
@@ -732,6 +733,52 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn validate_dev_sync_binary_for_runner(runner: &super::Runner, binary: &Path) -> Result<()> {
+    if runner.kind == RunnerKind::Ssh && is_macho_binary(binary)? {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_binary",
+            "runner dev-sync refuses to upload a Darwin/Mach-O Homeboy binary to an SSH runner",
+            Some(binary.display().to_string()),
+            Some(vec![
+                format!(
+                    "Build/select Homeboy on the runner with `homeboy runner refresh-homeboy {} --ref main --reconnect`.",
+                    shell_arg(&runner.id)
+                ),
+                format!(
+                    "For extension-only sync, run `homeboy runner dev-sync {} --extensions <id>=<path>` without --homeboy-binary or --homeboy-source.",
+                    shell_arg(&runner.id)
+                ),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+fn is_macho_binary(path: &Path) -> Result<bool> {
+    let mut file = fs::File::open(path).map_err(|err| {
+        Error::validation_invalid_argument(
+            "homeboy_binary",
+            format!("could not read binary: {err}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    let mut magic = [0_u8; 4];
+    let read = file
+        .read(&mut magic)
+        .map_err(|err| Error::internal_json(err.to_string(), None))?;
+    Ok(read == 4
+        && matches!(
+            magic,
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        ))
 }
 
 fn expand_path(path: &str) -> PathBuf {
@@ -1119,6 +1166,53 @@ mod tests {
 
         assert!(should_sync_homeboy_binary(&options));
         assert!(!dev_sync_next_actions("lab", &options).is_empty());
+    }
+
+    #[test]
+    fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
+        let dir = tempfile::tempdir().expect("binary dir");
+        let binary = dir.path().join("homeboy");
+        std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
+        let runner = super::super::Runner {
+            id: "homeboy-lab".to_string(),
+            kind: RunnerKind::Ssh,
+            server_id: Some("lab-server".to_string()),
+            workspace_root: Some("/home/chubes/Developer".to_string()),
+            settings: Default::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        };
+
+        let err = validate_dev_sync_binary_for_runner(&runner, &binary)
+            .expect_err("darwin binary rejected");
+
+        assert!(err.message.contains("Darwin/Mach-O"));
+        let tried = err.details["tried"].as_array().expect("tried remediation");
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(|hint| {
+            hint.contains("runner refresh-homeboy") && hint.contains("--ref main --reconnect")
+        })));
+    }
+
+    #[test]
+    fn local_dev_sync_allows_darwin_binary() {
+        let dir = tempfile::tempdir().expect("binary dir");
+        let binary = dir.path().join("homeboy");
+        std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
+        let runner = super::super::Runner {
+            id: "lab-local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: Some("/tmp/homeboy".to_string()),
+            settings: Default::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        };
+
+        validate_dev_sync_binary_for_runner(&runner, &binary).expect("local runner accepts binary");
     }
 
     #[test]
