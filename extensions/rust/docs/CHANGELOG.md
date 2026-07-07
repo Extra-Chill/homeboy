@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.6] - 2026-07-07
+
+### Changed
+- Declare source sync excludes in manifests
+
 ## [1.23.4] - 2026-07-04
 
 ### Changed
