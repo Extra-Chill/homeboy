@@ -68,6 +68,8 @@ const {
 const {
   wpCodeboxProviderPluginPathsFromEnv,
   wpCodeboxBin,
+  wpCodeboxRuntimePackagePackage,
+  wpCodeboxRuntimePackageSourceDescriptor,
 } = require('./wp-codebox-adapter-descriptor');
 const {
   assertProviderCredentialBoundaryNamesOnly,
@@ -965,98 +967,7 @@ function runtimePackageTaskInputForCodebox(input, options = {}) {
 }
 
 function normalizeRuntimePackageTaskPackage(packageDescriptor, options = {}) {
-  if (typeof packageDescriptor === 'string') {
-    return { package: runtimePackagePackageFromString(packageDescriptor, options) };
-  }
-  if (!packageDescriptor || typeof packageDescriptor !== 'object' || Array.isArray(packageDescriptor)) {
-    return { package: null };
-  }
-
-  const descriptor = runtimePackageDescriptorForCodebox(packageDescriptor, options);
-  const sourceKeys = ['source', 'path', 'bundle_path', 'bundlePath'];
-  const declaredSources = sourceKeys
-    .map((key) => descriptor[key])
-    .filter((value) => typeof value === 'string' && value !== '');
-  const uniqueSources = Array.from(new Set(declaredSources));
-  if (uniqueSources.length > 1) {
-    throw new Error(`WP Codebox runtime_package descriptor source fields cannot diverge: ${uniqueSources.join(', ')}`);
-  }
-
-  return { package: runtimePackagePackageFromDescriptor(descriptor, uniqueSources[0]) };
-}
-
-function runtimePackagePackageFromString(value, options = {}) {
-  const source = runtimePackageImportPath(value, options);
-  const slug = runtimePackageIdentifier(value);
-  return withoutUndefinedValues(relativeRuntimePackagePath(value) ? { slug, source } : { slug: source || slug });
-}
-
-function runtimePackagePackageFromDescriptor(descriptor, source = '') {
-  return withoutUndefinedValues({
-    ...descriptor,
-    slug: firstValue(descriptor.slug, descriptor.id, descriptor.name, runtimePackageIdentifier(source)),
-    ...(source ? { source } : {}),
-    path: undefined,
-    bundle_path: undefined,
-    bundlePath: undefined,
-    id: undefined,
-    name: undefined,
-  });
-}
-
-function runtimePackageIdentifier(value) {
-  if (typeof value === 'string') {
-    return path.basename(String(value).replace(/\/+$/, '')) || value;
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return '';
-  }
-  return firstValue(value.slug, value.id, value.name, value.source, '');
-}
-
-function runtimePackageImportPath(value, options = {}) {
-  if (typeof value === 'string') {
-    return runtimePackagePathForSandbox(value, options);
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return '';
-  }
-  const importPath = firstValue(value.source, value.path, value.bundle_path, value.bundlePath, '');
-  if (importPath) {
-    return runtimePackagePathForSandbox(importPath, options);
-  }
-  return firstValue(value.slug, value.id, value.name, '');
-}
-
-function runtimePackageDescriptorForCodebox(descriptor, options = {}) {
-  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
-    return descriptor;
-  }
-  const normalized = { ...descriptor };
-  for (const key of ['source', 'path', 'bundle_path', 'bundlePath']) {
-    if (typeof normalized[key] === 'string' && normalized[key]) {
-      normalized[key] = runtimePackagePathForSandbox(normalized[key], options);
-    }
-  }
-  return normalized;
-}
-
-function runtimePackagePathForSandbox(value, options = {}) {
-  const raw = String(value || '');
-  if (!raw || !relativeRuntimePackagePath(raw)) {
-    return raw;
-  }
-  const workspaceTarget = String(options.workspaceTarget || '').replace(/\/+$/, '');
-  return workspaceTarget ? `${workspaceTarget}/${raw.replace(/^\.\//, '')}` : raw;
-}
-
-function relativeRuntimePackagePath(value) {
-  const raw = String(value || '');
-  return raw.includes('/')
-    && !raw.startsWith('/')
-    && !raw.startsWith('~/')
-    && !/^[A-Za-z]:[\\/]/.test(raw)
-    && !/^[a-z][a-z0-9+.-]*:/i.test(raw);
+  return { package: wpCodeboxRuntimePackagePackage(packageDescriptor, options) };
 }
 
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
@@ -1113,11 +1024,13 @@ function matchingInlineAgentBundleSpec(packageDescriptor, specs) {
   if (inlineSpecs.length === 0) {
     return null;
   }
-  const packageSource = firstValue(packageDescriptor.source, packageDescriptor.path, packageDescriptor.bundle_path, packageDescriptor.bundlePath, '');
-  const packageSlug = firstValue(packageDescriptor.slug, packageDescriptor.id, packageDescriptor.name, '');
+  const packageSourceDescriptor = wpCodeboxRuntimePackageSourceDescriptor(packageDescriptor, { rejectDivergentSources: false });
+  const packageSource = packageSourceDescriptor.source;
+  const packageSlug = packageSourceDescriptor.slug;
   return inlineSpecs.find((spec) => {
-    const specSource = firstValue(spec.source, spec.path, spec.bundle_path, spec.bundlePath, '');
-    const specSlug = firstValue(spec.slug, spec.id, spec.name, spec.bundle?.bundle_slug, '');
+    const specSourceDescriptor = wpCodeboxRuntimePackageSourceDescriptor({ ...spec, slug: firstValue(spec.slug, spec.id, spec.name, spec.bundle?.bundle_slug, '') }, { rejectDivergentSources: false });
+    const specSource = specSourceDescriptor.source;
+    const specSlug = specSourceDescriptor.slug;
     return (packageSource && specSource && packageSource === specSource) || (packageSlug && specSlug && packageSlug === specSlug);
   }) || inlineSpecs[0];
 }

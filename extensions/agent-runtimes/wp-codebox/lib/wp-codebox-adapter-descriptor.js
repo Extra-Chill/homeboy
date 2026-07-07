@@ -13,6 +13,7 @@ const {
 } = require('./wp-codebox-adapter-contract');
 
 const WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA = 'wp-codebox/cli-descriptor/v1';
+const WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS = ['source', 'path', 'bundle_path', 'bundlePath'];
 
 const DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR = {
   schema: WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
@@ -252,6 +253,108 @@ function wpCodeboxProviderPluginPathsFromEnv(env = process.env) {
 	);
 }
 
+function wpCodeboxRuntimePackageSourceDescriptor(value, options = {}) {
+	if (typeof value === 'string') {
+		const source = wpCodeboxRuntimePackageImportPath(value, options);
+		const slug = wpCodeboxRuntimePackageIdentifier(value);
+		return {
+			descriptor: withoutUndefinedValues(relativeRuntimePackagePath(value) ? { slug, source } : { slug: source || slug }),
+			source,
+			slug,
+		};
+	}
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return { descriptor: null, source: '', slug: '' };
+	}
+
+	const descriptor = wpCodeboxRuntimePackageDescriptorForCodebox(value, options);
+	const declaredSources = WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS
+		.map((key) => descriptor[key])
+		.filter((source) => typeof source === 'string' && source !== '');
+	const uniqueSources = Array.from(new Set(declaredSources));
+	if (uniqueSources.length > 1 && options.rejectDivergentSources !== false) {
+		throw new Error(`WP Codebox runtime_package descriptor source fields cannot diverge: ${uniqueSources.join(', ')}`);
+	}
+	const source = uniqueSources[0] || '';
+	const slug = firstValue(descriptor.slug, descriptor.id, descriptor.name, wpCodeboxRuntimePackageIdentifier(source));
+	return { descriptor, source, slug };
+}
+
+function wpCodeboxRuntimePackagePackage(value, options = {}) {
+	const sourceDescriptor = wpCodeboxRuntimePackageSourceDescriptor(value, options);
+	if (!sourceDescriptor.descriptor) {
+		return null;
+	}
+	if (typeof value === 'string') {
+		return sourceDescriptor.descriptor;
+	}
+	return withoutUndefinedValues({
+		...sourceDescriptor.descriptor,
+		slug: sourceDescriptor.slug,
+		...(sourceDescriptor.source ? { source: sourceDescriptor.source } : {}),
+		path: undefined,
+		bundle_path: undefined,
+		bundlePath: undefined,
+		id: undefined,
+		name: undefined,
+	});
+}
+
+function wpCodeboxRuntimePackageDescriptorForCodebox(descriptor, options = {}) {
+	if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+		return descriptor;
+	}
+	const normalized = { ...descriptor };
+	for (const key of WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS) {
+		if (typeof normalized[key] === 'string' && normalized[key]) {
+			normalized[key] = wpCodeboxRuntimePackagePathForSandbox(normalized[key], options);
+		}
+	}
+	return normalized;
+}
+
+function wpCodeboxRuntimePackageImportPath(value, options = {}) {
+	if (typeof value === 'string') {
+		return wpCodeboxRuntimePackagePathForSandbox(value, options);
+	}
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return '';
+	}
+	const importPath = firstValue(...WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS.map((key) => value[key]), '');
+	if (importPath) {
+		return wpCodeboxRuntimePackagePathForSandbox(importPath, options);
+	}
+	return firstValue(value.slug, value.id, value.name, '');
+}
+
+function wpCodeboxRuntimePackageIdentifier(value) {
+	if (typeof value === 'string') {
+		return path.basename(String(value).replace(/\/+$/, '')) || value;
+	}
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return '';
+	}
+	return firstValue(value.slug, value.id, value.name, value.source, '');
+}
+
+function wpCodeboxRuntimePackagePathForSandbox(value, options = {}) {
+	const raw = String(value || '');
+	if (!raw || !relativeRuntimePackagePath(raw)) {
+		return raw;
+	}
+	const workspaceTarget = String(options.workspaceTarget || '').replace(/\/+$/, '');
+	return workspaceTarget ? `${workspaceTarget}/${raw.replace(/^\.\//, '')}` : raw;
+}
+
+function relativeRuntimePackagePath(value) {
+	const raw = String(value || '');
+	return raw.includes('/')
+		&& !raw.startsWith('/')
+		&& !raw.startsWith('~/')
+		&& !/^[A-Za-z]:[\\/]/.test(raw)
+		&& !/^[a-z][a-z0-9+.-]*:/i.test(raw);
+}
+
 function homeboySettings(env = process.env) {
   if (!env.HOMEBOY_SETTINGS_JSON) {
     return {};
@@ -297,6 +400,10 @@ function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
 
+function withoutUndefinedValues(value) {
+	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 function firstObject(...values) {
 	return values.find((value) => value && typeof value === 'object' && !Array.isArray(value));
 }
@@ -304,7 +411,9 @@ function firstObject(...values) {
 module.exports = {
   DEFAULT_WP_CODEBOX_CLI_DESCRIPTOR,
   WP_CODEBOX_CLI_DESCRIPTOR_SCHEMA,
+	WP_CODEBOX_RUNTIME_PACKAGE_SOURCE_FIELDS,
 	parseRuntimeDescriptorJson,
+	relativeRuntimePackagePath,
 	runtimeDescriptorCommandNames,
 	runtimeDescriptorSupportsCommand,
 	homeboySettings,
@@ -316,6 +425,12 @@ module.exports = {
 	wpCodeboxCommand,
 	wpCodeboxProviderPluginPathsFromEnv,
 	wpCodeboxResolveCommand,
+	wpCodeboxRuntimePackageDescriptorForCodebox,
+	wpCodeboxRuntimePackageIdentifier,
+	wpCodeboxRuntimePackageImportPath,
+	wpCodeboxRuntimePackagePackage,
+	wpCodeboxRuntimePackagePathForSandbox,
+	wpCodeboxRuntimePackageSourceDescriptor,
 	wpCodeboxRuntimeDescriptor,
 	wpCodeboxSupportsRunAgentTaskCommand,
 };
