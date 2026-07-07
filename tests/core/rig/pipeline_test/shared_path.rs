@@ -112,7 +112,9 @@ fn test_shared_path_cleanup_removes_only_state_owned_symlink() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let target = tmp.path().join("primary-node_modules");
         let owned_link = tmp.path().join("owned-node_modules");
+        let unowned_link = tmp.path().join("unowned-node_modules");
         fs::create_dir(&target).expect("target dir");
+        std::os::unix::fs::symlink(&target, &unowned_link).expect("preexisting symlink");
 
         let rig = rig_with_shared_path(
             "shared-cleanup",
@@ -124,28 +126,9 @@ fn test_shared_path_cleanup_removes_only_state_owned_symlink() {
 
         cleanup_shared_paths(&rig).expect("cleanup");
         assert!(!owned_link.exists(), "owned symlink removed");
+        assert!(unowned_link.is_symlink(), "unowned symlink is left alone");
         let state = RigState::load(&rig.id).expect("state");
         assert!(state.shared_paths.is_empty(), "ownership marker cleared");
-    });
-}
-
-#[test]
-fn test_shared_path_cleanup_does_not_remove_unowned_matching_symlink() {
-    with_isolated_home(|_home| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        fs::create_dir(&target).expect("target dir");
-        std::os::unix::fs::symlink(&target, &link).expect("preexisting symlink");
-
-        let rig = rig_with_shared_path(
-            "shared-unowned",
-            shared(&link, &target),
-            SharedPathOp::Ensure,
-        );
-        run_pipeline(&rig, "up", true).expect("ensure sees existing symlink");
-        cleanup_shared_paths(&rig).expect("cleanup");
-        assert!(link.is_symlink(), "unowned symlink is left alone");
     });
 }
 
