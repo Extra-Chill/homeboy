@@ -84,11 +84,25 @@ pub fn check_from_probe(
     }
 
     if success {
-        return checks::ok_with_details(
+        add_extension_show_details(stdout, &mut details);
+        let copied_install = details.get("linked").map(String::as_str) == Some("false");
+        let mut check = checks::ok_with_details(
             "extension.parity",
-            format!("Extension '{extension_id}' resolves on the {target} runner"),
+            if copied_install {
+                format!(
+                    "Extension '{extension_id}' resolves on the {target} runner as a copied install"
+                )
+            } else {
+                format!("Extension '{extension_id}' resolves on the {target} runner")
+            },
             details,
         );
+        if copied_install {
+            check.remediation = Some(format!(
+                "No runner repair is needed when the copied install is current. Verify copied/current state with `{homeboy_command} extension diff-installed {extension_id}` on the runner; if stale, refresh it from source with `{homeboy_command} extension refresh <source> --id {extension_id}`."
+            ));
+        }
+        return check;
     }
 
     let diagnostics = diagnostic_tail(stderr, stdout);
@@ -138,4 +152,26 @@ fn json_error_message(output: &str) -> Option<String> {
         .map(str::trim)
         .filter(|message| !message.is_empty())
         .map(str::to_string)
+}
+
+fn add_extension_show_details(stdout: &str, details: &mut BTreeMap<String, String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return;
+    };
+    let extension = value
+        .pointer("/data/extension")
+        .or_else(|| value.get("extension"))
+        .unwrap_or(&value);
+    if let Some(linked) = extension.get("linked").and_then(|value| value.as_bool()) {
+        details.insert("linked".to_string(), linked.to_string());
+    }
+    if let Some(path) = extension.get("path").and_then(|value| value.as_str()) {
+        details.insert("path".to_string(), path.to_string());
+    }
+    if let Some(source_revision) = extension
+        .get("source_revision")
+        .and_then(|value| value.as_str())
+    {
+        details.insert("source_revision".to_string(), source_revision.to_string());
+    }
 }

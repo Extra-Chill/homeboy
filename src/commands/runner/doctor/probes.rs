@@ -248,14 +248,11 @@ pub(super) fn homeboy_path_shadow_check(
         || !version_is_older(bare_version, configured_version)
     {
         if configured_command != "homeboy" && configured_path != bare_path {
-            return Some(checks::warning_with_details(
+            return Some(checks::ok_with_details(
                 "lab.homeboy.path_shadow",
                 format!(
-                    "Configured runner Homeboy at {configured_path} differs from bare PATH `homeboy` at {bare_path}"
+                    "Runner uses configured Homeboy at {configured_path}; bare PATH `homeboy` resolves to {bare_path}"
                 ),
-                Some(format!(
-                    "Fix PATH ordering on server `{server_id}` or update runner `{runner_id}` so configured homeboy_path and bare `homeboy` resolve to the same binary"
-                )),
                 details,
             ));
         }
@@ -263,16 +260,19 @@ pub(super) fn homeboy_path_shadow_check(
         return None;
     }
 
-    Some(checks::warning_with_details(
+    Some(checks::ok(
         "lab.homeboy.path_shadow",
         format!(
-            "Configured runner Homeboy {configured_version} at {configured_path} is newer than bare PATH `homeboy` {bare_version} at {bare_path}"
+            "Runner uses configured Homeboy {configured_version} at {configured_path}; bare PATH `homeboy` is older ({bare_version} at {bare_path})"
         ),
         Some(format!(
-            "Fix PATH ordering on server `{server_id}` or update/remove the stale bare `homeboy`; keep runner `{runner_id}` configured with `{configured_command}` until bare `homeboy` resolves current"
+            "No runner repair is needed while jobs use configured homeboy_path `{configured_command}`. To clean up interactive PATH skew, run `homeboy ssh {server_id} -- 'command -v homeboy && homeboy --version'` and update/remove the stale bare `homeboy`."
         )),
-        details,
     ))
+    .map(|mut check| {
+        check.details = details;
+        check
+    })
 }
 
 fn version_is_older(candidate: &str, baseline: &str) -> bool {

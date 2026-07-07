@@ -404,7 +404,26 @@ fn lab_homeboy_provenance_from_parts(
                         .or(active_daemon.version.as_deref())
                         .unwrap_or("unknown")
                 ),
-                action: "rebuild the controller binary or refresh/reconnect the runner so both phases report the intended Homeboy identity".to_string(),
+                action: format!(
+                    "run `{}`; if active jobs are still running, wait for them or inspect with `{}` before reconnecting",
+                    shell_join(&[
+                        "homeboy",
+                        "runner",
+                        "refresh-homeboy",
+                        runner_id,
+                        "--ref",
+                        &format!("v{}", controller_identity.version),
+                        "--reconnect"
+                    ]),
+                    shell_join(&[
+                        "homeboy",
+                        "runner",
+                        "doctor",
+                        runner_id,
+                        "--scope",
+                        "lab-offload"
+                    ])
+                ),
             });
         } else if active_daemon
             .build_identity
@@ -422,7 +441,18 @@ fn lab_homeboy_provenance_from_parts(
                         .as_deref()
                         .unwrap_or("unknown")
                 ),
-                action: "rebuild the controller binary or refresh/reconnect the runner before relying on commit-specific Lab behavior".to_string(),
+                action: format!(
+                    "run `{}`; same-version build drift can be intentional for origin/main-style runner builds, but Lab proof should use matching controller and runner identities",
+                    shell_join(&[
+                        "homeboy",
+                        "runner",
+                        "refresh-homeboy",
+                        runner_id,
+                        "--ref",
+                        &format!("v{}", controller_identity.version),
+                        "--reconnect"
+                    ])
+                ),
             });
         }
     } else if let Some(error) = status_error {
@@ -1127,7 +1157,50 @@ mod tests {
             .contains("executes the runner job"));
         assert!(provenance.diagnostics[1]
             .action
-            .contains("refresh/reconnect the runner"));
+            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
+        assert!(provenance.diagnostics[1]
+            .action
+            .contains("homeboy runner doctor lab-runner --scope lab-offload"));
+    }
+
+    #[test]
+    fn homeboy_provenance_same_version_build_drift_mentions_origin_main_style_builds() {
+        let controller_identity = BuildIdentity {
+            version: "0.265.0".to_string(),
+            git_commit: Some("controller123".to_string()),
+            git_dirty: Some(false),
+            display: "homeboy 0.265.0+controller123".to_string(),
+        };
+
+        let provenance = lab_homeboy_provenance_from_parts(
+            "lab-runner",
+            controller_identity,
+            Some("/controller/homeboy".to_string()),
+            Some("/runner/homeboy".to_string()),
+            Some(LabHomeboyBinaryIdentity {
+                role: "active_daemon",
+                owner: "runner",
+                path: None,
+                version: Some("0.265.0".to_string()),
+                build_identity: Some("homeboy 0.265.0+origin-main".to_string()),
+                dirty: None,
+                purpose: "test daemon",
+            }),
+            None,
+            None,
+        );
+
+        assert_eq!(provenance.diagnostics.len(), 1);
+        assert_eq!(
+            provenance.diagnostics[0].code,
+            "controller_daemon_build_drift"
+        );
+        assert!(provenance.diagnostics[0]
+            .action
+            .contains("origin/main-style runner builds"));
+        assert!(provenance.diagnostics[0]
+            .action
+            .contains("homeboy runner refresh-homeboy lab-runner --ref v0.265.0 --reconnect"));
     }
 
     #[test]

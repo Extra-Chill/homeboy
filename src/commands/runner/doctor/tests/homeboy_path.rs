@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use types::{HomeboyProbe, RunnerDoctorStatus};
 
 #[test]
-fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
+fn lab_homeboy_path_shadow_is_ok_when_configured_homeboy_is_current() {
     let mut details = BTreeMap::new();
     details.insert(
         "configured_command".to_string(),
@@ -38,7 +38,7 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
     .expect("stale bare homeboy warning");
 
     assert_eq!(check.id, "lab.homeboy.path_shadow");
-    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert_eq!(check.status, RunnerDoctorStatus::Ok);
     assert!(check.message.contains("0.229.9"));
     assert!(check.message.contains("0.228.22"));
     assert_eq!(
@@ -52,11 +52,11 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
     assert!(check
         .remediation
         .as_deref()
-        .is_some_and(|value| value.contains("Fix PATH ordering")));
+        .is_some_and(|value| value.contains("No runner repair is needed")));
 }
 
 #[test]
-fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
+fn lab_homeboy_path_shadow_is_ok_when_configured_and_bare_paths_differ_but_version_matches() {
     let mut details = BTreeMap::new();
     details.insert(
         "configured_command".to_string(),
@@ -91,7 +91,7 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
     .expect("different bare homeboy path warning");
 
     assert_eq!(check.id, "lab.homeboy.path_shadow");
-    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert_eq!(check.status, RunnerDoctorStatus::Ok);
     assert!(check.message.contains("/home/user/.cargo/bin/homeboy"));
     assert!(check.message.contains("/home/user/.local/bin/homeboy"));
     assert_eq!(
@@ -102,10 +102,7 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
         check.details.get("bare_path").map(String::as_str),
         Some("/home/user/.local/bin/homeboy")
     );
-    assert!(check
-        .remediation
-        .as_deref()
-        .is_some_and(|value| value.contains("configured homeboy_path and bare `homeboy`")));
+    assert!(check.remediation.is_none());
 }
 
 #[test]

@@ -1474,11 +1474,14 @@ mod tests {
         );
         assert_eq!(
             warning.refresh_command,
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+            format!(
+                "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect && homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                env!("CARGO_PKG_VERSION")
+            )
         );
         assert!(warning.message.contains("daemon control plane"));
         assert!(warning.message.contains("job command binary"));
-        assert!(warning.message.contains("run refresh_command"));
+        assert!(warning.message.contains("active jobs are drained"));
         assert_eq!(
             warning.recovery_commands,
             vec![
