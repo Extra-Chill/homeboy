@@ -350,6 +350,40 @@ fn rewrite_lab_offload_args_preserves_extension_dev_run_runner() {
 }
 
 #[test]
+fn lab_offload_source_path_uses_extension_refresh_local_source() {
+    let dir = tempfile::tempdir().expect("extension source");
+    let args = vec![
+        "homeboy".to_string(),
+        "extension".to_string(),
+        "refresh".to_string(),
+        dir.path().display().to_string(),
+        "--id".to_string(),
+        "nodejs".to_string(),
+    ];
+
+    let source = lab_offload_source_path(&args).expect("source path");
+
+    assert_eq!(source, dir.path());
+}
+
+#[test]
+fn lab_offload_source_path_ignores_extension_refresh_git_source() {
+    let cwd = std::env::current_dir().expect("cwd");
+    let args = vec![
+        "homeboy".to_string(),
+        "extension".to_string(),
+        "refresh".to_string(),
+        "https://example.test/extensions.git".to_string(),
+        "--id".to_string(),
+        "nodejs".to_string(),
+    ];
+
+    let source = lab_offload_source_path(&args).expect("source path");
+
+    assert_eq!(source, cwd);
+}
+
+#[test]
 fn detects_lab_offload_source_path_from_path_flag() {
     let input = args(&["homeboy", "test", "--path", "/Users/user/Developer/project"]);
 
