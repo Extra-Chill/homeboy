@@ -570,9 +570,14 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_commands = [
-            format!("homeboy runner disconnect {}", runner_id),
-            format!("homeboy runner connect {}", runner_id),
+        let recovery_commands = vec![
+            format!(
+                "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
+                shell::quote_arg(runner_id),
+                env!("CARGO_PKG_VERSION")
+            ),
+            format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
+            format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
         ];
         Self {
             severity: "warning",
@@ -585,18 +590,10 @@ impl RunnerStaleDaemonWarning {
             session_homeboy_build_identity,
             current_homeboy_build_identity,
             refresh_command: recovery_commands.join(" && "),
-            message: "connected runner daemon control plane was started by a different Homeboy build than the configured job command binary; run refresh_command to restart the active daemon".to_string(),
+            message: "connected runner daemon control plane was started by a different Homeboy build than the configured job command binary; run recovery_commands in order when runner active jobs are drained".to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
-            recovery_commands: vec![
-                format!(
-                    "homeboy runner refresh-homeboy {} --ref v{} --reconnect",
-                    shell::quote_arg(runner_id),
-                    env!("CARGO_PKG_VERSION")
-                ),
-                format!("homeboy runner disconnect {}", shell::quote_arg(runner_id)),
-                format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
-            ],
+            recovery_commands,
         }
     }
 
