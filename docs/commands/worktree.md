@@ -10,6 +10,8 @@ Manage component-backed task worktrees for generic Homeboy workflows.
 - `homeboy worktree remove <id> [--force]`
 - `homeboy worktree cleanup [--force] [--cleanup-artifacts]`
 
+For multi-PR orchestration, start with `homeboy --output homeboy-results/worktrees.json worktree list`, then pair each branch with `homeboy triage landing 'owner/repo#number' --drilldown` and any recorded `homeboy runs evidence <run-id>` output. See [Hold a PR fleet](../workflows/hold-a-pr-fleet.md) for the full local-plus-remote handoff loop.
+
 ## Safety
 
 Removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. `--force` only bypasses dirty/unpushed checks; primary checkout and containment gates always apply.
