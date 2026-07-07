@@ -1258,6 +1258,71 @@ fn routes_exec_body_to_daemon_job() {
 }
 
 #[test]
+fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
+    let _home = create_lab_local_runner();
+    let store = JobStore::default();
+    let cwd = std::env::current_dir()
+        .expect("cwd")
+        .to_string_lossy()
+        .to_string();
+    let path_materialization_plan = serde_json::json!({
+        "schema": "homeboy/path-materialization-plan/v1",
+        "entries": [
+            {
+                "role": "workspace",
+                "owner": "lab-local",
+                "local_path": cwd,
+                "remote_path": "/tmp/homeboy-lab/workspace",
+                "materialization_mode": "mirror",
+                "validation_status": "validated"
+            }
+        ]
+    });
+    let response = route_with_job_store_and_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "printf ok"],
+            "path_materialization_plan": path_materialization_plan
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    assert_eq!(
+        response.body["body"]["job"]["path_materialization_plan"],
+        path_materialization_plan
+    );
+    assert_eq!(
+        response.body["body"]["request"]["path_materialization_plan"],
+        path_materialization_plan
+    );
+    assert_eq!(
+        store.list()[0].path_materialization_plan,
+        Some(serde_json::from_value(path_materialization_plan.clone()).expect("plan"))
+    );
+
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let job = wait_for_job(&store, &job_id);
+    assert_eq!(job.status, JobStatus::Succeeded);
+    let events = store.events(job.id).expect("events");
+    let result = events
+        .iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.as_ref())
+        .expect("result event");
+    assert_eq!(
+        result["path_materialization_plan"],
+        path_materialization_plan
+    );
+}
+
+#[test]
 fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation() {
     let _home = HomeGuard::new();
     let store = JobStore::default();

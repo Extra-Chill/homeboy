@@ -23,10 +23,7 @@ use super::utils::args::{
 use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
-    LabCommandContract, LINT_LAB_LABEL,
-};
+use crate::command_contract::{LabCommandContract, LINT_LAB_LABEL};
 
 #[derive(Args)]
 pub struct LintArgs {
@@ -96,13 +93,6 @@ pub struct LintArgs {
 }
 
 impl LintArgs {
-    pub(crate) fn output_descriptor(
-        &self,
-        output_file_mode: CommandOutputFileMode,
-    ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
-    }
-
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.is_full_workspace_run()
             || self.changed_since.is_some()
@@ -122,10 +112,6 @@ impl LintArgs {
         }
 
         None
-    }
-
-    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
-        CommandPortabilityContract::lab_optional(self.lab_contract())
     }
 
     pub fn is_full_workspace_run(&self) -> bool {

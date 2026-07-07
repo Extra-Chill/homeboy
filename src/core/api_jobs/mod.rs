@@ -1457,6 +1457,29 @@ mod tests {
         assert_eq!(envelope.result_refs.run_id.as_deref(), Some("run-123"));
     }
 
+    #[test]
+    fn remote_runner_job_enqueue_persists_run_ref_metadata() {
+        let store = JobStore::default();
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some("agent-task-run-123".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        });
+
+        let job = store.submit_remote_runner_job(request).expect("job queued");
+        let events = store.events(job.id).expect("job events");
+
+        assert!(events.iter().any(|event| {
+            event.data.as_ref().is_some_and(|data| {
+                data["durable_run_id"] == "agent-task-run-123"
+                    && data["agent_task_run_id"] == "agent-task-run-123"
+            })
+        }));
+    }
+
     fn remote_runner_request(runner_id: &str, project_id: Option<&str>) -> RemoteRunnerJobRequest {
         RemoteRunnerJobRequest {
             runner_id: runner_id.to_string(),

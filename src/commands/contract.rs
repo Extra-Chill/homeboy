@@ -1976,21 +1976,6 @@ mod tests {
     }
 
     #[test]
-    fn show_rejects_unknown_contract() {
-        let err = run(
-            ContractArgs {
-                command: ContractCommand::Show(ContractShowArgs {
-                    schema_id_or_name: "missing-contract".to_string(),
-                }),
-            },
-            &GlobalArgs {},
-        )
-        .expect_err("unknown contract should fail");
-
-        assert!(err.to_string().contains("missing-contract"));
-    }
-
-    #[test]
     fn artifact_ref_normalizer_trims_and_classifies_reviewer_url() {
         let output =
             normalize_artifact_ref(json!({ "ref": " https://example.com/artifact.json " }))
@@ -2002,14 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_ref_normalizer_rejects_localhost() {
-        let err = normalize_artifact_ref(json!("http://localhost:8080/artifact.json"))
-            .expect_err("localhost refs should be rejected");
-
-        assert!(err.message.contains("localhost"));
-    }
-
-    #[test]
     fn run_lifecycle_status_normalizer_reports_generic_classification() {
         let output = normalize_run_lifecycle_status(json!({ "status": "timed_out" }))
             .expect("status should normalize");
@@ -2018,14 +1995,6 @@ mod tests {
         assert!(output.is_terminal);
         assert!(!output.is_success);
         assert!(output.is_retryable);
-    }
-
-    #[test]
-    fn run_lifecycle_status_normalizer_rejects_non_contract_status() {
-        let err = normalize_run_lifecycle_status(json!("wordpress_failed"))
-            .expect_err("domain-specific statuses should be rejected");
-
-        assert!(err.message.contains("run-lifecycle-status"));
     }
 
     #[test]

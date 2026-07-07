@@ -22,6 +22,7 @@ use crate::core::runner::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
     BrokerScope, Runner, RunnerProcessRequest,
 };
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::upgrade::VERSION;
@@ -209,11 +210,15 @@ struct ExecRequest {
     #[serde(default)]
     source_snapshot: Option<SourceSnapshot>,
     #[serde(default)]
+    path_materialization_plan: Option<PathMaterializationPlan>,
+    #[serde(default)]
     require_paths: Vec<String>,
     #[serde(default)]
     runner_workload: Option<RunnerWorkload>,
     #[serde(default)]
     lifecycle: Option<RunnerJobLifecycleMetadata>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1061,6 +1066,7 @@ fn enqueue_exec_job(
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
+    let path_materialization_plan = request.path_materialization_plan.clone();
 
     let summary = json!({
         "runner_id": plan.runner.id,
@@ -1068,12 +1074,20 @@ fn enqueue_exec_job(
         "command": plan.command,
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
+        "path_materialization_plan": path_materialization_plan,
         "lifecycle": request.lifecycle.clone(),
     });
     let operation = "runner.exec".to_string();
-    let runner = job_store.run_background_with_source_snapshot(
+    let run_ref_metadata = exec_request_run_ref_metadata(
+        request.lifecycle.as_ref(),
+        request.runner_workload.as_ref(),
+        request.metadata.as_ref(),
+    );
+    let runner = job_store.run_background_with_source_snapshot_metadata_and_path_materialization_plan(
         operation,
         source_snapshot.clone(),
+        run_ref_metadata,
+        path_materialization_plan.clone(),
         move |job| {
             job.progress(json!({
                 "phase": "started",
@@ -1083,6 +1097,7 @@ fn enqueue_exec_job(
                 "capture_patch": request.capture_patch,
                 "job_id": job.job_id(),
                 "source_snapshot": source_snapshot,
+                "path_materialization_plan": path_materialization_plan,
             }))?;
             let baseline = if request.capture_patch {
                 Some(capture_baseline(&plan.cwd)?)
@@ -1117,6 +1132,7 @@ fn enqueue_exec_job(
                     "stdout": stdout,
                     "stderr": stderr,
                     "source_snapshot": source_snapshot,
+                    "path_materialization_plan": path_materialization_plan,
                     "metrics": metrics,
                     "capture": capture,
                     "status": JobStatus::Cancelled,
@@ -1154,6 +1170,7 @@ fn enqueue_exec_job(
                 "stdout": stdout,
                 "stderr": stderr,
                 "source_snapshot": source_snapshot,
+                "path_materialization_plan": path_materialization_plan,
                 "patch": patch,
                 "metrics": metrics,
                 "capture": capture,
@@ -1189,8 +1206,76 @@ fn enqueue_exec_job(
     }))
 }
 
+fn exec_request_run_ref_metadata(
+    lifecycle: Option<&RunnerJobLifecycleMetadata>,
+    runner_workload: Option<&RunnerWorkload>,
+    metadata: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let durable_run_id = lifecycle
+        .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
+        .or_else(|| metadata.and_then(metadata_run_id));
+    let agent_task_run_id = runner_workload
+        .and_then(|workload| workload.agent_task.as_ref())
+        .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
+        .or_else(|| {
+            metadata
+                .and_then(|metadata| metadata.get("agent_task_run_id"))
+                .and_then(|run_id| non_empty_string(run_id.as_str()))
+        })
+        .or_else(|| durable_run_id.clone());
+
+    if durable_run_id.is_none() && agent_task_run_id.is_none() {
+        return None;
+    }
+
+    Some(json!({
+        "durable_run_id": durable_run_id,
+        "agent_task_run_id": agent_task_run_id,
+    }))
+}
+
+fn metadata_run_id(metadata: &serde_json::Value) -> Option<String> {
+    ["durable_run_id", "run_id", "record_run_id"]
+        .iter()
+        .find_map(|key| metadata.get(*key))
+        .and_then(|run_id| non_empty_string(run_id.as_str()))
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn daemon_job_store() -> &'static JobStore {
     DAEMON_JOB_STORE.get_or_init(JobStore::default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_request_run_ref_metadata_prefers_lifecycle_run_id() {
+        let lifecycle = RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some("agent-task-run-123".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        };
+
+        let metadata = exec_request_run_ref_metadata(
+            Some(&lifecycle),
+            None,
+            Some(&json!({ "run_id": "metadata-run" })),
+        )
+        .expect("run ref metadata");
+
+        assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
+        assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+    }
 }
 
 fn daemon_runtime_snapshot() -> &'static DaemonRuntimeSnapshot {

@@ -9,6 +9,7 @@ use clap::{Args, Subcommand};
 
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::rig;
+use homeboy::core::runners;
 
 use self::output::{
     RigAppOutput, RigCheckOutput, RigDownOutput, RigInstallOutput, RigInstalledStackSummary,
@@ -555,16 +556,24 @@ fn up(rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
 
 pub(crate) fn up_runner_exec_plan(rig_id: &str, runner_id: &str) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(rig_id)?;
-    let steps = command_only_up_steps(&rig, runner_id)?;
+    let homeboy_binary = runners::runner_homeboy_path_for_command(
+        runner_id,
+        "rig up --dry-run --runner command plan",
+    )?;
+    let steps = command_only_up_steps(&rig, runner_id, &homeboy_binary)?;
     let commands = steps
         .iter()
         .map(|step| step.runner_exec_command.clone())
         .collect();
+    eprintln!(
+        "Rig up plan: runner `{runner_id}` will execute nested Homeboy commands with `{homeboy_binary}`."
+    );
     Ok((
         RigCommandOutput::UpPlan(RigUpPlanOutput {
             command: "rig.up.plan",
             rig_id: rig.id,
             runner_id: runner_id.to_string(),
+            selected_homeboy_binary: homeboy_binary,
             portable: true,
             steps,
             commands,
@@ -576,6 +585,7 @@ pub(crate) fn up_runner_exec_plan(rig_id: &str, runner_id: &str) -> CmdResult<Ri
 fn command_only_up_steps(
     rig: &rig::RigSpec,
     runner_id: &str,
+    homeboy_binary: &str,
 ) -> homeboy::core::Result<Vec<RigUpPlanStep>> {
     if !rig.services.is_empty()
         || !rig.resources.is_empty()
@@ -605,7 +615,7 @@ fn command_only_up_steps(
                     .collect::<Vec<_>>();
                 env_pairs.sort();
                 let mut argv = vec![
-                    "homeboy".to_string(),
+                    homeboy_binary.to_string(),
                     "runner".to_string(),
                     "exec".to_string(),
                     runner_id.to_string(),
@@ -1297,6 +1307,11 @@ mod tests {
     #[test]
     fn up_dry_run_runner_plan_emits_command_only_runner_exec_steps() {
         crate::test_support::with_isolated_home(|home| {
+            runners::create(
+                r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
+                false,
+            )
+            .expect("runner");
             write_rig(
                 home.path(),
                 "script-matrix",
@@ -1329,14 +1344,18 @@ mod tests {
             let json = serde_json::to_value(output).expect("serialize plan");
             assert_eq!(json["variant"], "up_plan");
             assert_eq!(json["payload"]["portable"], true);
+            assert_eq!(
+                json["payload"]["selected_homeboy_binary"],
+                "/runner/bin/homeboy-patched"
+            );
             assert_eq!(json["payload"]["steps"].as_array().unwrap().len(), 2);
             assert_eq!(
                 json["payload"]["steps"][0]["runner_exec_command"],
-                "homeboy runner exec homeboy-lab --cwd packages/tooling --env MATRIX_AXIS=a -- sh -c './scripts/run-one.sh --axis a'"
+                "/runner/bin/homeboy-patched runner exec homeboy-lab --cwd packages/tooling --env MATRIX_AXIS=a -- sh -c './scripts/run-one.sh --axis a'"
             );
             assert_eq!(
                 json["payload"]["commands"][1],
-                "homeboy runner exec homeboy-lab -- sh -c './scripts/run-one.sh --axis b'"
+                "/runner/bin/homeboy-patched runner exec homeboy-lab -- sh -c './scripts/run-one.sh --axis b'"
             );
         });
     }
@@ -1344,6 +1363,11 @@ mod tests {
     #[test]
     fn up_dry_run_runner_plan_refuses_resource_rigs() {
         crate::test_support::with_isolated_home(|home| {
+            runners::create(
+                r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
+                false,
+            )
+            .expect("runner");
             write_rig(
                 home.path(),
                 "resource-rig",

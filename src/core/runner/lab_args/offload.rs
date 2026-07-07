@@ -10,6 +10,10 @@ use super::path_remap::{remap_local_path, LabPathRemap};
 use super::EXPLICIT_PASSTHROUGH_SENTINEL;
 
 pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Result<PathBuf> {
+    if let Some(source) = extension_refresh_local_source_path(args) {
+        return Ok(source);
+    }
+
     let mut iter = args.iter().skip(1).peekable();
     while let Some(arg) = iter.next() {
         if arg == "--" {
@@ -51,6 +55,22 @@ pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Resul
 
     std::env::current_dir()
         .map_err(|err| Error::internal_io(err.to_string(), Some("read cwd".to_string())))
+}
+
+fn extension_refresh_local_source_path(args: &[String]) -> Option<PathBuf> {
+    let refresh_index = args
+        .windows(2)
+        .position(|window| matches!(window, [command, subcommand] if command == "extension" && subcommand == "refresh"))?;
+    let source = args.get(refresh_index + 2)?;
+    if source.starts_with('-') || looks_like_remote_source(source) {
+        return None;
+    }
+    let path = PathBuf::from(shellexpand::tilde(source).to_string());
+    path.exists().then_some(path)
+}
+
+fn looks_like_remote_source(source: &str) -> bool {
+    source.contains("://") || source.starts_with("git@")
 }
 
 pub(in crate::core::runner) fn rewrite_lab_offload_args(

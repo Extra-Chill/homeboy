@@ -325,7 +325,6 @@ mod tests {
                 metadata_json: Value::Null,
             },
             artifact_kind: kind.into(),
-            artifact_path: "/dev/null".into(),
             json,
         }
     }
