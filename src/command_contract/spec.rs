@@ -90,6 +90,7 @@ pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
 pub(crate) const REVIEW_LAB_LABEL: &str = "review";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
 pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
+pub(crate) const FUZZ_DOCTOR_LAB_LABEL: &str = "fuzz doctor";
 pub(crate) const TRACE_LAB_LABEL: &str = "trace";
 pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
 pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
@@ -299,9 +300,9 @@ const BENCH_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummar
 }];
 
 const FUZZ_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[FUZZ_LAB_LABEL],
-    message_label: FUZZ_LAB_LABEL,
-    hint_label: "fuzz run",
+    contract_labels: &[FUZZ_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL],
+    message_label: "fuzz run/doctor",
+    hint_label: "fuzz run/doctor",
 }];
 
 const TRACE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {

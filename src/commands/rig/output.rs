@@ -98,6 +98,7 @@ pub struct RigUpPlanOutput {
     pub command: &'static str,
     pub rig_id: String,
     pub runner_id: String,
+    pub selected_homeboy_binary: String,
     pub portable: bool,
     pub steps: Vec<RigUpPlanStep>,
     pub commands: Vec<String>,
