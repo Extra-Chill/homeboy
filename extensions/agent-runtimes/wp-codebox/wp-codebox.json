@@ -357,6 +357,39 @@
       "workspace_materialization": {
         "cwd": "git_checkout"
       },
+      "runtime_contract": {
+        "preflight_checks": [
+          {
+            "id": "wp-codebox.provider_plugin.runtime_package_shadow",
+            "label": "WP Codebox provider plugin runtime package shadow check",
+            "enforcement": "error",
+            "target": {
+              "component": {
+                "metadata_equals": {
+                  "loadAs": "plugin"
+                },
+                "metadata_any_equals": {
+                  "activate": true
+                }
+              }
+            },
+            "path_probes": {
+              "exists": [
+                {
+                  "id": "wp-codebox.php-ai-client",
+                  "path": "vendor/automattic/php-ai-client",
+                  "subject": "automattic/php-ai-client",
+                  "owner": "wp-codebox WordPress runtime",
+                  "message": "Provider component `{component}` includes `{subject}` (owned by `{owner}`) at `{path}`.",
+                  "remediation": "Rebuild the provider component without the vendored runtime package so the WP Codebox runtime-provided copy is used."
+                }
+              ]
+            },
+            "message": "Homeboy refused dispatch: runtime preflight `{check}` found {conflict_count} component path conflict(s). A declared runtime-owned package would be shadowed by the selected component before the provider run starts.",
+            "remediation": "Remove declared runtime-owned packages from staged WP Codebox provider plugins before dispatch."
+          }
+        ]
+      },
       "runner_readiness": [
         {
           "id": "wp-codebox.executable",
