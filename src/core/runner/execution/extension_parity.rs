@@ -327,6 +327,8 @@ struct DevSyncExtensionOverlay {
     id: String,
     source_path: String,
     content_hash: String,
+    #[serde(default)]
+    duplicate_records: usize,
 }
 
 fn dev_sync_extension_overlay(
@@ -338,9 +340,23 @@ fn dev_sync_extension_overlay(
         .get("dev_sync")?
         .get("extensions")?
         .as_array()?;
-    extensions.iter().find_map(|value| {
-        let overlay: DevSyncExtensionOverlay = serde_json::from_value(value.clone()).ok()?;
-        (overlay.id == extension_id).then_some(overlay)
+    let mut selected = None;
+    let mut matches: usize = 0;
+    for value in extensions {
+        let Ok(mut overlay) = serde_json::from_value::<DevSyncExtensionOverlay>(value.clone())
+        else {
+            continue;
+        };
+        if overlay.id != extension_id {
+            continue;
+        }
+        matches += 1;
+        overlay.duplicate_records = matches.saturating_sub(1);
+        selected = Some(overlay);
+    }
+    selected.map(|mut overlay| {
+        overlay.duplicate_records = matches.saturating_sub(1);
+        overlay
     })
 }
 
@@ -850,12 +866,14 @@ fn dev_overlay_mismatch_error(
                 "current_content_hash": current_hash,
                 "runner_extension_source_revision": remote_revision.unwrap_or("<missing>"),
                 "source_path": overlay.source_path,
+                "duplicate_dev_overlay_records": overlay.duplicate_records,
                 "remediation_command": command,
             },
             "tried": [
                 format!("Recorded dev overlay content_hash: {}", overlay.content_hash),
                 format!("Current local extension content_hash: {current_hash}"),
                 format!("Runner extension source_revision: {}", remote_revision.unwrap_or("<missing>")),
+                format!("Duplicate recorded dev overlays for this id: {}", overlay.duplicate_records),
                 format!("Re-sync the dev overlay before dispatch: {command}"),
             ]
         }),
@@ -1369,6 +1387,47 @@ mod tests {
             &remote_stdout,
         )
         .expect("matching dev overlay hash should pass parity");
+    }
+
+    #[test]
+    fn revision_parity_uses_latest_duplicate_dev_overlay_record() {
+        let stale_dir = tempfile::tempdir().expect("stale source dir");
+        fs::write(stale_dir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#)
+            .expect("stale manifest");
+        fs::write(stale_dir.path().join("run.sh"), "echo stale\n").expect("stale source");
+        let stale_hash = crate::core::runner::extension_source_content_hash(stale_dir.path())
+            .expect("stale hash");
+
+        let current_dir = tempfile::tempdir().expect("current source dir");
+        fs::write(current_dir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#)
+            .expect("current manifest");
+        fs::write(current_dir.path().join("run.sh"), "echo current\n").expect("current source");
+        let current_hash = crate::core::runner::extension_source_content_hash(current_dir.path())
+            .expect("current hash");
+
+        let mut runner = runner_with_overlay("other", "/tmp/other", "unused");
+        runner.resources.insert(
+            "dev_sync".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/runner-dev-sync/v1",
+                "extensions": [
+                    {"id": "nodejs", "source_path": stale_dir.path().display().to_string(), "content_hash": stale_hash},
+                    {"id": "nodejs", "source_path": current_dir.path().display().to_string(), "content_hash": current_hash}
+                ]
+            }),
+        );
+        let remote_stdout = format!(
+            r#"{{"success":true,"data":{{"extension":{{"id":"nodejs","source_revision":"{current_hash}"}}}}}}"#
+        );
+
+        validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "nodejs",
+            &remote_stdout,
+        )
+        .expect("latest duplicate dev overlay metadata should be authoritative");
     }
 
     #[test]
