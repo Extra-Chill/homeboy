@@ -272,18 +272,6 @@ fn runs_proof_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
     args.proof_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
-fn ci_triage_summary_eligible(args: &crate::commands::ci::CiArgs) -> bool {
-    matches!(&args.command, crate::commands::ci::CiCommand::Triage(_))
-        && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
-fn render_ci_triage_summary(payload: &Value) -> Option<String> {
-    payload
-        .get("human_summary")
-        .and_then(Value::as_str)
-        .map(|summary| format!("{}\n", summary))
-}
-
 /// Whether `homeboy bench` should render the compact human summary instead
 /// of dumping the full JSON envelope. The full payload is kept for `--json`,
 /// for non-run subcommands, and for lab-offload subprocesses (whose stdout

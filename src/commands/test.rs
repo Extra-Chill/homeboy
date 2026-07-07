@@ -23,10 +23,7 @@ use super::utils::args::{
 use super::utils::observed_workflow::ObservedWorkflowRunner;
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-    TEST_LAB_LABEL,
-};
+use crate::command_contract::{LabCommandContract, TEST_LAB_LABEL};
 use homeboy::core::validation_progress::validation_progress_metadata;
 
 #[derive(Args)]
@@ -95,13 +92,6 @@ pub struct TestArgs {
 }
 
 impl TestArgs {
-    pub(crate) fn output_descriptor(
-        &self,
-        output_file_mode: CommandOutputFileMode,
-    ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
-    }
-
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
         LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
             .release_gate()

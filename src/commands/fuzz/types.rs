@@ -7,7 +7,7 @@ use homeboy::core::evidence_manifest::TrackerRef;
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-    FUZZ_LAB_LABEL,
+    FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL,
 };
 use homeboy::core::fuzz::FuzzGateProfile;
 use homeboy::core::rig::{self, RigSpec};
@@ -30,6 +30,13 @@ impl FuzzArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        if matches!(self.command, Some(FuzzCommand::Doctor(_))) {
+            let mut contract =
+                LabCommandContract::runner_resident_read_polling(FUZZ_DOCTOR_LAB_LABEL);
+            contract.routing_policy.requires_extension_parity = true;
+            return Some(contract);
+        }
+
         self.is_lab_offload_command()
             .then(|| LabCommandContract::portable_workload(FUZZ_LAB_LABEL, None, true, &[]))
     }
@@ -54,6 +61,10 @@ impl FuzzArgs {
     }
 
     pub(crate) fn lab_required_extension_ids(&self) -> homeboy::core::Result<Vec<String>> {
+        if let Some(FuzzCommand::Doctor(doctor)) = &self.command {
+            return Ok(vec![doctor.extension_id.clone()]);
+        }
+
         if let Some(FuzzCommand::List(list)) = &self.command {
             if !list.extension_override.extensions.is_empty() {
                 return Ok(list.extension_override.extensions.clone());
