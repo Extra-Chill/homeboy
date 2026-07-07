@@ -59,7 +59,31 @@ homeboy --output homeboy-results/landing.json triage landing --repo owner/repo -
 
 Use `triage --watch` only for a small number of PRs that are actively moving. The snapshot commands above are better for broad fleet handoffs.
 
-## 3. Refresh Evidence Only Where Needed
+## 3. Run The Compact Landing Loop
+
+When a fleet is close to landing, repeat this loop until every PR is either landed or has one concrete blocker. Keep the PR order explicit when there are dependent branches.
+
+```bash
+homeboy triage landing --repo owner/repo --ordered 123 124 125 --drilldown --output homeboy-results/landing.json
+homeboy git pr readiness <component-id> --number 123 --output homeboy-results/123-readiness.json
+homeboy git pr land owner/repo 123 124 125 --dry-run --output homeboy-results/land-dry-run.json
+```
+
+Use the landing snapshot first. It gives the fleet-wide view: PR state, check state, mergeability, review state, suggested next command, and matching local worktree records when Homeboy can find them.
+
+Use readiness for the first PR you intend to merge next. It gives a narrow merge/no-merge answer without probing by attempting a merge.
+
+Use `git pr land --dry-run` before any merge train. The dry run confirms the sequence Homeboy would attempt and where it would pause. Run without `--dry-run` only when the ready prefix is correct and you intend to merge those PRs.
+
+Recommended next actions:
+
+- `ready`: clean local worktree, pushed branch, non-draft PR, mergeable state, terminal green required checks, no blocking review decision. Include in the next `git pr land` ready prefix.
+- `waiting`: pending or missing checks on the current head. Re-run `triage landing` or `git pr readiness` after checks report; do not merge based on stale proof.
+- `refresh`: base is stale, mergeability is dirty/behind, or an ordered landing report shows a dependent branch needs a rebase after an earlier PR lands. Use `homeboy git pr refresh <component-id> <number-or-url> --strategy rebase --push` from a clean checkout.
+- `local-cleanup`: landing output reports dirty or unpushed matching local worktrees. Inspect `homeboy worktree status <worktree-id>` and either commit/push, discard only intentional scratch changes, or stop and hand off the blocker.
+- `blocked`: failed checks, requested changes, unresolved conflicts, unknown mergeability after retry, missing evidence, or an external dependency. Capture the blocker in the fleet handoff instead of leaving it implicit.
+
+## 4. Refresh Evidence Only Where Needed
 
 Run review from the worktree path so the evidence matches the branch being held:
 
@@ -78,7 +102,7 @@ homeboy runs artifacts <run-id>
 
 Attach or link the durable artifact/evidence refs in the PR. Treat local-only paths as operator notes, not reviewer-facing evidence.
 
-## 4. Classify Each Branch
+## 5. Classify Each Branch
 
 Keep the handoff small by assigning one state per branch:
 
@@ -90,7 +114,15 @@ Keep the handoff small by assigning one state per branch:
 
 A concise fleet handoff usually needs only branch, PR URL, local state, remote state, evidence ref, and next action.
 
-## 5. Clean Up Deliberately
+Example handoff row:
+
+| PR | Branch | Local | Remote | Evidence | Next action |
+|----|--------|-------|--------|----------|-------------|
+| `owner/repo#123` | `feature/a` | clean/pushed | mergeable/green | `run_...` | land first |
+| `owner/repo#124` | `feature/b` | clean/pushed | behind after `#123` | `run_...` | refresh after `#123` lands |
+| `owner/repo#125` | `feature/c` | dirty-local | checks failed | missing | fix blocker before sequencing |
+
+## 6. Clean Up Deliberately
 
 Preview cleanup first:
 

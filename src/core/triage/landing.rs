@@ -358,12 +358,15 @@ fn landing_local_worktrees_for(items: &[TriageLandingPr]) -> Vec<TriageLandingLo
     if wanted.is_empty() {
         return Vec::new();
     }
+    let wanted_branches: BTreeSet<String> =
+        wanted.iter().map(|(_, branch)| branch.clone()).collect();
     let Ok(list) = worktree::list() else {
         return Vec::new();
     };
     list.worktrees
         .into_iter()
         .filter(|record| record.state == TaskWorktreeState::Active)
+        .filter(|record| wanted_branches.contains(&record.branch))
         .filter(|record| {
             worktree_record_repo(record)
                 .is_some_and(|repo| wanted.contains(&(repo, record.branch.clone())))
