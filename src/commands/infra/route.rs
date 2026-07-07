@@ -1995,6 +1995,67 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_doctor_supports_runner_lab_only_diagnostic_route() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "fuzz",
+            "doctor",
+            "--extension",
+            "nodejs",
+            "--runner",
+            "homeboy-lab",
+            "--lab-only",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
+            cli.allow_local_hot,
+            cli.allow_local_fallback,
+            cli.lab_only,
+        );
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(local_policy.deny_local_execution());
+        assert_eq!(command.hot_label, "fuzz doctor");
+        assert!(lab_runner_supports_contract_label(command.hot_label));
+        assert!(command.portable);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(command.routing_policy.requires_extension_parity);
+        assert!(command.routing_policy.read_only_polling);
+        assert_eq!(command.required_extensions, vec!["nodejs".to_string()]);
+        assert_eq!(
+            command.source_path_mode,
+            runners::LabOffloadSourcePathMode::RunnerResident
+        );
+        assert_eq!(
+            command.workspace_mode_policy,
+            runners::LabOffloadWorkspaceModePolicy::RunnerResident
+        );
+        assert!(cli.command.lab_offload_mutation_flag().is_none());
+        assert!(!cli.command.lab_offload_captures_mutation_patch());
+        assert!(cli.command.supports_lab_runner());
+    }
+
+    #[test]
+    fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "doctor".to_string(),
+            "--extension".to_string(),
+            "nodejs".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("fuzz doctor without --runner should remain a local diagnostic");
+
+        assert_eq!(outcome, None);
+        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
+    }
+
+    #[test]
     fn extension_list_stays_local_only() {
         let cli = Cli::parse_from(["homeboy", "--runner", "lab", "extension", "list"]);
 
