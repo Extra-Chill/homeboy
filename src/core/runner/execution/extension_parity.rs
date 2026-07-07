@@ -327,6 +327,8 @@ struct DevSyncExtensionOverlay {
     id: String,
     source_path: String,
     content_hash: String,
+    source_revision: Option<String>,
+    synced_at: Option<String>,
     #[serde(default)]
     duplicate_records: usize,
 }
@@ -340,9 +342,9 @@ fn dev_sync_extension_overlay(
         .get("dev_sync")?
         .get("extensions")?
         .as_array()?;
-    let mut selected = None;
+    let mut selected: Option<(usize, DevSyncExtensionOverlay)> = None;
     let mut matches: usize = 0;
-    for value in extensions {
+    for (index, value) in extensions.iter().enumerate() {
         let Ok(mut overlay) = serde_json::from_value::<DevSyncExtensionOverlay>(value.clone())
         else {
             continue;
@@ -352,12 +354,33 @@ fn dev_sync_extension_overlay(
         }
         matches += 1;
         overlay.duplicate_records = matches.saturating_sub(1);
-        selected = Some(overlay);
+        if selected
+            .as_ref()
+            .is_none_or(|(selected_index, selected_overlay)| {
+                overlay_is_newer(index, &overlay, *selected_index, selected_overlay)
+            })
+        {
+            selected = Some((index, overlay));
+        }
     }
-    selected.map(|mut overlay| {
+    selected.map(|(_, mut overlay)| {
         overlay.duplicate_records = matches.saturating_sub(1);
         overlay
     })
+}
+
+fn overlay_is_newer(
+    index: usize,
+    overlay: &DevSyncExtensionOverlay,
+    selected_index: usize,
+    selected: &DevSyncExtensionOverlay,
+) -> bool {
+    match (overlay.synced_at.as_deref(), selected.synced_at.as_deref()) {
+        (Some(current), Some(previous)) if current != previous => current > previous,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => index > selected_index,
+    }
 }
 
 fn unsupported_runner_extension_setting_error(
@@ -823,7 +846,12 @@ fn validate_dev_overlay_extension_revision(
     }
 
     let remote_revision = remote_extension_source_revision(remote_stdout);
-    if remote_revision.as_deref() == Some(overlay.content_hash.as_str()) {
+    let recorded_revision = overlay
+        .source_revision
+        .as_deref()
+        .filter(|revision| !revision.trim().is_empty())
+        .unwrap_or(&overlay.content_hash);
+    if remote_revision.as_deref() == Some(recorded_revision) {
         return Ok(());
     }
 
@@ -865,6 +893,7 @@ fn dev_overlay_mismatch_error(
                 "runner_id": runner_id,
                 "extension_id": extension_id,
                 "recorded_content_hash": overlay.content_hash,
+                "recorded_source_revision": overlay.source_revision.as_deref().unwrap_or("<missing>"),
                 "current_content_hash": current_hash,
                 "runner_extension_source_revision": remote_revision.unwrap_or("<missing>"),
                 "source_path": overlay.source_path,
@@ -873,6 +902,7 @@ fn dev_overlay_mismatch_error(
             },
             "tried": [
                 format!("Recorded dev overlay content_hash: {}", overlay.content_hash),
+                format!("Recorded dev overlay source_revision: {}", overlay.source_revision.as_deref().unwrap_or("<missing>")),
                 format!("Current local extension content_hash: {current_hash}"),
                 format!("Runner extension source_revision: {}", remote_revision.unwrap_or("<missing>")),
                 format!("Duplicate recorded dev overlays for this id: {}", overlay.duplicate_records),
@@ -1431,6 +1461,120 @@ mod tests {
             &remote_stdout,
         )
         .expect("latest duplicate dev overlay metadata should be authoritative");
+    }
+
+    #[test]
+    fn revision_parity_uses_newest_synced_duplicate_dev_overlay_record() {
+        let stale_dir = tempfile::tempdir().expect("stale source dir");
+        fs::write(stale_dir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#)
+            .expect("stale manifest");
+        fs::write(stale_dir.path().join("run.sh"), "echo stale\n").expect("stale source");
+        let stale_hash = crate::core::runner::extension_source_content_hash(stale_dir.path())
+            .expect("stale hash");
+
+        let current_dir = tempfile::tempdir().expect("current source dir");
+        fs::write(current_dir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#)
+            .expect("current manifest");
+        fs::write(current_dir.path().join("run.sh"), "echo current\n").expect("current source");
+        let current_hash = crate::core::runner::extension_source_content_hash(current_dir.path())
+            .expect("current hash");
+
+        let mut runner = runner_with_overlay("other", "/tmp/other", "unused");
+        runner.resources.insert(
+            "dev_sync".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/runner-dev-sync/v1",
+                "extensions": [
+                    {"id": "nodejs", "source_path": current_dir.path().display().to_string(), "content_hash": current_hash, "source_revision": "current-rev", "synced_at": "2026-07-07T12:00:00Z"},
+                    {"id": "nodejs", "source_path": stale_dir.path().display().to_string(), "content_hash": stale_hash, "source_revision": "stale-rev", "synced_at": "2026-07-07T11:00:00Z"}
+                ]
+            }),
+        );
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"current-rev"}}}"#;
+
+        validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "nodejs",
+            remote_stdout,
+        )
+        .expect("newest synced duplicate dev overlay metadata should be authoritative");
+    }
+
+    #[test]
+    fn revision_parity_accepts_matching_dev_overlay_source_revision() {
+        let tempdir = tempfile::tempdir().expect("source dir");
+        fs::write(tempdir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
+        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
+        let hash = crate::core::runner::extension_source_content_hash(tempdir.path())
+            .expect("content hash");
+        let mut runner =
+            runner_with_overlay("nodejs", &tempdir.path().display().to_string(), &hash);
+        runner.resources.insert(
+            "dev_sync".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/runner-dev-sync/v1",
+                "extensions": [{
+                    "id": "nodejs",
+                    "source_path": tempdir.path().display().to_string(),
+                    "content_hash": hash,
+                    "source_revision": "8317270c0b2241326ff42ed648e4e5b447dbead2"
+                }]
+            }),
+        );
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"8317270c0b2241326ff42ed648e4e5b447dbead2"}}}"#;
+
+        validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "nodejs",
+            remote_stdout,
+        )
+        .expect("matching dev overlay source revision should pass parity");
+    }
+
+    #[test]
+    fn revision_parity_rejects_stale_dev_overlay_source_revision() {
+        let tempdir = tempfile::tempdir().expect("source dir");
+        fs::write(tempdir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
+        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
+        let hash = crate::core::runner::extension_source_content_hash(tempdir.path())
+            .expect("content hash");
+        let mut runner =
+            runner_with_overlay("nodejs", &tempdir.path().display().to_string(), &hash);
+        runner.resources.insert(
+            "dev_sync".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/runner-dev-sync/v1",
+                "extensions": [{
+                    "id": "nodejs",
+                    "source_path": tempdir.path().display().to_string(),
+                    "content_hash": hash,
+                    "source_revision": "8317270c0b2241326ff42ed648e4e5b447dbead2"
+                }]
+            }),
+        );
+        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"b44a15b01"}}}"#;
+
+        let err = validate_runner_extension_revision(
+            "homeboy-lab",
+            &runner,
+            "homeboy",
+            "nodejs",
+            remote_stdout,
+        )
+        .expect_err("stale dev overlay source revision should fail parity");
+
+        assert_eq!(
+            err.details["diagnostic"]["recorded_source_revision"].as_str(),
+            Some("8317270c0b2241326ff42ed648e4e5b447dbead2")
+        );
+        assert_eq!(
+            err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
+            Some("b44a15b01")
+        );
     }
 
     #[test]
