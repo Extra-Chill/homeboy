@@ -123,6 +123,7 @@ impl<'a> GitFixture<'a> {
 
 /// Path to the bare `rig-package.git` clone produced by
 /// [`GitFixture::clone_bare`].
+#[allow(dead_code)]
 pub(crate) fn bare_source_path(bare: &tempfile::TempDir) -> PathBuf {
     bare.path().join("rig-package.git")
 }

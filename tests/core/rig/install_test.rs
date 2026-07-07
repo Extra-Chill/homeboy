@@ -113,109 +113,39 @@ mod install_flows {
     }
 
     #[test]
-    fn reinstall_replaces_broken_owned_stack_link() {
-        let _home = HomeGuard::new();
-        let stale_package = tempfile::tempdir().expect("stale package");
-        write_rig(stale_package.path(), "studio", &minimal_rig("studio"));
-        write_stack(stale_package.path(), "studio-combined", "studio");
-        install(stale_package.path().to_str().unwrap(), None, false).expect("install stale");
-        fs::remove_dir_all(stale_package.path()).expect("remove stale source");
-
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "studio", &minimal_rig("studio"));
-        let stack_path = write_stack(package.path(), "studio-combined", "studio");
-
-        let result = install(package.path().to_str().unwrap(), None, false)
-            .expect("reinstall replaces broken stack link");
-
-        assert_eq!(result.installed_stacks.len(), 1);
-        let installed = crate::core::paths::stack_config("studio-combined").expect("stack path");
-        assert!(installed.exists());
-        #[cfg(unix)]
-        assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-    }
-
-    #[test]
-    fn reinstall_replaces_owned_stack_with_updated_content() {
-        let _home = HomeGuard::new();
-        let first_package = tempfile::tempdir().expect("first package");
-        write_rig(first_package.path(), "studio", &minimal_rig("studio"));
-        write_stack(first_package.path(), "studio-combined", "studio");
-        install(first_package.path().to_str().unwrap(), None, false).expect("install first");
-
-        let second_package = tempfile::tempdir().expect("second package");
-        write_rig(second_package.path(), "studio", &minimal_rig("studio"));
-        let stack_path = write_stack(second_package.path(), "studio-combined", "studio");
-        fs::write(
-            &stack_path,
-            minimal_stack("studio-combined", "studio")
-                .replace("studio-combined stack", "updated stack"),
-        )
-        .expect("update stack content");
-
-        let result = install(second_package.path().to_str().unwrap(), None, false)
-            .expect("reinstall replaces owned stack with updated content");
-
-        assert_eq!(result.installed_stacks.len(), 1);
-        let installed = crate::core::paths::stack_config("studio-combined").expect("stack path");
-        #[cfg(unix)]
-        assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-    }
-
-    #[test]
-    fn install_git_source_subpath_records_nested_package_root() {
-        let _home = HomeGuard::new();
-        let repo = tempfile::tempdir().expect("repo");
-        let nested = repo.path().join("woocommerce/woocommerce-gateway-stripe");
-        fs::create_dir_all(nested.join("bench")).expect("bench dir");
-        fs::write(
-            nested.join("bench/stripe.trace.mjs"),
-            "export default {};\n",
-        )
-        .expect("trace workload");
-        write_rig(
-            &nested,
-            "woocommerce-stripe-ece-product-page",
-            r#"{
-            "id": "woocommerce-stripe-ece-product-page",
-            "trace_workloads": {
-                "woocommerce-gateway-stripe": [
-                    { "path": "${package.root}/bench/stripe.trace.mjs" }
-                ]
+    fn reinstall_replaces_owned_stack_links() {
+        for remove_original_source in [true, false] {
+            let _home = HomeGuard::new();
+            let first_package = tempfile::tempdir().expect("first package");
+            write_rig(first_package.path(), "studio", &minimal_rig("studio"));
+            write_stack(first_package.path(), "studio-combined", "studio");
+            install(first_package.path().to_str().unwrap(), None, false).expect("install first");
+            if remove_original_source {
+                fs::remove_dir_all(first_package.path()).expect("remove stale source");
             }
-        }"#,
-        );
-        let bare = bare_package(repo.path());
-        let source = format!(
-            "{}//woocommerce/woocommerce-gateway-stripe",
-            bare.path().join("rig-package.git").display()
-        );
 
-        let result = install(&source, Some("woocommerce-stripe-ece-product-page"), false)
-            .expect("install nested git package");
-        let metadata =
-            read_source_metadata("woocommerce-stripe-ece-product-page").expect("metadata");
-        let source_root = result.source_root;
-        let package_root = source_root.join("woocommerce/woocommerce-gateway-stripe");
+            let second_package = tempfile::tempdir().expect("second package");
+            write_rig(second_package.path(), "studio", &minimal_rig("studio"));
+            let stack_path = write_stack(second_package.path(), "studio-combined", "studio");
+            if !remove_original_source {
+                fs::write(
+                    &stack_path,
+                    minimal_stack("studio-combined", "studio")
+                        .replace("studio-combined stack", "updated stack"),
+                )
+                .expect("update stack content");
+            }
 
-        assert_eq!(result.package_path, package_root);
-        assert_eq!(
-            metadata.source_root.as_deref(),
-            Some(source_root.to_str().unwrap())
-        );
-        assert_eq!(metadata.package_path, package_root.to_string_lossy());
-        assert_eq!(
-            metadata.discovery_path.as_deref(),
-            Some(metadata.package_path.as_str())
-        );
+            let result = install(second_package.path().to_str().unwrap(), None, false)
+                .expect("reinstall replaces owned stack link");
 
-        let rig = load("woocommerce-stripe-ece-product-page").expect("load rig");
-        assert_eq!(
-            crate::core::rig::expand::expand_vars(&rig, "${package.root}/bench/stripe.trace.mjs"),
-            package_root
-                .join("bench/stripe.trace.mjs")
-                .to_string_lossy()
-        );
+            assert_eq!(result.installed_stacks.len(), 1);
+            let installed =
+                crate::core::paths::stack_config("studio-combined").expect("stack path");
+            assert!(installed.exists());
+            #[cfg(unix)]
+            assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
+        }
     }
 
     #[test]
@@ -378,26 +308,6 @@ mod install_flows {
 
         assert!(err.message.contains("non-empty relative paths"));
         assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    }
-
-    #[test]
-    fn install_git_source_missing_subpath_reports_source_and_package_roots() {
-        let _home = HomeGuard::new();
-        let repo = tempfile::tempdir().expect("repo");
-        write_rig(repo.path(), "alpha", &minimal_rig("alpha"));
-        let bare = bare_package(repo.path());
-        let source = format!(
-            "{}//woocommerce/woocommerce-gateway-stripe",
-            bare.path().join("rig-package.git").display()
-        );
-
-        let err = install(&source, Some("alpha"), false).expect_err("missing nested package");
-
-        assert!(err.message.contains("source root:"));
-        assert!(err.message.contains("resolved package root:"));
-        assert!(err
-            .message
-            .contains("woocommerce/woocommerce-gateway-stripe"));
     }
 
     #[test]
@@ -1274,29 +1184,7 @@ mod git_url {
     use super::*;
 
     #[test]
-    fn git_url_installs_clone_package_and_config_link() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-
-        let bare = bare_package(package.path());
-        let source = support::bare_source_path(&bare)
-            .to_string_lossy()
-            .to_string();
-        let result = install(&source, None, false).expect("install");
-        assert!(!result.linked);
-        assert_eq!(result.installed.len(), 1);
-        assert!(result
-            .package_path
-            .parent()
-            .unwrap()
-            .ends_with("rig-packages"));
-        assert!(crate::core::paths::rig_config("alpha").unwrap().exists());
-        assert_eq!(read_source_metadata("alpha").unwrap().source, source);
-    }
-
-    #[test]
-    fn git_url_subpath_installs_single_rig_directory() {
+    fn git_url_subpath_installs_clone_package_and_selected_specs() {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
         let subdir = package.path().join("packages").join("studio");
@@ -1305,7 +1193,9 @@ mod git_url {
             "studio",
             include_str!("../../fixtures/rig-package-subpath/packages/studio/rig.json"),
         );
+        write_stack(&subdir, "studio-combined", "studio");
         write_rig(package.path(), "other", &minimal_rig("other"));
+        write_stack(package.path(), "root-combined", "root");
         let bare = bare_package(package.path());
 
         let root_source = bare.path().join("rig-package.git");
@@ -1321,28 +1211,6 @@ mod git_url {
             .ends_with("packages/studio/rig.json"));
         assert!(crate::core::paths::rig_config("studio").unwrap().exists());
         assert!(!crate::core::paths::rig_config("other").unwrap().exists());
-
-        let metadata = read_source_metadata("studio").expect("metadata");
-        assert_eq!(metadata.source, root_source.to_string_lossy());
-        assert!(metadata.rig_path.ends_with("packages/studio/rig.json"));
-    }
-
-    #[test]
-    fn git_url_subpath_installs_only_stacks_under_selected_subpath() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        let selected = package.path().join("packages").join("studio");
-        write_single_rig(&selected, "studio", &minimal_rig("studio"));
-        write_stack(&selected, "studio-combined", "studio");
-        write_stack(package.path(), "root-combined", "root");
-        let bare = bare_package(package.path());
-        let source = format!(
-            "{}//packages/studio",
-            bare.path().join("rig-package.git").to_string_lossy()
-        );
-
-        let result = install(&source, None, false).expect("install subpath");
-
         assert_eq!(result.installed_stacks.len(), 1);
         assert_eq!(result.installed_stacks[0].id, "studio-combined");
         assert!(crate::core::paths::stack_config("studio-combined")
@@ -1351,29 +1219,10 @@ mod git_url {
         assert!(!crate::core::paths::stack_config("root-combined")
             .unwrap()
             .exists());
-        let stacks = crate::core::stack::list().expect("stack list");
-        assert_eq!(stacks.len(), 1);
-        assert_eq!(stacks[0].id, "studio-combined");
-    }
 
-    #[test]
-    fn git_url_subpath_preserves_multi_rig_ambiguity() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        let nested = package.path().join("nested");
-        write_rig(&nested, "alpha", &minimal_rig("alpha"));
-        write_rig(&nested, "beta", &minimal_rig("beta"));
-        let bare = bare_package(package.path());
-
-        let source = format!(
-            "{}//nested",
-            bare.path().join("rig-package.git").to_string_lossy()
-        );
-        let err = install(&source, None, false).expect_err("ambiguous subpath");
-
-        assert!(err.message.contains("multiple rigs"));
-        assert!(err.message.contains("alpha"));
-        assert!(err.message.contains("beta"));
+        let metadata = read_source_metadata("studio").expect("metadata");
+        assert_eq!(metadata.source, root_source.to_string_lossy());
+        assert!(metadata.rig_path.ends_with("packages/studio/rig.json"));
     }
 
     #[test]

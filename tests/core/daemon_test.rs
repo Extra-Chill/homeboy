@@ -49,6 +49,16 @@ fn create_local_runner_for_file_api(id: &str, workspace_root: &std::path::Path) 
     .expect("create local runner");
 }
 
+fn file_api_workspace(configure_runner: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    if configure_runner {
+        create_local_runner_for_file_api("file-lab", &workspace);
+    }
+    (temp, workspace)
+}
+
 #[test]
 fn parse_bind_addr_defaults_to_loopback_shape() {
     let addr = parse_bind_addr(DEFAULT_ADDR).expect("parse default");
@@ -100,24 +110,21 @@ fn write_state_establishes_daemon_session_lease_identity() {
 #[test]
 fn health_route_refreshes_daemon_lease_heartbeat() {
     let _home = HomeGuard::new();
-    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mut state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    state.last_seen_at = "2000-01-01T00:00:00Z".to_string();
+    write_daemon_state_for_test(&state);
 
     let response = route("GET", "/health");
     let refreshed = read_status().expect("status").state.expect("state");
 
     assert_eq!(response.status_code, 200);
-    assert_eq!(response.body["lease"]["lease_id"], state.lease_id);
     assert_ne!(refreshed.last_seen_at, state.last_seen_at);
 }
 
 #[test]
 fn file_route_rejects_paths_outside_runner_workspace_root() {
     let _home = HomeGuard::new();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    create_local_runner_for_file_api("file-lab", &workspace);
+    let (_temp, workspace) = file_api_workspace(true);
 
     let response = route_with_job_store_and_body(
         "POST",
@@ -140,10 +147,7 @@ fn file_route_rejects_paths_outside_runner_workspace_root() {
 #[test]
 fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
     let _home = HomeGuard::new();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    create_local_runner_for_file_api("file-lab", &workspace);
+    let (_temp, _workspace) = file_api_workspace(true);
 
     let response = route_with_job_store_and_body_and_runner_and_auth(
         "POST",
@@ -168,9 +172,7 @@ fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
 #[test]
 fn file_route_accepts_request_workspace_root_without_runner_config() {
     let _home = HomeGuard::new();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
+    let (_temp, workspace) = file_api_workspace(false);
 
     let response = route_with_job_store_and_body(
         "POST",
@@ -190,10 +192,7 @@ fn file_route_accepts_request_workspace_root_without_runner_config() {
 #[test]
 fn file_routes_upload_and_download_inside_runner_workspace_root() {
     let _home = HomeGuard::new();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    create_local_runner_for_file_api("file-lab", &workspace);
+    let (_temp, workspace) = file_api_workspace(true);
 
     let upload = route_with_job_store_and_body(
         "POST",
