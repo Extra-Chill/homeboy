@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.40] - 2026-07-07
+
+### Changed
+- Declare source sync excludes in manifests
+
 ## [3.23.39] - 2026-07-07
 
 ### Changed
