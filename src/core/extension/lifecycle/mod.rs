@@ -1,5 +1,6 @@
 use crate::core::engine::identifier;
 use crate::core::error::{Error, Result};
+use crate::core::git;
 use crate::core::paths;
 use std::path::{Path, PathBuf};
 
@@ -162,6 +163,12 @@ pub fn refresh(
         None => derive_id_from_url(source)?,
     };
 
+    let local_source_revision = if is_git_url(source) {
+        None
+    } else {
+        git::short_head_revision(&absolute_source_path(source)?)
+    };
+    let effective_revision = revision.or(local_source_revision.as_deref());
     let install_source = durable_refresh_source(source, &extension_id)?;
 
     let extension_dir = paths::extension(&extension_id)?;
@@ -172,7 +179,8 @@ pub fn refresh(
         false
     };
 
-    let installed = install_with_revision(&install_source, Some(&extension_id), revision)?;
+    let installed =
+        install_with_revision(&install_source, Some(&extension_id), effective_revision)?;
 
     Ok(RefreshResult {
         extension_id: installed.extension_id,
@@ -820,6 +828,46 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn refresh_local_git_source_reports_current_revision_over_copied_marker() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            let _remote = match prepare_git_extension_repo(&source, "nodejs") {
+                Some(remote) => remote,
+                None => return,
+            };
+            let source_revision =
+                git_output(&source, &["rev-parse", "--short", "HEAD"]).expect("source revision");
+            fs::write(source.join("nodejs/.source-revision"), "stale-marker\n")
+                .expect("stale copied marker");
+
+            let result = refresh(
+                &source.join("nodejs").to_string_lossy(),
+                Some("nodejs"),
+                None,
+            )
+            .expect("refresh should install from local git source");
+
+            assert_eq!(
+                result.source_revision.as_deref(),
+                Some(source_revision.as_str())
+            );
+            assert_eq!(
+                read_source_revision("nodejs").as_deref(),
+                Some(source_revision.as_str())
+            );
+            assert_eq!(
+                fs::read_to_string(result.path.join(".source-revision"))
+                    .expect("copied source marker")
+                    .trim(),
+                "stale-marker",
+                "fixture keeps the copied stale marker that used to win reporting"
+            );
         });
     }
 
