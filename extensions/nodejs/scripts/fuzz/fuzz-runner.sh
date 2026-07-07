@@ -85,11 +85,20 @@ import { resolve } from 'node:path';
 
 const workloadPath = process.argv[2];
 const workload = JSON.parse(readFileSync(workloadPath, 'utf8'));
-const args = Array.isArray(workload.args) ? workload.args.map(String) : [];
+const nestedWorkload = workload && typeof workload.workload === 'object' && workload.workload !== null ? workload.workload : {};
+const stringField = (name) => {
+  const nestedValue = nestedWorkload[name];
+  if (typeof nestedValue === 'string' && nestedValue.trim()) return nestedValue.trim();
+  const topLevelValue = workload[name];
+  return typeof topLevelValue === 'string' ? topLevelValue.trim() : '';
+};
+const rawArgs = Array.isArray(nestedWorkload.args) ? nestedWorkload.args : workload.args;
+const args = Array.isArray(rawArgs) ? rawArgs.map(String) : [];
+const path = stringField('path');
 const value = {
-  command: typeof workload.command === 'string' ? workload.command.trim() : '',
-  script: typeof workload.script === 'string' ? workload.script.trim() : '',
-  path: typeof workload.path === 'string' ? resolve(process.cwd(), workload.path) : '',
+  command: stringField('command'),
+  script: stringField('script'),
+  path: path ? resolve(process.cwd(), path) : '',
   args,
 };
 process.stdout.write(JSON.stringify(value));

@@ -143,4 +143,33 @@ if (data.source !== "json-workload") throw new Error("json workload path did not
 if (data.args.join(",") !== "--from-json,--flag") throw new Error(`json workload args not forwarded: ${data.args.join(",")}`);
 '
 
+NESTED_JSON_PROJECT="$(make_project nested-json-workload)"
+cat > "$NESTED_JSON_PROJECT/nested-json-fuzz.mjs" <<'JS'
+import { existsSync, writeFileSync } from 'node:fs';
+writeFileSync(process.env.HOMEBOY_FUZZ_RESULTS_FILE, JSON.stringify({
+  schema: 'homeboy/fuzz-campaign/v1',
+  status: 'pass',
+  source: 'nested-json-workload',
+  args: process.argv.slice(2),
+  injectedFileExists: existsSync('nested-injected'),
+}, null, 2));
+JS
+NESTED_JSON_WORKLOAD="$NESTED_JSON_PROJECT/nested-workload.json"
+cat > "$NESTED_JSON_WORKLOAD" <<'JSON'
+{
+  "schema": "homeboy/fuzz-workload/v1",
+  "workload": {
+    "path": "nested-json-fuzz.mjs",
+    "args": ["--from-nested", "value with spaces", "; touch nested-injected"]
+  }
+}
+JSON
+NESTED_JSON_RESULTS="$TMP_DIR/nested-json-results.json"
+run_fuzz "$NESTED_JSON_PROJECT" "$NESTED_JSON_RESULTS" "$NESTED_JSON_WORKLOAD" >/dev/null
+assert_json "$NESTED_JSON_RESULTS" '
+if (data.source !== "nested-json-workload") throw new Error("nested json workload path did not run");
+if (data.args.join("|") !== "--from-nested|value with spaces|; touch nested-injected|--flag") throw new Error(`nested json workload args not forwarded safely: ${data.args.join("|")}`);
+if (data.injectedFileExists) throw new Error("nested json workload args were evaluated by the shell");
+'
+
 echo "Node.js fuzz runner smoke passed."
