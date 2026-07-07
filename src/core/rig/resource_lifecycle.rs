@@ -132,4 +132,22 @@ mod tests {
             ResourceCleanupPolicy::Manual
         );
     }
+
+    #[test]
+    fn applies_declared_cleanup_intent_to_resource_records() {
+        let resources = RigResourcesSpec {
+            paths: vec!["/tmp/homeboy-rig".to_string()],
+            ..Default::default()
+        };
+        let mut options =
+            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
+        options.cleanup_intent = ResourceCleanupIntent::Apply;
+
+        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
+
+        assert_eq!(
+            index.resources[0].cleanup_intent,
+            ResourceCleanupIntent::Apply
+        );
+    }
 }

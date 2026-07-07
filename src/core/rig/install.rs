@@ -495,6 +495,69 @@ fn package_source_roots_for_dependencies(
     })
 }
 
+pub(crate) fn local_package_source_root_for_dependencies(
+    package_path: &Path,
+    rigs: &[DiscoveredRig],
+) -> Result<PathBuf> {
+    let mut dependency_paths = Vec::new();
+    for rig in rigs {
+        let value = read_json_value(&rig.rig_path)?;
+        let spec: RigPackageMetadata = serde_json::from_value(value).map_err(|e| {
+            Error::validation_invalid_argument(
+                "rig_spec",
+                format!(
+                    "Rig spec schema is not compatible with this Homeboy binary: {}",
+                    e
+                ),
+                Some(rig.rig_path.to_string_lossy().to_string()),
+                None,
+            )
+        })?;
+        for dependency in spec.package_dependencies {
+            dependency_paths.push((rig.id.clone(), dependency));
+        }
+    }
+
+    let package_root = package_path.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package path {}",
+                package_path.display()
+            )),
+        )
+    })?;
+    if dependency_paths.is_empty() {
+        return Ok(package_root);
+    }
+
+    let repo_root = git::repo_root(&package_root)
+        .or_else(|| materialized_runner_source_root(&package_root))
+        .unwrap_or_else(|| package_root.clone());
+    let repo_root = repo_root.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package source root {}",
+                repo_root.display()
+            )),
+        )
+    })?;
+    if !package_root.starts_with(&repo_root) {
+        return Err(Error::validation_invalid_argument(
+            "package_dependencies",
+            "Rig package dependencies require the selected package path to stay inside the package source root",
+            Some(package_path.to_string_lossy().to_string()),
+            Some(vec![format!("source root: {}", repo_root.display())]),
+        ));
+    }
+
+    for (rig_id, dependency) in dependency_paths {
+        validate_package_dependency_path(&rig_id, &dependency, &package_root, &repo_root)?;
+    }
+    Ok(repo_root)
+}
+
 fn validate_package_dependency_path(
     rig_id: &str,
     dependency: &str,

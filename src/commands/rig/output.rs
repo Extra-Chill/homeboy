@@ -228,10 +228,12 @@ mod tests {
                     paths: vec!["~/Developer/studio".to_string()],
                     ..Default::default()
                 },
+                lifecycle: Default::default(),
                 requirements: Default::default(),
                 pipeline: Default::default(),
                 bench: None,
                 fuzz: None,
+                trace: Default::default(),
                 bench_workloads: Default::default(),
                 trace_workloads: Default::default(),
                 fuzz_workloads: Default::default(),

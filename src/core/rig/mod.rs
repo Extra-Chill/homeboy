@@ -345,8 +345,13 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
     Ok((spec, declared_id))
 }
 
-fn read_spec_from_path(path: &Path, id_hint: Option<&str>, package_root: &Path) -> Result<RigSpec> {
-    let value = match install::materialize_rig_spec(path, package_root)? {
+fn read_spec_from_path(
+    path: &Path,
+    id_hint: Option<&str>,
+    package_root: &Path,
+    source_root: &Path,
+) -> Result<RigSpec> {
+    let value = match install::materialize_rig_spec(path, source_root)? {
         Some(value) => value,
         None => {
             let content = fs::read_to_string(path).map_err(|e| {
@@ -520,7 +525,16 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
             .parent()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str());
-        return read_spec_from_path(&path, id.or(id_hint), &package_root);
+        let discovered = DiscoveredRig {
+            id: id.or(id_hint).unwrap_or_default().to_string(),
+            description: String::new(),
+            rig_path: path.clone(),
+        };
+        let source_root = install::local_package_source_root_for_dependencies(
+            &package_root,
+            std::slice::from_ref(&discovered),
+        )?;
+        return read_spec_from_path(&path, id.or(id_hint), &package_root, &source_root);
     }
     if !path.is_dir() {
         return Err(Error::validation_invalid_argument(
@@ -560,7 +574,9 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
     }
 
     let rig = rigs.remove(0);
-    read_spec_from_path(&rig.rig_path, Some(&rig.id), &path)
+    let source_root =
+        install::local_package_source_root_for_dependencies(&path, std::slice::from_ref(&rig))?;
+    read_spec_from_path(&rig.rig_path, Some(&rig.id), &path, &source_root)
 }
 
 /// A loaded rig spec paired with the resolved on-disk package root of its

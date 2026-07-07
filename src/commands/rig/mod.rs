@@ -5,7 +5,7 @@ mod sources;
 
 pub use output::RigCommandOutput;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::rig;
@@ -158,6 +158,9 @@ enum RigCommand {
         /// Lint every rig discovered in a local package path
         #[arg(long)]
         all: bool,
+        /// Output format. `json` uses Homeboy's standard command-result envelope.
+        #[arg(long, value_enum)]
+        format: Option<RigLintFormat>,
     },
     /// Validate rig package artifacts without touching the environment.
     Package {
@@ -236,6 +239,11 @@ enum RigCommand {
         #[command(subcommand)]
         command: RigAppCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RigLintFormat {
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -334,7 +342,12 @@ pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOu
         RigCommand::Show { rig_id } => show(&rig_id),
         RigCommand::Up { rig_id, dry_run } => up(&rig_id, dry_run),
         RigCommand::Check { target, id, path } => check(&target, id.as_deref(), path.as_deref()),
-        RigCommand::Lint { target, id, all } => lint(&target, id.as_deref(), all),
+        RigCommand::Lint {
+            target,
+            id,
+            all,
+            format,
+        } => lint(&target, id.as_deref(), all, format),
         RigCommand::Package { command } => package(command),
         RigCommand::Down {
             rig_id,
@@ -697,7 +710,12 @@ fn check(
     ))
 }
 
-fn lint(target: &str, id: Option<&str>, all: bool) -> CmdResult<RigCommandOutput> {
+fn lint(
+    target: &str,
+    id: Option<&str>,
+    all: bool,
+    _format: Option<RigLintFormat>,
+) -> CmdResult<RigCommandOutput> {
     if all {
         if id.is_some() {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -1227,12 +1245,40 @@ mod tests {
         let cli = TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--id", "alpha"])
             .expect("rig lint should parse");
 
-        let RigCommand::Lint { target, id, all } = cli.rig.command else {
+        let RigCommand::Lint {
+            target,
+            id,
+            all,
+            format,
+        } = cli.rig.command
+        else {
             panic!("expected rig lint command");
         };
         assert_eq!(target, "./pkg");
         assert_eq!(id.as_deref(), Some("alpha"));
         assert!(!all);
+        assert_eq!(format, None);
+    }
+
+    #[test]
+    fn lint_command_parses_all_and_json_format() {
+        let cli =
+            TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--all", "--format", "json"])
+                .expect("rig lint --all --format json should parse");
+
+        let RigCommand::Lint {
+            target,
+            id,
+            all,
+            format,
+        } = cli.rig.command
+        else {
+            panic!("expected rig lint command");
+        };
+        assert_eq!(target, "./pkg");
+        assert_eq!(id, None);
+        assert!(all);
+        assert_eq!(format, Some(RigLintFormat::Json));
     }
 
     #[test]
@@ -1256,7 +1302,8 @@ mod tests {
             assert_eq!(check_exit, 1, "missing requirement should fail rig check");
 
             // The lint command skips requirements entirely and succeeds.
-            let (output, exit_code) = lint("lint-cmd", None, false).expect("rig lint runs");
+            let (output, exit_code) =
+                lint("lint-cmd", None, false, Some(RigLintFormat::Json)).expect("rig lint runs");
             assert_eq!(exit_code, 0);
             let json = serde_json::to_value(output).expect("serialize lint output");
             assert_eq!(json["payload"]["command"], "rig.lint");
@@ -1273,7 +1320,7 @@ mod tests {
                 serde_json::json!({ "id": "lint-id-guard" }),
             );
 
-            let err = match lint("lint-id-guard", Some("alpha"), false) {
+            let err = match lint("lint-id-guard", Some("alpha"), false, None) {
                 Ok(_) => panic!("--id against an installed rig id should fail"),
                 Err(err) => err,
             };
@@ -1295,8 +1342,13 @@ mod tests {
             .expect("write rig");
         }
 
-        let (output, exit_code) =
-            lint(&temp.path().to_string_lossy(), None, true).expect("rig lint --all runs");
+        let (output, exit_code) = lint(
+            &temp.path().to_string_lossy(),
+            None,
+            true,
+            Some(RigLintFormat::Json),
+        )
+        .expect("rig lint --all runs");
 
         assert_eq!(exit_code, 0);
         let json = serde_json::to_value(output).expect("serialize lint output");
