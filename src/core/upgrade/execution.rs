@@ -139,6 +139,16 @@ pub(crate) fn execute_upgrade(
         return Err(upgrade_failure_error(method, &error_detail));
     }
 
+    if method == InstallMethod::Source {
+        let workspace_root = source_workspace_root.as_deref().ok_or_else(|| {
+            Error::internal_unexpected("source workspace unavailable after source upgrade build")
+        })?;
+        let replacement_target = source_replacement_target.as_deref().ok_or_else(|| {
+            Error::internal_unexpected("active binary path unavailable for source upgrade install")
+        })?;
+        install_source_built_binary(workspace_root, replacement_target)?;
+    }
+
     // The upgrade command above succeeded, so the new binary is already on
     // disk. Reading the version back can race the just-replaced binary (atomic
     // rename not yet observable on PATH, stale resolution, the process failing
@@ -366,6 +376,84 @@ fn replacement_target_may_be_writable(path: &Path) -> bool {
             .and_then(|parent| std::fs::metadata(parent).ok())
             .map(|metadata| !metadata.permissions().readonly())
             .unwrap_or(false)
+}
+
+fn install_source_built_binary(source_workspace: &Path, replacement_target: &Path) -> Result<()> {
+    let built_binary = source_workspace.join("target/release/homeboy");
+    let parent = replacement_target.parent().ok_or_else(|| {
+        Error::internal_io(
+            format!(
+                "replacement target has no parent directory: {}",
+                replacement_target.display()
+            ),
+            Some("install source-built binary".to_string()),
+        )
+    })?;
+    let temp_target = parent.join(format!(".homeboy-upgrade.{}.tmp", std::process::id()));
+
+    std::fs::copy(&built_binary, &temp_target).map_err(|e| {
+        Error::internal_io(
+            format!(
+                "copy {} to {} failed: {}",
+                built_binary.display(),
+                temp_target.display(),
+                e
+            ),
+            Some("install source-built binary".to_string()),
+        )
+    })?;
+
+    if let Err(err) = make_source_install_executable(&temp_target) {
+        let _ = std::fs::remove_file(&temp_target);
+        return Err(err);
+    }
+
+    if let Err(err) = std::fs::rename(&temp_target, replacement_target) {
+        let _ = std::fs::remove_file(&temp_target);
+        return Err(Error::internal_io(
+            format!(
+                "rename {} to {} failed: {}",
+                temp_target.display(),
+                replacement_target.display(),
+                err
+            ),
+            Some("install source-built binary".to_string()),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_source_install_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(path, permissions).map_err(|e| {
+        Error::internal_io(
+            format!("chmod 0755 {} failed: {}", path.display(), e),
+            Some("install source-built binary".to_string()),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn make_source_install_executable(path: &Path) -> Result<()> {
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|e| {
+            Error::internal_io(
+                format!("read permissions for {} failed: {}", path.display(), e),
+                Some("install source-built binary".to_string()),
+            )
+        })?
+        .permissions();
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions).map_err(|e| {
+        Error::internal_io(
+            format!("make {} writable failed: {}", path.display(), e),
+            Some("install source-built binary".to_string()),
+        )
+    })
 }
 
 fn display_path(path: &Path) -> String {
@@ -1547,6 +1635,69 @@ mod tests {
         assert!(built_command.contains("upgrade --method source"));
         assert!(built_command.contains("--source-path"));
         assert!(built_command.contains(&source.display().to_string()));
+    }
+
+    #[test]
+    fn install_source_built_binary_replaces_active_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let target_dir = dir.path().join("bin");
+        std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+        let built = source.join("target/release/homeboy");
+        let active = target_dir.join("homeboy");
+        std::fs::write(&built, "new homeboy").expect("built binary");
+        std::fs::write(&active, "old homeboy").expect("active binary");
+
+        install_source_built_binary(&source, &active).expect("install source binary");
+
+        assert_eq!(
+            std::fs::read_to_string(&active).expect("active"),
+            "new homeboy"
+        );
+        assert!(binary_files_match(&built, &active).expect("files match"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_source_built_binary_sets_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let target_dir = dir.path().join("bin");
+        std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+        let built = source.join("target/release/homeboy");
+        let active = target_dir.join("homeboy");
+        std::fs::write(&built, "new homeboy").expect("built binary");
+        std::fs::write(&active, "old homeboy").expect("active binary");
+
+        install_source_built_binary(&source, &active).expect("install source binary");
+
+        let mode = std::fs::metadata(&active)
+            .expect("active metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn install_source_built_binary_reports_copy_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        let target_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+        let active = target_dir.join("homeboy");
+        std::fs::write(&active, "old homeboy").expect("active binary");
+
+        let err = install_source_built_binary(&source, &active).expect_err("missing build fails");
+
+        let details = err.details.to_string();
+        assert!(details.contains("target/release/homeboy"));
+        assert!(details.contains("install source-built binary"));
     }
 
     #[test]
