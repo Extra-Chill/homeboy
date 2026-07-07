@@ -323,11 +323,12 @@ fn agent_task_summary_kind_for_output_mode(
 }
 
 fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
-    let command = match adapter::command_adapter(
+    let command = match adapter::run_json_output(
         command,
+        global,
         crate::command_contract::CommandOutputFileMode::None,
     ) {
-        Ok(adapter) => return adapter.run(global),
+        Ok(result) => return result,
         Err(command) => command,
     };
 
@@ -380,6 +381,28 @@ mod tests {
         let value = result.expect("manifest should dispatch as JSON");
         assert_eq!(value["command"], "contract.manifest");
         assert!(value["commands"].is_array());
+    }
+
+    #[test]
+    fn public_dispatch_matches_adapter_execution_for_migrated_contract() {
+        let command = || {
+            Commands::Contract(crate::commands::contract::ContractArgs {
+                command: crate::commands::contract::ContractCommand::Manifest(
+                    crate::commands::manifest::ManifestArgs {},
+                ),
+            })
+        };
+
+        let (dispatch_stdout, dispatch_exit_code) = dispatch(command(), &GlobalArgs {});
+        let (adapter_stdout, adapter_exit_code) = adapter::run_json_output(
+            command(),
+            &GlobalArgs {},
+            crate::command_contract::CommandOutputFileMode::None,
+        )
+        .unwrap_or_else(|_| panic!("contract should route through adapter helper"));
+
+        assert_eq!(dispatch_exit_code, adapter_exit_code);
+        assert_eq!(dispatch_stdout.unwrap(), adapter_stdout.unwrap());
     }
 
     #[test]
