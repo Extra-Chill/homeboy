@@ -1,13 +1,30 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -n "${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-}" ]; then
-    PROJECT_SCRIPTS_HELPER="$HOMEBOY_RUNTIME_PROJECT_SCRIPTS"
-elif [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -f "$(dirname "$HOMEBOY_EXTENSION_PATH")/scripts/lib/project-scripts.sh" ]; then
-    PROJECT_SCRIPTS_HELPER="$(dirname "$HOMEBOY_EXTENSION_PATH")/scripts/lib/project-scripts.sh"
-else
-    PROJECT_SCRIPTS_HELPER="${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh"
-fi
+homeboy_node_project_scripts_helper() {
+    if [ -n "${HOMEBOY_RUNTIME_PROJECT_SCRIPTS:-}" ]; then
+        printf '%s\n' "$HOMEBOY_RUNTIME_PROJECT_SCRIPTS"
+        return 0
+    fi
+
+    local _candidate
+    for _candidate in \
+        "${HOMEBOY_EXTENSION_PATH:+$(dirname "$HOMEBOY_EXTENSION_PATH")/scripts/lib/project-scripts.sh}" \
+        "${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh" \
+        "${SCRIPT_DIR}/project-scripts.sh"; do
+        if [ -n "$_candidate" ] && [ -f "$_candidate" ]; then
+            printf '%s\n' "$_candidate"
+            return 0
+        fi
+    done
+
+    echo "Error: Unable to locate Homeboy project script helpers for Node.js extension." >&2
+    echo "Expected shared helper near HOMEBOY_EXTENSION_PATH, shared helper at ${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh, or packaged helper at ${SCRIPT_DIR}/project-scripts.sh." >&2
+    return 1
+}
+
+PROJECT_SCRIPTS_HELPER="$(homeboy_node_project_scripts_helper)"
 # shellcheck source=/dev/null
 source "$PROJECT_SCRIPTS_HELPER"
 

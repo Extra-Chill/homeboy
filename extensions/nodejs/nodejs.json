@@ -1,12 +1,12 @@
 {
   "name": "Node.js",
-  "version": "3.3.1",
+  "version": "3.4.0",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
-    "capabilities": ["format", "validate"]
+    "capabilities": ["format", "validate", "fuzz"]
   },
   "structured_sidecars": {
     "lint.findings": true,
@@ -58,6 +58,18 @@
       "produces": [
         { "kind": "artifact", "name": "trace.results" },
         { "kind": "artifact", "name": "trace.artifacts" }
+      ]
+    },
+    {
+      "id": "nodejs.fuzz-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/fuzz/fuzz-runner.sh" },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "fuzz.results",
+          "schema": "homeboy/fuzz-campaign/v1"
+        }
       ]
     }
   ],
@@ -112,6 +124,13 @@
       "type": "object",
       "default": {},
       "description": "Additional non-secret environment values consumed by Node.js bench workloads."
+    },
+    {
+      "id": "fuzz_script",
+      "label": "Fuzz Script",
+      "type": "string",
+      "default": "",
+      "description": "Package.json script to run when Node.js fuzz is invoked without a rig workload path. Defaults to scripts.fuzz when present."
     },
     {
       "id": "local_workspace_dependencies",
@@ -294,6 +313,27 @@
   },
   "trace": {
     "extension_script": "scripts/trace/trace-runner.sh"
+  },
+  "fuzz": {
+    "extension_script": "scripts/fuzz/fuzz-runner.sh",
+    "capabilities": ["nodejs-fuzz-workload"],
+    "env": [
+      "HOMEBOY_FUZZ_RESULTS_FILE",
+      "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+      "HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE",
+      "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+      "HOMEBOY_FUZZ_WORKLOAD_ID",
+      "HOMEBOY_FUZZ_WORKLOAD_PATH",
+      "HOMEBOY_FUZZ_WORKLOAD_ROOT",
+      "HOMEBOY_FUZZ_RUN_ID",
+      "HOMEBOY_FUZZ_SEED",
+      "HOMEBOY_FUZZ_INVENTORY_FILE",
+      "HOMEBOY_FUZZ_SHARED_STATE",
+      "HOMEBOY_FUZZ_MAX_DURATION",
+      "HOMEBOY_FUZZ_GATE_PROFILE",
+      "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE",
+      "HOMEBOY_FUZZ_ISOLATION"
+    ]
   },
   "actions": [
     {
