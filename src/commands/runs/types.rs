@@ -289,10 +289,20 @@ pub struct RunsArtifactsOutput {
     pub matrix_summary: Option<MatrixArtifactSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fuzz_result_envelopes: Vec<FuzzResultEnvelopeArtifactInspection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_commands: Vec<RunsArtifactCommandHint>,
     /// Present only when `--pull` was requested. Summarizes the best-effort
     /// retrieval of each artifact's bytes to the operator-local artifact root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull: Option<RunsArtifactPullSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RunsArtifactCommandHint {
+    pub artifact_id: String,
+    pub kind: String,
+    pub token: String,
+    pub get_command: String,
 }
 
 #[derive(Serialize)]

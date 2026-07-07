@@ -21,9 +21,9 @@ use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
 use super::types::{
     actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
-    RunsArtifactCommand, RunsArtifactGetArgs, RunsArtifactGetOutput, RunsArtifactPathGuide,
-    RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs, RunsArtifactsOutput,
-    RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
+    RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetOutput,
+    RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
+    RunsArtifactsOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
     RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
     RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
 };
@@ -234,6 +234,7 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
             run_id: run_id.clone(),
             runner_id: None,
             path_guide: RunsArtifactPathGuide::for_listing(&run_id, None),
+            next_commands: artifact_get_command_hints(&run_id, &artifacts),
             artifacts,
             resource_lifecycle_index,
             directory_publication,
@@ -244,6 +245,71 @@ pub fn artifacts_from_args(args: RunsArtifactsArgs) -> CmdResult<RunsOutput> {
         }),
         0,
     ))
+}
+
+fn artifact_get_command_hints(
+    run_id: &str,
+    artifacts: &[homeboy::core::observation::ArtifactRecord],
+) -> Vec<RunsArtifactCommandHint> {
+    artifacts
+        .iter()
+        .map(|artifact| {
+            let token = preferred_artifact_token(artifact, artifacts);
+            RunsArtifactCommandHint {
+                artifact_id: artifact.id.clone(),
+                kind: artifact.kind.clone(),
+                get_command: format!(
+                    "homeboy runs artifact get {} {}",
+                    shell_arg(run_id),
+                    shell_arg(&token)
+                ),
+                token,
+            }
+        })
+        .collect()
+}
+
+fn preferred_artifact_token(
+    artifact: &homeboy::core::observation::ArtifactRecord,
+    artifacts: &[homeboy::core::observation::ArtifactRecord],
+) -> String {
+    if let Some(name) = artifact.metadata_json.get("name").and_then(Value::as_str) {
+        if token_is_unique(name, artifacts) {
+            return name.to_string();
+        }
+    }
+    if token_is_unique(&artifact.kind, artifacts) {
+        return artifact.kind.clone();
+    }
+    artifact.id.clone()
+}
+
+fn token_is_unique(token: &str, artifacts: &[homeboy::core::observation::ArtifactRecord]) -> bool {
+    artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.id == token
+                || artifact.kind == token
+                || artifact.metadata_json.get("name").and_then(Value::as_str) == Some(token)
+                || artifact
+                    .metadata_json
+                    .get("original_manifest_id")
+                    .and_then(Value::as_str)
+                    == Some(token)
+        })
+        .count()
+        == 1
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn directory_publication_guidance_for_artifacts(
