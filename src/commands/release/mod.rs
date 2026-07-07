@@ -421,6 +421,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             skip_checks,
             skip_checks_granular: skip_checks_granular.clone(),
             skip_build_validation: args.skip_build_validation,
+            skip_deps_hydration: crate::commands::skip_deps_hydration(),
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
             pipeline: args.pipeline_options(),
@@ -494,6 +495,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         skip_checks,
         skip_checks_granular,
         skip_build_validation: args.skip_build_validation,
+        skip_deps_hydration: crate::commands::skip_deps_hydration(),
         bump_override,
         force_lower_bump: args.force_lower_bump,
         pipeline: ReleasePipelineOptions {

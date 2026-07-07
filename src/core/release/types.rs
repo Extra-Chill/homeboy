@@ -281,6 +281,9 @@ pub struct ReleaseOptions {
     /// positive (see issue #5425).
     #[serde(default)]
     pub skip_build_validation: bool,
+    /// Skip dependency hydration during release preflight.
+    #[serde(default)]
+    pub skip_deps_hydration: bool,
     #[serde(default, flatten)]
     pub pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
@@ -340,6 +343,9 @@ pub struct ReleaseCommandInput {
     /// build (see [`ReleaseOptions::skip_build_validation`] and issue #5425).
     #[serde(default)]
     pub skip_build_validation: bool,
+    /// Skip dependency hydration during release preflight.
+    #[serde(default)]
+    pub skip_deps_hydration: bool,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
     /// When set, overrides auto-detection from commit history.
     #[serde(skip_serializing_if = "Option::is_none")]
