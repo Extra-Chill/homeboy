@@ -215,8 +215,6 @@ mod tests {
             component_contracts: vec![AgentTaskComponentContract {
                 slug: Some("sample-runtime".to_string()),
                 path: Some("/runner/components/sample-runtime".to_string()),
-                load_as: None,
-                activate: None,
                 extra: Map::new(),
             }],
             policy: AgentTaskPolicy::default(),

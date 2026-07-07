@@ -38,10 +38,10 @@ mod fixtures;
 mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
+mod runtime_preflight_checks;
 mod runtime_types;
 mod secret_types;
 mod secrets;
-mod staging_reconciliation;
 mod types;
 mod workspace_types;
 
@@ -54,15 +54,15 @@ pub(crate) use resolution::{
     resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
     selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,
 };
+pub use runtime_preflight_checks::{
+    ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
+    RuntimePreflightReadiness,
+};
 pub use runtime_types::*;
 pub use secret_types::*;
 pub(crate) use secrets::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
-};
-pub use staging_reconciliation::{
-    ensure_staged_plugins_reconciled, reconcile_staged_plugins, StagingReadiness,
-    StagingReconciliationConflict,
 };
 pub(crate) use types::wildcard_match;
 pub use types::*;
@@ -71,7 +71,7 @@ pub use workspace_types::*;
 
 #[cfg(test)]
 use catalog::{
-    component_default_backend, reconcile_staged_runtime_for_plan_with_providers,
+    component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
     validate_provider_runner_readiness_for_backend_with_providers,
 };
 #[cfg(test)]

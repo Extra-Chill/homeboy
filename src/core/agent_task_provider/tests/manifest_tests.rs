@@ -475,7 +475,7 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
             ],
         },
         apply_back: AgentTaskRuntimeApplyBack::default(),
-        staging: AgentTaskRuntimeStagingContract::default(),
+        preflight_checks: Vec::new(),
     };
 
     let outcome = run_provider_command(&request, &provider, None);

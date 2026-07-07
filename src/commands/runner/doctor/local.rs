@@ -115,6 +115,17 @@ pub fn report(
         tools.entry(command).or_insert(probe);
     }
 
+    let mut declared_tools = BTreeMap::new();
+    for (source, specs) in probes::declared_tool_specs_by_source() {
+        let mut source_tools = BTreeMap::new();
+        for spec in specs {
+            let probe = probes::local_tool_probe(&spec.command, &spec.version_args);
+            source_tools.insert(spec.id.clone(), probe.clone());
+            tools.entry(spec.id.clone()).or_insert(probe);
+        }
+        declared_tools.insert(source, source_tools);
+    }
+
     let playwright = probes::tool_available(&tools, "playwright");
     let browser_ready = probes::local_browser_ready();
     let display_ready = probes::local_display_ready();
@@ -153,13 +164,9 @@ pub fn report(
     }
 
     let capabilities = probes::capabilities_from(
-        &tools,
         true,
         false,
-        playwright,
-        browser_ready,
-        xvfb_ready,
-        headed_browser_ready,
+        true,
         workspace_writable,
         artifact_store_available,
     );
@@ -172,6 +179,7 @@ pub fn report(
         workspace_root: common::display_path(workspace_root),
         artifact_root: common::display_path(artifact_root),
         tools,
+        declared_tools,
     };
 
     RunnerDoctorOutput {

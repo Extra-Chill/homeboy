@@ -669,9 +669,10 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
         request.component_contracts = vec![AgentTaskComponentContract {
             slug: Some("runtime-engine".to_string()),
             path: Some("/workspace/runtime-engine".to_string()),
-            load_as: Some("plugin".to_string()),
-            activate: Some(true),
-            extra: Default::default(),
+            extra: serde_json::Map::from_iter([
+                ("loadAs".to_string(), json!("plugin")),
+                ("activate".to_string(), json!(true)),
+            ]),
         }];
         request.metadata = json!({
             "runtime_component_paths": ["/runtime/components/sandbox-host"]

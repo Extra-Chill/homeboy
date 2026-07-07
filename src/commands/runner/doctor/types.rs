@@ -61,18 +61,7 @@ pub struct RunnerServerSummary {
 pub struct RunnerCapabilities {
     pub local_execution: bool,
     pub ssh_execution: bool,
-    pub git: bool,
-    pub github_cli: bool,
-    pub node: bool,
-    pub npm: bool,
-    pub pnpm: bool,
-    pub php: bool,
-    pub composer: bool,
-    pub docker: bool,
-    pub playwright: bool,
-    pub browser_ready: bool,
-    pub xvfb_ready: bool,
-    pub headed_browser_ready: bool,
+    pub homeboy_available: bool,
     pub workspace_writable: bool,
     pub artifact_store_available: bool,
 }
@@ -89,6 +78,8 @@ pub struct RunnerResources {
     pub workspace_root: String,
     pub artifact_root: String,
     pub tools: BTreeMap<String, ToolProbe>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub declared_tools: BTreeMap<String, BTreeMap<String, ToolProbe>>,
 }
 
 #[derive(Debug, Default, Serialize)]

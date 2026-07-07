@@ -1,4 +1,6 @@
 use super::*;
+use homeboy::core::agent_runtime_manifest::{self, AgentRuntimeManifest};
+use homeboy::core::extension::{self, ExtensionManifest};
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
 pub fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
@@ -6,34 +8,122 @@ pub fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
 }
 
 pub fn capabilities_from(
-    tools: &BTreeMap<String, ToolProbe>,
     local_execution: bool,
     ssh_execution: bool,
-    playwright: bool,
-    browser_ready: bool,
-    xvfb_ready: bool,
-    headed_browser_ready: bool,
+    homeboy_available: bool,
     workspace_writable: bool,
     artifact_store_available: bool,
 ) -> RunnerCapabilities {
     RunnerCapabilities {
         local_execution,
         ssh_execution,
-        git: tool_available(tools, "git"),
-        github_cli: tool_available(tools, "gh"),
-        node: tool_available(tools, "node"),
-        npm: tool_available(tools, "npm"),
-        pnpm: tool_available(tools, "pnpm"),
-        php: tool_available(tools, "php"),
-        composer: tool_available(tools, "composer"),
-        docker: tool_available(tools, "docker"),
-        playwright,
-        browser_ready,
-        xvfb_ready,
-        headed_browser_ready,
+        homeboy_available,
         workspace_writable,
         artifact_store_available,
     }
+}
+
+pub fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
+    let mut by_source = declared_extension_tool_specs_by_source(
+        &extension::load_all_extensions().unwrap_or_default(),
+    );
+    by_source.extend(declared_tool_specs_by_source_from_manifests(
+        &agent_runtime_manifest::discover_agent_runtime_tool_diagnostic_manifests(),
+    ));
+    by_source
+}
+
+pub(super) fn declared_extension_tool_specs_by_source(
+    extensions: &[ExtensionManifest],
+) -> BTreeMap<String, Vec<RunnerToolSpec>> {
+    let mut by_source = BTreeMap::new();
+    for extension in extensions {
+        let mut specs = extension
+            .diagnostics
+            .tools
+            .iter()
+            .filter_map(|tool| {
+                declared_tool_spec_from_parts(
+                    &extension.id,
+                    tool.id.as_str(),
+                    tool.command.as_deref(),
+                    &tool.version_args,
+                    tool.remediation.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if specs.is_empty() {
+            continue;
+        }
+        specs.sort_by(|left, right| left.id.cmp(&right.id));
+        by_source.insert(extension.id.clone(), specs);
+    }
+    by_source
+}
+
+pub(super) fn declared_tool_specs_by_source_from_manifests(
+    manifests: &[AgentRuntimeManifest],
+) -> BTreeMap<String, Vec<RunnerToolSpec>> {
+    let mut by_source = BTreeMap::new();
+    for manifest in manifests {
+        let mut specs = manifest
+            .materialization
+            .diagnostics
+            .tools
+            .iter()
+            .filter_map(|tool| declared_tool_spec(manifest, tool.tool.as_str()))
+            .collect::<Vec<_>>();
+        if specs.is_empty() {
+            continue;
+        }
+        specs.sort_by(|left, right| left.id.cmp(&right.id));
+        by_source.insert(declared_tool_source(manifest), specs);
+    }
+    by_source
+}
+
+fn declared_tool_spec(manifest: &AgentRuntimeManifest, tool: &str) -> Option<RunnerToolSpec> {
+    declared_tool_spec_from_parts(&declared_tool_source(manifest), tool, None, &[], None)
+}
+
+fn declared_tool_spec_from_parts(
+    source: &str,
+    tool: &str,
+    command: Option<&str>,
+    version_args: &[String],
+    remediation: Option<&str>,
+) -> Option<RunnerToolSpec> {
+    let id = tool.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(RunnerToolSpec {
+        tool: None,
+        id: id.to_string(),
+        capability_id: format!("declared_tool.{source}.{id}"),
+        check_id: format!("tool.declared.{source}.{id}"),
+        command: command.unwrap_or(id).to_string(),
+        version_args: if version_args.is_empty() {
+            vec!["--version".to_string()]
+        } else {
+            version_args.to_vec()
+        },
+        required: false,
+        remediation: remediation
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Install '{id}' and ensure it is on PATH")),
+        capability_remediation: remediation
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Install '{id}' on the runner and ensure it is on PATH.")),
+    })
+}
+
+fn declared_tool_source(manifest: &AgentRuntimeManifest) -> String {
+    manifest
+        .extension_id
+        .as_ref()
+        .map(|extension_id| format!("{extension_id}/{}", manifest.id))
+        .unwrap_or_else(|| manifest.id.clone())
 }
 
 pub fn tool_available(tools: &BTreeMap<String, ToolProbe>, id: &str) -> bool {

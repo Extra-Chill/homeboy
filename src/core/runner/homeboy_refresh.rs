@@ -433,7 +433,12 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
         .as_ref()
         .map(|output| output.updated_fields.clone())
         .unwrap_or_default();
-    if let MergeOutput::Single(result) = merge(Some(&options.runner_id), &patch.to_string(), &[])? {
+    let replace_fields = vec!["resources".to_string()];
+    if let MergeOutput::Single(result) = merge(
+        Some(&options.runner_id),
+        &patch.to_string(),
+        &replace_fields,
+    )? {
         updated_fields.extend(result.updated_fields);
     }
 

@@ -135,6 +135,17 @@ pub fn report(
         tools.entry(command).or_insert(probe);
     }
 
+    let mut declared_tools = BTreeMap::new();
+    for (source, specs) in probes::declared_tool_specs_by_source() {
+        let mut source_tools = BTreeMap::new();
+        for spec in specs {
+            let probe = probes::remote_tool_probe(client, &spec.command, &spec.version_args);
+            source_tools.insert(spec.id.clone(), probe.clone());
+            tools.entry(spec.id.clone()).or_insert(probe);
+        }
+        declared_tools.insert(source, source_tools);
+    }
+
     let playwright = probes::tool_available(&tools, "playwright");
     let browser_ready = probes::remote_browser_ready(client);
     let display_ready = probes::remote_display_ready(client);
@@ -197,13 +208,9 @@ pub fn report(
     }
 
     let capabilities = probes::capabilities_from(
-        &tools,
         false,
         true,
-        playwright,
-        browser_ready,
-        xvfb_ready,
-        headed_browser_ready,
+        homeboy.path.is_some(),
         workspace_writable,
         artifact_store_available,
     );
@@ -216,6 +223,7 @@ pub fn report(
         workspace_root: workspace_root.clone(),
         artifact_root,
         tools,
+        declared_tools,
     };
 
     RunnerDoctorOutput {

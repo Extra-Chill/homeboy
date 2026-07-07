@@ -609,72 +609,99 @@ fn provider_exhausts_bounded_transient_retries() {
     let _ = fs::remove_file(&state_path);
 }
 
-fn plugin_component_contract(
+fn selected_component_contract(
     slug: &str,
     path: &std::path::Path,
 ) -> crate::core::agent_task::AgentTaskComponentContract {
+    let mut extra = serde_json::Map::new();
+    extra.insert("loadMode".to_string(), json!("runtime-loadable"));
+    extra.insert("activate".to_string(), json!(true));
     crate::core::agent_task::AgentTaskComponentContract {
         slug: Some(slug.to_string()),
         path: Some(path.display().to_string()),
-        load_as: Some("plugin".to_string()),
-        activate: Some(true),
-        extra: Default::default(),
+        extra,
     }
 }
 
-fn staging_provider() -> AgentTaskExecutorProvider {
-    let (_, mut provider) = request("staging", "noop".to_string());
-    provider.runtime_contract.staging = AgentTaskRuntimeStagingContract {
-        reconciled_packages: vec![AgentTaskRuntimeReconciledPackage {
-            name: "acme/runtime-lib".to_string(),
-            owner: Some("wordpress-7.0".to_string()),
-            ..AgentTaskRuntimeReconciledPackage::default()
-        }],
-        ..AgentTaskRuntimeStagingContract::default()
-    };
+fn runtime_preflight_provider() -> AgentTaskExecutorProvider {
+    let (_, mut provider) = request("runtime-preflight", "noop".to_string());
+    provider.runtime_contract.preflight_checks = vec![serde_json::from_value(json!({
+        "id": "runtime.package_shadow",
+        "enforcement": "error",
+        "target": {
+            "component": {
+                "metadata_equals": { "loadMode": "runtime-loadable" },
+                "metadata_any_equals": { "activate": true }
+            }
+        },
+        "path_probes": {
+            "exists": [{
+                "path": "vendor/acme/runtime-lib",
+                "subject": "acme/runtime-lib",
+                "owner": "runtime-1"
+            }]
+        }
+    }))
+    .expect("runtime preflight check")];
     provider
 }
 
-fn staging_plan(component: crate::core::agent_task::AgentTaskComponentContract) -> AgentTaskPlan {
-    let (mut req, _) = request("staging", "noop".to_string());
+fn runtime_preflight_plan(
+    component: crate::core::agent_task::AgentTaskComponentContract,
+) -> AgentTaskPlan {
+    let (mut req, _) = request("runtime-preflight", "noop".to_string());
     req.component_contracts = vec![component];
-    AgentTaskPlan::new("plan-staging".to_string(), vec![req])
+    AgentTaskPlan::new("plan-runtime-preflight".to_string(), vec![req])
 }
 
 #[test]
-fn plan_reconciliation_passes_when_no_staged_plugin_shadows_runtime() {
-    let plugin = tempfile::tempdir().expect("plugin dir");
-    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
+fn plan_runtime_preflight_passes_when_declared_probe_is_absent() {
+    let component = tempfile::tempdir().expect("component dir");
+    let plan = runtime_preflight_plan(selected_component_contract(
+        "provider-component",
+        component.path(),
+    ));
 
-    reconcile_staged_runtime_for_plan_with_providers(&plan, &[staging_provider()])
-        .expect("clean staged plugin reconciles before dispatch");
+    enforce_runtime_preflight_checks_for_plan_with_providers(
+        &plan,
+        &[runtime_preflight_provider()],
+    )
+    .expect("clean component passes declared preflight before dispatch");
 }
 
 #[test]
-fn plan_reconciliation_refuses_shadowed_runtime_package_before_dispatch() {
-    let plugin = tempfile::tempdir().expect("plugin dir");
-    fs::create_dir_all(plugin.path().join("vendor/acme/runtime-lib"))
-        .expect("create vendored runtime dir");
-    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
+fn plan_runtime_preflight_refuses_declared_path_conflict_before_dispatch() {
+    let component = tempfile::tempdir().expect("component dir");
+    fs::create_dir_all(component.path().join("vendor/acme/runtime-lib"))
+        .expect("create conflict dir");
+    let plan = runtime_preflight_plan(selected_component_contract(
+        "provider-component",
+        component.path(),
+    ));
 
-    let err = reconcile_staged_runtime_for_plan_with_providers(&plan, &[staging_provider()])
-        .expect_err("shadowed runtime package is refused before dispatch");
+    let err = enforce_runtime_preflight_checks_for_plan_with_providers(
+        &plan,
+        &[runtime_preflight_provider()],
+    )
+    .expect_err("declared path conflict is refused before dispatch");
 
-    assert_eq!(err.details["field"], "staged_plugin");
+    assert_eq!(err.details["field"], "runtime_preflight_checks");
     assert!(err.message.contains("acme/runtime-lib"));
-    assert!(err.message.contains("wordpress-7.0"));
-    assert!(err.message.contains("provider-plugin"));
+    assert!(err.message.contains("runtime-1"));
+    assert!(err.message.contains("provider-component"));
 }
 
 #[test]
-fn plan_reconciliation_skips_provider_without_staging_contract() {
-    let plugin = tempfile::tempdir().expect("plugin dir");
-    fs::create_dir_all(plugin.path().join("vendor/acme/runtime-lib"))
-        .expect("create vendored runtime dir");
-    let plan = staging_plan(plugin_component_contract("provider-plugin", plugin.path()));
-    // Default provider has an empty staging contract: nothing to reconcile.
-    let (_, provider) = request("staging", "noop".to_string());
+fn plan_runtime_preflight_skips_provider_without_declared_checks() {
+    let component = tempfile::tempdir().expect("component dir");
+    fs::create_dir_all(component.path().join("vendor/acme/runtime-lib"))
+        .expect("create conflict dir");
+    let plan = runtime_preflight_plan(selected_component_contract(
+        "provider-component",
+        component.path(),
+    ));
+    let (_, provider) = request("runtime-preflight", "noop".to_string());
 
-    reconcile_staged_runtime_for_plan_with_providers(&plan, &[provider])
-        .expect("provider without a staging contract is a no-op");
+    enforce_runtime_preflight_checks_for_plan_with_providers(&plan, &[provider])
+        .expect("provider without declared checks is a no-op");
 }

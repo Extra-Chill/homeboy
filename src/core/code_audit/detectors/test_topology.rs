@@ -380,6 +380,7 @@ JSON
             env_provider: None,
             ci: None,
             source_snapshot: None,
+            diagnostics: Default::default(),
             runtime: None,
             cli: None,
             build: None,

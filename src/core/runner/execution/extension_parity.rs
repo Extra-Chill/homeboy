@@ -528,8 +528,9 @@ fn record_materialized_extension_overlay(
     dev_sync["extensions"] = Value::Array(extensions);
     runner.resources.insert("dev_sync".to_string(), dev_sync);
     let patch = serde_json::json!({ "resources": runner.resources });
+    let replace_fields = vec!["resources".to_string()];
     let _updated = matches!(
-        merge(Some(runner_id), &patch.to_string(), &[])?,
+        merge(Some(runner_id), &patch.to_string(), &replace_fields)?,
         MergeOutput::Single(_)
     );
     Ok(())
@@ -734,6 +735,16 @@ fn validate_runner_extension_revision(
     extension_id: &str,
     remote_stdout: &str,
 ) -> Result<()> {
+    if let Some(overlay) = dev_sync_extension_overlay(runner, extension_id) {
+        return validate_dev_overlay_extension_revision(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            remote_stdout,
+            &overlay,
+        );
+    }
+
     let local_revision = extension::read_source_revision(extension_id);
     let remote_revision = remote_extension_source_revision(remote_stdout);
     if matches!(
@@ -750,15 +761,6 @@ fn validate_runner_extension_revision(
         return Ok(());
     }
 
-    if let Some(overlay) = dev_sync_extension_overlay(runner, extension_id) {
-        return validate_dev_overlay_extension_revision(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            remote_stdout,
-            &overlay,
-        );
-    }
     let Some(local_revision) = local_revision.filter(|revision| !revision.trim().is_empty()) else {
         return Ok(());
     };
@@ -993,11 +995,12 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
-        remote_extension_core_compatibility, remote_extension_ready_status,
-        remote_extension_setting_ids, remote_extension_source_revision,
-        requested_setting_keys_for_command, runner_extension_sync_command,
-        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
-        validate_runner_extension_revision, validate_runner_extension_settings,
+        record_materialized_extension_overlay, remote_extension_core_compatibility,
+        remote_extension_ready_status, remote_extension_setting_ids,
+        remote_extension_source_revision, requested_setting_keys_for_command,
+        runner_extension_sync_command, validate_runner_extension_core_compatibility,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings,
     };
     use crate::test_support::with_isolated_home;
 
@@ -1431,26 +1434,99 @@ mod tests {
     }
 
     #[test]
-    fn revision_parity_ignores_stale_dev_overlay_when_installed_revision_is_current() {
+    fn revision_parity_rejects_dirty_dev_overlay_when_same_revision_content_changed() {
         with_isolated_home(|home| {
             let extension_dir = home.path().join(".config/homeboy/extensions/nodejs");
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(extension_dir.join(".source-revision"), "1fad4a12\n").expect("revision");
-            let runner = runner_with_overlay(
-                "nodejs",
-                "/Users/chubes/Developer/homeboy-extensions@fix-nodejs-fuzz-runner/nodejs",
-                "stale-dev-overlay-hash",
-            );
+
+            let source = tempfile::tempdir().expect("source dir");
+            fs::write(source.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
+            fs::write(source.path().join("run.sh"), "echo synced\n").expect("source file");
+            let synced_hash = crate::core::runner::extension_source_content_hash(source.path())
+                .expect("content hash");
+            fs::write(source.path().join("run.sh"), "echo dirty\n").expect("dirty source file");
+
+            let runner =
+                runner_with_overlay("nodejs", &source.path().display().to_string(), &synced_hash);
             let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"1fad4a12"}}}"#;
 
-            validate_runner_extension_revision(
+            let err = validate_runner_extension_revision(
                 "homeboy-lab",
                 &runner,
                 "homeboy",
                 "nodejs",
                 remote_stdout,
             )
-            .expect("current installed revision should supersede stale dev overlay metadata");
+            .expect_err("dev overlay content hash should supersede matching git revision");
+
+            assert_eq!(
+                err.details["diagnostic"]["code"].as_str(),
+                Some("runner_extension.dev_overlay_content_hash_mismatch")
+            );
+            assert_eq!(
+                err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
+                Some("1fad4a12")
+            );
+        });
+    }
+
+    #[test]
+    fn materialized_overlay_record_replaces_duplicate_dev_sync_entries() {
+        with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{
+                    "id": "homeboy-lab",
+                    "kind": "local",
+                    "workspace_root": "/runner/ws",
+                    "resources": {
+                        "dev_sync": {
+                            "schema": "homeboy/runner-dev-sync/v1",
+                            "extensions": [
+                                {"id":"nodejs","source_path":"/old","content_hash":"old"},
+                                {"id":"nodejs","source_path":"/older","content_hash":"older"},
+                                {"id":"rust","source_path":"/rust","content_hash":"rust"}
+                            ]
+                        },
+                        "keep": {"enabled": true}
+                    }
+                }"#,
+                false,
+            )
+            .expect("create runner");
+
+            record_materialized_extension_overlay(
+                "homeboy-lab",
+                crate::core::runner::extension_materialization::RunnerExtensionMaterializationProvenance {
+                    id: "nodejs".to_string(),
+                    source_path: "/new/nodejs".to_string(),
+                    synced_source_path: "/runner/ws/_lab_workspaces/dev-extensions/nodejs/new/".to_string(),
+                    content_hash: "new".to_string(),
+                    source_revision: Some("abc123".to_string()),
+                    dirty: true,
+                    dirty_fingerprint: Some("dirty".to_string()),
+                    synced_at: "2026-07-07T00:00:00Z".to_string(),
+                    dev_overlay: true,
+                    lifecycle: crate::core::runner::extension_materialization::dev_extension_lifecycle(
+                        "homeboy-lab",
+                        "/runner/ws/_lab_workspaces/dev-extensions/nodejs/new/",
+                        "nodejs",
+                    ),
+                    materialization_source: None,
+                },
+            )
+            .expect("records overlay");
+
+            let runner = crate::core::runner::load("homeboy-lab").expect("load runner");
+            let extensions = runner.resources["dev_sync"]["extensions"]
+                .as_array()
+                .expect("extensions");
+
+            assert_eq!(extensions.len(), 2);
+            assert_eq!(extensions[0]["id"], "rust");
+            assert_eq!(extensions[1]["id"], "nodejs");
+            assert_eq!(extensions[1]["content_hash"], "new");
+            assert_eq!(runner.resources["keep"]["enabled"], true);
         });
     }
 
