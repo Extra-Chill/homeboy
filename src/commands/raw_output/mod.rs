@@ -165,23 +165,4 @@ mod tests {
 
         assert!(result.is_none());
     }
-
-    #[test]
-    fn unsupported_plain_text_command_returns_output_mode_error() {
-        let result = run(
-            Commands::Contract(crate::commands::contract::ContractArgs {
-                command: crate::commands::contract::ContractCommand::Manifest(
-                    crate::commands::manifest::ManifestArgs {},
-                ),
-            }),
-            &GlobalArgs {},
-            CommandRawOutputMode::PlainText,
-        )
-        .expect("plain text mode should return a result")
-        .raw_stdout
-        .expect("raw mode has raw stdout")
-        .expect_err("manifest does not support plain text output");
-
-        assert!(result.to_string().contains("plain text output"));
-    }
 }

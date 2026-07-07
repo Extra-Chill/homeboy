@@ -204,10 +204,6 @@ fn scalar_label(value: &Value) -> Option<String> {
 pub struct ArtifactJsonRow {
     pub run: RunRecord,
     pub artifact_kind: String,
-    /// Local path on disk. Held for diagnostics so callers can mention which
-    /// file produced a finding; not currently consumed by core primitives.
-    #[allow(dead_code)]
-    pub artifact_path: String,
     pub json: Value,
 }
 
@@ -304,7 +300,6 @@ pub fn load_artifact_rows(
         rows.push(ArtifactJsonRow {
             run,
             artifact_kind: artifact.kind,
-            artifact_path: artifact.path,
             json,
         });
     }
@@ -488,25 +483,21 @@ mod tests {
             ArtifactJsonRow {
                 run: sample_run("a"),
                 artifact_kind: "k".into(),
-                artifact_path: "/dev/null".into(),
                 json: serde_json::json!({ "kind": "alpha" }),
             },
             ArtifactJsonRow {
                 run: sample_run("b"),
                 artifact_kind: "k".into(),
-                artifact_path: "/dev/null".into(),
                 json: serde_json::json!({ "kind": "alpha" }),
             },
             ArtifactJsonRow {
                 run: sample_run("c"),
                 artifact_kind: "k".into(),
-                artifact_path: "/dev/null".into(),
                 json: serde_json::json!({ "kind": "beta" }),
             },
             ArtifactJsonRow {
                 run: sample_run("d"),
                 artifact_kind: "k".into(),
-                artifact_path: "/dev/null".into(),
                 json: serde_json::json!({ "other": true }),
             },
         ];

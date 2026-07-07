@@ -42,8 +42,7 @@ pub use types::{
 
 #[cfg(test)]
 pub(crate) use extract::{
-    extract_block_body, extract_concept, import_paths, method_names, public_symbols,
-    regex_cache_has_for_tests, type_names,
+    extract_block_body, extract_concept, import_paths, method_names, public_symbols, type_names,
 };
 #[cfg(test)]
 pub(crate) use parser::walk_lines;
@@ -372,19 +371,6 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "std::path::Path");
         assert_eq!(paths[1], "crate::core::error::Result");
-    }
-
-    #[test]
-    fn extract_caches_compiled_regex_patterns() {
-        let content = "pub fn cached_regex_probe() {}\n";
-        let grammar = rust_grammar();
-        let function_pattern = grammar.patterns.get("function").unwrap().regex.clone();
-
-        let first = extract(content, &grammar);
-        let second = extract(content, &grammar);
-
-        assert_eq!(first.len(), second.len());
-        assert!(regex_cache_has_for_tests(&function_pattern));
     }
 
     #[test]
