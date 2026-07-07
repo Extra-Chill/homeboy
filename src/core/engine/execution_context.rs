@@ -184,7 +184,45 @@ fn add_extension_override_hints(
     mut err: Error,
     extension_overrides: &[String],
     declared_extension_ids: &[String],
+    capability: ExtensionCapability,
 ) -> Error {
+    if !extension_overrides.is_empty()
+        && err.code == ErrorCode::ValidationInvalidArgument
+        && err
+            .details
+            .get("problem")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|problem| problem.contains("has no linked extensions that provide"))
+    {
+        let override_list = extension_overrides.join(", ");
+        let mut explicit_err = Error::validation_invalid_argument(
+            "extension",
+            format!(
+                "explicit extension override '{}' is installed but does not declare {} support",
+                override_list,
+                capability.label()
+            ),
+            Some(override_list),
+            None,
+        )
+        .with_hint(format!(
+            "Upgrade or refresh the runner extension so its manifest declares {} support, then retry.",
+            capability.label()
+        ))
+        .with_hint(
+            "If this command was offloaded to Lab, run the runner extension refresh/update workflow on that runner.".to_string(),
+        );
+
+        if !declared_extension_ids.is_empty() {
+            explicit_err = explicit_err.with_hint(format!(
+                "Component declares extensions: {}",
+                declared_extension_ids.join(", ")
+            ));
+        }
+
+        return explicit_err;
+    }
+
     if extension_overrides.is_empty() || err.code != ErrorCode::ExtensionNotFound {
         return err;
     }
@@ -266,6 +304,7 @@ pub fn resolve_with_component(
                             err,
                             &options.extension_overrides,
                             &declared_extension_ids,
+                            capability,
                         )
                     })?;
                 let accepted_setting_keys = ext_context.accepted_setting_keys.clone();

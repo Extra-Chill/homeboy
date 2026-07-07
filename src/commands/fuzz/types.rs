@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -9,6 +10,7 @@ use crate::command_contract::{
     FUZZ_LAB_LABEL,
 };
 use homeboy::core::fuzz::FuzzGateProfile;
+use homeboy::core::rig::{self, RigSpec};
 
 #[derive(Args)]
 pub struct FuzzArgs {
@@ -51,10 +53,32 @@ impl FuzzArgs {
         ) || matches!(&self.command, Some(FuzzCommand::Plan(plan)) if plan.execute)
     }
 
-    pub fn extension_override_ids(&self) -> &[String] {
+    pub(crate) fn lab_required_extension_ids(&self) -> homeboy::core::Result<Vec<String>> {
+        if let Some(FuzzCommand::List(list)) = &self.command {
+            if !list.extension_override.extensions.is_empty() {
+                return Ok(list.extension_override.extensions.clone());
+            }
+            return lab_required_rig_extension_ids(list.rig.as_deref(), list.comp.id());
+        }
+
+        let Some(run) = self.run_args_for_lab_offload() else {
+            return Ok(Vec::new());
+        };
+        if !run.extension_override.extensions.is_empty() {
+            return Ok(run.extension_override.extensions.clone());
+        }
+
+        lab_required_rig_extension_ids(run.rig.as_deref(), run.comp.id())
+    }
+
+    fn run_args_for_lab_offload(&self) -> Option<&FuzzRunArgs> {
         match &self.command {
-            Some(FuzzCommand::List(list)) => list.extension_override.extensions.as_slice(),
-            _ => self.run.extension_override.extensions.as_slice(),
+            None => Some(&self.run),
+            Some(FuzzCommand::Run(run)) => Some(run),
+            Some(FuzzCommand::RunCampaign(plan)) => Some(&plan.run),
+            Some(FuzzCommand::Plan(plan)) => plan.execute.then_some(&plan.run),
+            Some(FuzzCommand::List(_)) => None,
+            _ => None,
         }
     }
 
@@ -81,6 +105,49 @@ impl FuzzArgs {
             _ => None,
         }
     }
+}
+
+fn lab_required_rig_extension_ids(
+    rig_id: Option<&str>,
+    component_id: Option<&str>,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(rig_id) = rig_id else {
+        return Ok(Vec::new());
+    };
+    let spec = rig::load(rig_id)?;
+    let mut extension_ids = BTreeSet::new();
+    let workload_extension_ids =
+        rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Fuzz);
+    for extension_id in &workload_extension_ids {
+        extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
+            &spec,
+            rig::RigWorkloadKind::Fuzz,
+            extension_id,
+        ));
+    }
+    extension_ids.extend(workload_extension_ids);
+    extension_ids.extend(fuzz_component_extension_ids(&spec, component_id));
+    Ok(extension_ids.into_iter().collect())
+}
+
+fn fuzz_component_extension_ids(spec: &RigSpec, explicit_component: Option<&str>) -> Vec<String> {
+    let component_id = explicit_component.map(str::to_string).or_else(|| {
+        spec.fuzz
+            .as_ref()
+            .and_then(|fuzz| fuzz.default_component.clone())
+    });
+    let Some(component_id) = component_id else {
+        return Vec::new();
+    };
+
+    let mut extension_ids: Vec<String> = spec
+        .components
+        .get(&component_id)
+        .and_then(|component| component.extensions.as_ref())
+        .map(|extensions| extensions.keys().cloned().collect())
+        .unwrap_or_default();
+    extension_ids.sort();
+    extension_ids
 }
 
 #[derive(Subcommand)]
