@@ -30,7 +30,9 @@ bash -c '
 DEV_ROOT="$TMP_DIR/dev-overlay-src"
 mkdir -p "$DEV_ROOT"
 cp -R "$ROOT_DIR" "$DEV_ROOT/nodejs"
-DEV_NODE_HELPERS="${DEV_ROOT}/nodejs/scripts/lib/node-helpers.sh"
+rm -rf "$INSTALL_ROOT/nodejs"
+ln -s "$DEV_ROOT/nodejs" "$INSTALL_ROOT/nodejs"
+DEV_NODE_HELPERS="${INSTALL_ROOT}/nodejs/scripts/lib/node-helpers.sh"
 
 test -f "$DEV_NODE_HELPERS"
 
