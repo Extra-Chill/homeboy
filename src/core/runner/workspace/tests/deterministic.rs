@@ -81,7 +81,7 @@ fn materialization_plan_records_explicit_remote_path_contract() {
 }
 
 #[test]
-fn default_excludes_filter_generated_outputs_and_secrets() {
+fn default_excludes_filter_core_metadata_and_secrets() {
     let root = Path::new("/repo");
     let excludes = DEFAULT_EXCLUDES
         .iter()
@@ -90,25 +90,31 @@ fn default_excludes_filter_generated_outputs_and_secrets() {
 
     assert!(is_excluded(
         root,
-        Path::new("/repo/node_modules/pkg/index.js"),
-        &excludes,
-        &[]
-    ));
-    assert!(is_excluded(
-        root,
         Path::new("/repo/.env.local"),
         &excludes,
         &[]
     ));
     assert!(is_excluded(
         root,
-        Path::new("/repo/target/debug/homeboy"),
+        Path::new("/repo/.homeboy-build/plugin.zip"),
         &excludes,
         &[]
     ));
     assert!(is_excluded(
         root,
         Path::new("/repo/src/__tests__/._index.js"),
+        &excludes,
+        &[]
+    ));
+    assert!(!is_excluded(
+        root,
+        Path::new("/repo/node_modules/pkg/index.js"),
+        &excludes,
+        &[]
+    ));
+    assert!(!is_excluded(
+        root,
+        Path::new("/repo/target/debug/homeboy"),
         &excludes,
         &[]
     ));

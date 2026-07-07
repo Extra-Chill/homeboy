@@ -70,6 +70,11 @@ pub fn sync_workspace(
             excludes.push(pattern.clone());
         }
     }
+    for pattern in crate::core::source_snapshot::declared_sync_excludes_for_path(&local_path) {
+        if !excludes.contains(&pattern) {
+            excludes.push(pattern);
+        }
+    }
     let mut includes = runner.policy.snapshot_includes.clone();
     for pattern in &options.snapshot_includes {
         if !includes.contains(pattern) {

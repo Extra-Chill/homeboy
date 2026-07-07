@@ -19,9 +19,9 @@ pub use super::manifest_config::{
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint,
     DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
     FuzzConfig, FuzzWorkloadConfig, LintChangedFileRoute, LintConfig, RemotePathInferenceRule,
-    RemotePathRootRule, RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv,
-    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig,
-    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    RemotePathRootRule, RequirementsConfig, SinceTagConfig, SourceSnapshotConfig,
+    TestChangedFileExclusiveEnv, TestChangedFileRouting, TestChangedFileRoutingStrategy,
+    TestConfig, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
     VersionPatternConfig,
 };
@@ -691,6 +691,8 @@ pub struct ExtensionManifest {
     pub env_provider: Option<EnvProviderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<SourceSnapshotConfig>,
 
     /// Optional diagnostics this extension wants runner doctor to probe without
     /// core learning the extension's ecosystem or toolchain.

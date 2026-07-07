@@ -14,9 +14,6 @@ const SOURCE_SYNC_EXCLUDES_ENV: &str = "HOMEBOY_SOURCE_SYNC_EXCLUDES";
 
 const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".git/",
-    "node_modules/",
-    "target/",
-    "vendor/",
     ".homeboy-build/",
     ".homeboy-bin/",
     ".homeboy/",
@@ -35,9 +32,14 @@ pub struct SourceSnapshotPolicy {
 impl SourceSnapshotPolicy {
     pub fn from_env() -> Self {
         let mut policy = Self::default();
+        policy.extend_sync_excludes(split_env_list(SOURCE_SYNC_EXCLUDES_ENV));
         policy
-            .sync_excludes
-            .extend(split_env_list(SOURCE_SYNC_EXCLUDES_ENV));
+    }
+
+    pub fn for_path(path: &Path) -> Self {
+        let mut policy = Self::from_env();
+        policy.extend_sync_excludes(component_extension_sync_excludes(path));
+        policy.extend_sync_excludes(gitignore_sync_excludes(path));
         policy
     }
 
@@ -46,9 +48,20 @@ impl SourceSnapshotPolicy {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.sync_excludes
-            .extend(excludes.into_iter().map(Into::into));
+        self.extend_sync_excludes(excludes.into_iter().map(Into::into));
         self
+    }
+
+    pub(crate) fn extend_sync_excludes<I, S>(&mut self, excludes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for exclude in excludes.into_iter().map(Into::into) {
+            if !exclude.trim().is_empty() && !self.sync_excludes.contains(&exclude) {
+                self.sync_excludes.push(exclude);
+            }
+        }
     }
 }
 
@@ -89,7 +102,7 @@ impl SourceSnapshot {
         remote_path: Option<&str>,
         sync_mode: &str,
     ) -> Self {
-        let policy = SourceSnapshotPolicy::from_env();
+        let policy = SourceSnapshotPolicy::for_path(path);
         Self::collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
     }
 
@@ -180,6 +193,106 @@ pub(crate) fn default_sync_excludes() -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn declared_sync_excludes_for_path(path: &Path) -> Vec<String> {
+    let mut excludes = Vec::new();
+    append_unique(&mut excludes, component_extension_sync_excludes(path));
+    append_unique(&mut excludes, gitignore_sync_excludes(path));
+    excludes
+}
+
+fn component_extension_sync_excludes(path: &Path) -> Vec<String> {
+    let Ok(path) = fs::canonicalize(path) else {
+        return Vec::new();
+    };
+    let Ok(components) = crate::core::component::inventory() else {
+        return Vec::new();
+    };
+
+    let mut excludes = Vec::new();
+    for component in components {
+        let component_path = PathBuf::from(shellexpand::tilde(&component.local_path).into_owned());
+        let Ok(component_path) = fs::canonicalize(component_path) else {
+            continue;
+        };
+        if component_path != path {
+            continue;
+        }
+        let Some(extensions) = component.extensions.as_ref() else {
+            continue;
+        };
+        let mut extension_ids = extensions.keys().collect::<Vec<_>>();
+        extension_ids.sort();
+        for extension_id in extension_ids {
+            let Ok(extension) = crate::core::extension::load_extension(extension_id) else {
+                continue;
+            };
+            if let Some(source_snapshot) = extension.source_snapshot {
+                append_unique(&mut excludes, source_snapshot.sync_excludes);
+            }
+        }
+    }
+    excludes
+}
+
+pub(crate) fn gitignore_sync_excludes(path: &Path) -> Vec<String> {
+    let mut excludes = Vec::new();
+    if let Ok(contents) = fs::read_to_string(path.join(".gitignore")) {
+        for line in contents.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                continue;
+            }
+            append_gitignore_exclude(&mut excludes, line);
+        }
+    }
+
+    let Some(output) = git::output_optional(
+        path,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    ) else {
+        return excludes;
+    };
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        append_gitignore_exclude(&mut excludes, line);
+    }
+    excludes
+}
+
+fn append_gitignore_exclude(excludes: &mut Vec<String>, raw: &str) {
+    let pattern = raw.trim_start_matches("./").trim_start_matches('/');
+    if pattern.is_empty() {
+        return;
+    }
+    if pattern.ends_with('/') {
+        let base = pattern.trim_end_matches('/');
+        append_unique(excludes, [base.to_string(), format!("{base}/**")]);
+    } else {
+        append_unique(excludes, [pattern.to_string()]);
+    }
+}
+
+fn append_unique<I, S>(values: &mut Vec<String>, items: I)
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    for item in items.into_iter().map(Into::into) {
+        if !item.trim().is_empty() && !values.contains(&item) {
+            values.push(item);
+        }
+    }
+}
+
 fn split_env_list(name: &str) -> Vec<String> {
     std::env::var(name)
         .ok()
@@ -254,9 +367,11 @@ mod tests {
         let excludes = default_sync_excludes();
 
         assert!(excludes.contains(&".git/".to_string()));
-        assert!(excludes.contains(&"node_modules/".to_string()));
         assert!(excludes.contains(&".homeboy-build/".to_string()));
         assert!(excludes.contains(&".env".to_string()));
+        assert!(!excludes.contains(&"node_modules/".to_string()));
+        assert!(!excludes.contains(&"target/".to_string()));
+        assert!(!excludes.contains(&"vendor/".to_string()));
         assert!(!excludes.contains(&".sampleplugin/".to_string()));
     }
 

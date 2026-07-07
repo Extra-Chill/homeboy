@@ -9,6 +9,10 @@ use crate::core::resource_lifecycle_index::ResourceLifecycleRecord;
 pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
     ".git/**",
+    ".homeboy-build",
+    ".homeboy-build/**",
+    ".homeboy-bin",
+    ".homeboy-bin/**",
     "._*",
     "**/._*",
     ".env",
@@ -21,19 +25,6 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     ".ssh/**",
     "*.p12",
     "*.pfx",
-    "node_modules",
-    "node_modules/**",
-    "target",
-    "target/**",
-    "dist",
-    "dist/**",
-    ".next",
-    ".next/**",
-    ".turbo",
-    ".turbo/**",
-    ".cache",
-    ".cache/**",
-    "*.tsbuildinfo",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]

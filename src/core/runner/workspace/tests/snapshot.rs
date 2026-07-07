@@ -175,7 +175,7 @@ fn test_sync_workspace() {
         assert_eq!(output.current_workspace.source_commit, None);
         assert_eq!(output.current_workspace.source_ref, None);
         assert_eq!(output.current_workspace.source_dirty, None);
-        assert_eq!(output.counts.files, 4);
+        assert_eq!(output.counts.files, 6);
         assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
         assert!(Path::new(&output.remote_path)
             .join("vendor/autoload.php")
@@ -191,11 +191,71 @@ fn test_sync_workspace() {
             .join("src/._main.rs")
             .exists());
         assert!(!Path::new(&output.remote_path).join(".env.local").exists());
+        assert!(Path::new(&output.remote_path)
+            .join("target/debug/homeboy")
+            .exists());
+        assert!(Path::new(&output.remote_path)
+            .join("packages/cli/tsconfig.tsbuildinfo")
+            .exists());
+    });
+}
+
+#[test]
+fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(source.path(), &["init"]);
+        fs::write(
+            source.path().join(".gitignore"),
+            "target/\nnode_modules/\n*.tsbuildinfo\n",
+        )
+        .expect("gitignore");
+        fs::create_dir_all(source.path().join("src")).expect("src dir");
+        fs::create_dir_all(source.path().join("target/debug")).expect("target dir");
+        fs::create_dir_all(source.path().join("node_modules/pkg")).expect("node_modules dir");
+        fs::write(source.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+        fs::write(source.path().join("target/debug/homeboy"), "binary").expect("build file");
+        fs::write(source.path().join("node_modules/pkg/index.js"), "module").expect("module file");
+        fs::write(source.path().join("build.tsbuildinfo"), "state").expect("state file");
+
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-gitignore","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, exit_code) = sync_workspace(
+            "lab-local-gitignore",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("sync workspace");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.excludes.contains(&"target".to_string()));
+        assert!(output.excludes.contains(&"node_modules/**".to_string()));
+        assert!(output.excludes.contains(&"*.tsbuildinfo".to_string()));
+        assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
         assert!(!Path::new(&output.remote_path)
             .join("target/debug/homeboy")
             .exists());
         assert!(!Path::new(&output.remote_path)
-            .join("packages/cli/tsconfig.tsbuildinfo")
+            .join("node_modules/pkg/index.js")
+            .exists());
+        assert!(!Path::new(&output.remote_path)
+            .join("build.tsbuildinfo")
             .exists());
     });
 }

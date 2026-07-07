@@ -746,6 +746,7 @@ mod tests {
             component_env: None,
             env_provider: None,
             ci: None,
+            source_snapshot: None,
             diagnostics: Default::default(),
             runtime: None,
             cli: None,
