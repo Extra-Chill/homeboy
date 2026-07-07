@@ -149,19 +149,6 @@ pub(crate) fn cached_regex(pattern: &str) -> Option<Regex> {
         .clone()
 }
 
-#[cfg(test)]
-pub(crate) fn regex_cache_has_for_tests(pattern: &str) -> bool {
-    REGEX_CACHE
-        .get()
-        .map(|cache| {
-            cache
-                .lock()
-                .expect("regex cache lock")
-                .contains_key(pattern)
-        })
-        .unwrap_or(false)
-}
-
 /// Extract symbols of a specific concept only.
 #[cfg(test)]
 pub(crate) fn extract_concept(content: &str, grammar: &Grammar, concept: &str) -> Vec<Symbol> {

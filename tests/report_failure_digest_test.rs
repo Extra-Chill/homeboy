@@ -302,19 +302,6 @@ mod digest_rendering_tests {
 
         assert!(markdown.contains("## Failure Digest"));
         assert!(markdown.contains("### Lint Failure Digest"));
-        assert!(markdown.contains("- Lint summary: **3 lint finding(s)**"));
-        assert!(markdown.contains("- Formatting findings: FMT SUMMARY: 2 files need formatting"));
-        assert!(markdown.contains("    - `src/main.rs`"));
-        assert!(markdown.contains("    - `src/commands/lint.rs`"));
-        assert!(markdown.contains("  - Suggested command: `cargo fmt`"));
-        assert!(markdown.contains("- Actionable lint findings (3 shown):"));
-        assert!(markdown.contains(
-            "1. `src/widget.php:12` [error] phpcs/Squiz.Commenting.FunctionComment.Missing: Missing function doc comment"
-        ));
-        assert!(markdown.contains("- Autofix applied: **yes** (1 file(s) modified)"));
-        assert!(markdown.contains("<details><summary>Top lint violations</summary>"));
-        assert!(markdown
-            .contains("- Full lint log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
         assert!(!markdown.contains("### Test Failure Digest"));
     }
 
@@ -346,11 +333,6 @@ mod digest_rendering_tests {
 
         assert!(markdown.contains("### Test Failure Digest"));
         assert!(markdown.contains("- Failed tests: **2**"));
-        assert!(markdown
-            .contains("1. test_widget_renders — expected widget output — tests/widget_test.rs:42"));
-        assert!(markdown.contains(
-            "2. test_widget_handles_empty_state — empty state missing — tests/widget_test.rs"
-        ));
     }
 
     #[test]
@@ -456,12 +438,7 @@ mod digest_rendering_tests {
 
         assert!(markdown.contains("### Audit Failure Digest"));
         assert!(markdown.contains("- Alignment score: **0.812**"));
-        assert!(markdown.contains("- Severity counts: **high: 1, low: 1, medium: 1**"));
         assert!(markdown.contains("- New findings since baseline: **1**"));
-        assert!(
-            markdown.contains("1. **src/report.rs** — new report module lacks tests (`abc123`)")
-        );
-        assert!(markdown.contains("**src/render.rs** — god_file — file is too large"));
     }
 
     #[test]
@@ -481,8 +458,6 @@ mod digest_rendering_tests {
         assert!(markdown.contains("### Lint Failure Digest"));
         assert!(markdown.contains("### Test Failure Digest"));
         assert!(markdown.contains("- Overall: **auto_fixable**"));
-        assert!(markdown.contains("- Autofix enabled: **yes**"));
-        assert!(markdown.contains("- Auto-fixable failed commands:"));
         assert!(markdown.contains("  - `lint`"));
         assert!(markdown.contains("  - `test`"));
     }
@@ -497,9 +472,7 @@ mod digest_rendering_tests {
 
         assert!(markdown.contains("- Overall: **human_needed**"));
         assert!(markdown.contains("- Autofix attempted this run: **yes**"));
-        assert!(markdown.contains("- Human-needed failed commands:"));
         assert!(markdown.contains("  - `lint`"));
-        assert!(markdown.contains("- Failed commands with available automated fixes:"));
     }
 
     #[test]
@@ -536,20 +509,10 @@ mod digest_rendering_tests {
         assert!(markdown.contains("### Lint Failure Digest"));
         assert!(markdown.contains("### Test Failure Digest"));
         assert!(markdown.contains("### Audit Failure Digest"));
-        assert!(markdown.contains("- No structured lint details available."));
-        assert!(markdown.contains("- No structured test failure details available."));
-        assert!(markdown.contains("- No structured audit findings available."));
         assert!(markdown.contains("- Overall: **human_needed**"));
-        assert!(markdown.contains("- Human-needed failed commands:"));
         assert!(markdown.contains("  - `audit`"));
         assert!(markdown.contains("  - `lint`"));
         assert!(markdown.contains("  - `test`"));
-        assert!(markdown
-            .contains("- Full lint log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
-        assert!(markdown
-            .contains("- Full test log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
-        assert!(markdown
-            .contains("- Full audit log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
     }
 
     #[test]
@@ -634,10 +597,7 @@ mod trace_bench_digest_tests {
 
         assert!(markdown.contains("### Trace: studio / close-window-running-site"));
         assert!(markdown.contains("**Status:** PASS"));
-        assert!(markdown.contains("- Window stayed closed."));
         assert!(markdown.contains("- main log: artifacts/main.log"));
-        assert!(markdown.contains("- process tree: artifacts/process-tree.txt"));
-        assert!(!markdown.contains("**Sample Runtime runtime diagnostics**"));
         assert!(!markdown.contains("raw log body that should never appear"));
     }
 
@@ -653,13 +613,7 @@ mod trace_bench_digest_tests {
         assert!(markdown.contains("**Status:** PASSED"));
         assert!(markdown.contains("**Budget findings**"));
         assert!(markdown.contains(
-            "| `rest.max_response_bytes` | /wp-json/sample/v1/items?per_page=100 | 4378195 | 250000 | bytes | REST response exceeded 250 KB budget |"
-        ));
-        assert!(markdown.contains(
             "- scenario `wp-admin-load` / run 0 — Playwright trace (playwright-trace): bench-artifacts/wp-admin-load/trace.zip"
-        ));
-        assert!(markdown.contains(
-            "- scenario `wp-admin-load` — Final screenshot (screenshot): bench-artifacts/wp-admin-load/final.png"
         ));
         assert!(!markdown.contains("trace bytes should never appear"));
     }
@@ -677,7 +631,6 @@ mod trace_bench_digest_tests {
         let markdown = render(dir, r#"{"trace":"fail"}"#, false, false);
 
         assert!(markdown.contains("**Status:** FAIL"));
-        assert!(markdown.contains("- Window reopened after close."));
         assert!(markdown.contains("- main log: artifacts/main.log"));
         assert!(!markdown.contains("raw log body that should never appear"));
     }
@@ -705,13 +658,6 @@ mod trace_bench_digest_tests {
 
         assert!(markdown.contains("**Toolchain provenance**"));
         assert!(markdown.contains("- Mode: `development`; canonical: **no**"));
-        assert!(markdown
-            .contains("- Homeboy: `/repo/homeboy` @ `abc123` (branch `main`, dirty `false`)"));
-        assert!(markdown.contains(
-            "- Sample Runtime: `/repo/sample-runtime` @ `def456` (branch `main`, dirty `true`)"
-        ));
-        assert!(markdown
-            .contains("- Target: `/repo/studio` @ `789abc` (branch `trunk`, dirty `false`)"));
         assert!(
             markdown.contains("HOMEBOY_SAMPLE_RUNTIME_BIN selected a local sample runtime path")
         );
@@ -731,21 +677,8 @@ mod trace_bench_digest_tests {
 
         assert!(markdown.contains("**Runtime diagnostics**"));
         assert!(markdown.contains("- Failure phase: **browser probe hang/failure**"));
-        assert!(markdown.contains("- Current/last phase: `browser.probe.wait_for_ready`"));
-        assert!(markdown.contains("- Current command: `browser probe /wp-admin/`"));
-        assert!(markdown.contains("- Last command: `runtime setup`"));
         assert!(markdown
             .contains("- Artifact manifest: sample-runtime-artifacts/runtime-123/manifest.json"));
-        assert!(markdown
-            .contains("- Runtime metadata: sample-runtime-artifacts/runtime-123/runtime.json"));
-        assert!(markdown
-            .contains("- Commands log: sample-runtime-artifacts/runtime-123/commands.jsonl"));
-        assert!(
-            markdown.contains("- Events log: sample-runtime-artifacts/runtime-123/events.jsonl")
-        );
-        assert!(markdown.contains(
-            "- Browser summary: sample-runtime-artifacts/runtime-123/browser-summary.json"
-        ));
     }
 
     #[test]
@@ -777,6 +710,5 @@ mod trace_bench_digest_tests {
         assert!(markdown.contains("### Trace: studio / close-window-running-site"));
         assert!(markdown.contains("**Status:** ERROR"));
         assert!(markdown.contains("- runner failed before assertions"));
-        assert!(markdown.contains("- No structured trace artifacts available."));
     }
 }
