@@ -379,6 +379,7 @@ JSON
             component_env: None,
             env_provider: None,
             ci: None,
+            source_snapshot: None,
             runtime: None,
             cli: None,
             build: None,

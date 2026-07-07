@@ -34,6 +34,13 @@ pub struct EnvProviderConfig {
     pub script: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSnapshotConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_excludes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
