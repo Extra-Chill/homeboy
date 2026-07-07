@@ -39,6 +39,8 @@ pub struct DomBoxEntrypointReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dom_capture_valid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_capture_invalid_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stylesheet_status: Option<Value>,
     pub elements: Vec<DomBoxElement>,
 }
@@ -187,27 +189,86 @@ pub(crate) fn shape_report(
         entrypoints: browser
             .entrypoints
             .into_iter()
-            .map(|entrypoint| DomBoxEntrypointReport {
-                page_path: entrypoint.page_path,
-                page_url: entrypoint.page_url,
-                viewport: entrypoint.viewport,
-                dom_css_loaded: entrypoint.dom_css_loaded,
-                dom_capture_valid: entrypoint.dom_capture_valid,
-                stylesheet_status: entrypoint.stylesheet_status,
-                elements: entrypoint
-                    .elements
-                    .into_iter()
-                    .map(|element| DomBoxElement {
-                        node_id: element.node_id,
-                        node_name: element.node_name,
-                        selector: element.selector,
-                        tag: element.tag,
-                        text_sample: truncate_text_sample(&element.text_sample, text_sample_limit),
-                        bounding_client_rect: element.bounding_client_rect,
-                    })
-                    .collect(),
+            .map(|entrypoint| {
+                let diagnostics = normalize_capture_diagnostics(
+                    entrypoint.dom_css_loaded,
+                    entrypoint.dom_capture_valid,
+                    &entrypoint.stylesheet_status,
+                );
+                DomBoxEntrypointReport {
+                    page_path: entrypoint.page_path,
+                    page_url: entrypoint.page_url,
+                    viewport: entrypoint.viewport,
+                    dom_css_loaded: diagnostics.dom_css_loaded,
+                    dom_capture_valid: diagnostics.dom_capture_valid,
+                    dom_capture_invalid_reason: diagnostics.dom_capture_invalid_reason,
+                    stylesheet_status: entrypoint.stylesheet_status,
+                    elements: entrypoint
+                        .elements
+                        .into_iter()
+                        .map(|element| DomBoxElement {
+                            node_id: element.node_id,
+                            node_name: element.node_name,
+                            selector: element.selector,
+                            tag: element.tag,
+                            text_sample: truncate_text_sample(
+                                &element.text_sample,
+                                text_sample_limit,
+                            ),
+                            bounding_client_rect: element.bounding_client_rect,
+                        })
+                        .collect(),
+                }
             })
             .collect(),
+    }
+}
+
+struct NormalizedCaptureDiagnostics {
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    dom_capture_invalid_reason: Option<String>,
+}
+
+fn normalize_capture_diagnostics(
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    stylesheet_status: &Option<Value>,
+) -> NormalizedCaptureDiagnostics {
+    let mut problems = Vec::new();
+    if dom_css_loaded.is_none() {
+        problems.push("dom_css_loaded missing".to_string());
+    }
+    if dom_capture_valid.is_none() {
+        problems.push("dom_capture_valid missing".to_string());
+    }
+    match stylesheet_status {
+        Some(Value::Object(_)) => {}
+        Some(_) => problems.push("stylesheet_status must be an object".to_string()),
+        None => problems.push("stylesheet_status missing".to_string()),
+    }
+    if dom_css_loaded == Some(false) {
+        problems.push("provider reported CSS was not loaded".to_string());
+    }
+    if dom_capture_valid == Some(false) {
+        problems.push("provider reported DOM capture invalid".to_string());
+    }
+
+    if problems.is_empty() {
+        NormalizedCaptureDiagnostics {
+            dom_css_loaded,
+            dom_capture_valid,
+            dom_capture_invalid_reason: None,
+        }
+    } else {
+        NormalizedCaptureDiagnostics {
+            dom_css_loaded,
+            dom_capture_valid: Some(false),
+            dom_capture_invalid_reason: Some(format!(
+                "provider CSS diagnostics invalid: {}",
+                problems.join("; ")
+            )),
+        }
     }
 }
 
@@ -392,6 +453,7 @@ mod tests {
         );
         assert_eq!(report.entrypoints[0].dom_css_loaded, Some(true));
         assert_eq!(report.entrypoints[0].dom_capture_valid, Some(true));
+        assert_eq!(report.entrypoints[0].dom_capture_invalid_reason, None);
         assert_eq!(
             report.entrypoints[0]
                 .stylesheet_status
@@ -401,6 +463,72 @@ mod tests {
             Some("0px")
         );
         assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+    }
+
+    #[test]
+    fn marks_missing_provider_css_diagnostics_invalid() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: None,
+                    dom_capture_valid: None,
+                    stylesheet_status: None,
+                    elements: Vec::new(),
+                }],
+            },
+            16,
+        );
+
+        let entrypoint = &report.entrypoints[0];
+        assert_eq!(entrypoint.dom_capture_valid, Some(false));
+        let reason = entrypoint
+            .dom_capture_invalid_reason
+            .as_deref()
+            .expect("invalid reason");
+        assert!(reason.contains("dom_css_loaded missing"));
+        assert!(reason.contains("dom_capture_valid missing"));
+        assert!(reason.contains("stylesheet_status missing"));
+    }
+
+    #[test]
+    fn marks_invalid_provider_css_diagnostics_invalid() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: Some(false),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!("not diagnostic object")),
+                    elements: Vec::new(),
+                }],
+            },
+            16,
+        );
+
+        let entrypoint = &report.entrypoints[0];
+        assert_eq!(entrypoint.dom_css_loaded, Some(false));
+        assert_eq!(entrypoint.dom_capture_valid, Some(false));
+        let reason = entrypoint
+            .dom_capture_invalid_reason
+            .as_deref()
+            .expect("invalid reason");
+        assert!(reason.contains("stylesheet_status must be an object"));
+        assert!(reason.contains("provider reported CSS was not loaded"));
     }
 
     #[test]

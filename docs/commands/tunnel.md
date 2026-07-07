@@ -78,6 +78,8 @@ homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
 
 The same path convention covers `report.html`, `report.md`, `evidence.json`, compact Sample Runtime replay files such as `blueprint.after.json`, and external bundle files such as `files/runtime-snapshot.json`.
 
+`artifact-origin dom-boxes` reports mark each entrypoint with provider CSS diagnostics. When `dom_css_loaded`, `dom_capture_valid`, or an object-shaped `stylesheet_status` is missing or invalid, Homeboy writes `dom_capture_valid: false` and `dom_capture_invalid_reason` so operators can reject untrustworthy DOM evidence without inspecting provider internals.
+
 ## Service Tunnels
 
 Declare a private service reachable from a configured SSH server:
