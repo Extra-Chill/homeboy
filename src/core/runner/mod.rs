@@ -270,6 +270,11 @@ pub(crate) fn remote_runner_homeboy_path<'a>(runner: &'a Runner, context: &str) 
     }
 }
 
+pub fn runner_homeboy_path_for_command(id: &str, context: &str) -> Result<String> {
+    let runner = load(id)?;
+    remote_runner_homeboy_path(&runner, context).map(str::to_string)
+}
+
 fn missing_remote_homeboy_path_error(runner: &Runner, context: &str) -> Error {
     Error::validation_invalid_argument(
         "homeboy_path",
