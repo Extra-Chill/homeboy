@@ -116,6 +116,7 @@ homeboy triage --mine --drilldown
 homeboy triage component homeboy --failing-checks --drilldown
 homeboy triage component --path /Users/me/Developer/homeboy
 homeboy triage component homeboy --path ./homeboy --failing-checks
+homeboy triage landing --repo owner/repo 123 124 --drilldown
 ```
 
 ## Related
@@ -123,3 +124,4 @@ homeboy triage component homeboy --path ./homeboy --failing-checks
 - [status](status.md)
 - [runs](runs.md)
 - [review](review.md)
+- [Hold a PR fleet](../workflows/hold-a-pr-fleet.md)
