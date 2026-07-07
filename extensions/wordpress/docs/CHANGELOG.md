@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.37] - 2026-07-07
+
+### Changed
+- Add wordpress deps provider declaration
+
 ## [3.23.36] - 2026-07-06
 
 ### Changed
