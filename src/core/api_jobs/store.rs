@@ -15,6 +15,7 @@ use super::persistence::{
 use super::remote_runner;
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::core::error::{Error, Result};
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +107,19 @@ impl JobStore {
         operation: impl Into<String>,
         source_snapshot: Option<SourceSnapshot>,
     ) -> Job {
+        self.create_with_source_snapshot_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            None,
+        )
+    }
+
+    pub(crate) fn create_with_source_snapshot_and_path_materialization_plan(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+    ) -> Job {
         let now = timestamp_ms();
         let job = Job {
             id: Uuid::new_v4(),
@@ -117,6 +131,7 @@ impl JobStore {
             finished_at_ms: None,
             event_count: 0,
             source_snapshot,
+            path_materialization_plan,
             stale_reason: None,
             target_runner_id: None,
             target_project_id: None,
@@ -297,7 +312,30 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let job = self.create_with_source_snapshot(operation, source_snapshot);
+        self.run_background_with_source_snapshot_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            None,
+            run,
+        )
+    }
+
+    pub(crate) fn run_background_with_source_snapshot_and_path_materialization_plan<T, F>(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        let job = self.create_with_source_snapshot_and_path_materialization_plan(
+            operation,
+            source_snapshot,
+            path_materialization_plan,
+        );
         let job_id = job.id;
         let handle_store = self.clone();
         let worker_store = self.clone();
