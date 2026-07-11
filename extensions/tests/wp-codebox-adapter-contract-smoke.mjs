@@ -35,6 +35,7 @@ const {
 	wpCodeboxBin,
 	wpCodeboxCliDescriptor,
 	wpCodeboxCommand,
+	wpCodeboxRuntimePackageSourceDescriptor,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-descriptor.js'));
 
 assert.equal(WP_CODEBOX_BACKEND, 'wp-codebox');
@@ -55,6 +56,9 @@ const emptyManagedInstallDir = path.join(tmpdir(), 'homeboy-wp-codebox-empty-man
 assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyManagedInstallDir, HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
 assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyManagedInstallDir }, settings: { wp_codebox_bin: '/settings/wp-codebox' } }), '/settings/wp-codebox');
 assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.mjs'), { command: process.execPath, args: ['/tmp/wp-codebox.mjs'] });
+assert.deepEqual(wpCodeboxRuntimePackageSourceDescriptor('@extra-chill/release-runtime').descriptor, { slug: 'release-runtime', source: '@extra-chill/release-runtime' });
+assert.deepEqual(wpCodeboxRuntimePackageSourceDescriptor({ slug: 'local-runtime', source: '/local/wp-codebox/runtime' }).descriptor, { slug: 'local-runtime', source: '/local/wp-codebox/runtime' });
+assert.deepEqual(wpCodeboxRuntimePackageSourceDescriptor({ slug: 'cached-runtime', path: '/cache/homeboy/wp-codebox/source' }).descriptor, { slug: 'cached-runtime', path: '/cache/homeboy/wp-codebox/source' });
 
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-bin-'));
 try {

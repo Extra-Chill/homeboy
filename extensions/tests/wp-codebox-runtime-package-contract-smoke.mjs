@@ -16,6 +16,9 @@ const {
 	normalizeRuntimePackageTaskPackage,
 	runtimePackageTaskInputForCodebox,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js'));
+const {
+	wpCodeboxRuntimePackageSourceDescriptor,
+} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-descriptor.js'));
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hbe-codebox-runtime-package-'));
 
@@ -101,6 +104,15 @@ try {
 			source: '/workspace/source/packages/proof-loop',
 		},
 		artifact_declarations: [],
+	});
+	assert.deepEqual(wpCodeboxRuntimePackageSourceDescriptor({ slug: 'proof-loop', source: 'packages/proof-loop' }, { workspaceTarget: '/workspace/source' }), {
+		descriptor: { slug: 'proof-loop', source: '/workspace/source/packages/proof-loop' },
+		source: '/workspace/source/packages/proof-loop',
+		slug: 'proof-loop',
+	});
+	assert.deepEqual(wpCodeboxRuntimePackageSourceDescriptor('packages/proof-loop', { workspaceTarget: '/workspace/source' }).descriptor, {
+		slug: 'proof-loop',
+		source: '/workspace/source/packages/proof-loop',
 	});
 
 	assert.throws(
