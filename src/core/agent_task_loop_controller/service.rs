@@ -1,7 +1,7 @@
 use super::*;
+use crate::core::engine::local_files::write_json_file as write_json;
 use crate::core::{agent_task_lifecycle, paths, Error, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -827,20 +827,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     serde_json::from_str(&raw)
         .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!("path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
-    let json = serde_json::to_string_pretty(value).map_err(|error| {
-        Error::internal_json(error.to_string(), Some(path.display().to_string()))
-    })?;
-    fs::write(path, format!("{json}\n"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 pub fn controller_record_path(loop_id: &str) -> Result<PathBuf> {

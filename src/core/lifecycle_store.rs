@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{
@@ -9,6 +8,7 @@ use super::{
     AgentTaskRunState,
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use crate::core::engine::local_files::write_json_file as write_json;
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::core::{paths, Error, ErrorCode, Result};
 
@@ -274,20 +274,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     serde_json::from_str(&raw)
         .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
-}
-
-fn write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!("path has no parent: {}", path.display()))
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-    })?;
-    let json = serde_json::to_string_pretty(value).map_err(|error| {
-        Error::internal_json(error.to_string(), Some(path.display().to_string()))
-    })?;
-    fs::write(path, format!("{json}\n"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
 }
 
 fn run_dir(run_id: &str) -> Result<PathBuf> {
