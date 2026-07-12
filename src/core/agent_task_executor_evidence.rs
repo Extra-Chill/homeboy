@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::core::agent_task::{AgentTaskEvidenceRef, AgentTaskOutcome, AgentTaskRequest};
+use crate::core::agent_task::{AgentTaskEvidenceRef, AgentTaskExecutorRequest, AgentTaskOutcome};
 use crate::core::redaction::RedactionPolicy;
 
 /// Evidence kind for the latest raw executor request (input piped to the
@@ -50,7 +50,7 @@ pub const EXECUTOR_RESULT_FILE: &str = "executor-result.json";
 /// contracts, runtime/component paths, model/provider metadata, and typed
 /// artifact expectations.
 pub(crate) fn link_latest_executor_evidence(
-    request: &AgentTaskRequest,
+    request: &AgentTaskExecutorRequest,
     outcome: &mut AgentTaskOutcome,
     run_id: Option<&str>,
 ) {
@@ -128,7 +128,7 @@ fn sanitize_task_id(task_id: &str) -> String {
 /// important fields. `redact_json` only rewrites known-sensitive keys, so
 /// component contracts, runtime/component paths, model/provider metadata, and
 /// typed artifact expectations are retained.
-fn redacted_request_value(request: &AgentTaskRequest, policy: &RedactionPolicy) -> Value {
+fn redacted_request_value(request: &AgentTaskExecutorRequest, policy: &RedactionPolicy) -> Value {
     match serde_json::to_value(request) {
         Ok(value) => policy.redact_json(&value),
         Err(error) => json!({
@@ -183,7 +183,8 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
-        AgentTaskPolicy, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA,
+        AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
     use std::sync::Mutex;
@@ -255,7 +256,7 @@ mod tests {
     #[test]
     fn links_executor_input_and_result_evidence_refs() {
         with_artifact_root(|_| {
-            let request = test_request();
+            let request = executor_test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
@@ -277,10 +278,26 @@ mod tests {
         });
     }
 
+    fn executor_test_request() -> AgentTaskExecutorRequest {
+        let request = test_request();
+        AgentTaskExecutorRequest {
+            artifacts_path: PathBuf::from("/runner/artifacts/task"),
+            artifacts_path_provenance: crate::core::agent_task::AgentTaskArtifactsPathProvenance {
+                owner: "homeboy".to_string(),
+                locality: "runner".to_string(),
+                plan_id: "plan-1".to_string(),
+                run_id: Some("run-1".to_string()),
+                task_id: request.task_id.clone(),
+                attempt: 1,
+            },
+            request,
+        }
+    }
+
     #[test]
     fn persisted_input_redacts_secrets_but_retains_contracts_paths_and_artifacts() {
         with_artifact_root(|_| {
-            let request = test_request();
+            let request = executor_test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
@@ -304,13 +321,16 @@ mod tests {
             assert!(raw.contains("runtime_component_paths"));
             assert!(raw.contains("claude-sonnet"));
             assert!(raw.contains("component_contracts"));
+            assert!(raw.contains("/runner/artifacts/task"));
+            assert!(raw.contains("artifacts_path_provenance"));
+            assert!(raw.contains("\"locality\": \"runner\""));
         });
     }
 
     #[test]
     fn re_linking_does_not_duplicate_evidence_refs() {
         with_artifact_root(|_| {
-            let request = test_request();
+            let request = executor_test_request();
             let mut outcome = test_outcome();
             link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
             let first = outcome.evidence_refs.len();
@@ -343,7 +363,7 @@ mod tests {
     #[test]
     fn repeated_child_runs_with_same_task_id_keep_distinct_evidence_paths() {
         with_artifact_root(|_| {
-            let request = test_request();
+            let request = executor_test_request();
             let mut first_outcome = test_outcome();
             let mut second_outcome = test_outcome();
 
