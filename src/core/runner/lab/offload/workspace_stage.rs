@@ -150,8 +150,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         &workspace_ref_resolutions,
         source_path,
     )?);
-    extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
-    extra_workspaces.extend(rig_declared_path_input_extra_workspaces(
+    extra_workspaces.extend(lab_path_input_extra_workspaces(
         &offload_args,
         contract.workload.as_ref(),
         source_path,
@@ -428,15 +427,11 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
-    let late_path_setting_workspaces =
-        path_setting_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
-    let late_declared_path_input_workspaces = rig_declared_path_input_extra_workspaces(
+    let late_path_input_workspaces = lab_path_input_extra_workspaces(
         &remapped_args,
         contract.workload.as_ref(),
         Path::new(&synced.local_path),
     )?;
-    let mut late_path_input_workspaces = late_path_setting_workspaces;
-    late_path_input_workspaces.extend(late_declared_path_input_workspaces);
     let late_synced_path_settings = sync_extra_lab_workspaces(
         runner_id,
         &synced.local_path,
@@ -814,6 +809,24 @@ fn rig_declared_path_input_extra_workspaces(
     )
 }
 
+fn lab_path_input_extra_workspaces(
+    args: &[String],
+    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
+    primary_source_path: &Path,
+) -> Result<Vec<ExtraLabWorkspace>> {
+    let mut workspaces = path_values_extra_workspaces(
+        path_setting_values(args),
+        primary_source_path,
+        "path_setting",
+    )?;
+    workspaces.extend(rig_declared_path_input_extra_workspaces(
+        args,
+        workload,
+        primary_source_path,
+    )?);
+    Ok(workspaces)
+}
+
 fn rig_path_inputs_from_primary_rig(
     workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
     primary_source_path: &Path,
@@ -833,125 +846,6 @@ fn rig_path_inputs_from_primary_rig(
     }
 
     Ok(path_inputs.into_iter().collect())
-}
-
-fn declared_path_input_values(args: &[String], path_inputs: &[String]) -> Vec<String> {
-    let mut values = Vec::new();
-    for input in path_inputs {
-        if input.starts_with("--") {
-            values.extend(values_for_flag_including_passthrough(args, input));
-        } else {
-            values.extend(values_for_setting_path(args, input));
-        }
-    }
-    values
-}
-
-fn values_for_flag_including_passthrough(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == flag {
-            if let Some(value) = iter.peek() {
-                values.push((*value).to_string());
-            }
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            values.push(value.to_string());
-        }
-    }
-    values
-}
-
-fn values_for_setting_path(args: &[String], setting_path: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--setting" {
-            if let Some(raw) = iter.next() {
-                collect_setting_path_values(raw, setting_path, false, &mut values);
-            }
-            continue;
-        }
-        if arg == "--setting-json" {
-            if let Some(raw) = iter.next() {
-                collect_setting_path_values(raw, setting_path, true, &mut values);
-            }
-            continue;
-        }
-        if let Some(raw) = arg.strip_prefix("--setting=") {
-            collect_setting_path_values(raw, setting_path, false, &mut values);
-            continue;
-        }
-        if let Some(raw) = arg.strip_prefix("--setting-json=") {
-            collect_setting_path_values(raw, setting_path, true, &mut values);
-        }
-    }
-    values
-}
-
-fn collect_setting_path_values(
-    raw: &str,
-    setting_path: &str,
-    json: bool,
-    values: &mut Vec<String>,
-) {
-    let Some((key, value)) = raw.split_once('=') else {
-        return;
-    };
-    if key == setting_path {
-        values.push(value.to_string());
-        return;
-    }
-    let Some(suffix) = setting_path
-        .strip_prefix(key)
-        .and_then(|suffix| suffix.strip_prefix('.'))
-    else {
-        return;
-    };
-    if !json {
-        return;
-    }
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
-        return;
-    };
-    collect_json_path_values(&parsed, suffix, values);
-}
-
-fn collect_json_path_values(
-    value: &serde_json::Value,
-    dotted_path: &str,
-    values: &mut Vec<String>,
-) {
-    let mut current = value;
-    for segment in dotted_path.split('.') {
-        let Some(next) = current.get(segment) else {
-            return;
-        };
-        current = next;
-    }
-    collect_json_string_values(current, values);
-}
-
-fn collect_json_string_values(value: &serde_json::Value, values: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(text) => values.push(text.to_string()),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_json_string_values(item, values);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for item in map.values() {
-                collect_json_string_values(item, values);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
