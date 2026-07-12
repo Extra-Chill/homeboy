@@ -26,7 +26,6 @@ struct RuntimeHelper {
     filename: &'static str,
     content: &'static str,
     env_var: &'static str,
-    legacy_fallback: bool,
 }
 
 const HELPERS: &[RuntimeHelper] = &[
@@ -34,79 +33,66 @@ const HELPERS: &[RuntimeHelper] = &[
         filename: "runner-steps.sh",
         content: assets::RUNNER_STEPS_SH,
         env_var: RUNNER_STEPS_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "runner-prelude.sh",
         content: assets::RUNNER_PRELUDE_SH,
         env_var: RUNNER_PRELUDE_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "command-capture.sh",
         content: assets::COMMAND_CAPTURE_SH,
         env_var: COMMAND_CAPTURE_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "bash-preflight.sh",
         content: assets::BASH_PREFLIGHT_SH,
         env_var: BASH_PREFLIGHT_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "failure-trap.sh",
         content: assets::FAILURE_TRAP_SH,
         env_var: FAILURE_TRAP_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "write-test-results.sh",
         content: assets::WRITE_TEST_RESULTS_SH,
         env_var: WRITE_TEST_RESULTS_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "emit-lint-finding.sh",
         content: assets::EMIT_LINT_FINDING_SH,
         env_var: EMIT_LINT_FINDING_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "emit-test-failure.sh",
         content: assets::EMIT_TEST_FAILURE_SH,
         env_var: EMIT_TEST_FAILURE_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "sidecar-writer.sh",
         content: assets::SIDECAR_WRITER_SH,
         env_var: SIDECAR_WRITER_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "resolve-context.sh",
         content: assets::RESOLVE_CONTEXT_SH,
         env_var: RESOLVE_CONTEXT_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "disposable-local-db.sh",
         content: assets::DISPOSABLE_LOCAL_DB_SH,
         env_var: DISPOSABLE_LOCAL_DB_ENV,
-        legacy_fallback: false,
     },
     RuntimeHelper {
         filename: "bench-helper.sh",
         content: assets::BENCH_HELPER_SH,
         env_var: BENCH_HELPER_SH_ENV,
-        legacy_fallback: true,
     },
     RuntimeHelper {
         filename: "bench-helper.mjs",
         content: assets::BENCH_HELPER_JS,
         env_var: BENCH_HELPER_JS_ENV,
-        legacy_fallback: true,
     },
 ];
 
@@ -115,8 +101,6 @@ struct DeclaredRuntimeHelper {
     filename: String,
     source: String,
     env_var: String,
-    #[serde(default)]
-    legacy_fallback: bool,
 }
 
 /// Write a single runtime helper to disk if it's missing or stale.
@@ -172,19 +156,6 @@ fn declared_helpers() -> Result<Vec<DeclaredRuntimeHelper>> {
     })
 }
 
-#[cfg(not(windows))]
-fn legacy_runtime_dir() -> Result<Option<PathBuf>> {
-    let home = env::var("HOME").map_err(|_| {
-        Error::internal_unexpected("HOME environment variable not set on Unix-like system")
-    })?;
-    Ok(Some(PathBuf::from(home).join(".homeboy").join("runtime")))
-}
-
-#[cfg(windows)]
-fn legacy_runtime_dir() -> Result<Option<PathBuf>> {
-    Ok(None)
-}
-
 /// Ensure all runtime helpers are written and return (env_var, path) pairs.
 pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
     let runtime_dir = paths::homeboy()
@@ -197,24 +168,9 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
         )
     })?;
 
-    let legacy_runtime_dir = legacy_runtime_dir().unwrap_or(None);
-    if let Some(ref legacy_dir) = legacy_runtime_dir {
-        fs::create_dir_all(legacy_dir).map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some("create legacy homeboy runtime directory".to_string()),
-            )
-        })?;
-    }
-
     let mut env_pairs = Vec::with_capacity(HELPERS.len());
     for helper in HELPERS {
         let path = ensure_helper(&runtime_dir, helper)?;
-        if helper.legacy_fallback {
-            if let Some(ref legacy_dir) = legacy_runtime_dir {
-                ensure_helper(legacy_dir, helper)?;
-            }
-        }
         env_pairs.push((
             helper.env_var.to_string(),
             path.to_string_lossy().to_string(),
@@ -223,11 +179,6 @@ pub fn ensure_all_helpers() -> Result<Vec<(String, String)>> {
 
     for helper in declared_helpers()? {
         let path = ensure_declared_helper(&runtime_dir, &helper)?;
-        if helper.legacy_fallback {
-            if let Some(ref legacy_dir) = legacy_runtime_dir {
-                ensure_declared_helper(legacy_dir, &helper)?;
-            }
-        }
         env_pairs.push((helper.env_var, path.to_string_lossy().to_string()));
     }
 
