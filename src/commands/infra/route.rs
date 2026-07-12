@@ -2255,6 +2255,66 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_cook_supports_automatic_explicit_and_lab_only_routing() {
+        let automatic = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ]);
+        let automatic_command = lab_offload_command(&automatic.command).unwrap().unwrap();
+        assert!(automatic_command.portable);
+        assert!(automatic_command.routing_policy.default_lab_offload);
+
+        let explicit = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ]);
+        let explicit_command = lab_offload_command(&explicit.command).unwrap().unwrap();
+        assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
+        assert!(explicit_command.portable);
+
+        let lab_only = Cli::parse_from([
+            "homeboy",
+            "--lab-only",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ]);
+        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
+            lab_only.allow_local_hot,
+            lab_only.allow_local_fallback,
+            lab_only.lab_only,
+        );
+        assert!(
+            lab_offload_command(&lab_only.command)
+                .unwrap()
+                .unwrap()
+                .portable
+        );
+        assert!(local_policy.deny_local_execution());
+    }
+
+    #[test]
     fn agent_task_providers_supports_explicit_runner_discovery() {
         let cli = Cli::parse_from([
             "homeboy",

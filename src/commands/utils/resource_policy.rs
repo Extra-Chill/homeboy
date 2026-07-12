@@ -575,6 +575,47 @@ mod tests {
     }
 
     #[test]
+    fn verified_agent_task_cook_automatically_selects_default_lab_on_warm_controller() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ]);
+        let command = hot_command(&cli.command).expect("verified cook is hot");
+        let resources = resources(ResourceRecommendation::Warm);
+        let warning = evaluate_with_runner_hint(command, &resources, Some("homeboy-lab"))
+            .expect("warm controller warns before routing");
+        let context = ResourcePolicyContext::from_evaluation(
+            command,
+            &resources,
+            Some(&warning),
+            false,
+            Some("homeboy-lab"),
+            false,
+        );
+
+        assert!(command.lab_offload_supported);
+        assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
+        assert_eq!(
+            context.runner_selection,
+            ResourcePolicyRunnerSelection {
+                runner_id: Some("homeboy-lab".to_string()),
+                reason: "default_lab_runner".to_string(),
+            }
+        );
+        assert!(
+            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn does_not_warn_when_machine_is_ok() {
         assert!(evaluate(
             lab_supported_hot("bench"),
