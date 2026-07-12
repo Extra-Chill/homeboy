@@ -100,6 +100,11 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let provider_ready;
     let mapping_value;
 
+    // When a concrete provider is selected, record its executor require-graph
+    // resolution so the verdict reflects on-disk runtime health, not just
+    // declared contract metadata (#7736).
+    let mut executor_resolution_value = Value::Null;
+
     match (selected_backend.as_deref(), backend_match) {
         (None, _) => {
             provider_ready = false;
@@ -113,7 +118,53 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         }
         (Some(backend), Some((count, selected))) => {
             if let Some(provider) = selected {
-                provider_ready = true;
+                // Provider contract mapping succeeded. Before calling the cook
+                // ready, verify the selected provider's executor entrypoint
+                // actually loads its module require graph on disk — a stale or
+                // partial runtime install (e.g. a shared runtime package never
+                // materialized) passes contract discovery but crashes every cook
+                // with MODULE_NOT_FOUND (#7736).
+                match homeboy::core::agent_tasks::provider::probe_provider_executor_resolves(provider)
+                {
+                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
+                        provider_ready = true;
+                        executor_resolution_value = json!({ "status": "resolved" });
+                    }
+                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Skipped {
+                        reason,
+                    } => {
+                        // The executor runtime does not implement the dry-load
+                        // probe; fall back to contract readiness (prior
+                        // behavior) rather than inventing a failure.
+                        provider_ready = true;
+                        executor_resolution_value =
+                            json!({ "status": "skipped", "reason": reason });
+                    }
+                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
+                        command,
+                        detail,
+                    } => {
+                        provider_ready = false;
+                        executor_resolution_value = json!({
+                            "status": "unresolved",
+                            "command": command,
+                            "detail": detail,
+                        });
+                        blocker = Some(json!({
+                            "stage": "provider_contracts",
+                            "code": "executor_require_graph_unresolved",
+                            "message": format!(
+                                "Provider `{}` (backend `{backend}`) is declared but its executor could not load its runtime require graph on disk",
+                                provider.id
+                            ),
+                            "remediation": "Reinstall the runtime so shared runtime packages are materialized (e.g. `homeboy extension refresh <homeboy-extensions source> --id <extension>`), then rerun doctor",
+                            "details": {
+                                "command": command,
+                                "detail": detail,
+                            },
+                        }));
+                    }
+                }
                 mapping_value = json!({
                     "selected_backend": backend,
                     "selector": args.selector,
@@ -165,6 +216,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         "providers": providers,
         "diagnostics": executor.diagnostics(),
         "backend_mapping": mapping_value,
+        "executor_resolution": executor_resolution_value,
         "secret_env": secret_env,
     });
 

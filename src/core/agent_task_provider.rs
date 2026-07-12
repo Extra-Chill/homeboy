@@ -31,7 +31,7 @@ use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 mod catalog;
-mod command_runner;
+pub(crate) mod command_runner;
 mod config_preflight;
 mod executor;
 mod fixtures;
@@ -49,6 +49,7 @@ mod workspace_types;
 mod tests;
 
 pub use catalog::*;
+pub(crate) use command_runner::{probe_provider_executor_resolves, ProviderExecutorResolution};
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub(crate) use resolution::{
     resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
