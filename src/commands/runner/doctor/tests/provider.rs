@@ -184,6 +184,81 @@ fn local_provider_executor_resolution_check_filters_to_selected_provider() {
     );
 }
 
+#[test]
+fn remote_executor_probe_uses_runner_runtime_root_not_controller_path() {
+    let provider = node_provider(
+        "test.node.provider",
+        "test",
+        std::path::Path::new(
+            "/Users/controller/.config/homeboy/agent-runtimes/test-runtime/scripts/executor.cjs",
+        ),
+    );
+    let mut provider = provider;
+    provider.runtime_id = Some("test-runtime".to_string());
+    provider.runtime_path =
+        Some("/Users/controller/.config/homeboy/agent-runtimes/test-runtime".to_string());
+    provider.invocation.cwd = Some("{{runtime_path}}".to_string());
+
+    let entrypoint = probes::remote_provider_executor_entrypoint(&provider)
+        .expect("runtime-relative entrypoint");
+    let shell = probes::provider_executor_resolution_remote_shell(&entrypoint);
+
+    assert!(matches!(
+        entrypoint.args.first(),
+        Some(probes::RemoteProviderExecutorEntrypointPart::RuntimeRelative(path)) if path == "scripts/executor.cjs"
+    ));
+    assert_eq!(entrypoint.cwd.as_deref(), Some(""));
+    assert!(shell.contains("$HOME/.config/homeboy/agent-runtimes"));
+    assert!(shell.contains("test-runtime"));
+    assert!(!shell.contains("/Users/controller"));
+
+    let runner_root = tempfile::tempdir().expect("runner root");
+    let script = runner_root.path().join("scripts/executor.cjs");
+    std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
+    std::fs::write(&script, "process.exit(0);\n").expect("write runner executor");
+    let output = std::process::Command::new("node")
+        .arg(runner_root.path().join("scripts/executor.cjs"))
+        .arg("--provider-contract")
+        .output()
+        .expect("run runner-local probe");
+
+    assert!(output.status.success());
+}
+
+#[test]
+fn remote_executor_probe_keeps_missing_runner_local_dependency_actionable() {
+    let provider = node_provider(
+        "test.node.provider",
+        "test",
+        std::path::Path::new(
+            "/Users/controller/.config/homeboy/agent-runtimes/test-runtime/scripts/executor.cjs",
+        ),
+    );
+    let mut provider = provider;
+    provider.runtime_id = Some("test-runtime".to_string());
+    provider.runtime_path =
+        Some("/Users/controller/.config/homeboy/agent-runtimes/test-runtime".to_string());
+
+    let entrypoint = probes::remote_provider_executor_entrypoint(&provider)
+        .expect("runtime-relative entrypoint");
+    assert!(entrypoint
+        .display()
+        .contains("<runtime:test-runtime>/scripts/executor.cjs"));
+    let runner_root = tempfile::tempdir().expect("runner root");
+    let script = runner_root.path().join("scripts/executor.cjs");
+    std::fs::create_dir_all(script.parent().expect("script parent")).expect("create scripts");
+    std::fs::write(&script, "require('./missing-runner-local-package');\n")
+        .expect("write runner executor");
+    let output = std::process::Command::new("node")
+        .arg(runner_root.path().join("scripts/executor.cjs"))
+        .arg("--provider-contract")
+        .output()
+        .expect("run runner-local probe");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot find module"));
+}
+
 fn node_provider(id: &str, backend: &str, script: &std::path::Path) -> AgentTaskExecutorProvider {
     serde_json::from_value(json!({
         "id": id,
