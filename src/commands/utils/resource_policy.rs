@@ -247,7 +247,7 @@ pub fn reset_captured_context_for_test() {
 }
 
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
-    if is_read_only_agent_task(command) {
+    if is_plan_only_command(command) || is_read_only_agent_task(command) {
         return None;
     }
 
@@ -259,6 +259,19 @@ pub fn hot_command(command: &Commands) -> Option<HotCommand> {
             Some(HotCommand::local_only(contract.hot_label, Some(reason)))
         }
     }
+}
+
+fn is_plan_only_command(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                command: agent_task::AgentTaskFanoutCommand::CookBatch(
+                    agent_task::AgentTaskFanoutCookBatchArgs { dry_run: true, .. },
+                ),
+            }),
+        })
+    )
 }
 
 fn is_read_only_agent_task(command: &Commands) -> bool {
@@ -323,22 +336,41 @@ pub fn non_interactive_preflight_error(
     Some(error)
 }
 
-pub fn local_hot_rerun_command(command: HotCommand, args: &[String]) -> Option<String> {
-    if command.lab_offload_supported || args.is_empty() {
+pub fn rerun_command(
+    command: HotCommand,
+    args: &[String],
+    default_runner: Option<&str>,
+) -> Option<String> {
+    if args.is_empty() {
         return None;
     }
 
     let mut rerun = Vec::with_capacity(args.len() + 2);
     rerun.push(args[0].clone());
+    if command.lab_offload_supported {
+        if let Some(runner_id) = default_runner {
+            if !args.iter().any(|arg| arg == "--runner") {
+                rerun.push("--runner".to_string());
+                rerun.push(runner_id.to_string());
+            }
+        } else {
+            append_local_hot_overrides(&mut rerun, args);
+        }
+    } else {
+        append_local_hot_overrides(&mut rerun, args);
+    }
+    rerun.extend(args.iter().skip(1).cloned());
+
+    Some(crate::core::engine::shell::quote_args(&rerun))
+}
+
+fn append_local_hot_overrides(rerun: &mut Vec<String>, args: &[String]) {
     if !args.iter().any(|arg| arg == "--force-hot") {
         rerun.push("--force-hot".to_string());
     }
     if !args.iter().any(|arg| arg == "--allow-local-hot") {
         rerun.push("--allow-local-hot".to_string());
     }
-    rerun.extend(args.iter().skip(1).cloned());
-
-    Some(crate::core::engine::shell::quote_args(&rerun))
 }
 
 pub fn is_runner_hosted_exec() -> bool {
@@ -353,7 +385,7 @@ pub fn clear_runner_hosted_exec() {
 
 fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>) -> String {
     if warning.message.contains("--runner <id>") {
-        return "Connect a default Homeboy Lab runner or pass --runner <id> when Lab offload supports this mode.".to_string();
+        return "No eligible Homeboy Lab runner was found. Connect a runner or pass --runner <id> to offload this portable command; use the local-hot rerun command only as a last resort.".to_string();
     }
     if let Some(runner_id) = default_runner {
         if warning.message.contains("--runner") {
@@ -365,7 +397,7 @@ fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>)
     if warning.message.contains("--runner") {
         "Pass --runner <id> when Lab offload supports this mode.".to_string()
     } else {
-        "This command is currently local-only under resource policy.".to_string()
+        "Lab routing is not offered because this command is currently local-only under resource policy.".to_string()
     }
 }
 
@@ -575,6 +607,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_cook_batch_dry_run_does_not_start_hot_workloads() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "cook-batch",
+            "--repo",
+            "homeboy",
+            "--verify",
+            "cargo build -j 3",
+            "--dry-run",
+            "https://github.com/Extra-Chill/homeboy/issues/7796",
+        ]);
+
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn verified_agent_task_cook_automatically_selects_default_lab_on_warm_controller() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -672,7 +722,7 @@ mod tests {
         );
         let warning = evaluate(command, &resources(ResourceRecommendation::Warm))
             .expect("warm machines warn");
-        let rerun = local_hot_rerun_command(
+        let rerun = rerun_command(
             command,
             &[
                 "homeboy".to_string(),
@@ -681,6 +731,7 @@ mod tests {
                 "--changed-since".to_string(),
                 "origin/main".to_string(),
             ],
+            None,
         );
 
         let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
@@ -691,6 +742,50 @@ mod tests {
             Some("homeboy --force-hot --allow-local-hot review lint --changed-since origin/main")
         );
         assert!(!error.message.contains("--force-hot --allow-local-hot"));
+        assert!(error.message.contains("Lab routing is not offered"));
+    }
+
+    #[test]
+    fn portable_refusal_rerun_uses_eligible_lab_runner() {
+        let rerun = rerun_command(
+            lab_supported_hot("audit"),
+            &[
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--changed-since".to_string(),
+                "origin/main".to_string(),
+            ],
+            Some("homeboy-lab"),
+        );
+
+        assert_eq!(
+            rerun.as_deref(),
+            Some("homeboy --runner homeboy-lab audit --changed-since origin/main")
+        );
+    }
+
+    #[test]
+    fn portable_refusal_without_runner_uses_explicit_local_last_resort() {
+        let warning = evaluate(
+            lab_supported_hot("audit"),
+            &resources(ResourceRecommendation::Warm),
+        )
+        .expect("warm machines warn");
+        let rerun = rerun_command(
+            lab_supported_hot("audit"),
+            &["homeboy".to_string(), "audit".to_string()],
+            None,
+        );
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
+            .expect("non-interactive hot runs should fail fast");
+
+        assert_eq!(
+            error.details["rerun_command"].as_str(),
+            Some("homeboy --force-hot --allow-local-hot audit")
+        );
+        assert!(error
+            .message
+            .contains("No eligible Homeboy Lab runner was found"));
     }
 
     #[test]
