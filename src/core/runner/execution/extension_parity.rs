@@ -845,24 +845,10 @@ fn validate_dev_overlay_extension_revision(
         ));
     }
 
-    let remote_revision = remote_extension_source_revision(remote_stdout);
-    let recorded_revision = overlay
-        .source_revision
-        .as_deref()
-        .filter(|revision| !revision.trim().is_empty())
-        .unwrap_or(&overlay.content_hash);
-    if remote_revision.as_deref() == Some(recorded_revision) {
-        return Ok(());
-    }
-
-    Err(dev_overlay_mismatch_error(
-        runner_id,
-        homeboy_path,
-        extension_id,
-        overlay,
-        &current_hash,
-        remote_revision.as_deref(),
-    ))
+    // Dev overlays are materialized and addressed by content hash. Git
+    // revisions may advance without changing the extension bytes, so they are
+    // provenance rather than an additional parity gate.
+    Ok(())
 }
 
 fn dev_overlay_mismatch_error(
@@ -1536,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_parity_rejects_stale_dev_overlay_source_revision() {
+    fn revision_parity_accepts_unchanged_dev_overlay_with_new_source_revision() {
         let tempdir = tempfile::tempdir().expect("source dir");
         fs::write(tempdir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
         fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
@@ -1558,23 +1544,14 @@ mod tests {
         );
         let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"b44a15b01"}}}"#;
 
-        let err = validate_runner_extension_revision(
+        validate_runner_extension_revision(
             "homeboy-lab",
             &runner,
             "homeboy",
             "nodejs",
             remote_stdout,
         )
-        .expect_err("stale dev overlay source revision should fail parity");
-
-        assert_eq!(
-            err.details["diagnostic"]["recorded_source_revision"].as_str(),
-            Some("8317270c0b2241326ff42ed648e4e5b447dbead2")
-        );
-        assert_eq!(
-            err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
-            Some("b44a15b01")
-        );
+        .expect("identical dev overlay content should be authoritative");
     }
 
     #[test]
