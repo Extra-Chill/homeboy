@@ -57,8 +57,8 @@ mod worker;
 mod tests;
 
 use extension_parity::{
-    requested_setting_keys_for_command, required_extensions_for_command,
-    validate_runner_extension_parity,
+    ensure_extension_materialized, plan_extension_parity, requested_setting_keys_for_command,
+    required_extensions_for_command, validate_extension_ready,
 };
 use policy::remote_execution_preflight;
 
@@ -682,7 +682,17 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
 
-    validate_runner_extension_parity(
+    let extension_parity_plan = plan_extension_parity(
+        runner_id,
+        &runner,
+        &cwd,
+        &required_extensions,
+        &requested_setting_keys,
+        &accepted_extension_settings,
+    )?;
+    ensure_extension_materialized(&extension_parity_plan)?;
+    let runner = super::load(runner_id)?;
+    validate_extension_ready(
         runner_id,
         &runner,
         &cwd,
