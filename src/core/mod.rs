@@ -196,6 +196,11 @@ pub fn artifact_root() -> Result<std::path::PathBuf> {
     paths::artifact_root()
 }
 
+/// Expand a leading tilde in a local path.
+pub fn expand_tilde_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    paths::expand_tilde_path(path)
+}
+
 /// Resolve a remote path against an optional project base path.
 pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     paths::join_remote_path(base_path, path)

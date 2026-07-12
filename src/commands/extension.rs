@@ -8,6 +8,7 @@ use homeboy::core::extension::{
     self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
     UpdateEntry,
 };
+use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::runners::{self, RunnerKind};
 use homeboy::core::server::{self, SshClient};
@@ -725,7 +726,7 @@ fn parse_runner_diff_installed(stdout: &str) -> homeboy::core::Result<Vec<Instal
 }
 
 fn installed_extension_diff(summary: ExtensionSummary) -> InstalledExtensionDiff {
-    let checkout_head_revision = git_head_revision(Path::new(&summary.path));
+    let checkout_head_revision = git::head_sha_short(Path::new(&summary.path));
     let manifest_path = manifest_path_for_summary(&summary);
     let source_url = read_source_url_metadata(&summary.path);
     let source_path = source_url.as_deref().and_then(local_source_path);
@@ -789,7 +790,11 @@ fn local_source_path(source: &str) -> Option<String> {
     if looks_like_remote_source(source) {
         return None;
     }
-    Some(shellexpand::tilde(source).to_string())
+    Some(
+        homeboy::core::expand_tilde_path(source)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn looks_like_remote_source(source: &str) -> bool {
@@ -846,25 +851,6 @@ fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &st
         "unready" => format!("homeboy extension setup {}", shell_arg(&summary.id)),
         _ => format!("homeboy extension show {}", shell_arg(&summary.id)),
     }
-}
-
-fn git_head_revision(path: &Path) -> Option<String> {
-    if path.as_os_str().is_empty() || !path.exists() {
-        return None;
-    }
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(path)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {

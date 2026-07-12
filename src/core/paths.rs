@@ -115,26 +115,27 @@ pub fn artifact_root() -> Result<PathBuf> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
     {
-        return Ok(expand_path(path));
+        return Ok(expand_tilde_path(path));
     }
 
     if let Ok(path) = env::var("HOMEBOY_ARTIFACT_ROOT") {
         if !path.trim().is_empty() {
-            return Ok(expand_path(PathBuf::from(path)));
+            return Ok(expand_tilde_path(path));
         }
     }
 
     if let Some(path) = crate::core::defaults::load_config().artifact_root {
         if !path.trim().is_empty() {
-            return Ok(expand_path(PathBuf::from(path)));
+            return Ok(expand_tilde_path(path));
         }
     }
 
     Ok(homeboy_data()?.join("artifacts"))
 }
 
-fn expand_path(path: PathBuf) -> PathBuf {
-    let raw = path.to_string_lossy();
+/// Expand a leading tilde in a local path.
+pub fn expand_tilde_path(path: impl AsRef<Path>) -> PathBuf {
+    let raw = path.as_ref().to_string_lossy();
     PathBuf::from(shellexpand::tilde(&raw).into_owned())
 }
 
@@ -424,6 +425,17 @@ mod tests {
             assert_eq!(
                 artifact_root().expect("artifact root"),
                 home.path().join(".local/share/homeboy/artifacts")
+            );
+        });
+    }
+
+    #[test]
+    fn expand_tilde_path_uses_home_and_preserves_other_paths() {
+        with_isolated_home(|home| {
+            assert_eq!(expand_tilde_path("~/source"), home.path().join("source"));
+            assert_eq!(
+                expand_tilde_path("relative/source"),
+                PathBuf::from("relative/source")
             );
         });
     }

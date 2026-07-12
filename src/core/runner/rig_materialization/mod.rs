@@ -855,7 +855,7 @@ fn required_component_subpath(
 }
 
 fn normalize_path_for_prefix(path: &Path) -> PathBuf {
-    path.components().collect()
+    crate::core::paths::normalize_local_path(path)
 }
 
 fn lab_offload_rig_ids(args: &[String]) -> Vec<String> {

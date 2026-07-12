@@ -481,7 +481,7 @@ fn collect_local_paths(value: &Value, paths: &mut Vec<PathBuf>) {
             for (key, value) in map {
                 if matches!(key.as_str(), "local_path" | "localPath") {
                     if let Some(path) = value.as_str().filter(|path| !path.trim().is_empty()) {
-                        paths.push(expand_user_path(path));
+                        paths.push(homeboy::core::expand_tilde_path(path));
                     }
                 }
                 collect_local_paths(value, paths);
@@ -494,10 +494,6 @@ fn collect_local_paths(value: &Value, paths: &mut Vec<PathBuf>) {
         }
         _ => {}
     }
-}
-
-fn expand_user_path(path: &str) -> PathBuf {
-    PathBuf::from(shellexpand::tilde(path).into_owned())
 }
 
 fn path_is_at_or_inside(parent: &Path, path: &Path) -> bool {
