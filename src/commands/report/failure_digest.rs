@@ -119,16 +119,7 @@ fn render_failure_digest(context: &FailureDigestContext) -> String {
 mod detail {
     use super::*;
     pub fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
-        let raw = if Path::new(spec).exists() {
-            std::fs::read_to_string(spec).map_err(|e| {
-                homeboy::core::Error::internal_unexpected(format!("Failed to read {}: {}", spec, e))
-            })?
-        } else {
-            homeboy::core::config::read_json_spec_to_string(spec)?
-        };
-        serde_json::from_str(&raw).map_err(|e| {
-            homeboy::core::Error::validation_invalid_json(e, Some(context.to_string()), Some(raw))
-        })
+        homeboy::core::config::read_json_value_spec_with_bare_path(spec, context)
     }
 
     pub fn normalize_object(value: Value) -> Map<String, Value> {
@@ -187,15 +178,15 @@ mod detail {
 
     pub fn read_command_json(output_dir: &Path, command: &str) -> Option<Value> {
         let path = output_dir.join(format!("{command}.json"));
-        let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+        homeboy::core::config::try_read_json_file(&path)
     }
 
     pub fn read_json_file(path: &Path) -> Result<Value, String> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
-        serde_json::from_str(&raw)
-            .map_err(|error| format!("failed to parse {}: {}", path.display(), error))
+        homeboy::core::config::read_json_file_with(
+            path,
+            |error| format!("failed to read {}: {}", path.display(), error),
+            |error, _| format!("failed to parse {}: {}", path.display(), error),
+        )
     }
 
     pub fn envelope_parts(value: Option<Value>) -> (Map<String, Value>, Map<String, Value>) {
