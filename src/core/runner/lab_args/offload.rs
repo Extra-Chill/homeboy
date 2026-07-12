@@ -1,7 +1,7 @@
 //! Lab offload argument rewriting: resolve the offload source path and strip /
 //! rewrite controller-only flags so a command can run on the remote runner.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::core::{git, worktree, worktree_providers};
 use crate::core::{Error, Result};
@@ -113,6 +113,20 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg == "--" {
             passthrough = true;
             stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--lab-changed-files-json" {
+            stripped.push(arg.clone());
+            if let Some(value) = iter.next() {
+                stripped.push(remap_lab_changed_files_json(value, remote_path, &ordered));
+            }
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--lab-changed-files-json=") {
+            stripped.push(format!(
+                "--lab-changed-files-json={}",
+                remap_lab_changed_files_json(value, remote_path, &ordered)
+            ));
             continue;
         }
         if arg == "--path" || arg == "--cwd" {
@@ -259,6 +273,30 @@ fn remap_lab_offload_arg(arg: &str, mappings: &[&LabPathRemap]) -> String {
     }
 
     remap_local_path(arg, mappings).unwrap_or_else(|| arg.to_string())
+}
+
+/// Changed-file payloads are repo-relative because lint scopes reconstruct
+/// absolute paths from the component root on the runner. Normalize any
+/// controller/runner absolute forms back into that shared repo-relative space.
+fn remap_lab_changed_files_json(
+    value: &str,
+    remote_path: &str,
+    mappings: &[&LabPathRemap],
+) -> String {
+    let Ok(mut files) = serde_json::from_str::<Vec<String>>(value) else {
+        return value.to_string();
+    };
+
+    for file in &mut files {
+        let mapped = remap_local_path(file, mappings).unwrap_or_else(|| file.clone());
+        if let Ok(relative) = Path::new(&mapped).strip_prefix(remote_path) {
+            *file = relative.to_string_lossy().to_string();
+        } else {
+            *file = mapped;
+        }
+    }
+
+    serde_json::to_string(&files).unwrap_or_else(|_| value.to_string())
 }
 
 pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
