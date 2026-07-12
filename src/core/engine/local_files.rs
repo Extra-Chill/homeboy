@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::Serialize;
+
 use crate::core::error::{Error, Result};
 
 /// Entry returned from directory listing
@@ -56,30 +58,7 @@ impl FileSystem for LocalFs {
     }
 
     fn write(&self, path: &Path, content: &str) -> Result<()> {
-        // Atomic write: write to temp file, then rename
-        let parent = path.parent().ok_or_else(|| {
-            Error::internal_io(
-                format!("Invalid path: {}", path.display()),
-                Some("write file".to_string()),
-            )
-        })?;
-
-        let filename = path.file_name().ok_or_else(|| {
-            Error::internal_io(
-                format!("Invalid path: {}", path.display()),
-                Some("write file".to_string()),
-            )
-        })?;
-
-        let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
-
-        fs::write(&tmp_path, content)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("write temp file".to_string())))?;
-
-        fs::rename(&tmp_path, path)
-            .map_err(|e| Error::internal_io(e.to_string(), Some("rename temp file".to_string())))?;
-
-        Ok(())
+        write_file_atomic(path, content, "write file")
     }
 
     fn list(&self, dir: &Path) -> Result<Vec<Entry>> {
@@ -187,6 +166,20 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (rename)", operation))))?;
 
     Ok(())
+}
+
+/// Create parent directories and atomically persist pretty-printed JSON.
+pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!("path has no parent: {}", path.display()))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+    })?;
+    let json = serde_json::to_string_pretty(value).map_err(|error| {
+        Error::internal_json(error.to_string(), Some(path.display().to_string()))
+    })?;
+    write_file_atomic(path, &format!("{json}\n"), &path.display().to_string())
 }
 
 fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {
@@ -319,5 +312,18 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code.as_str(), "internal.io_error");
+    }
+
+    #[test]
+    fn write_json_file_creates_parents_and_preserves_pretty_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/state.json");
+
+        write_json_file(&path, &serde_json::json!({ "name": "homeboy" })).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "{\n  \"name\": \"homeboy\"\n}\n"
+        );
     }
 }
