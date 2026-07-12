@@ -279,15 +279,6 @@ fn explicit_capability_extension(
         .filter(|extension_id| !extension_id.is_empty())
 }
 
-fn linked_extensions(
-    component: &Component,
-) -> Result<&HashMap<String, crate::core::component::ScopedExtensionConfig>> {
-    component
-        .extensions
-        .as_ref()
-        .ok_or_else(|| no_extensions_error(component))
-}
-
 pub fn extract_component_extension_settings(
     component: &Component,
     extension_id: &str,
@@ -310,9 +301,29 @@ pub fn resolve_extension_for_capability(
     component: &Component,
     capability: ExtensionCapability,
 ) -> Result<String> {
-    let extensions = linked_extensions(component)?;
+    match resolve_extension_for_capability_if_available(component, capability)? {
+        Some(extension_id) => Ok(extension_id),
+        None if component
+            .extensions
+            .as_ref()
+            .is_none_or(|extensions| extensions.is_empty()) => Err(no_extensions_error(component)),
+        None => Err(capability_missing_error(component, capability)),
+    }
+}
+
+/// Resolve a capability only when one of the component's linked extensions
+/// advertises it. This lets optional consumers skip a capability that the
+/// component has not opted into without weakening validation of explicit or
+/// ambiguous capability ownership.
+fn resolve_extension_for_capability_if_available(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<Option<String>> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(None);
+    };
     if extensions.is_empty() {
-        return Err(no_extensions_error(component));
+        return Ok(None);
     }
 
     if let Some(extension_id) = explicit_capability_extension(component, capability) {
@@ -349,7 +360,7 @@ pub fn resolve_extension_for_capability(
             ));
         }
 
-        return Ok(extension_id.to_string());
+        return Ok(Some(extension_id.to_string()));
     }
 
     let mut matching = Vec::new();
@@ -362,8 +373,8 @@ pub fn resolve_extension_for_capability(
     }
 
     match matching.len() {
-        0 => Err(capability_missing_error(component, capability)),
-        1 => Ok(matching.remove(0)),
+        0 => Ok(None),
+        1 => Ok(Some(matching.remove(0))),
         _ => Err(capability_ambiguous_error(component, capability, &matching)),
     }
 }
@@ -373,6 +384,28 @@ pub fn resolve_execution_context(
     capability: ExtensionCapability,
 ) -> Result<ExtensionExecutionContext> {
     let extension_id = resolve_extension_for_capability(component, capability)?;
+    execution_context_for_extension(component, capability, extension_id)
+}
+
+/// Resolve an execution context when a linked extension provides `capability`.
+/// A missing optional capability is represented as `Ok(None)`; malformed
+/// explicit ownership and ambiguous providers remain validation errors.
+pub(crate) fn resolve_execution_context_if_available(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<Option<ExtensionExecutionContext>> {
+    let Some(extension_id) = resolve_extension_for_capability_if_available(component, capability)?
+    else {
+        return Ok(None);
+    };
+    execution_context_for_extension(component, capability, extension_id).map(Some)
+}
+
+fn execution_context_for_extension(
+    component: &Component,
+    capability: ExtensionCapability,
+    extension_id: String,
+) -> Result<ExtensionExecutionContext> {
     let manifest = load_extension(&extension_id)?;
     let script_path = capability
         .script_path(&manifest)
