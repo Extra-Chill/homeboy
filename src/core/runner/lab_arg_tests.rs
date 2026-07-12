@@ -1,6 +1,6 @@
 use super::super::lab_args::{
     lab_offload_source_path, rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args,
-    EXPLICIT_PASSTHROUGH_SENTINEL,
+    LabPathRemap, EXPLICIT_PASSTHROUGH_SENTINEL,
 };
 
 fn args(items: &[&str]) -> Vec<String> {
@@ -182,8 +182,6 @@ fn leaves_relative_passthrough_path_args_untouched() {
 
 #[test]
 fn remaps_synced_source_paths_in_passthrough_args() {
-    use super::super::lab_args::LabPathRemap;
-
     let input = args(&[
         "homeboy",
         "bench",
@@ -229,6 +227,63 @@ fn remaps_synced_source_paths_in_passthrough_args() {
             "--batch-size",
             "1",
         ])
+    );
+}
+
+#[test]
+fn preserves_repo_relative_changed_files_through_lab_dispatch_rewrite() {
+    let input = args(&[
+        "homeboy",
+        "review",
+        "lint",
+        "--path",
+        "/Users/user/Developer/project",
+        "--changed-only",
+        "--lab-changed-files-json",
+        "[\"inc/Workspace/WorkspaceWorktreeCleanupEngine.php\",\"tests/worktree-retention-apply-protections.php\"]",
+    ]);
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/project".to_string(),
+        remote: "/runner/workspaces/project".to_string(),
+    }];
+
+    let rewritten = rewrite_lab_offload_args(&input, "/runner/workspaces/project", &mappings, None);
+
+    assert_eq!(
+        rewritten,
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "review",
+            "lint",
+            "--path",
+            "/runner/workspaces/project",
+            "--changed-only",
+            "--lab-changed-files-json",
+            "[\"inc/Workspace/WorkspaceWorktreeCleanupEngine.php\",\"tests/worktree-retention-apply-protections.php\"]",
+        ])
+    );
+}
+
+#[test]
+fn normalizes_changed_file_paths_to_the_remote_workspace_coordinate_system() {
+    let input = args(&[
+        "homeboy",
+        "review",
+        "lint",
+        "--lab-changed-files-json",
+        "[\"/Users/user/Developer/project/src/lib.rs\"]",
+    ]);
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/project".to_string(),
+        remote: "/runner/workspaces/project".to_string(),
+    }];
+
+    let rewritten = rewrite_lab_offload_args(&input, "/runner/workspaces/project", &mappings, None);
+
+    assert_eq!(
+        rewritten.last().map(String::as_str),
+        Some("[\"src/lib.rs\"]")
     );
 }
 
