@@ -53,6 +53,14 @@ pub struct RunnerResourceGuardLimits {
     pub concurrency: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_capacity_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_headroom_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_rss_budget_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_rss_bytes: Option<u64>,
     pub rss_limit_source: String,
 }
 
@@ -82,6 +90,9 @@ struct MetricsState {
     child_process_count_peak: u64,
     cpu_user_ms: u64,
     cpu_system_ms: u64,
+    active_rss_bytes_peak: u64,
+    aggregate_rss_bytes_peak: u64,
+    effective_rss_limit_bytes_min: Option<u64>,
     guard_violation: Option<RunnerResourceGuardViolation>,
 }
 
@@ -158,6 +169,8 @@ struct ResourceMetricsCollector {
     state: Arc<Mutex<MetricsState>>,
     handle: Option<thread::JoinHandle<()>>,
     guard_limits: Option<RunnerResourceGuardLimits>,
+    #[cfg(target_os = "linux")]
+    registered_root_pid: Option<u32>,
 }
 
 impl ResourceMetricsCollector {
@@ -178,8 +191,13 @@ impl ResourceMetricsCollector {
                 state,
                 handle: None,
                 guard_limits,
+                #[cfg(target_os = "linux")]
+                registered_root_pid: None,
             };
         }
+
+        #[cfg(target_os = "linux")]
+        register_active_runner(root_pid);
 
         let (stop, stop_rx) = mpsc::channel();
         sample(
@@ -219,6 +237,8 @@ impl ResourceMetricsCollector {
             state,
             handle: Some(handle),
             guard_limits,
+            #[cfg(target_os = "linux")]
+            registered_root_pid: Some(root_pid),
         }
     }
 
@@ -229,7 +249,21 @@ impl ResourceMetricsCollector {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(root_pid) = self.registered_root_pid.take() {
+            unregister_active_runner(root_pid);
+        }
         let state = self.state.lock().expect("resource metrics mutex poisoned");
+        let mut guard_limits = self.guard_limits;
+        if let Some(limits) = guard_limits.as_mut() {
+            if limits.aggregate_rss_budget_bytes.is_some() {
+                limits.active_rss_bytes = Some(state.active_rss_bytes_peak);
+                limits.aggregate_rss_bytes = Some(state.aggregate_rss_bytes_peak);
+                if let Some(effective_limit) = state.effective_rss_limit_bytes_min {
+                    limits.rss_limit_bytes = effective_limit;
+                }
+            }
+        }
         RunnerResourceMetrics {
             duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
             cpu_user_ms: (state.sample_count > 0).then_some(state.cpu_user_ms),
@@ -238,7 +272,7 @@ impl ResourceMetricsCollector {
             sample_count: state.sample_count,
             child_process_count_peak: (state.sample_count > 0)
                 .then_some(state.child_process_count_peak),
-            resource_guard: self.guard_limits,
+            resource_guard: guard_limits,
             guard_violation: state.guard_violation.clone(),
             source: if self.supported {
                 "linux_procfs_process_tree".to_string()
@@ -290,6 +324,7 @@ fn sample(
     guard_limits: Option<&RunnerResourceGuardLimits>,
 ) {
     if let Some(snapshot) = process_tree_snapshot(root_pid) {
+        let active_rss = update_active_runner_rss(root_pid, snapshot.rss_bytes);
         let mut state = state.lock().expect("resource metrics mutex poisoned");
         state.sample_count += 1;
         state.peak_rss_bytes = state.peak_rss_bytes.max(snapshot.rss_bytes);
@@ -298,8 +333,23 @@ fn sample(
             .max(snapshot.process_count.saturating_sub(1));
         state.cpu_user_ms = state.cpu_user_ms.max(snapshot.cpu_user_ms);
         state.cpu_system_ms = state.cpu_system_ms.max(snapshot.cpu_system_ms);
+        state.active_rss_bytes_peak = state.active_rss_bytes_peak.max(active_rss.other_rss_bytes);
+        state.aggregate_rss_bytes_peak = state
+            .aggregate_rss_bytes_peak
+            .max(active_rss.aggregate_rss_bytes);
+        let effective_rss_limit_bytes =
+            guard_limits.map(|limits| effective_rss_limit(limits, active_rss.other_rss_bytes));
+        if let Some(limit) = effective_rss_limit_bytes {
+            state.effective_rss_limit_bytes_min = Some(
+                state
+                    .effective_rss_limit_bytes_min
+                    .map_or(limit, |current| current.min(limit)),
+            );
+        }
         if state.guard_violation.is_none() {
-            if let Some(violation) = resource_guard_violation(&snapshot, guard_limits) {
+            if let Some(violation) =
+                resource_guard_violation(&snapshot, guard_limits, effective_rss_limit_bytes)
+            {
                 if let Some(shared_violation) = guard_violation {
                     *shared_violation
                         .lock()
@@ -373,12 +423,13 @@ fn process_tree_snapshot(root_pid: u32) -> Option<ProcessSnapshot> {
 fn resource_guard_violation(
     snapshot: &ProcessSnapshot,
     limits: Option<&RunnerResourceGuardLimits>,
+    effective_rss_limit_bytes: Option<u64>,
 ) -> Option<RunnerResourceGuardViolation> {
     let limits = limits?;
     classify_resource_guard_violation(
         snapshot.rss_bytes,
         snapshot.process_count,
-        limits.rss_limit_bytes,
+        effective_rss_limit_bytes.unwrap_or(limits.rss_limit_bytes),
         limits.process_count_limit,
     )
 }
@@ -393,43 +444,116 @@ fn resolved_resource_guard_limits(
     let explicit_rss_limit = std::env::var(RSS_LIMIT_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok());
-    let (rss_limit_bytes, rss_limit_source) =
-        resolved_rss_limit(memory_capacity_bytes, concurrency, explicit_rss_limit);
+    let rss_limit = resolved_rss_limit(memory_capacity_bytes, explicit_rss_limit);
     Some(RunnerResourceGuardLimits {
-        rss_limit_bytes,
+        rss_limit_bytes: rss_limit.rss_limit_bytes,
         process_count_limit: resource_guard_limit(
             PROCESS_COUNT_LIMIT_ENV,
             DEFAULT_PROCESS_COUNT_LIMIT,
         ),
         concurrency,
         memory_capacity_bytes,
-        rss_limit_source,
+        host_headroom_bytes: rss_limit.host_headroom_bytes,
+        aggregate_rss_budget_bytes: rss_limit.aggregate_rss_budget_bytes,
+        active_rss_bytes: None,
+        aggregate_rss_bytes: None,
+        rss_limit_source: rss_limit.source,
     })
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct ResolvedRssLimit {
+    rss_limit_bytes: u64,
+    host_headroom_bytes: Option<u64>,
+    aggregate_rss_budget_bytes: Option<u64>,
+    source: String,
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn resolved_rss_limit(
     memory_capacity_bytes: Option<u64>,
-    concurrency: u64,
     explicit_rss_limit: Option<u64>,
-) -> (u64, String) {
+) -> ResolvedRssLimit {
     if let Some(limit) = explicit_rss_limit {
-        return (limit, "explicit_override".to_string());
+        return ResolvedRssLimit {
+            rss_limit_bytes: limit,
+            host_headroom_bytes: None,
+            aggregate_rss_budget_bytes: None,
+            source: "explicit_override".to_string(),
+        };
     }
     match memory_capacity_bytes {
-        Some(capacity) => (
-            capacity
-                // Small hosts cannot reserve the preferred 4 GiB without disabling
-                // the guard, so reserve at most half of their capacity.
-                .saturating_sub(
-                    (capacity / HOST_HEADROOM_DIVISOR)
-                        .max(PREFERRED_HOST_HEADROOM_BYTES)
-                        .min(capacity / 2),
-                )
-                / concurrency.max(1),
-            "capacity_aware".to_string(),
-        ),
-        None => (FALLBACK_RSS_LIMIT_BYTES, "fallback".to_string()),
+        Some(capacity) => {
+            // Small hosts cannot reserve the preferred 4 GiB without disabling
+            // the guard, so reserve at most half of their capacity.
+            let headroom = (capacity / HOST_HEADROOM_DIVISOR)
+                .max(PREFERRED_HOST_HEADROOM_BYTES)
+                .min(capacity / 2);
+            let budget = capacity.saturating_sub(headroom);
+            ResolvedRssLimit {
+                rss_limit_bytes: budget,
+                host_headroom_bytes: Some(headroom),
+                aggregate_rss_budget_bytes: Some(budget),
+                source: "active_load_aware".to_string(),
+            }
+        }
+        None => ResolvedRssLimit {
+            rss_limit_bytes: FALLBACK_RSS_LIMIT_BYTES,
+            host_headroom_bytes: None,
+            aggregate_rss_budget_bytes: None,
+            source: "fallback".to_string(),
+        },
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn effective_rss_limit(limits: &RunnerResourceGuardLimits, active_rss_bytes: u64) -> u64 {
+    limits
+        .aggregate_rss_budget_bytes
+        .map(|budget| budget.saturating_sub(active_rss_bytes).max(1))
+        .unwrap_or(limits.rss_limit_bytes)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct ActiveRunnerRss {
+    other_rss_bytes: u64,
+    aggregate_rss_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn active_runner_rss() -> &'static Mutex<std::collections::HashMap<u32, u64>> {
+    static ACTIVE_RUNNER_RSS: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, u64>>> =
+        std::sync::OnceLock::new();
+    ACTIVE_RUNNER_RSS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn register_active_runner(root_pid: u32) {
+    active_runner_rss()
+        .lock()
+        .expect("active runner rss mutex poisoned")
+        .insert(root_pid, 0);
+}
+
+#[cfg(target_os = "linux")]
+fn unregister_active_runner(root_pid: u32) {
+    active_runner_rss()
+        .lock()
+        .expect("active runner rss mutex poisoned")
+        .remove(&root_pid);
+}
+
+#[cfg(target_os = "linux")]
+fn update_active_runner_rss(root_pid: u32, rss_bytes: u64) -> ActiveRunnerRss {
+    let mut runners = active_runner_rss()
+        .lock()
+        .expect("active runner rss mutex poisoned");
+    runners.insert(root_pid, rss_bytes);
+    let aggregate_rss_bytes: u64 = runners.values().copied().sum();
+    ActiveRunnerRss {
+        other_rss_bytes: aggregate_rss_bytes.saturating_sub(rss_bytes),
+        aggregate_rss_bytes,
     }
 }
 
@@ -591,61 +715,77 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_uses_capacity_aware_limit_on_low_memory_hosts() {
-        let (limit, source) = resolved_rss_limit(Some(8 * 1024 * 1024 * 1024), 1, None);
+    fn resource_guard_allows_idle_capacity_borrowing() {
+        let lab_capacity = 89 * 1024 * 1024 * 1024 + 7 * 1024 * 1024 * 1024 / 10;
+        let limits = resolved_rss_limit(Some(lab_capacity), None);
+        let trusted_cook_rss = 20 * 1024 * 1024 * 1024;
 
-        assert_eq!(limit, 4 * 1024 * 1024 * 1024);
-        assert_eq!(source, "capacity_aware");
+        assert_eq!(limits.rss_limit_bytes, lab_capacity - lab_capacity / 10);
+        assert!(limits.rss_limit_bytes > 19 * 1024 * 1024 * 1024);
+        assert!(classify_resource_guard_violation(
+            trusted_cook_rss,
+            1,
+            limits.rss_limit_bytes,
+            128,
+        )
+        .is_none());
+        assert_eq!(limits.source, "active_load_aware");
     }
 
     #[test]
-    fn resource_guard_uses_capacity_aware_limit_on_high_memory_hosts() {
-        let (limit, source) = resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), 1, None);
+    fn resource_guard_protects_the_aggregate_budget() {
+        let resolved = resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), None);
+        let limits = RunnerResourceGuardLimits {
+            rss_limit_bytes: resolved.rss_limit_bytes,
+            process_count_limit: 128,
+            concurrency: 8,
+            memory_capacity_bytes: Some(96 * 1024 * 1024 * 1024),
+            host_headroom_bytes: resolved.host_headroom_bytes,
+            aggregate_rss_budget_bytes: resolved.aggregate_rss_budget_bytes,
+            active_rss_bytes: None,
+            aggregate_rss_bytes: None,
+            rss_limit_source: resolved.source,
+        };
 
+        let effective_limit = effective_rss_limit(&limits, 70 * 1024 * 1024 * 1024);
         assert_eq!(
-            limit,
-            96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10
+            effective_limit,
+            limits.aggregate_rss_budget_bytes.unwrap() - 70 * 1024 * 1024 * 1024
         );
-        assert_eq!(source, "capacity_aware");
-    }
-
-    #[test]
-    fn resource_guard_divides_capacity_after_reserving_host_headroom() {
-        let (limit, source) = resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), 4, None);
-
-        assert_eq!(
-            limit,
-            (96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10) / 4
-        );
-        assert_eq!(source, "capacity_aware");
+        let violation = classify_resource_guard_violation(
+            20 * 1024 * 1024 * 1024,
+            1,
+            effective_limit,
+            limits.process_count_limit,
+        )
+        .expect("aggregate pressure violation");
+        assert_eq!(violation.reason, "rss_limit_exceeded");
     }
 
     #[test]
     fn resource_guard_keeps_a_limit_when_capacity_is_smaller_than_headroom() {
-        let (limit, source) = resolved_rss_limit(Some(2 * 1024 * 1024 * 1024), 1, None);
+        let limits = resolved_rss_limit(Some(2 * 1024 * 1024 * 1024), None);
 
-        assert_eq!(limit, 1024 * 1024 * 1024);
-        assert_eq!(source, "capacity_aware");
+        assert_eq!(limits.rss_limit_bytes, 1024 * 1024 * 1024);
+        assert_eq!(limits.source, "active_load_aware");
     }
 
     #[test]
     fn resource_guard_uses_fallback_when_memory_capacity_is_unavailable() {
-        let (limit, source) = resolved_rss_limit(None, 4, None);
+        let limits = resolved_rss_limit(None, None);
 
-        assert_eq!(limit, FALLBACK_RSS_LIMIT_BYTES);
-        assert_eq!(source, "fallback");
+        assert_eq!(limits.rss_limit_bytes, FALLBACK_RSS_LIMIT_BYTES);
+        assert_eq!(limits.source, "fallback");
     }
 
     #[test]
-    fn resource_guard_explicit_rss_limit_takes_precedence_over_capacity() {
-        let (limit, source) = resolved_rss_limit(
-            Some(96 * 1024 * 1024 * 1024),
-            4,
-            Some(7 * 1024 * 1024 * 1024),
-        );
+    fn resource_guard_explicit_rss_limit_takes_precedence_over_active_load() {
+        let limits =
+            resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), Some(7 * 1024 * 1024 * 1024));
 
-        assert_eq!(limit, 7 * 1024 * 1024 * 1024);
-        assert_eq!(source, "explicit_override");
+        assert_eq!(limits.rss_limit_bytes, 7 * 1024 * 1024 * 1024);
+        assert_eq!(limits.source, "explicit_override");
+        assert_eq!(limits.aggregate_rss_budget_bytes, None);
     }
 }
 
