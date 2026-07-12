@@ -3,7 +3,7 @@ use homeboy::core::git::{
     IssueFindOptions,
 };
 
-use super::args::{IssueArgs, IssueCommand};
+use super::args::{ComponentPathArgs, IssueArgs, IssueCommand};
 use super::helpers::{parse_issue_close_reason, parse_issue_state, resolve_body};
 use super::output::GitCommandOutput;
 use crate::commands::CmdResult;
@@ -39,8 +39,9 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
             number,
             body,
             body_file,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let body = resolve_body(body, body_file)?.ok_or_else(|| {
                 homeboy::core::Error::validation_invalid_argument(
                     "body",
@@ -61,8 +62,9 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
             label,
             state,
             limit,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let state = parse_issue_state(&state)?;
             let output = git::issue_find(
                 Some(&component_id),
@@ -82,8 +84,9 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
             reason,
             comment,
             comment_file,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let reason = parse_issue_close_reason(&reason)?;
             let comment = resolve_body(comment, comment_file)?;
             let output = git::issue_close(
@@ -105,8 +108,9 @@ pub(super) fn run_issue(args: IssueArgs) -> CmdResult<GitCommandOutput> {
             body_file,
             add_labels,
             remove_labels,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let body = resolve_body(body, body_file)?;
             let output = git::issue_edit(
                 Some(&component_id),

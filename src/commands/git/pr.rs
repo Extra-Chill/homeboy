@@ -5,7 +5,7 @@ use homeboy::core::git::{
     PrRefreshStrategy,
 };
 
-use super::args::{PrArgs, PrCommand, PrPolicyArgs, PrPolicyCommand};
+use super::args::{ComponentPathArgs, PrArgs, PrCommand, PrPolicyArgs, PrPolicyCommand};
 use super::helpers::{parse_pr_state, read_lines_file, resolve_body};
 use super::output::GitCommandOutput;
 use crate::commands::CmdResult;
@@ -24,8 +24,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             body,
             body_file,
             draft,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let body = resolve_body(body, body_file)?.unwrap_or_default();
             let output = git::pr_create(
                 Some(&component_id),
@@ -46,8 +47,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             title,
             body,
             body_file,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let body = resolve_body(body, body_file)?;
             let output = git::pr_edit(
                 Some(&component_id),
@@ -66,8 +68,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             head,
             state,
             limit,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let state = parse_pr_state(&state)?;
             let output = git::pr_find(
                 Some(&component_id),
@@ -84,8 +87,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
         PrCommand::Readiness {
             component_id,
             number,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let output = git::pr_readiness(Some(&component_id), number, path)?;
             let exit = if output.readiness.mergeable { 0 } else { 1 };
             Ok((GitCommandOutput::PrReadiness(output), exit))
@@ -102,8 +106,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             footer,
             footer_file,
             section_order,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let body = resolve_body(body, body_file)?.ok_or_else(|| {
                 homeboy::core::Error::validation_invalid_argument(
                     "body",
@@ -156,8 +161,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             update_branches,
             apply,
             merge_method,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             if refs.is_empty() {
                 return Err(homeboy::core::Error::validation_missing_argument(vec![
                     "at least one PR number or URL".to_string(),
@@ -179,8 +185,9 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
         PrCommand::ReconcileMergeability {
             component_id,
             number,
-            path,
+            path_args,
         } => {
+            let ComponentPathArgs { path } = path_args;
             let output = git::pr_reconcile_mergeability(
                 Some(&component_id),
                 PrMergeabilityReconcileOptions { number, path },
