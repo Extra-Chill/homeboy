@@ -508,7 +508,7 @@ function collectOpenCodeArtifacts(context = {}) {
 	const stdout = redactKnownSecrets(String(spawnResult.stdout || ''), context.spawnExtra?.env);
 	const stderr = redactKnownSecrets(String(spawnResult.stderr || ''), context.spawnExtra?.env);
 	const transcript = [stdout, stderr].filter(Boolean).join('\n');
-	const patchCapture = gitDiff(context.cwd);
+	const patchCapture = gitDiff(context.cwd, context.initialRevision);
 	if (patchCapture.error) {
 		captureErrors.push({ artifact: 'patch', message: patchCapture.error });
 	}
@@ -600,11 +600,25 @@ function sessionMetadata(context = {}) {
 	return explicit && typeof explicit === 'object' && !Array.isArray(explicit) ? explicit : OPENCODE_SESSION_METADATA_ABSENT;
 }
 
-function gitDiff(cwd) {
+function gitRevision(cwd) {
+	if (!cwd) {
+		return { revision: '', error: 'OpenCode workspace path was not available for patch capture.' };
+	}
+	const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd, encoding: 'utf8' });
+	if (result.status !== 0 || result.error) {
+		return { revision: '', error: result.error?.message || String(result.stderr || 'git rev-parse failed').trim() };
+	}
+	return { revision: String(result.stdout || '').trim(), error: null };
+}
+
+function gitDiff(cwd, initialRevision = {}) {
 	if (!cwd) {
 		return { content: '', error: 'OpenCode workspace path was not available for patch capture.' };
 	}
-	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary', 'HEAD'], { cwd, encoding: 'utf8' });
+	if (!initialRevision.revision) {
+		return { content: '', error: initialRevision.error || 'OpenCode workspace initial revision was not available for patch capture.' };
+	}
+	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary', initialRevision.revision], { cwd, encoding: 'utf8' });
 	if (result.status !== 0 || result.error) {
 		return { content: '', error: result.error?.message || String(result.stderr || 'git diff failed').trim() };
 	}
@@ -747,6 +761,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
+	const initialRevision = gitRevision(cwd);
 	const spawnResult = await spawnOpenCodeStreaming(commandSpec.command, args, {
 		cwd,
 		env: spawnExtra.env,
@@ -754,7 +769,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		runtimeLogPaths,
 		diagnosticLogPath: openCodeDiagnosticLogPath(config, spawnExtra.env),
 	});
-	const context = { request, config, commandSpec, cwd, spawnResult, spawnExtra, runtimeLogPaths };
+	const context = { request, config, commandSpec, cwd, initialRevision, spawnResult, spawnExtra, runtimeLogPaths };
 	const runtimeLogs = collectOpenCodeRuntimeLogs(context);
 
 	if (spawnResult.error?.code === 'ENOENT') {

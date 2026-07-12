@@ -218,7 +218,8 @@ process.exit(0);
 	fs.mkdirSync(workspace, { recursive: true });
 	spawnSync('git', ['init'], { cwd: workspace, encoding: 'utf8' });
 	fs.writeFileSync(path.join(workspace, 'README.md'), 'before\n');
-	spawnSync('git', ['add', 'README.md'], { cwd: workspace, encoding: 'utf8' });
+	fs.writeFileSync(path.join(workspace, 'UNSTAGED.md'), 'before unstaged\n');
+	spawnSync('git', ['add', 'README.md', 'UNSTAGED.md'], { cwd: workspace, encoding: 'utf8' });
 	spawnSync('git', ['commit', '-m', 'initial'], {
 		cwd: workspace,
 		encoding: 'utf8',
@@ -235,9 +236,14 @@ process.exit(0);
 	fs.writeFileSync(artifactCliPath, `#!/usr/bin/env node
 	const fs = require('node:fs');
 	const { spawnSync } = require('node:child_process');
-	fs.writeFileSync('README.md', 'after\\n');
+	fs.writeFileSync('README.md', 'committed after\\n');
 	spawnSync('git', ['add', 'README.md']);
+	spawnSync('git', ['-c', 'user.name=Homeboy Test', '-c', 'user.email=homeboy@example.test', 'commit', '-m', 'agent commit']);
+	fs.writeFileSync('STAGED.md', 'staged after\\n');
+	spawnSync('git', ['add', 'STAGED.md']);
+	fs.writeFileSync('UNSTAGED.md', 'unstaged after\\n');
 	fs.writeFileSync('NEW.md', 'untracked\\n');
+	fs.writeFileSync('BINARY.bin', Buffer.from([0, 1, 2, 0, 255]));
 	process.stdout.write('transcript output ' + process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN);
 	process.stderr.write('provider stderr output');
 	process.exit(0);
@@ -259,9 +265,15 @@ process.exit(0);
 	assert.equal(artifactResult.status, 'succeeded');
 	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stderr', 'opencode-runtime-stdout', 'patch', 'transcript']);
 	const editingPatch = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8');
-	assert.match(editingPatch, /after/);
+	assert.match(editingPatch, /committed after/);
+	assert.equal(editingPatch.match(/committed after/g)?.length, 1);
+	assert.match(editingPatch, /STAGED\.md/);
+	assert.match(editingPatch, /staged after/);
+	assert.match(editingPatch, /unstaged after/);
 	assert.match(editingPatch, /NEW\.md/);
 	assert.match(editingPatch, /untracked/);
+	assert.match(editingPatch, /BINARY\.bin/);
+	assert.match(editingPatch, /GIT binary patch/);
 	const transcript = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8');
 	assert.match(transcript, /transcript output/);
 	assert.match(transcript, /provider stderr output/);
@@ -278,6 +290,46 @@ process.exit(0);
 	const agentResult = JSON.parse(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.equal(agentResult.opencode_session.status, 'not_discovered');
 	assert.equal(artifactResult.metadata.missing_declared_artifacts, undefined);
+
+	const committedWorkspace = path.join(root, 'committed-workspace');
+	fs.mkdirSync(committedWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: committedWorkspace, encoding: 'utf8' });
+	fs.writeFileSync(path.join(committedWorkspace, 'README.md'), 'before commit\n');
+	spawnSync('git', ['add', 'README.md'], { cwd: committedWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '-m', 'initial'], {
+		cwd: committedWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
+	const committedCliPath = path.join(root, 'mock-opencode-committed.cjs');
+	fs.writeFileSync(committedCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+fs.writeFileSync('README.md', 'committed only\\n');
+spawnSync('git', ['add', 'README.md']);
+spawnSync('git', ['-c', 'user.name=Homeboy Test', '-c', 'user.email=homeboy@example.test', 'commit', '-m', 'agent commit']);
+process.exit(0);
+`);
+	const committedResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-committed-artifacts',
+		workspace_path: committedWorkspace,
+		artifacts_path: path.join(root, 'committed-artifacts'),
+		executor: {
+			...request.executor,
+			config: { ...request.executor.config, command_args: [committedCliPath] },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(committedResult.status, 'succeeded');
+	const committedPatch = fs.readFileSync(committedResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8');
+	assert.match(committedPatch, /committed only/);
+	assert.equal(committedPatch.match(/committed only/g)?.length, 1);
 
 	const quietWorkspace = path.join(root, 'quiet-workspace');
 	fs.mkdirSync(quietWorkspace, { recursive: true });
