@@ -36,102 +36,75 @@ pub fn run_command_output(
             let run_from_spec_output_ref =
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), spec, global);
-            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                if let Some(output_file) = run_from_spec_output_ref {
-                    return render_controller_run_from_spec_output_ref(
-                        payload,
-                        exit_code,
-                        output_file,
-                    );
-                }
+            command_run_with_summary(
+                dispatch(Commands::AgentTask(args), spec, global),
+                |payload, exit_code| {
+                    if let Some(output_file) = run_from_spec_output_ref {
+                        return render_controller_run_from_spec_output_ref(
+                            payload,
+                            exit_code,
+                            output_file,
+                        );
+                    }
 
-                summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
-            });
-
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
+                    summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
                 },
             )
         }
         Commands::Runner(args) => runner::run_command_output(args, global),
-        Commands::Activity(args) => {
-            let (stdout_result, exit_code) = dispatch(Commands::Activity(args), spec, global);
-            let summary_stdout = stdout_result
-                .as_ref()
-                .ok()
-                .and_then(super::activity::render_activity_summary);
-
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
-                },
-            )
-        }
+        Commands::Activity(args) => command_run_with_summary(
+            dispatch(Commands::Activity(args), spec, global),
+            |payload, _| super::activity::render_activity_summary(payload),
+        ),
         Commands::Bench(args) => {
-            let summarize = bench_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Bench(args), spec, global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(super::bench_summary::render_bench_summary)
-                })
-                .flatten();
-
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
+            let summarize = args.is_run_invocation()
+                && !args.wants_full_json()
+                && !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            command_run_with_summary(
+                dispatch(Commands::Bench(args), spec, global),
+                |payload, _| {
+                    summarize
+                        .then(|| super::bench_summary::render_bench_summary(payload))
+                        .flatten()
                 },
             )
         }
         Commands::Cleanup(args) => {
-            let summarize = cleanup_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), spec, global);
-            let summary_stdout = summarize
-                .then(|| {
-                    stdout_result
-                        .as_ref()
-                        .ok()
-                        .and_then(super::cleanup::render_cleanup_summary)
-                })
-                .flatten();
-
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
+            let summarize = matches!(
+                args.command,
+                Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
+                    | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
+            ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            command_run_with_summary(
+                dispatch(Commands::Cleanup(args), spec, global),
+                |payload, _| {
+                    summarize
+                        .then(|| super::cleanup::render_cleanup_summary(payload))
+                        .flatten()
                 },
             )
         }
         Commands::Runs(args) => {
-            let summarize_show = runs_show_summary_eligible(&args);
-            let summarize_dossier = runs_dossier_summary_eligible(&args);
-            let summarize_proof = runs_proof_summary_eligible(&args);
-            let (stdout_result, exit_code) = dispatch(Commands::Runs(args), spec, global);
-            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
-                if let Some(rendered) = super::runs_summary::render_runs_field_selection(payload) {
-                    Some(rendered)
-                } else if summarize_show {
-                    super::runs_summary::render_runs_show_summary(payload)
-                } else if summarize_dossier {
-                    super::runs_dossier_summary::render_runs_dossier_summary(payload)
-                } else if summarize_proof {
-                    super::runs_proof_summary::render_runs_proof_summary(payload)
-                } else {
-                    None
-                }
-            });
-
-            CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
-                CommandPresentation {
-                    stdout: summary_stdout,
-                    stderr: None,
+            let operator_output = !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            let summarize_show = args.show_summary_eligible() && operator_output;
+            let summarize_dossier = args.dossier_summary_eligible() && operator_output;
+            let summarize_proof = args.proof_summary_eligible() && operator_output;
+            command_run_with_summary(
+                dispatch(Commands::Runs(args), spec, global),
+                |payload, _| {
+                    if let Some(rendered) =
+                        super::runs_summary::render_runs_field_selection(payload)
+                    {
+                        Some(rendered)
+                    } else if summarize_show {
+                        super::runs_summary::render_runs_show_summary(payload)
+                    } else if summarize_dossier {
+                        super::runs_dossier_summary::render_runs_dossier_summary(payload)
+                    } else if summarize_proof {
+                        super::runs_proof_summary::render_runs_proof_summary(payload)
+                    } else {
+                        None
+                    }
                 },
             )
         }
@@ -142,6 +115,23 @@ pub fn run_command_output(
     };
 
     run.with_command(spec.name)
+}
+
+fn command_run_with_summary(
+    (stdout_result, exit_code): JsonRun,
+    render: impl FnOnce(&Value, i32) -> Option<String>,
+) -> CommandRun {
+    let summary_stdout = stdout_result
+        .as_ref()
+        .ok()
+        .and_then(|payload| render(payload, exit_code));
+
+    CommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+        CommandPresentation {
+            stdout: summary_stdout,
+            stderr: None,
+        },
+    )
 }
 
 fn agent_task_controller_run_from_spec_output_ref_eligible<'a>(
@@ -251,39 +241,6 @@ fn controller_evidence_refs(controller: &Value) -> Vec<Value> {
     refs
 }
 
-/// Whether `homeboy runs show` should render the compact human summary
-/// instead of the full JSON envelope (#3260). Suppressed by `--json` and in
-/// lab-offload subprocesses whose stdout must remain machine-readable.
-fn runs_show_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
-    args.show_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
-fn runs_dossier_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
-    args.dossier_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
-fn runs_proof_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
-    args.proof_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
-/// Whether `homeboy bench` should render the compact human summary instead
-/// of dumping the full JSON envelope. The full payload is kept for `--json`,
-/// for non-run subcommands, and for lab-offload subprocesses (whose stdout
-/// must stay machine-readable for the parent process).
-fn bench_summary_eligible(args: &crate::commands::bench::BenchArgs) -> bool {
-    args.is_run_invocation()
-        && !args.wants_full_json()
-        && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
-fn cleanup_summary_eligible(args: &crate::commands::cleanup::CleanupArgs) -> bool {
-    matches!(
-        args.command,
-        Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
-            | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
-    ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
-}
-
 fn agent_task_summary_kind_for_output(
     args: &crate::commands::agent_task::AgentTaskArgs,
 ) -> Option<super::agent_task_summary::AgentTaskSummaryKind> {
@@ -378,25 +335,50 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_artifacts_summary_is_eligible_for_operator_stdout() {
-        let args = crate::commands::cleanup::CleanupArgs {
-            apply: false,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            command: Some(crate::commands::cleanup::CleanupCommand::Artifacts(
-                crate::commands::cleanup::CleanupArtifactsArgs {
-                    apply: false,
-                    self_artifacts: false,
-                    path: None,
-                    temp_root: Vec::new(),
-                    sort: crate::commands::cleanup::CleanupArtifactsSortArg::default(),
-                    limit: None,
-                    merged_only: false,
-                },
-            )),
-        };
+    fn summary_presentation_preserves_structured_result_exit_code_and_file_payload() {
+        let payload = serde_json::json!({ "schema": "test/v1", "items": [1, 2, 3] });
+        let run = command_run_with_summary((Ok(payload.clone()), 7), |value, exit_code| {
+            assert_eq!(value, &payload);
+            assert_eq!(exit_code, 7);
+            Some("3 items\n".to_string())
+        });
 
-        assert!(cleanup_summary_eligible(&args));
+        assert_eq!(
+            run.stdout_result.as_ref().expect("structured payload"),
+            &payload
+        );
+        assert_eq!(run.exit_code, 7);
+        assert_eq!(run.presentation.stdout.as_deref(), Some("3 items\n"));
+        assert_eq!(
+            super::super::output_runtime::select_output_file_result(
+                &run,
+                crate::command_contract::CommandOutputFileMode::GenericEnvelope,
+            )
+            .as_ref()
+            .expect("output-file payload"),
+            &payload
+        );
+    }
+
+    #[test]
+    fn absent_summary_and_error_paths_remain_unmodified() {
+        let payload = serde_json::json!({ "schema": "test/v1" });
+        let run = command_run_with_summary((Ok(payload.clone()), 0), |_, _| None);
+        assert_eq!(run.stdout_result.expect("structured payload"), payload);
+        assert_eq!(run.presentation, CommandPresentation::default());
+
+        let error =
+            homeboy::core::Error::validation_invalid_argument("test", "invalid", None, None);
+        let expected_code = error.code.clone();
+        let run = command_run_with_summary((Err(error.clone()), 2), |_, _| {
+            panic!("renderer must not run for errors")
+        });
+        assert_eq!(
+            run.stdout_result.expect_err("error result").code,
+            expected_code
+        );
+        assert_eq!(run.exit_code, 2);
+        assert_eq!(run.presentation, CommandPresentation::default());
     }
 
     #[test]
