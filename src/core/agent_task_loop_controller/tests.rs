@@ -815,7 +815,6 @@ fn pr_ownership_red_checks_increment_until_retry_limit() {
         AgentTaskPrOwnershipStatusUpdate {
             pr_number: Some(42),
             ci_state: Some("terminal_failed".to_string()),
-            retry_count: 1,
             ..AgentTaskPrOwnershipStatusUpdate::default()
         },
     );
@@ -825,7 +824,6 @@ fn pr_ownership_red_checks_increment_until_retry_limit() {
         AgentTaskPrOwnershipStatusUpdate {
             pr_number: Some(42),
             ci_state: Some("terminal_failed".to_string()),
-            retry_count: 2,
             ..AgentTaskPrOwnershipStatusUpdate::default()
         },
     );
@@ -834,6 +832,48 @@ fn pr_ownership_red_checks_increment_until_retry_limit() {
     assert_eq!(second.state, AgentTaskPrOwnershipState::RetryLimitReached);
     assert_eq!(record.pr_ownerships.len(), 1);
     assert_eq!(record.pr_ownerships[0].retry_count, 2);
+}
+
+#[test]
+fn persisted_gate_records_accept_legacy_status_vocabulary() {
+    let mut record = AgentTaskLoopControllerRecord::new("loop", "verify", "v1");
+    record.gate_results.push(AgentTaskGateBundleResult {
+        result_id: "gate-result-1".to_string(),
+        bundle_id: "quality".to_string(),
+        entity_id: None,
+        run_id: None,
+        status: AgentTaskLoopGateStatus::Satisfied,
+        checks: vec![AgentTaskGateCheckResult {
+            check_id: "check-1".to_string(),
+            status: AgentTaskLoopGateStatus::Satisfied,
+            retryable: false,
+            classification: None,
+            evidence: Vec::new(),
+            details: Value::Null,
+        }],
+        recorded_at: "2026-07-12T00:00:00Z".to_string(),
+    });
+    let mut persisted = serde_json::to_value(record).expect("record serializes");
+    persisted["gate_results"][0]["status"] = json!("passed");
+    persisted["gate_results"][0]["checks"][0]["status"] = json!("warn");
+
+    let loaded: AgentTaskLoopControllerRecord =
+        serde_json::from_value(persisted).expect("legacy record deserializes");
+
+    assert_eq!(
+        loaded.gate_results[0].status,
+        AgentTaskLoopGateStatus::Satisfied
+    );
+    assert_eq!(
+        loaded.gate_results[0].checks[0].status,
+        AgentTaskLoopGateStatus::Satisfied
+    );
+    let serialized = serde_json::to_value(loaded).expect("record reserializes");
+    assert_eq!(serialized["gate_results"][0]["status"], json!("satisfied"));
+    assert_eq!(
+        serialized["gate_results"][0]["checks"][0]["status"],
+        json!("satisfied")
+    );
 }
 
 #[test]

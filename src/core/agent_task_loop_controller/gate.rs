@@ -64,7 +64,7 @@ pub struct AgentTaskGateBundleResult {
     pub entity_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    pub status: AgentTaskGateBundleStatus,
+    pub status: AgentTaskLoopGateStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<AgentTaskGateCheckResult>,
     pub recorded_at: String,
@@ -72,16 +72,27 @@ pub struct AgentTaskGateBundleResult {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentTaskGateBundleStatus {
-    Passed,
+pub enum AgentTaskLoopGateStatus {
+    /// A recorded gate result that satisfies the acceptance requirement.
+    ///
+    /// `passed`, `warn`, and `warning` were emitted by earlier controller
+    /// records. They retain their prior non-blocking behavior when read.
+    #[serde(alias = "passed", alias = "warn", alias = "warning")]
+    Satisfied,
+    /// The policy declared a gate, but no result has been recorded yet.
+    /// This is diagnostic-only and is never written into a gate result.
+    Missing,
     Failed,
-    Warn,
     /// The gate has a recorded result but cannot be considered acceptable yet:
     /// it requires an external result that has not arrived (for example a
     /// manual check awaiting a human/external signal). Pending gates block the
     /// loop rather than auto-passing as a non-blocking warning.
     Pending,
 }
+
+/// Backwards-compatible source alias for the old gate-result vocabulary.
+/// New policy, result, and diagnostic fields use `AgentTaskLoopGateStatus`.
+pub type AgentTaskGateBundleStatus = AgentTaskLoopGateStatus;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -112,7 +123,7 @@ pub struct AgentTaskLoopTerminalOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateCheckResult {
     pub check_id: String,
-    pub status: AgentTaskGateBundleStatus,
+    pub status: AgentTaskLoopGateStatus,
     #[serde(default)]
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

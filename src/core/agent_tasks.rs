@@ -259,7 +259,7 @@ pub mod loop_controller {
         AgentTaskLoopControllerState, AgentTaskLoopControllerStatusReport,
         AgentTaskLoopDedupeRecord, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
         AgentTaskLoopFeedbackArtifact, AgentTaskLoopFeedbackStatus, AgentTaskLoopFindingPacket,
-        AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
+        AgentTaskLoopGateStatus, AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
         AgentTaskLoopPendingActionDiagnostic, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
         AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopReviewFinding,
         AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,

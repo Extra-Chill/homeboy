@@ -145,46 +145,34 @@ pub struct AgentTaskLoopFailedChildEvidenceRef {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskLoopAcceptanceGateStatus {
-    Satisfied,
-    Missing,
-    Failed,
-    Warning,
-    /// The gate recorded a result that is still awaiting an external/manual
-    /// signal. Treated as blocking (not acceptable) so a manual-only bundle
-    /// never resolves to a false-green acceptance gate.
-    Pending,
-}
-
 /// Canonical projection from a (possibly absent) recorded gate-bundle result
 /// status to the acceptance-gate status surfaced in diagnostics. An absent
 /// result maps to `Missing`; the present statuses map 1:1 onto their
 /// acceptance-gate equivalents. Routing every call site through this `From`
 /// keeps the projection in one place instead of hand-synced match arms.
-impl From<Option<AgentTaskGateBundleStatus>> for AgentTaskLoopAcceptanceGateStatus {
-    fn from(status: Option<AgentTaskGateBundleStatus>) -> Self {
+impl From<Option<AgentTaskLoopGateStatus>> for AgentTaskLoopGateStatus {
+    fn from(status: Option<AgentTaskLoopGateStatus>) -> Self {
         match status {
-            Some(AgentTaskGateBundleStatus::Passed) => AgentTaskLoopAcceptanceGateStatus::Satisfied,
-            Some(AgentTaskGateBundleStatus::Failed) => AgentTaskLoopAcceptanceGateStatus::Failed,
-            Some(AgentTaskGateBundleStatus::Warn) => AgentTaskLoopAcceptanceGateStatus::Warning,
-            Some(AgentTaskGateBundleStatus::Pending) => AgentTaskLoopAcceptanceGateStatus::Pending,
-            None => AgentTaskLoopAcceptanceGateStatus::Missing,
+            Some(status) => status,
+            None => AgentTaskLoopGateStatus::Missing,
         }
     }
 }
+
+/// Backwards-compatible source alias for the old diagnostics vocabulary.
+/// New policy, result, and diagnostic fields use `AgentTaskLoopGateStatus`.
+pub type AgentTaskLoopAcceptanceGateStatus = AgentTaskLoopGateStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskLoopAcceptanceGateDiagnostic {
     pub bundle_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_id: Option<String>,
-    pub status: AgentTaskLoopAcceptanceGateStatus,
+    pub status: AgentTaskLoopGateStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_status: Option<AgentTaskGateBundleStatus>,
+    pub result_status: Option<AgentTaskLoopGateStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_at: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -219,24 +207,24 @@ mod tests {
     #[test]
     fn acceptance_gate_status_bridges_from_bundle_status() {
         assert_eq!(
-            AgentTaskLoopAcceptanceGateStatus::from(Some(AgentTaskGateBundleStatus::Passed)),
-            AgentTaskLoopAcceptanceGateStatus::Satisfied
+            AgentTaskLoopGateStatus::from(Some(AgentTaskLoopGateStatus::Satisfied)),
+            AgentTaskLoopGateStatus::Satisfied
         );
         assert_eq!(
-            AgentTaskLoopAcceptanceGateStatus::from(Some(AgentTaskGateBundleStatus::Failed)),
-            AgentTaskLoopAcceptanceGateStatus::Failed
+            AgentTaskLoopGateStatus::from(Some(AgentTaskLoopGateStatus::Failed)),
+            AgentTaskLoopGateStatus::Failed
         );
         assert_eq!(
-            AgentTaskLoopAcceptanceGateStatus::from(Some(AgentTaskGateBundleStatus::Warn)),
-            AgentTaskLoopAcceptanceGateStatus::Warning
+            AgentTaskLoopGateStatus::from(Some(AgentTaskLoopGateStatus::Satisfied)),
+            AgentTaskLoopGateStatus::Satisfied
         );
         assert_eq!(
-            AgentTaskLoopAcceptanceGateStatus::from(Some(AgentTaskGateBundleStatus::Pending)),
-            AgentTaskLoopAcceptanceGateStatus::Pending
+            AgentTaskLoopGateStatus::from(Some(AgentTaskLoopGateStatus::Pending)),
+            AgentTaskLoopGateStatus::Pending
         );
         assert_eq!(
-            AgentTaskLoopAcceptanceGateStatus::from(None),
-            AgentTaskLoopAcceptanceGateStatus::Missing
+            AgentTaskLoopGateStatus::from(None),
+            AgentTaskLoopGateStatus::Missing
         );
     }
 }

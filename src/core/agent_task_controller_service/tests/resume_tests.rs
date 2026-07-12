@@ -742,7 +742,7 @@ fn from_spec_resume_drives_workflow_lineage_then_blocks_on_pending_manual_gate()
         assert_eq!(result.value.controller.gate_results.len(), 1);
         assert_eq!(
             result.value.controller.gate_results[0].status,
-            AgentTaskGateBundleStatus::Pending
+            AgentTaskLoopGateStatus::Pending
         );
         let gate_action = result
             .value
