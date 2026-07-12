@@ -18,26 +18,15 @@ pub struct ResolvedArtifactInput {
     pub sha256: String,
 }
 
-pub(crate) trait ArtifactInputWriter {
-    fn validate_consumer_artifact(&self, consumer_artifact: &Path) -> Result<()>;
-    fn write_input(
-        &self,
-        consumer_artifact: &Path,
-        source_artifact: &Path,
-        resolved: &ResolvedArtifactInput,
-    ) -> Result<()>;
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct ZipArtifactInputWriter;
 
-impl ArtifactInputWriter for ZipArtifactInputWriter {
-    fn validate_consumer_artifact(&self, consumer_artifact: &Path) -> Result<()> {
+impl ZipArtifactInputWriter {
+    fn validate_consumer_artifact(consumer_artifact: &Path) -> Result<()> {
         validate_zip_artifact(consumer_artifact)
     }
 
     fn write_input(
-        &self,
         consumer_artifact: &Path,
         source_artifact: &Path,
         resolved: &ResolvedArtifactInput,
@@ -55,24 +44,20 @@ pub(crate) fn apply_to_component_artifact(
     consumer: &Component,
     consumer_artifact: &Path,
 ) -> Result<Vec<ResolvedArtifactInput>> {
-    apply_to_component_artifact_with_writer(consumer, consumer_artifact, &ZipArtifactInputWriter)
-}
-
-fn apply_to_component_artifact_with_writer(
-    consumer: &Component,
-    consumer_artifact: &Path,
-    writer: &dyn ArtifactInputWriter,
-) -> Result<Vec<ResolvedArtifactInput>> {
     if consumer.artifact_inputs.is_empty() {
         return Ok(Vec::new());
     }
 
-    writer.validate_consumer_artifact(consumer_artifact)?;
+    ZipArtifactInputWriter::validate_consumer_artifact(consumer_artifact)?;
 
     let mut resolved = Vec::with_capacity(consumer.artifact_inputs.len());
     for input in &consumer.artifact_inputs {
         let input = resolve_input_source(input, &consumer.id, true)?;
-        writer.write_input(consumer_artifact, &input.source_artifact, &input.metadata)?;
+        ZipArtifactInputWriter::write_input(
+            consumer_artifact,
+            &input.source_artifact,
+            &input.metadata,
+        )?;
         resolved.push(input.metadata);
     }
 
@@ -373,11 +358,8 @@ mod tests {
             sha256: "sha".to_string(),
         };
 
-        let writer = ZipArtifactInputWriter;
-        writer.validate_consumer_artifact(&zip_path).unwrap();
-        writer
-            .write_input(&zip_path, &source_path, &resolved)
-            .unwrap();
+        ZipArtifactInputWriter::validate_consumer_artifact(&zip_path).unwrap();
+        ZipArtifactInputWriter::write_input(&zip_path, &source_path, &resolved).unwrap();
 
         let file = File::open(&zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -395,10 +377,7 @@ mod tests {
         let artifact_path = dir.path().join("consumer.tar");
         fs::write(&artifact_path, b"consumer bytes").unwrap();
 
-        let writer = ZipArtifactInputWriter;
-        let err = writer
-            .validate_consumer_artifact(&artifact_path)
-            .unwrap_err();
+        let err = ZipArtifactInputWriter::validate_consumer_artifact(&artifact_path).unwrap_err();
 
         assert_eq!(err.details["field"], "build_artifact");
         assert!(err.details.to_string().contains("ZIP consumer artifact"));

@@ -586,57 +586,57 @@ fn validate_artifact_name(name: &str) -> homeboy::core::Result<()> {
 }
 
 fn validate_runner_artifact_path(runner: &Runner, path: &str) -> homeboy::core::Result<()> {
-    let candidate = Path::new(path);
-    if !candidate.is_absolute() {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "runner artifact attach requires an absolute runner-side path",
-            Some(path.to_string()),
-            None,
-        ));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "runner artifact attach path must not contain parent directory components",
-            Some(path.to_string()),
-            None,
-        ));
-    }
-
     let roots = allowed_runner_artifact_roots(runner)?;
-    if roots.iter().any(|root| path_is_within_root(path, root)) {
-        return Ok(());
+    match homeboy::core::paths::authorize_remote_artifact_path(
+        Path::new(path),
+        &roots,
+        homeboy::core::paths::RemotePathRootContainment::RemoteString,
+    ) {
+        Ok(()) => Ok(()),
+        Err(homeboy::core::paths::RemotePathAuthorizationError::NotAbsolute) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner artifact attach requires an absolute runner-side path",
+                Some(path.to_string()),
+                None,
+            ))
+        }
+        Err(homeboy::core::paths::RemotePathAuthorizationError::ContainsParentDir) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner artifact attach path must not contain parent directory components",
+                Some(path.to_string()),
+                None,
+            ))
+        }
+        Err(homeboy::core::paths::RemotePathAuthorizationError::OutsideAllowedRoots) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner artifact path must be under an allowed runner workspace/output root",
+                Some(path.to_string()),
+                Some(vec![format!("Allowed roots: {}", roots.join(", "))]),
+            ))
+        }
     }
-
-    Err(Error::validation_invalid_argument(
-        "path",
-        "runner artifact path must be under an allowed runner workspace/output root",
-        Some(path.to_string()),
-        Some(vec![format!("Allowed roots: {}", roots.join(", "))]),
-    ))
 }
 
 fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<String>> {
     let mut roots = Vec::new();
     if let Some(root) = runner.workspace_root.as_deref() {
-        roots.push(normalize_root(root));
+        roots.push(homeboy::core::paths::normalize_remote_root(root));
     }
     roots.extend(
         runner
             .policy
             .workspace_roots
             .iter()
-            .map(|root| normalize_root(root)),
+            .map(|root| homeboy::core::paths::normalize_remote_root(root)),
     );
     if let Some(root) = runner.env.get("HOMEBOY_ARTIFACT_ROOT") {
-        roots.push(normalize_root(root));
+        roots.push(homeboy::core::paths::normalize_remote_root(root));
     }
     if runner.kind == RunnerKind::Local {
-        roots.push(normalize_root(
+        roots.push(homeboy::core::paths::normalize_remote_root(
             &homeboy::core::artifact_root()?.display().to_string(),
         ));
     }
@@ -655,20 +655,6 @@ fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<S
         ));
     }
     Ok(roots)
-}
-
-fn normalize_root(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn path_is_within_root(path: &str, root: &str) -> bool {
-    let root = normalize_root(root);
-    path == root || path.starts_with(&format!("{root}/"))
 }
 
 fn copy_runner_artifact_source(

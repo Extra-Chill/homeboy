@@ -1,5 +1,4 @@
 pub mod attachments;
-pub mod discovery;
 pub mod overrides;
 pub mod report;
 pub mod resolution;

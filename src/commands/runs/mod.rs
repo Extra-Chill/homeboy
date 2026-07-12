@@ -16,7 +16,6 @@ mod common;
 mod compare;
 #[cfg(test)]
 mod corpus_tests;
-mod disk;
 mod dispatch;
 mod distribution;
 mod dossier;

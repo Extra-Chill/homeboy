@@ -209,7 +209,8 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code = commands::response::run(cli.command, &global, output_file.as_deref());
+        let exit_code =
+            commands::output_runtime::run_command(cli.command, &global, output_file.as_deref());
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
     }
 

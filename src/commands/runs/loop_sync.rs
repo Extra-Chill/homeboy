@@ -3,14 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use homeboy::core::observation::{persist_loop_inventory_run, ArtifactRecord, NewRunRecord};
+use homeboy::core::observation::{
+    disk_budget::disk_budget, persist_loop_inventory_run, ArtifactRecord, NewRunRecord,
+};
 use homeboy::core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod types;
 
-use super::{disk, CmdResult, RunsOutput};
+use super::{CmdResult, RunsOutput};
 use types::*;
 pub use types::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 
@@ -227,7 +229,7 @@ fn loop_triage_summary(inventory: &LoopInventory, args: &RunsLoopSyncArgs) -> Lo
     let heartbeat = latest_heartbeat(inventory, args.stale_after_minutes);
     LoopTriageSummary {
         heartbeat,
-        disk: disk::disk_budget(
+        disk: disk_budget(
             &inventory.archive_root,
             "archive",
             "disk budget probing is not implemented for this platform",

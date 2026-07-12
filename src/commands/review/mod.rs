@@ -32,10 +32,10 @@ use std::path::Path;
 
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
-use super::utils::output::{write_output_file_atomically, OutputWriteOptions};
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{audit, audit_baseline, build, ci, lint, test, CmdResult, GlobalArgs};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
+use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
 mod observation;
 pub(super) mod raw_output;

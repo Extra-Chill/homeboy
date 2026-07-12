@@ -20,10 +20,10 @@ use super::utils::args::{
     filter_passthrough_args, BaselineArgs, ExtensionOverrideArgs, PassthroughCommand,
     PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::ObservedWorkflowRunner;
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{LabCommandContract, TEST_LAB_LABEL};
+use crate::core::observation::ObservedWorkflowRunner;
 use homeboy::core::validation_progress::validation_progress_metadata;
 
 #[derive(Args)]

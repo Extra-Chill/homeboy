@@ -20,10 +20,10 @@ use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
-use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::utils::response::actionable_metadata_value_for_run_ref;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{LabCommandContract, LINT_LAB_LABEL};
+use crate::core::observation::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 
 #[derive(Args)]
 pub struct LintArgs {
@@ -499,7 +499,7 @@ fn run_fix(
 #[cfg(test)]
 mod tests {
     use super::{LintArgs, LintObservationAdapter};
-    use crate::commands::utils::observed_workflow::WorkflowObservationAdapter;
+    use crate::core::observation::WorkflowObservationAdapter;
     use clap::Parser;
     use homeboy::core::component::Component;
     use homeboy::core::engine::run_dir::RunDir;

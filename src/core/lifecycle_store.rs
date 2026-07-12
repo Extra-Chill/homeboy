@@ -50,7 +50,7 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
     store.upsert_imported_run(&RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
-        component_id: record.plan_id_component(),
+        component_id: plan_id_component(record),
         started_at: record.submitted_at.clone(),
         finished_at: terminal_finished_at(record),
         status: run_status(record.state).to_string(),
@@ -198,7 +198,7 @@ fn mirror_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<()> 
     store.upsert_imported_run(&RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
-        component_id: record.plan_id_component(),
+        component_id: plan_id_component(&record),
         started_at: record.submitted_at.clone(),
         finished_at: terminal_finished_at(&record),
         status: run_status(record.state).to_string(),
@@ -254,23 +254,19 @@ fn terminal_finished_at(record: &AgentTaskRunRecord) -> Option<String> {
     }
 }
 
-trait AgentTaskRunRecordExt {
-    fn plan_id_component(&self) -> Option<String>;
-}
-
-impl AgentTaskRunRecordExt for AgentTaskRunRecord {
-    fn plan_id_component(&self) -> Option<String> {
-        self.metadata
-            .get("repo")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| {
-                self.metadata
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-    }
+fn plan_id_component(record: &AgentTaskRunRecord) -> Option<String> {
+    record
+        .metadata
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            record
+                .metadata
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {

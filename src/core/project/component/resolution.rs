@@ -3,8 +3,8 @@ use crate::core::project::Project;
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::discovery::discover_attached_component;
 use super::overrides::apply_component_overrides;
+use crate::core::component::discover_from_portable;
 
 pub fn resolve_project_component(
     project: &Project,
@@ -31,7 +31,7 @@ pub fn resolve_project_component_with_standalone_snapshot(
             None,
         )?;
         (
-            discover_attached_component(Path::new(&attachment.local_path)).ok_or_else(|| {
+            discover_from_portable(Path::new(&attachment.local_path)).ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "components.local_path",
                     format!(
