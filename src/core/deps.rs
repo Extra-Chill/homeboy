@@ -315,6 +315,16 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
 }
 
 fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallInvocation> {
+    for (entrypoint_index, value) in argv.iter().enumerate() {
+        if let Some((extension_id, entrypoint)) = installed_extension_entrypoint(Path::new(value)) {
+            return Ok(extension_install_invocation(
+                argv,
+                entrypoint_index,
+                extension_id,
+                entrypoint,
+            ));
+        }
+    }
     for extension in extension::load_all_extensions()? {
         let Some(root) = extension.extension_path else {
             continue;
@@ -326,18 +336,56 @@ fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallI
             }
             if let Ok(entrypoint) = path.strip_prefix(&root) {
                 let entrypoint = entrypoint.to_string_lossy().to_string();
-                let mut portable_argv = argv;
-                portable_argv.remove(entrypoint_index);
-                return Ok(DependencyInstallInvocation::ExtensionEntrypoint {
-                    extension_id: extension.id,
-                    entrypoint,
-                    argv: portable_argv,
+                return Ok(extension_install_invocation(
+                    argv,
                     entrypoint_index,
-                });
+                    extension.id,
+                    entrypoint,
+                ));
             }
         }
     }
     Ok(DependencyInstallInvocation::Argv { argv })
+}
+
+fn installed_extension_entrypoint(path: &Path) -> Option<(String, String)> {
+    let components = path.components().collect::<Vec<_>>();
+    let marker = [".config", "homeboy", "extensions"];
+    let marker_index = components.windows(marker.len()).position(|window| {
+        window
+            .iter()
+            .zip(marker)
+            .all(|(component, expected)| component.as_os_str() == expected)
+    })?;
+    let extension_id = components.get(marker_index + marker.len())?;
+    let entrypoint = components.get(marker_index + marker.len() + 1..)?;
+    if entrypoint.is_empty() {
+        return None;
+    }
+    Some((
+        extension_id.as_os_str().to_string_lossy().to_string(),
+        entrypoint
+            .iter()
+            .map(|component| component.as_os_str())
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .to_string(),
+    ))
+}
+
+fn extension_install_invocation(
+    mut argv: Vec<String>,
+    entrypoint_index: usize,
+    extension_id: String,
+    entrypoint: String,
+) -> DependencyInstallInvocation {
+    argv.remove(entrypoint_index);
+    DependencyInstallInvocation::ExtensionEntrypoint {
+        extension_id,
+        entrypoint,
+        argv,
+        entrypoint_index,
+    }
 }
 
 fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {
@@ -485,6 +533,29 @@ mod tests {
                     extension_id: extension_id.to_string(),
                     entrypoint: "scripts/install.sh".to_string(),
                     argv: vec!["sh".to_string(), "install".to_string()],
+                    entrypoint_index: 1,
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn configured_extension_asset_from_foreign_controller_home_becomes_portable() {
+        crate::test_support::with_isolated_home(|_active_home| {
+            let invocation = dependency_install_invocation(vec![
+                "bash".to_string(),
+                "/controller/home/.config/homeboy/extensions/fixture-runtime/scripts/install.sh"
+                    .to_string(),
+                "install".to_string(),
+            ])
+            .expect("portable invocation");
+
+            assert_eq!(
+                invocation,
+                DependencyInstallInvocation::ExtensionEntrypoint {
+                    extension_id: "fixture-runtime".to_string(),
+                    entrypoint: "scripts/install.sh".to_string(),
+                    argv: vec!["bash".to_string(), "install".to_string()],
                     entrypoint_index: 1,
                 }
             );
