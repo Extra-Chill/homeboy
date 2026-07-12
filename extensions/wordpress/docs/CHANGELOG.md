@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.41] - 2026-07-12
+
+### Fixed
+- treat @wordpress/* runtime externals as resolvable in WordPress lint config
+- discover wp-codebox via Homeboy component registry
+
 ## [3.23.40] - 2026-07-07
 
 ### Changed
