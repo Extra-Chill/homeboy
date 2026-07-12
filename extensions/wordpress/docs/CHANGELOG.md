@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.42] - 2026-07-12
+
+### Fixed
+- Fix #2226: retire Homeboy compat surfaces
+
 ## [3.23.41] - 2026-07-12
 
 ### Fixed
