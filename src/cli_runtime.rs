@@ -584,9 +584,10 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     warning,
                     cli.force_hot || runner_hosted,
                     is_interactive_shell(),
-                    resource_policy::local_hot_rerun_command(
+                    resource_policy::rerun_command(
                         hot_command,
                         &std::env::args().collect::<Vec<_>>(),
+                        default_lab_runner.as_deref(),
                     ),
                     default_lab_runner.as_deref(),
                 ) {
