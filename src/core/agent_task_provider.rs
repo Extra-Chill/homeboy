@@ -53,9 +53,10 @@ pub(crate) use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, ProviderExecutorResolution,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
+pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
-    resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
-    selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,
+    role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,
+    timeout_artifact_discovery_for_executor,
 };
 pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
