@@ -1579,159 +1579,96 @@ fn resolve_schema(schema_id: &str) -> homeboy::core::Result<&'static ContractSch
         })
 }
 
+macro_rules! contract_schema {
+    ($id:expr, $type:ty) => {
+        ContractSchema {
+            id: $id,
+            validate_json: validate_contract::<$type>,
+        }
+    };
+}
+
 static CONTRACT_SCHEMAS: &[ContractSchema] = &[
-    ContractSchema {
-        id: RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-        validate_json: validate_artifact_manifest,
-    },
-    ContractSchema {
-        id: ARTIFACT_POSTPROCESS_SCHEMA,
-        validate_json: validate_artifact_postprocess,
-    },
-    ContractSchema {
-        id: SECRET_ENV_PLAN_SCHEMA,
-        validate_json: validate_secret_env_plan,
-    },
-    ContractSchema {
-        id: SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA,
-        validate_json: validate_secret_env_materialized_handoff,
-    },
-    ContractSchema {
-        id: FUZZ_WORKLOAD_SCHEMA,
-        validate_json: validate_fuzz_workload,
-    },
-    ContractSchema {
-        id: RESOURCE_CLEANUP_INTENT_SCHEMA,
-        validate_json: validate_resource_cleanup_intent,
-    },
-    ContractSchema {
-        id: RESOURCE_LIFECYCLE_INDEX_SCHEMA,
-        validate_json: validate_resource_lifecycle_index,
-    },
-    ContractSchema {
-        id: HOST_MUTATION_LIFECYCLE_SCHEMA,
-        validate_json: validate_host_mutation_lifecycle,
-    },
-    ContractSchema {
-        id: LOOP_RUN_SCHEMA,
-        validate_json: validate_loop_run,
-    },
-    ContractSchema {
-        id: LOOP_ITERATION_SCHEMA,
-        validate_json: validate_loop_iteration,
-    },
-    ContractSchema {
-        id: LOOP_EVIDENCE_SCHEMA,
-        validate_json: validate_loop_evidence,
-    },
-    ContractSchema {
-        id: RUNNER_EXECUTION_ENVELOPE_SCHEMA,
-        validate_json: validate_runner_execution_envelope,
-    },
-    ContractSchema {
-        id: RUNNER_EXECUTION_RECORD_SCHEMA,
-        validate_json: validate_runner_execution_record,
-    },
-    ContractSchema {
-        id: PATH_MATERIALIZATION_PLAN_SCHEMA,
-        validate_json: validate_path_materialization_plan,
-    },
-    ContractSchema {
-        id: RUN_OUTCOME_ENVELOPE_SCHEMA,
-        validate_json: validate_run_outcome_envelope,
-    },
+    contract_schema!(RUNNER_ARTIFACT_MANIFEST_SCHEMA, ArtifactManifest),
+    contract_schema!(ARTIFACT_POSTPROCESS_SCHEMA, ArtifactPostprocessPlan),
+    contract_schema!(SECRET_ENV_PLAN_SCHEMA, SecretEnvPlan),
+    contract_schema!(
+        SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA,
+        SecretEnvMaterializedHandoff
+    ),
+    contract_schema!(FUZZ_WORKLOAD_SCHEMA, Value),
+    contract_schema!(
+        RESOURCE_CLEANUP_INTENT_SCHEMA,
+        ResourceCleanupIntentContract
+    ),
+    contract_schema!(RESOURCE_LIFECYCLE_INDEX_SCHEMA, ResourceLifecycleIndex),
+    contract_schema!(HOST_MUTATION_LIFECYCLE_SCHEMA, HostMutationLifecycle),
+    contract_schema!(LOOP_RUN_SCHEMA, LoopRunRecord),
+    contract_schema!(LOOP_ITERATION_SCHEMA, LoopIterationRecord),
+    contract_schema!(LOOP_EVIDENCE_SCHEMA, LoopEvidenceRecord),
+    contract_schema!(
+        RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+        RunnerExecutionEnvelope
+    ),
+    contract_schema!(RUNNER_EXECUTION_RECORD_SCHEMA, RunnerExecutionRecord),
+    contract_schema!(PATH_MATERIALIZATION_PLAN_SCHEMA, PathMaterializationPlan),
+    contract_schema!(RUN_OUTCOME_ENVELOPE_SCHEMA, RunOutcomeEnvelope),
 ];
 
-fn validate_secret_env_plan(raw: &str) -> homeboy::core::Result<()> {
-    let plan: SecretEnvPlan = deserialize_contract(raw, SECRET_ENV_PLAN_SCHEMA)?;
-    validate_schema_field(SECRET_ENV_PLAN_SCHEMA, &plan.schema)
+trait ContractValidation: DeserializeOwned {
+    const SCHEMA: &'static str;
+
+    fn validate_contract(self) -> homeboy::core::Result<()>;
 }
 
-fn validate_secret_env_materialized_handoff(raw: &str) -> homeboy::core::Result<()> {
-    let handoff: SecretEnvMaterializedHandoff =
-        deserialize_contract(raw, SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA)?;
-    validate_schema_field(SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, &handoff.schema)
+fn validate_contract<T: ContractValidation>(raw: &str) -> homeboy::core::Result<()> {
+    deserialize_contract::<T>(raw, T::SCHEMA)?.validate_contract()
 }
 
-fn validate_artifact_postprocess(raw: &str) -> homeboy::core::Result<()> {
-    let plan: ArtifactPostprocessPlan = deserialize_contract(raw, ARTIFACT_POSTPROCESS_SCHEMA)?;
-    validate_artifact_postprocess_plan(&plan)
+macro_rules! impl_contract_validation {
+    ($($type:ty => $schema:expr, |$value:ident| $validate:expr);+ $(;)?) => {
+        $(
+            impl ContractValidation for $type {
+                const SCHEMA: &'static str = $schema;
+
+                fn validate_contract(self) -> homeboy::core::Result<()> {
+                    let $value = self;
+                    $validate
+                }
+            }
+        )+
+    };
 }
 
-fn validate_artifact_manifest(raw: &str) -> homeboy::core::Result<()> {
-    let manifest: ArtifactManifest = deserialize_contract(raw, RUNNER_ARTIFACT_MANIFEST_SCHEMA)?;
-    manifest.validate_shape()
-}
-
-fn validate_fuzz_workload(raw: &str) -> homeboy::core::Result<()> {
-    let value: Value = deserialize_contract(raw, FUZZ_WORKLOAD_SCHEMA)?;
-    FuzzWorkload::from_value(value).map_err(|message| {
-        homeboy::core::Error::new(
-            homeboy::core::ErrorCode::ValidationInvalidArgument,
-            "Contract validation failed",
-            serde_json::json!({
-                "schema": FUZZ_WORKLOAD_SCHEMA,
-                "valid": false,
-                "error": message,
-            }),
-        )
-    })?;
-    Ok(())
-}
-
-fn validate_resource_cleanup_intent(raw: &str) -> homeboy::core::Result<()> {
-    let contract: ResourceCleanupIntentContract =
-        deserialize_contract(raw, RESOURCE_CLEANUP_INTENT_SCHEMA)?;
-    contract.validate()
-}
-
-fn validate_resource_lifecycle_index(raw: &str) -> homeboy::core::Result<()> {
-    let contract: ResourceLifecycleIndex =
-        deserialize_contract(raw, RESOURCE_LIFECYCLE_INDEX_SCHEMA)?;
-    contract.validate()
-}
-
-fn validate_host_mutation_lifecycle(raw: &str) -> homeboy::core::Result<()> {
-    let contract: HostMutationLifecycle =
-        deserialize_contract(raw, HOST_MUTATION_LIFECYCLE_SCHEMA)?;
-    contract.validate()
-}
-
-fn validate_loop_run(raw: &str) -> homeboy::core::Result<()> {
-    let record: LoopRunRecord = deserialize_contract(raw, LOOP_RUN_SCHEMA)?;
-    validate_schema_field(LOOP_RUN_SCHEMA, &record.schema)
-}
-
-fn validate_loop_iteration(raw: &str) -> homeboy::core::Result<()> {
-    let record: LoopIterationRecord = deserialize_contract(raw, LOOP_ITERATION_SCHEMA)?;
-    validate_schema_field(LOOP_ITERATION_SCHEMA, &record.schema)
-}
-
-fn validate_loop_evidence(raw: &str) -> homeboy::core::Result<()> {
-    let record: LoopEvidenceRecord = deserialize_contract(raw, LOOP_EVIDENCE_SCHEMA)?;
-    validate_schema_field(LOOP_EVIDENCE_SCHEMA, &record.schema)
-}
-
-fn validate_runner_execution_record(raw: &str) -> homeboy::core::Result<()> {
-    let record: RunnerExecutionRecord = deserialize_contract(raw, RUNNER_EXECUTION_RECORD_SCHEMA)?;
-    validate_schema_field(RUNNER_EXECUTION_RECORD_SCHEMA, &record.schema)
-}
-
-fn validate_runner_execution_envelope(raw: &str) -> homeboy::core::Result<()> {
-    let envelope: RunnerExecutionEnvelope =
-        deserialize_contract(raw, RUNNER_EXECUTION_ENVELOPE_SCHEMA)?;
-    validate_schema_field(RUNNER_EXECUTION_ENVELOPE_SCHEMA, &envelope.schema)
-}
-
-fn validate_path_materialization_plan(raw: &str) -> homeboy::core::Result<()> {
-    let plan: PathMaterializationPlan =
-        deserialize_contract(raw, PATH_MATERIALIZATION_PLAN_SCHEMA)?;
-    validate_schema_field(PATH_MATERIALIZATION_PLAN_SCHEMA, &plan.schema)
-}
-
-fn validate_run_outcome_envelope(raw: &str) -> homeboy::core::Result<()> {
-    let envelope: RunOutcomeEnvelope = deserialize_contract(raw, RUN_OUTCOME_ENVELOPE_SCHEMA)?;
-    validate_schema_field(RUN_OUTCOME_ENVELOPE_SCHEMA, &envelope.schema)
+impl_contract_validation! {
+    SecretEnvPlan => SECRET_ENV_PLAN_SCHEMA, |value| validate_schema_field(SECRET_ENV_PLAN_SCHEMA, &value.schema);
+    SecretEnvMaterializedHandoff => SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, |value| validate_schema_field(SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, &value.schema);
+    LoopRunRecord => LOOP_RUN_SCHEMA, |value| validate_schema_field(LOOP_RUN_SCHEMA, &value.schema);
+    LoopIterationRecord => LOOP_ITERATION_SCHEMA, |value| validate_schema_field(LOOP_ITERATION_SCHEMA, &value.schema);
+    LoopEvidenceRecord => LOOP_EVIDENCE_SCHEMA, |value| validate_schema_field(LOOP_EVIDENCE_SCHEMA, &value.schema);
+    RunnerExecutionEnvelope => RUNNER_EXECUTION_ENVELOPE_SCHEMA, |value| validate_schema_field(RUNNER_EXECUTION_ENVELOPE_SCHEMA, &value.schema);
+    RunnerExecutionRecord => RUNNER_EXECUTION_RECORD_SCHEMA, |value| validate_schema_field(RUNNER_EXECUTION_RECORD_SCHEMA, &value.schema);
+    PathMaterializationPlan => PATH_MATERIALIZATION_PLAN_SCHEMA, |value| validate_schema_field(PATH_MATERIALIZATION_PLAN_SCHEMA, &value.schema);
+    RunOutcomeEnvelope => RUN_OUTCOME_ENVELOPE_SCHEMA, |value| validate_schema_field(RUN_OUTCOME_ENVELOPE_SCHEMA, &value.schema);
+    ArtifactPostprocessPlan => ARTIFACT_POSTPROCESS_SCHEMA, |value| validate_artifact_postprocess_plan(&value);
+    ArtifactManifest => RUNNER_ARTIFACT_MANIFEST_SCHEMA, |value| value.validate_shape();
+    ResourceCleanupIntentContract => RESOURCE_CLEANUP_INTENT_SCHEMA, |value| value.validate();
+    ResourceLifecycleIndex => RESOURCE_LIFECYCLE_INDEX_SCHEMA, |value| value.validate();
+    HostMutationLifecycle => HOST_MUTATION_LIFECYCLE_SCHEMA, |value| value.validate();
+    Value => FUZZ_WORKLOAD_SCHEMA, |value| {
+        FuzzWorkload::from_value(value).map_err(|message| {
+            homeboy::core::Error::new(
+                homeboy::core::ErrorCode::ValidationInvalidArgument,
+                "Contract validation failed",
+                serde_json::json!({
+                    "schema": FUZZ_WORKLOAD_SCHEMA,
+                    "valid": false,
+                    "error": message,
+                }),
+            )
+        })?;
+        Ok(())
+    };
 }
 
 fn deserialize_contract<T: DeserializeOwned>(
@@ -2624,9 +2561,52 @@ mod tests {
         let error = validate_file(LOOP_RUN_SCHEMA, file).unwrap_err();
 
         assert_eq!(error.code, homeboy::core::ErrorCode::ValidationInvalidJson);
-        assert_eq!(error.details["valid"], false);
-        assert_eq!(error.details["schema"], LOOP_RUN_SCHEMA);
-        assert_eq!(error.details["path"], "status");
+        assert_eq!(error.message, "Contract validation failed");
+        assert_eq!(
+            error.details,
+            json!({
+                "schema": LOOP_RUN_SCHEMA,
+                "valid": false,
+                "error": "unknown variant `not-a-status`, expected one of `queued`, `running`, `succeeded`, `failed`, `cancelled`, `timed_out`, `blocked`, `skipped` at line 4 column 26",
+                "path": "status",
+            })
+        );
+    }
+
+    #[test]
+    fn schema_mismatch_preserves_validation_diagnostic() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "loop-run-wrong-schema.json",
+            json!({
+                "schema": LOOP_ITERATION_SCHEMA,
+                "id": "loop-1",
+                "status": "running"
+            }),
+        );
+
+        let error = validate_file(LOOP_RUN_SCHEMA, file).unwrap_err();
+
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert_eq!(
+            error.message,
+            format!(
+                "Invalid argument 'schema': expected {LOOP_RUN_SCHEMA}, received {LOOP_ITERATION_SCHEMA}"
+            )
+        );
+        assert_eq!(
+            error.details,
+            json!({
+                "field": "schema",
+                "problem": format!("expected {LOOP_RUN_SCHEMA}, received {LOOP_ITERATION_SCHEMA}"),
+                "id": LOOP_ITERATION_SCHEMA,
+                "tried": [LOOP_RUN_SCHEMA],
+            })
+        );
     }
 
     #[test]
