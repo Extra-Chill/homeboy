@@ -1082,6 +1082,42 @@ fn daemon_polling_error_for_known_job_is_recoverable_runner_disconnect() {
 }
 
 #[test]
+fn daemon_polling_rejects_a_response_for_a_different_job() {
+    let requested_job_id = uuid::Uuid::new_v4();
+    let returned_job_id = uuid::Uuid::new_v4();
+    let job = Job {
+        id: returned_job_id,
+        operation: "runner.exec".to_string(),
+        status: JobStatus::Running,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        started_at_ms: None,
+        finished_at_ms: None,
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+    };
+
+    let err =
+        super::super::daemon::validate_daemon_job_identity(&requested_job_id.to_string(), &job)
+            .expect_err("mismatched daemon response must not replace the tracked job");
+
+    assert_eq!(
+        err.details["requested_job_id"],
+        requested_job_id.to_string()
+    );
+    assert_eq!(err.details["returned_job_id"], returned_job_id.to_string());
+}
+
+#[test]
 fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
     // The historical #3631/#3624 symptom: a stale/restarting daemon answers
     // with an empty/null error payload. We must never surface a bare `null`,

@@ -297,8 +297,29 @@ pub(super) fn preflight_runner_capability_plan(
 pub(super) fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Job> {
     let data = daemon_get(client, local_url, &format!("/jobs/{job_id}"))?;
     let body = canonical_daemon_body(&data, "daemon job response")?;
-    serde_json::from_value(body["job"].clone())
-        .map_err(|err| Error::internal_json(err.to_string(), Some("parse daemon job".to_string())))
+    let job: Job = serde_json::from_value(body["job"].clone()).map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon job".to_string()))
+    })?;
+    validate_daemon_job_identity(job_id, &job)?;
+    Ok(job)
+}
+
+pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) -> Result<()> {
+    let returned_job_id = job.id.to_string();
+    if returned_job_id == requested_job_id {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        ErrorCode::InternalUnexpected,
+        format!(
+            "runner daemon returned job `{returned_job_id}` while polling requested job `{requested_job_id}`"
+        ),
+        json!({
+            "requested_job_id": requested_job_id,
+            "returned_job_id": returned_job_id,
+        }),
+    ))
 }
 
 pub(super) fn detached_handoff_output(
