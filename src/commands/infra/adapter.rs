@@ -6,7 +6,6 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
-use crate::commands::output_runtime::CommandRun;
 use crate::commands::{contract, fleet, observe, GlobalArgs};
 
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
@@ -133,30 +132,6 @@ pub(crate) fn command_adapter(
     }
 }
 
-pub(crate) fn run_command_output(
-    command: Commands,
-    command_name: &'static str,
-    global: &GlobalArgs,
-    output_file_mode: CommandOutputFileMode,
-) -> Result<CommandRun, Commands> {
-    let (stdout_result, exit_code) = run_json_output(command, global, output_file_mode)?;
-
-    Ok(CommandRun::from_command_stdout_result(
-        command_name,
-        stdout_result,
-        exit_code,
-    ))
-}
-
-pub(crate) fn run_json_output(
-    command: Commands,
-    global: &GlobalArgs,
-    output_file_mode: CommandOutputFileMode,
-) -> Result<JsonHandlerResult, Commands> {
-    let adapter = command_adapter(command, output_file_mode)?;
-    Ok(adapter.run(global))
-}
-
 pub(crate) fn output_descriptor(
     command: &Commands,
     output_file_mode: CommandOutputFileMode,
@@ -231,41 +206,6 @@ mod tests {
             CommandOutputFileMode::None,
         )
         .is_ok());
-    }
-
-    #[test]
-    fn run_command_output_routes_migrated_json_command() {
-        let run = run_command_output(
-            parsed_command(&["homeboy", "contract", "manifest"]),
-            "contract",
-            &GlobalArgs {},
-            CommandOutputFileMode::None,
-        )
-        .unwrap_or_else(|_| panic!("contract should route through adapter JSON output"));
-
-        assert_eq!(run.command, "contract");
-        assert_eq!(run.exit_code, 0);
-        let value = run.stdout_result.expect("manifest should dispatch as JSON");
-        assert_eq!(value["command"], "contract.manifest");
-        assert!(value["commands"].is_array());
-    }
-
-    #[test]
-    fn run_json_output_matches_adapter_bound_execution() {
-        let command = parsed_command(&["homeboy", "contract", "manifest"]);
-        let (adapter_stdout, adapter_exit_code) = command_adapter(
-            parsed_command(&["homeboy", "contract", "manifest"]),
-            CommandOutputFileMode::None,
-        )
-        .unwrap_or_else(|_| panic!("contract should bind an adapter"))
-        .run(&GlobalArgs {});
-
-        let (helper_stdout, helper_exit_code) =
-            run_json_output(command, &GlobalArgs {}, CommandOutputFileMode::None)
-                .unwrap_or_else(|_| panic!("contract should route through adapter helper"));
-
-        assert_eq!(helper_exit_code, adapter_exit_code);
-        assert_eq!(helper_stdout.unwrap(), adapter_stdout.unwrap());
     }
 
     #[test]
