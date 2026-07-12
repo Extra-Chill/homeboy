@@ -72,7 +72,7 @@ pub(super) fn select_provider<'a>(
 /// can explain *why* a provider that `agent-task providers` lists is still not
 /// selectable, instead of emitting a misleading "availability is false".
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProviderResolution<'a> {
+pub enum ProviderResolution<'a> {
     /// Exactly one provider matched the backend/selector.
     Resolved(&'a AgentTaskExecutorProvider),
     /// No provider matched the backend either exactly or via extension alias.
@@ -141,7 +141,7 @@ impl<'a> ProviderResolution<'a> {
 /// structured outcome. This is the shared resolution contract; execution-time
 /// `select_provider`, the local availability check, and the Lab preflight all
 /// funnel through here so they can never disagree about the same provider list.
-pub(crate) fn resolve_provider_for_backend<'a>(
+pub fn resolve_provider_for_backend<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     backend: &str,
     selector: Option<&str>,
