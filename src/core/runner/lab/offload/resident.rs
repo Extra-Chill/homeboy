@@ -70,6 +70,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         request.normalized_args,
         remote_output_file.as_deref(),
     );
+    let remapped_args = inject_agent_task_resolved_provider_policy_in_args(&remapped_args)?;
     let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
     let (remapped_args, agent_task_run_id) =
         ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())

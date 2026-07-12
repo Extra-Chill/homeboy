@@ -1,6 +1,9 @@
 //! Tests for Lab offload argument rewriting.
 
 use super::*;
+use crate::core::agent_task_scheduler::{
+    AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+};
 use crate::core::defaults;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -904,6 +907,7 @@ mod provider_config_remap_tests {
 
 mod provider_config_default_injection_tests {
     use super::*;
+    use crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 
     #[test]
     fn injects_default_provider_config_for_agent_task_cook() {
@@ -1012,6 +1016,111 @@ mod provider_config_default_injection_tests {
 
             let out = inject_agent_task_default_provider_config_in_args(&args).expect("inject");
             assert_eq!(out, args);
+        });
+    }
+
+    #[test]
+    fn controller_provider_policy_survives_runner_default_drift_and_serializes_rotation() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                agent_task: defaults::AgentTaskConfig {
+                    default_backend: Some("controller-backend".to_string()),
+                    rotation: Some(AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            AgentTaskProviderRotationEntry {
+                                backend: Some("fallback-a".to_string()),
+                                model: Some("model-a".to_string()),
+                                ..AgentTaskProviderRotationEntry::default()
+                            },
+                            AgentTaskProviderRotationEntry {
+                                backend: Some("fallback-b".to_string()),
+                                model: Some("model-b".to_string()),
+                                ..AgentTaskProviderRotationEntry::default()
+                            },
+                        ],
+                        max_attempts: Some(3),
+                        liveness_timeout_ms: Some(45_000),
+                    }),
+                    ..defaults::AgentTaskConfig::default()
+                },
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "fix it".to_string(),
+                "--to-worktree".to_string(),
+                "sample@fix".to_string(),
+                "--verify".to_string(),
+                "cargo check".to_string(),
+                "--model".to_string(),
+                "primary-model".to_string(),
+            ];
+
+            let out = inject_agent_task_resolved_provider_policy_in_args(&args).expect("inject");
+            let index = out
+                .iter()
+                .position(|arg| arg == "--resolved-provider-policy")
+                .expect("policy flag")
+                + 1;
+            let policy: ResolvedAgentTaskProviderPolicy =
+                serde_json::from_str(&out[index]).expect("policy");
+
+            assert_eq!(policy.backend, "controller-backend");
+            assert_eq!(policy.model.as_deref(), Some("primary-model"));
+            assert_eq!(policy.retry.max_attempts, 1);
+            assert_eq!(policy.liveness_timeout_ms, Some(45_000));
+            assert_eq!(
+                policy
+                    .rotation
+                    .as_ref()
+                    .expect("rotation")
+                    .entries
+                    .iter()
+                    .filter_map(|entry| entry.model.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["model-a", "model-b"]
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_backend_is_compiled_into_controller_provider_policy() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                agent_task: defaults::AgentTaskConfig {
+                    default_backend: Some("controller-default".to_string()),
+                    ..defaults::AgentTaskConfig::default()
+                },
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "fix it".to_string(),
+                "--to-worktree".to_string(),
+                "sample@fix".to_string(),
+                "--verify".to_string(),
+                "cargo check".to_string(),
+                "--backend".to_string(),
+                "explicit-backend".to_string(),
+            ];
+            let out = inject_agent_task_resolved_provider_policy_in_args(&args).expect("inject");
+            let index = out
+                .iter()
+                .position(|arg| arg == "--resolved-provider-policy")
+                .expect("policy flag")
+                + 1;
+            let policy: ResolvedAgentTaskProviderPolicy =
+                serde_json::from_str(&out[index]).expect("policy");
+
+            assert_eq!(policy.backend, "explicit-backend");
         });
     }
 }

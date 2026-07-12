@@ -32,6 +32,22 @@ pub struct DispatchCoreArgs {
     /// Provider wall-clock timeout in milliseconds. Defaults to Homeboy's provider timeout.
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
+
+    #[arg(
+        long = "resolved-provider-policy",
+        hide = true,
+        value_name = "JSON",
+        value_parser = parse_resolved_provider_policy
+    )]
+    pub resolved_provider_policy:
+        Option<homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy>,
+}
+
+fn parse_resolved_provider_policy(
+    raw: &str,
+) -> Result<homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy, String> {
+    serde_json::from_str(raw)
+        .map_err(|error| format!("invalid resolved provider policy JSON: {error}"))
 }
 
 impl From<DispatchCoreArgs> for DispatchCoreInputs {
@@ -43,6 +59,7 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             attempts: args.attempts,
             queue_only: args.queue_only,
             timeout_ms: args.timeout_ms,
+            resolved_provider_policy: args.resolved_provider_policy,
         }
     }
 }
@@ -136,6 +153,7 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_task::AgentTaskRequest;
+    use homeboy::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
     use homeboy::core::agent_task_prompts;
     use homeboy::core::agent_tasks::dispatch_service;
     use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
@@ -242,6 +260,7 @@ mod tests {
                     attempts: 1,
                     queue_only: false,
                     timeout_ms: None,
+                    resolved_provider_policy: None,
                 },
             }
             .into(),
@@ -276,6 +295,7 @@ mod tests {
                     attempts: 1,
                     queue_only: false,
                     timeout_ms: None,
+                    resolved_provider_policy: None,
                 },
             }
             .into(),
@@ -284,6 +304,34 @@ mod tests {
         .expect_err("missing backend should fail");
 
         assert!(error.message.contains("requires --backend"));
+    }
+
+    #[test]
+    fn submitted_provider_policy_ignores_runner_default_backend() {
+        let mut args = dispatch_args(DispatchArgOverrides::default());
+        args.backend = None;
+        args.model = Some("controller-model".to_string());
+        args.required_capabilities = vec!["runner-capability".to_string()];
+        args.secret_env = vec!["RUNNER_SECRET".to_string()];
+        args.core.resolved_provider_policy = Some(ResolvedAgentTaskProviderPolicy {
+            backend: "controller-backend".to_string(),
+            selector: Some("controller-selector".to_string()),
+            model: Some("controller-model".to_string()),
+            rotation: None,
+            retry: Default::default(),
+            liveness_timeout_ms: None,
+        });
+
+        let request = dispatch_service::resolve_dispatch_request_with_default(args.into(), |_| {
+            Ok(Some("runner-backend".to_string()))
+        })
+        .expect("submitted policy request");
+
+        assert_eq!(request.backend, "controller-backend");
+        assert_eq!(request.selector.as_deref(), Some("controller-selector"));
+        assert_eq!(request.model.as_deref(), Some("controller-model"));
+        assert_eq!(request.required_capabilities, ["runner-capability"]);
+        assert_eq!(request.secret_env, ["RUNNER_SECRET"]);
     }
 
     struct NoopExecutor;
@@ -356,6 +404,7 @@ mod tests {
                 },
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
+                resolved_provider_policy: overrides.core.resolved_provider_policy,
             },
         }
     }

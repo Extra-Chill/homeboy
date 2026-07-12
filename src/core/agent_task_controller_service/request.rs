@@ -52,6 +52,7 @@ pub fn controller_request_dispatch_command(
             attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
             queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
             timeout_ms: optional_u64(dispatch, "timeout_ms")?,
+            resolved_provider_policy: None,
         },
     };
 

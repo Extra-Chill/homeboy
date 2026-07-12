@@ -946,6 +946,7 @@ mod tests {
         let agent_task = RunnerWorkloadAgentTask {
             run_id: "run-typed-no-event".to_string(),
             plan_ref: Some("@/tmp/plan.json".to_string()),
+            resolved_provider_policy: None,
             dispatch_kind: crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
             lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
         };
@@ -967,6 +968,7 @@ mod tests {
             let agent_task = RunnerWorkloadAgentTask {
                 run_id: "run-typed-workload".to_string(),
                 plan_ref: Some(format!("@{}", plan_path.display())),
+                resolved_provider_policy: None,
                 dispatch_kind:
                     crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
