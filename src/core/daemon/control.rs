@@ -14,8 +14,8 @@ use crate::core::error::{Error, Result};
 use crate::core::execution_contract::encode_uri_component;
 
 use super::{
-    acquire_daemon_operation_lock, parse_bind_addr, read_status, stop_unlocked, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    acquire_daemon_operation_lock, parse_bind_addr, read_status, repair_legacy_lease_for_start,
+    stop_unlocked, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -35,6 +35,7 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
 
+    let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     let existing = read_status()?;
     if existing.state.is_some() || existing.stale_reason.is_some() {
         let _ = stop_unlocked()?;
