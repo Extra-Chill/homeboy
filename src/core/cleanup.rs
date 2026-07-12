@@ -896,6 +896,7 @@ mod tests {
                     cleanup_preview: Some(vec![script, "dry_run".to_string()]),
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("aggregate dry run cleanup");
@@ -949,6 +950,7 @@ mod tests {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("aggregate apply cleanup");

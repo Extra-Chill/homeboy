@@ -117,6 +117,15 @@ mod lab_source_path_tests {
                         list: Some(vec![script.display().to_string()]),
                         ..Default::default()
                     },
+                    list_result_mapping: Some(defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    }),
                 },
             );
             defaults::save_config(&defaults::HomeboyConfig {

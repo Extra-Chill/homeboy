@@ -151,6 +151,23 @@ pub struct WorktreeProviderConfig {
     pub apply_enabled: bool,
     #[serde(default)]
     pub commands: WorktreeProviderCommands,
+    /// Explicit projection of a command provider's list result into Homeboy's
+    /// generic worktree safety contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_result_mapping: Option<WorktreeProviderListResultMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderListResultMapping {
+    /// JSONPath resolving to exactly one array in the command result.
+    pub items: String,
+    /// JSONPath values resolved relative to each item in `items`.
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    pub dirty: String,
+    pub unpushed: String,
+    pub primary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
