@@ -7,6 +7,7 @@ const path = require('node:path');
 const { existsSync, readdirSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
+const { execFileSync } = require('node:child_process');
 
 /**
  * Internal dependencies
@@ -19,6 +20,7 @@ const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
 const DEFAULT_CORE_PACKAGE_CANDIDATES = [DEFAULT_CODEBOX_CORE_MODULE];
 const DEFAULT_RUNTIME_CORE_ENTRIES = [RUNTIME_CORE_ENTRY];
+const DEFAULT_HOMEBOY_COMPONENT_IDS = ['wp-codebox'];
 
 function coreModuleSpecifier(options = {}) {
 	const identity = resolveWpCodeboxIdentity(options);
@@ -66,8 +68,30 @@ function coreModuleCandidates(options = {}) {
 		}
 	}
 
+	const candidateCountBeforeWorkspaceRoots = candidates.length;
 	for (const root of workspaceRoots(options)) {
 		for (const repoPath of codeboxRepoCandidates(root)) {
+			for (const entry of options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES) {
+				const runtimeCore = path.resolve(repoPath, entry);
+				if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
+					candidates.push(runtimeCore);
+				}
+			}
+		}
+	}
+
+	// Last-resort discovery: ask the Homeboy component registry directly.
+	// This covers hosts where the wp-codebox checkout lives outside any
+	// workspaceRoots() guess (e.g. a Data Machine Code workspace root that
+	// differs from the wordpress extension's own parent directory) but is
+	// still registered with Homeboy via `homeboy component create`/`show`.
+	// Mirrors the same fallback already used by
+	// scripts/lib/validation-dependencies.sh (`homeboy component show`).
+	// Only attempted when workspaceRoots() sibling-checkout discovery found
+	// nothing, since this shells out to the `homeboy` binary and shouldn't
+	// add latency to the already-working discovery paths.
+	if (candidates.length === candidateCountBeforeWorkspaceRoots) {
+		for (const repoPath of homeboyComponentRepoCandidates(options)) {
 			for (const entry of options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES) {
 				const runtimeCore = path.resolve(repoPath, entry);
 				if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
@@ -162,6 +186,44 @@ function codeboxRepoCandidates(root) {
 	}
 
 	return candidates;
+}
+
+function homeboyComponentRepoCandidates(options = {}) {
+	if (options.includeHomeboyComponentRegistry === false) {
+		return [];
+	}
+
+	const componentIds = Array.isArray(options.homeboyComponentIds) && options.homeboyComponentIds.length > 0
+		? options.homeboyComponentIds
+		: DEFAULT_HOMEBOY_COMPONENT_IDS;
+
+	const candidates = [];
+	for (const componentId of componentIds) {
+		const localPath = homeboyComponentLocalPath(componentId, options);
+		if (localPath && existsSync(localPath) && !candidates.includes(localPath)) {
+			candidates.push(localPath);
+		}
+	}
+	return candidates;
+}
+
+function homeboyComponentLocalPath(componentId, options = {}) {
+	const homeboyBin = options.homeboyBin || process.env.HOMEBOY_BIN || 'homeboy';
+	try {
+		const stdout = execFileSync(homeboyBin, ['component', 'show', componentId], {
+			encoding: 'utf8',
+			stdio: ['ignore', 'pipe', 'ignore'],
+			timeout: 10000,
+		});
+		const parsed = JSON.parse(stdout);
+		const localPath = parsed?.data?.entity?.local_path;
+		return typeof localPath === 'string' && localPath.trim() ? localPath.trim() : null;
+	} catch {
+		// `homeboy` unavailable, component not registered, or output
+		// unparseable — this is a best-effort fallback, so fail silently
+		// and let the caller continue to the next discovery mechanism.
+		return null;
+	}
 }
 
 async function loadWpCodeboxCore(options = {}) {
