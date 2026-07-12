@@ -675,8 +675,6 @@ pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local bec
 pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, `rig sync`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
-const AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON: &str =
-    "agent-task cook finalization commits, pushes, and opens/updates GitHub PRs from the trusted controller; use --no-finalize for Lab patch evidence and finalize from the controller";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 
@@ -788,12 +786,6 @@ impl Commands {
             }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
                 AGENT_TASK_RUN_LAB_LABEL,
                 AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Cook(args),
-            }) if !args.no_finalize => LabCommandContract::local_only(
-                AGENT_TASK_RUN_LAB_LABEL,
-                AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -1430,7 +1422,7 @@ mod low_noise_polling_tests {
     }
 
     #[test]
-    fn agent_task_cook_finalization_is_controller_owned() {
+    fn agent_task_cook_with_controller_finalization_remains_lab_portable() {
         let command = parsed_command(&[
             "homeboy",
             "agent-task",
@@ -1445,12 +1437,10 @@ mod low_noise_polling_tests {
 
         let contract = command
             .lab_contract()
-            .expect("cook contract should explain controller-owned finalization");
+            .expect("cook contract should support controller-owned finalization after offload");
 
-        assert_eq!(
-            contract.portability,
-            LabCommandPortability::LocalOnly(AGENT_TASK_COOK_FINALIZATION_CONTROLLER_REASON)
-        );
+        assert_eq!(contract.portability, LabCommandPortability::Portable);
+        assert!(contract.routing_policy.default_lab_offload);
     }
 
     #[test]
