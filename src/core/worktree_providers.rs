@@ -7,7 +7,10 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::defaults::{self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind};
+use crate::core::defaults::{
+    self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind,
+    WorktreeProviderListResultMapping,
+};
 use crate::core::error::{Error, Result};
 
 #[derive(Debug, Clone)]
@@ -71,9 +74,8 @@ pub struct WorktreeProviderRunRef {
 
 /// A workspace returned by a command worktree provider's `list` command.
 ///
-/// The command must return JSON with a `worktrees` array (optionally nested in
-/// `data`). Each matching row must include all fields below so Homeboy never
-/// guesses safety state for an externally managed destination.
+/// The configured result mapping must project every field below so Homeboy
+/// never guesses safety state for an externally managed destination.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandle {
     pub handle: String,
@@ -116,7 +118,7 @@ pub fn resolve_worktree_provider_handle_from_config(
             continue;
         };
         attempted.push(provider_id.clone());
-        let worktrees = run_provider_list_command(&provider_id, command)?;
+        let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
             validate_provider_handle(&provider_id, &worktree)?;
             return Ok(worktree);
@@ -143,6 +145,7 @@ pub fn resolve_worktree_provider_handle_from_config(
 
 fn run_provider_list_command(
     provider_id: &str,
+    provider: &WorktreeProviderConfig,
     command: &[String],
 ) -> Result<Vec<WorktreeProviderHandle>> {
     let (program, args) = command
@@ -189,24 +192,122 @@ fn run_provider_list_command(
             None,
         )
     })?;
-    let worktrees = value.get("worktrees").or_else(|| value.get("data").and_then(|data| data.get("worktrees"))).ok_or_else(|| {
+    let mapping = provider.list_result_mapping.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
-            "to_worktree",
-            format!("worktree provider `{provider_id}` list response must include a worktrees array"),
-            Some(provider_id.to_string()),
-            None,
-        )
-    })?;
-    serde_json::from_value::<Vec<WorktreeProviderHandle>>(worktrees.clone()).map_err(|error| {
-        Error::validation_invalid_argument(
-            "to_worktree",
+            "worktree_providers.list_result_mapping",
             format!(
-                "worktree provider `{provider_id}` returned invalid worktree metadata: {error}"
+                "worktree provider `{provider_id}` must configure an explicit list_result_mapping"
             ),
             Some(provider_id.to_string()),
             None,
         )
-    })
+    })?;
+    map_provider_list_result(provider_id, mapping, &value)
+}
+
+fn map_provider_list_result(
+    provider_id: &str,
+    mapping: &WorktreeProviderListResultMapping,
+    value: &Value,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let items = required_jsonpath_value(provider_id, "items", &mapping.items, value)?;
+    let items = items.as_array().ok_or_else(|| {
+        mapping_error(
+            provider_id,
+            "items",
+            &mapping.items,
+            "must resolve to an array",
+        )
+    })?;
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            Ok(WorktreeProviderHandle {
+                handle: required_string(provider_id, index, "handle", &mapping.handle, item)?,
+                path: required_string(provider_id, index, "path", &mapping.path, item)?,
+                branch: required_string(provider_id, index, "branch", &mapping.branch, item)?,
+                safety: WorktreeProviderHandleSafety {
+                    dirty: required_bool(provider_id, index, "dirty", &mapping.dirty, item)?,
+                    unpushed: required_bool(
+                        provider_id,
+                        index,
+                        "unpushed",
+                        &mapping.unpushed,
+                        item,
+                    )?,
+                    primary: required_bool(provider_id, index, "primary", &mapping.primary, item)?,
+                },
+            })
+        })
+        .collect()
+}
+
+fn required_string(
+    provider_id: &str,
+    index: usize,
+    field: &str,
+    path: &str,
+    item: &Value,
+) -> Result<String> {
+    required_jsonpath_value(provider_id, &format!("items[{index}].{field}"), path, item)?
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a string"))
+}
+
+fn required_bool(
+    provider_id: &str,
+    index: usize,
+    field: &str,
+    path: &str,
+    item: &Value,
+) -> Result<bool> {
+    required_jsonpath_value(provider_id, &format!("items[{index}].{field}"), path, item)?
+        .as_bool()
+        .ok_or_else(|| mapping_error(provider_id, field, path, "must resolve to a boolean"))
+}
+
+fn required_jsonpath_value<'a>(
+    provider_id: &str,
+    field: &str,
+    expression: &str,
+    value: &'a Value,
+) -> Result<&'a Value> {
+    let path = serde_json_path::JsonPath::parse(expression).map_err(|error| {
+        mapping_error(
+            provider_id,
+            field,
+            expression,
+            &format!("is not valid JSONPath: {error}"),
+        )
+    })?;
+    let matches = path.query(value).all();
+    match matches.as_slice() {
+        [value] => Ok(*value),
+        [] => Err(mapping_error(
+            provider_id,
+            field,
+            expression,
+            "did not resolve a value",
+        )),
+        _ => Err(mapping_error(
+            provider_id,
+            field,
+            expression,
+            "resolved more than one value",
+        )),
+    }
+}
+
+fn mapping_error(provider_id: &str, field: &str, path: &str, detail: &str) -> Error {
+    Error::validation_invalid_argument(
+        "worktree_providers.list_result_mapping",
+        format!("worktree provider `{provider_id}` mapping `{field}` ({path}) {detail}"),
+        Some(provider_id.to_string()),
+        None,
+    )
 }
 
 fn validate_provider_handle(provider_id: &str, worktree: &WorktreeProviderHandle) -> Result<()> {
@@ -734,6 +835,15 @@ mod tests {
                         "cleanup_preview": ["fixture-bin", "preview"],
                         "cleanup_apply": ["fixture-bin", "apply"],
                         "artifacts_preview": ["fixture-bin", "artifacts-preview"]
+                    },
+                    "list_result_mapping": {
+                        "items": "$.result.items",
+                        "handle": "$.id",
+                        "path": "$.checkout.path",
+                        "branch": "$.checkout.branch",
+                        "dirty": "$.safety.dirty",
+                        "unpushed": "$.safety.unpushed",
+                        "primary": "$.safety.primary"
                     }
                 }
             }
@@ -747,6 +857,14 @@ mod tests {
         assert_eq!(
             provider.commands.cleanup_preview.as_ref().expect("command"),
             &vec!["fixture-bin".to_string(), "preview".to_string()]
+        );
+        assert_eq!(
+            provider
+                .list_result_mapping
+                .as_ref()
+                .expect("list result mapping")
+                .items,
+            "$.result.items"
         );
     }
 
@@ -768,6 +886,7 @@ mod tests {
                     cleanup_apply: None,
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("cleanup succeeds");
@@ -799,6 +918,7 @@ mod tests {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("cleanup reports refusal");
@@ -829,6 +949,7 @@ mod tests {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("cleanup succeeds");
@@ -863,6 +984,7 @@ mod tests {
                     list: Some(vec![script]),
                     ..Default::default()
                 },
+                list_result_mapping: Some(worktrees_mapping()),
             }),
         )
         .expect("provider handle resolves");
@@ -893,12 +1015,132 @@ mod tests {
                     list: Some(vec![script]),
                     ..Default::default()
                 },
+                list_result_mapping: Some(worktrees_mapping()),
             }),
         )
         .expect_err("dirty provider handle must be rejected");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("dirty"));
+    }
+
+    #[test]
+    fn maps_differently_nested_provider_envelopes_from_configuration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let cases = [
+            (
+                json!({ "result": { "items": [{
+                    "id": "fixture@cook-target", "checkout": { "path": workspace.path(), "branch": "cook-target" },
+                    "state": { "dirty": false, "unpushed": false, "primary": false }
+                }]}}),
+                WorktreeProviderListResultMapping {
+                    items: "$.result.items".to_string(),
+                    handle: "$.id".to_string(),
+                    path: "$.checkout.path".to_string(),
+                    branch: "$.checkout.branch".to_string(),
+                    dirty: "$.state.dirty".to_string(),
+                    unpushed: "$.state.unpushed".to_string(),
+                    primary: "$.state.primary".to_string(),
+                },
+            ),
+            (
+                json!({ "payload": [{
+                    "name": "fixture@cook-target", "location": workspace.path(), "ref": "cook-target",
+                    "dirty": false, "unpushed": false, "primary": false
+                }]}),
+                WorktreeProviderListResultMapping {
+                    items: "$.payload".to_string(),
+                    handle: "$.name".to_string(),
+                    path: "$.location".to_string(),
+                    branch: "$.ref".to_string(),
+                    dirty: "$.dirty".to_string(),
+                    unpushed: "$.unpushed".to_string(),
+                    primary: "$.primary".to_string(),
+                },
+            ),
+        ];
+
+        for (payload, mapping) in cases {
+            let script = fake_list_provider_script(payload);
+            let handle = resolve_worktree_provider_handle_from_config(
+                "fixture@cook-target",
+                &config_with_provider(list_provider(script, mapping)),
+            )
+            .expect("configured envelope resolves");
+            assert_eq!(handle.path, workspace.path().display().to_string());
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_or_incomplete_provider_mappings() {
+        let payload = json!({ "items": [{
+            "handle": "fixture@cook-target", "path": "/tmp/fixture", "branch": "cook-target",
+            "dirty": false, "unpushed": false, "primary": false
+        }] });
+        let cases = [
+            ("items", "not a jsonpath", "is not valid JSONPath"),
+            ("path", "$.missing", "did not resolve a value"),
+            ("dirty", "$.handle", "must resolve to a boolean"),
+        ];
+
+        for (field, path, expected) in cases {
+            let mut mapping = WorktreeProviderListResultMapping {
+                items: "$.items".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.dirty".to_string(),
+                unpushed: "$.unpushed".to_string(),
+                primary: "$.primary".to_string(),
+            };
+            *match field {
+                "items" => &mut mapping.items,
+                "path" => &mut mapping.path,
+                "dirty" => &mut mapping.dirty,
+                _ => unreachable!(),
+            } = path.to_string();
+            let err = resolve_worktree_provider_handle_from_config(
+                "fixture@cook-target",
+                &config_with_provider(list_provider(
+                    fake_list_provider_script(payload.clone()),
+                    mapping,
+                )),
+            )
+            .expect_err("invalid mapping must fail closed");
+            assert!(err.message.contains(expected), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_and_mismatched_provider_metadata() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        for (field, value, expected) in [
+            ("dirty", json!(true), "dirty"),
+            ("unpushed", json!(true), "unpushed"),
+            ("primary", json!(true), "primary"),
+            ("branch", json!("wrong-branch"), "does not match"),
+        ] {
+            let mut row = json!({
+                "handle": "fixture@cook-target", "path": workspace.path(), "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            });
+            if field == "branch" {
+                row[field] = value;
+            } else {
+                row["safety"][field] = value;
+            }
+            let err = resolve_worktree_provider_handle_from_config(
+                "fixture@cook-target",
+                &config_with_provider(list_provider(
+                    fake_list_provider_script(json!({ "worktrees": [row] })),
+                    worktrees_mapping(),
+                )),
+            )
+            .expect_err("unsafe metadata must fail closed");
+            assert!(err.message.contains(expected), "{}", err.message);
+        }
     }
 
     #[test]
@@ -918,6 +1160,7 @@ mod tests {
                     cleanup_apply: Some(vec![script]),
                     ..Default::default()
                 },
+                list_result_mapping: None,
             }),
         )
         .expect("cleanup succeeds");
@@ -946,6 +1189,34 @@ mod tests {
         HomeboyConfig {
             worktree_providers: providers,
             ..HomeboyConfig::default()
+        }
+    }
+
+    fn worktrees_mapping() -> WorktreeProviderListResultMapping {
+        WorktreeProviderListResultMapping {
+            items: "$.worktrees".to_string(),
+            handle: "$.handle".to_string(),
+            path: "$.path".to_string(),
+            branch: "$.branch".to_string(),
+            dirty: "$.safety.dirty".to_string(),
+            unpushed: "$.safety.unpushed".to_string(),
+            primary: "$.safety.primary".to_string(),
+        }
+    }
+
+    fn list_provider(
+        script: String,
+        mapping: WorktreeProviderListResultMapping,
+    ) -> WorktreeProviderConfig {
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            commands: WorktreeProviderCommands {
+                list: Some(vec![script]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(mapping),
         }
     }
 
