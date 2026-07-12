@@ -18,6 +18,7 @@
 //!   variants to discriminators and golden fixtures.
 
 mod constants;
+mod descriptors;
 mod lab;
 mod output;
 mod public_variants;

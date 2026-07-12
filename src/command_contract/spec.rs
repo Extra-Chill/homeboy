@@ -585,6 +585,12 @@ const COMPONENT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
 ];
 
+macro_rules! registered_ops_spec {
+    (($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path)) => {
+        $spec
+    };
+}
+
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         output_notes: "unified active/recent activity read model in the standard JSON envelope",
@@ -605,11 +611,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         subcommand_safety: PROJECT_SUBCOMMAND_SAFETY,
         ..command_spec("project", CommandJsonFamily::Workspace)
     },
-    command_spec("ssh", CommandJsonFamily::Ops),
-    CommandSpec {
-        subcommand_safety: SERVER_SUBCOMMAND_SAFETY,
-        ..command_spec("server", CommandJsonFamily::Ops)
-    },
+    crate::ops_command_descriptor!(ssh, registered_ops_spec),
+    crate::ops_command_descriptor!(server, registered_ops_spec),
     command_spec_with_representative_argv(
         &["homeboy", "bench"],
         lab_command_spec_with_summary(
@@ -645,30 +648,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         )
     },
     command_spec("observe", CommandJsonFamily::Quality),
-    command_spec("db", CommandJsonFamily::Ops),
+    crate::ops_command_descriptor!(db, registered_ops_spec),
     CommandSpec {
         subcommand_safety: DEPS_SUBCOMMAND_SAFETY,
         ..command_spec("deps", CommandJsonFamily::Ops)
     },
-    CommandSpec {
-        subcommand_safety: FILE_SUBCOMMAND_SAFETY,
-        ..command_spec("file", CommandJsonFamily::Ops)
-    },
+    crate::ops_command_descriptor!(file, registered_ops_spec),
     CommandSpec {
         subcommand_safety: FLEET_SUBCOMMAND_SAFETY,
         ..command_spec("fleet", CommandJsonFamily::Ops)
     },
-    command_spec("logs", CommandJsonFamily::Ops),
-    command_spec_with_safety(
-        "triage",
-        CommandJsonFamily::Ops,
-        operator_safety(None, TRIAGE_DANGEROUS_FLAGS),
-    ),
-    command_spec_with_safety(
-        "deploy",
-        CommandJsonFamily::Ops,
-        operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS),
-    ),
+    crate::ops_command_descriptor!(logs, registered_ops_spec),
+    crate::ops_command_descriptor!(triage, registered_ops_spec),
+    crate::ops_command_descriptor!(deploy, registered_ops_spec),
     CommandSpec {
         subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY,
         ..command_spec("component", CommandJsonFamily::Workspace)
@@ -682,7 +674,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface",
     ),
-    command_spec("daemon", CommandJsonFamily::Ops),
+    crate::ops_command_descriptor!(daemon, registered_ops_spec),
     command_spec_with_representative_argv(
         &["homeboy", "extension", "refresh", "."],
         lab_command_spec_with_summary(
@@ -692,7 +684,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             EXTENSION_LAB_SUPPORT,
         ),
     ),
-    command_spec("status", CommandJsonFamily::Ops),
+    crate::ops_command_descriptor!(status, registered_ops_spec),
     command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
@@ -705,7 +697,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
         },
     ),
-    command_spec("git", CommandJsonFamily::Ops),
+    crate::ops_command_descriptor!(git, registered_ops_spec),
     command_spec_with_output_notes_and_safety(
         "release",
         CommandJsonFamily::Workspace,
@@ -798,22 +790,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
     ),
-    command_spec_with_output_notes(
-        "self",
-        CommandJsonFamily::Ops,
-        "inspects the active Homeboy runtime and renders built-in CLI documentation",
-    ),
+    crate::ops_command_descriptor!(self_cmd, registered_ops_spec),
     command_spec("stack", CommandJsonFamily::Workspace),
-    CommandSpec {
-        subcommand_safety: API_SUBCOMMAND_SAFETY,
-        ..command_spec("api", CommandJsonFamily::Ops)
-    },
-    command_spec_with_output_notes_and_safety(
-        "upgrade",
-        CommandJsonFamily::Ops,
-        "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used",
-        operator_safety(None, UPGRADE_DANGEROUS_FLAGS),
-    ),
+    crate::ops_command_descriptor!(api, registered_ops_spec),
+    crate::ops_command_descriptor!(upgrade, registered_ops_spec),
 ];
 
 pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
