@@ -412,6 +412,49 @@ mod tests {
         assert_eq!(output.schema, HYDRATION_SCHEMA);
     }
 
+    /// End-to-end hydration skips when the component links an extension that
+    /// does not provide the optional `deps` capability (e.g. a native toolchain
+    /// such as cargo that resolves dependencies itself during build/test).
+    /// Regression for the no-deps-provider skip path: a missing optional `deps`
+    /// provider must soft-skip instead of failing the cook (#7843, #7832).
+    #[test]
+    fn hydration_skips_when_linked_extensions_do_not_provide_dependencies() {
+        crate::test_support::with_isolated_home(|home| {
+            let project = tempfile::tempdir().expect("project tempdir");
+            let extension_id = "fixture-non-deps";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{"name":"Fixture non-deps","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                project.path().join("homeboy.json"),
+                format!(
+                    r#"{{"id":"fixture","local_path":"{}","extensions":{{"{extension_id}":{{}}}}}}"#,
+                    project.path().display()
+                ),
+            )
+            .expect("component manifest");
+            let remote = tempfile::tempdir().expect("remote workspace");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "unused-runner",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("no applicable dependency provider skips hydration");
+
+            assert_eq!(output.status, "skipped_no_provider");
+            assert!(output.steps.is_empty());
+            assert_eq!(output.workspace, remote.path().display().to_string());
+        });
+    }
+
     /// The event-emission shape a hydration step records: provider id, command,
     /// duration, exit status, plus the runner job id and event count from the
     /// underlying `exec` job stream.
