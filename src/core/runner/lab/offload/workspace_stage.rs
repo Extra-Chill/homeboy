@@ -735,6 +735,9 @@ impl RunnerCommandPlan {
         let mut accepted_settings = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
         if let Some(workload) = workload {
+            let has_extension_overrides = !workload.extension_overrides.is_empty();
+            required_extensions.extend(workload.extension_overrides.iter().cloned());
+            command_extensions.extend(workload.extension_overrides.iter().cloned());
             let command = match workload.kind {
                 crate::command_contract::LabRigWorkloadKind::Bench => rig::RigWorkloadKind::Bench,
                 crate::command_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
@@ -751,9 +754,7 @@ impl RunnerCommandPlan {
                             .flat_map(|bench| bench.accepted_settings.iter().cloned()),
                     );
                 }
-                if !workload.extension_overrides.is_empty() {
-                    required_extensions.extend(workload.extension_overrides.iter().cloned());
-                    command_extensions.extend(workload.extension_overrides.iter().cloned());
+                if has_extension_overrides {
                     continue;
                 }
                 required_extensions.extend(rig::required_extension_ids_for_workload(
@@ -1539,6 +1540,60 @@ mod tests {
                 "wordpress-fixture".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn extension_injection_deduplicates_split_and_equals_forms_and_rejects_unsupported_commands() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "--extension".to_string(),
+            "explicit-a".to_string(),
+            "--extension=explicit-b".to_string(),
+            "list".to_string(),
+        ];
+        assert_eq!(
+            inject_required_extension_args(
+                args.clone(),
+                &[
+                    "explicit-a".to_string(),
+                    "explicit-b".to_string(),
+                    "required".to_string(),
+                ],
+            ),
+            vec![
+                "homeboy",
+                "fuzz",
+                "--extension",
+                "required",
+                "--extension",
+                "explicit-a",
+                "--extension=explicit-b",
+                "list",
+            ]
+        );
+
+        let unsupported = vec!["homeboy".to_string(), "status".to_string()];
+        assert_eq!(
+            inject_required_extension_args(unsupported.clone(), &["required".to_string()]),
+            unsupported
+        );
+    }
+
+    #[test]
+    fn runner_command_plan_preserves_explicit_override_without_a_rig() {
+        let workload = crate::command_contract::LabRigWorkloadArguments {
+            kind: crate::command_contract::LabRigWorkloadKind::Fuzz,
+            rig_ids: Vec::new(),
+            component: None,
+            extension_overrides: vec!["explicit".to_string(), "explicit".to_string()],
+        };
+
+        let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], Path::new("."))
+            .expect("runner command plan");
+
+        assert_eq!(plan.required_extensions, vec!["explicit".to_string()]);
+        assert_eq!(plan.command_extensions, vec!["explicit".to_string()]);
     }
 
     #[test]

@@ -9,7 +9,6 @@ use crate::command_contract::{
     FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL,
 };
 use homeboy::core::fuzz::FuzzGateProfile;
-use homeboy::core::rig;
 
 #[derive(Args)]
 pub struct FuzzArgs {
@@ -59,26 +58,11 @@ impl FuzzArgs {
         ) || matches!(&self.command, Some(FuzzCommand::Plan(plan)) if plan.execute)
     }
 
-    pub(crate) fn lab_required_extension_ids(&self) -> homeboy::core::Result<Vec<String>> {
-        if let Some(FuzzCommand::Doctor(doctor)) = &self.command {
-            return Ok(vec![doctor.extension_id.clone()]);
+    pub(crate) fn lab_route_required_extension_ids(&self) -> Vec<String> {
+        match &self.command {
+            Some(FuzzCommand::Doctor(doctor)) => vec![doctor.extension_id.clone()],
+            _ => Vec::new(),
         }
-
-        if let Some(FuzzCommand::List(list)) = &self.command {
-            if !list.extension_override.extensions.is_empty() {
-                return Ok(list.extension_override.extensions.clone());
-            }
-            return lab_required_rig_extension_ids(list.rig.as_deref(), list.comp.id());
-        }
-
-        let Some(run) = self.run_args_for_lab_offload() else {
-            return Ok(Vec::new());
-        };
-        if !run.extension_override.extensions.is_empty() {
-            return Ok(run.extension_override.extensions.clone());
-        }
-
-        lab_required_rig_extension_ids(run.rig.as_deref(), run.comp.id())
     }
 
     fn run_args_for_lab_offload(&self) -> Option<&FuzzRunArgs> {
@@ -141,21 +125,6 @@ impl FuzzArgs {
             _ => None,
         }
     }
-}
-
-fn lab_required_rig_extension_ids(
-    rig_id: Option<&str>,
-    component_id: Option<&str>,
-) -> homeboy::core::Result<Vec<String>> {
-    let Some(rig_id) = rig_id else {
-        return Ok(Vec::new());
-    };
-    let spec = rig::load(rig_id)?;
-    Ok(rig::required_extension_ids_for_workload(
-        &spec,
-        rig::RigWorkloadKind::Fuzz,
-        component_id,
-    ))
 }
 
 #[derive(Subcommand)]

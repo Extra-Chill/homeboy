@@ -1116,6 +1116,7 @@ pub(crate) fn run_lab_offload_inner(
     );
     runner_workload.agent_task =
         runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
+    runner_workload.required_extensions = runner_required_extensions.clone();
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["runner_workload"] =
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
