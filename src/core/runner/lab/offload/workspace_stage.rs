@@ -116,6 +116,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     let offload_args =
         inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
+    let offload_args = inject_agent_task_resolved_provider_policy_in_args(&offload_args)?;
     let runner = load(runner_id)?;
     preflight_agent_task_secret_env_before_workspace_stage(
         contract,

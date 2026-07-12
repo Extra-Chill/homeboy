@@ -518,6 +518,7 @@ impl BatchCookSpec {
                 attempts: self.attempts,
                 queue_only: false,
                 timeout_ms: None,
+                resolved_provider_policy: None,
             },
         };
         let title = self

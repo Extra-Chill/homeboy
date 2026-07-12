@@ -139,6 +139,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                         attempts: 1,
                         queue_only: false,
                         timeout_ms: None,
+                        resolved_provider_policy: None,
                     },
                 },
                 goal: Some("cook fixture".to_string()),
