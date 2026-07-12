@@ -9,35 +9,79 @@ const extensionPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const helper = path.join(extensionPath, 'scripts/notify.mjs');
 const secretToken = 'bot-secret-123';
 const secretWebhook = '/webhooks/webhook-id/webhook-secret-456';
+const guildId = '123456789012345678';
+const channelId = '223456789012345678';
+const threadOneId = '323456789012345678';
+const threadTwoId = '423456789012345678';
 
-await testBotThreadDelivery();
+await testConcurrentThreadRoutesDoNotCrossDeliver();
+await testDynamicChannelRoute();
+await testFallbackChannelDelivery();
+await testLegacyThreadDelivery();
 await testWebhookDelivery();
 await testRateLimitRetry();
-await testValidationBeforeNetwork();
+await testMalformedRouteBeforeNetwork();
+await testCrossModeRouteBeforeNetwork();
 await testAuthFailureClassification();
 await testTruncation();
 await testRedactionAndDryRun();
 console.log('discord notification tests passed');
 
-async function testBotThreadDelivery() {
+async function testConcurrentThreadRoutesDoNotCrossDeliver() {
   await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_THREAD_ID: 'thread-1', DISCORD_API_BASE_URL: `${baseUrl}/api/v10` });
-    assert.equal(result.status, 'delivered');
-    assert.equal(result.delivery.mode, 'bot');
-    assert.equal(result.delivery.destination, 'thread');
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, '/api/v10/channels/thread-1/messages');
-    assert.equal(requests[0].headers.authorization, `Bot ${secretToken}`);
+    const env = { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` };
+    const [first, second] = await Promise.all([
+      notify(env, { route: threadRoute(threadOneId), runId: 'run-one' }),
+      notify(env, { route: threadRoute(threadTwoId), runId: 'run-two' }),
+    ]);
+    assert.equal(first.delivery.route_kind, 'thread');
+    assert.equal(second.delivery.route_kind, 'thread');
+    assert.equal(first.delivery.destination, 'dynamic_thread');
+    assert.equal(second.delivery.destination, 'dynamic_thread');
+    assert.deepEqual(
+      requests.map((request) => [request.url, request.body.content.includes('run-one') ? 'run-one' : 'run-two']).sort(),
+      [
+        [`/api/v10/channels/${threadOneId}/messages`, 'run-one'],
+        [`/api/v10/channels/${threadTwoId}/messages`, 'run-two'],
+      ],
+    );
+  });
+}
+
+async function testDynamicChannelRoute() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { route: channelRoute(channelId) });
+    assert.equal(result.delivery.route_kind, 'channel');
+    assert.equal(result.delivery.destination, 'dynamic_channel');
+    assert.equal(requests[0].url, `/api/v10/channels/${channelId}/messages`);
+  });
+}
+
+async function testFallbackChannelDelivery() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: channelId, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { route: '' });
+    assert.equal(result.delivery.route_kind, 'fallback');
+    assert.equal(result.delivery.destination, 'fallback_channel');
+    assert.equal(requests[0].url, `/api/v10/channels/${channelId}/messages`);
+  });
+}
+
+async function testLegacyThreadDelivery() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_THREAD_ID: threadOneId, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` });
+    assert.equal(result.delivery.route_kind, 'legacy');
+    assert.equal(result.delivery.destination, 'legacy_thread');
+    assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
   });
 }
 
 async function testWebhookDelivery() {
   await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}`, DISCORD_THREAD_ID: 'thread-2' });
+    const result = await notify({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}`, DISCORD_THREAD_ID: threadTwoId });
     assert.equal(result.status, 'delivered');
     assert.equal(result.delivery.mode, 'webhook');
-    assert.equal(result.delivery.destination, 'thread');
-    assert.equal(requests[0].url, `${secretWebhook}?wait=true&thread_id=thread-2`);
+    assert.equal(result.delivery.destination, 'legacy_thread');
+    assert.equal(requests[0].url, `${secretWebhook}?wait=true&thread_id=${threadTwoId}`);
     assert.equal(requests[0].headers.authorization, undefined);
   });
 }
@@ -45,7 +89,7 @@ async function testWebhookDelivery() {
 async function testRateLimitRetry() {
   let calls = 0;
   await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: 'channel-1', DISCORD_API_BASE_URL: `${baseUrl}/api/v10` });
+    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { route: channelRoute(channelId) });
     assert.equal(result.status, 'delivered');
     assert.equal(result.attempts, 2);
     assert.equal(requests.length, 2);
@@ -56,17 +100,27 @@ async function testRateLimitRetry() {
   });
 }
 
-async function testValidationBeforeNetwork() {
-  const run = await notifyRaw({ DISCORD_BOT_TOKEN: secretToken, DISCORD_WEBHOOK_URL: 'https://discord.invalid/webhook', DISCORD_CHANNEL_ID: 'channel-1' });
-  assert.equal(run.code, 1);
-  const result = JSON.parse(run.stdout);
-  assert.equal(result.status, 'failed');
-  assert.equal(result.error.kind, 'input_error');
+async function testMalformedRouteBeforeNetwork() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const run = await notifyRaw({ DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { route: 'discord:v1:thread:not-a-guild:not-a-thread' });
+    assert.equal(run.code, 1);
+    assert.equal(JSON.parse(run.stdout).error.kind, 'input_error');
+    assert.equal(requests.length, 0);
+  });
+}
+
+async function testCrossModeRouteBeforeNetwork() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const run = await notifyRaw({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }, { route: channelRoute(channelId) });
+    assert.equal(run.code, 1);
+    assert.equal(JSON.parse(run.stdout).error.kind, 'input_error');
+    assert.equal(requests.length, 0);
+  });
 }
 
 async function testAuthFailureClassification() {
   await withServer(async ({ baseUrl }) => {
-    const run = await notifyRaw({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: 'channel-1', DISCORD_API_BASE_URL: `${baseUrl}/api/v10` });
+    const run = await notifyRaw({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: channelId, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` });
     assert.equal(run.code, 1);
     assert.equal(JSON.parse(run.stdout).error.kind, 'auth_error');
   }, (_request, response) => response.writeHead(401).end('{}'));
@@ -74,7 +128,7 @@ async function testAuthFailureClassification() {
 
 async function testTruncation() {
   await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: 'channel-1', DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { body: 'x'.repeat(3000) });
+    const result = await notify({ DISCORD_BOT_TOKEN: secretToken, DISCORD_CHANNEL_ID: channelId, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` }, { body: 'x'.repeat(3000) });
     assert.equal(result.delivery.content_length, 2000);
     assert.equal(result.delivery.truncated, true);
     assert.equal(requests[0].body.content.length, 2000);
@@ -117,10 +171,13 @@ function notify(env, overrides = {}) {
 }
 
 function notifyRaw(env, overrides = {}) {
-  const args = ['--run-id', 'run-123', '--status', 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
+  const args = ['--run-id', overrides.runId || 'run-123', '--status', 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
+  if (overrides.route !== undefined) args.push('--route', overrides.route);
   if (overrides.dryRun) args.push('--dry-run');
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [helper, ...args], { env: { ...process.env, ...env } });
+    const childEnv = { ...process.env };
+    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_CHANNEL_ID', 'DISCORD_THREAD_ID', 'DISCORD_API_BASE_URL']) delete childEnv[name];
+    const child = spawn(process.execPath, [helper, ...args], { env: { ...childEnv, ...env } });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -128,4 +185,12 @@ function notifyRaw(env, overrides = {}) {
     child.once('error', reject);
     child.once('close', (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+function channelRoute(id) {
+  return `discord:v1:channel:${guildId}:${id}`;
+}
+
+function threadRoute(id) {
+  return `discord:v1:thread:${guildId}:${id}`;
 }

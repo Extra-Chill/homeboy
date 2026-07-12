@@ -14,6 +14,7 @@ async function main() {
   const rendered = renderContent(args);
   const proof = {
     mode: validation.mode,
+    route_kind: validation.route_kind,
     destination: validation.destination,
     content_length: rendered.content.length,
     truncated: rendered.truncated,
@@ -63,20 +64,25 @@ async function main() {
 
 function parseArgs(tokens) {
   const args = { dryRun: false };
-  const names = new Set(['run-id', 'status', 'title', 'body']);
+  const names = new Set(['run-id', 'status', 'title', 'body', 'route']);
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === '--dry-run') {
       args.dryRun = true;
       continue;
     }
-    if (!token.startsWith('--') || !names.has(token.slice(2)) || index + 1 >= tokens.length) {
-      args.error = 'Expected --run-id, --status, --title, and --body; --dry-run is optional.';
+    if (!token.startsWith('--')) {
+      args.error = 'Expected --run-id, --status, --title, and --body; --route and --dry-run are optional.';
       return args;
     }
-    const name = token.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-    args[name] = tokens[index + 1];
-    index += 1;
+    const [flag, inlineValue] = token.slice(2).split(/=(.*)/s, 2);
+    if (!names.has(flag) || (inlineValue === undefined && index + 1 >= tokens.length)) {
+      args.error = 'Expected --run-id, --status, --title, and --body; --route and --dry-run are optional.';
+      return args;
+    }
+    const name = flag.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    args[name] = inlineValue === undefined ? tokens[index + 1] : inlineValue;
+    if (inlineValue === undefined) index += 1;
   }
   return args;
 }
@@ -92,25 +98,30 @@ function validate(args, env) {
     return { ok: false, error: 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.' };
   }
 
+  const route = value(args.route);
+  const parsedRoute = route === undefined ? undefined : parseRoute(route);
+  if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
+
   const channelId = value(env.DISCORD_CHANNEL_ID);
-  const threadId = value(env.DISCORD_THREAD_ID);
+  let threadId = value(env.DISCORD_THREAD_ID);
   if (botToken) {
-    if (Boolean(channelId) === Boolean(threadId)) {
-      return { ok: false, error: 'Bot mode requires exactly one destination: DISCORD_CHANNEL_ID or DISCORD_THREAD_ID.' };
-    }
-    const destination = threadId ? 'thread' : 'channel';
+    const resolved = resolveBotDestination(parsedRoute, channelId, threadId);
+    if (resolved.error) return { ok: false, error: resolved.error };
     const apiBase = value(env.DISCORD_API_BASE_URL) || 'https://discord.com/api/v10';
     let url;
     try {
-      url = new URL(`channels/${encodeURIComponent(threadId || channelId)}/messages`, ensureApiBase(apiBase));
+      url = new URL(`channels/${encodeURIComponent(resolved.id)}/messages`, ensureApiBase(apiBase));
     } catch {
       return { ok: false, error: 'DISCORD_API_BASE_URL must be a valid HTTP(S) URL.' };
     }
     if (!isHttp(url)) return { ok: false, error: 'DISCORD_API_BASE_URL must be an HTTP(S) URL.' };
-    return { ok: true, mode: 'bot', destination, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' } };
+    return { ok: true, mode: 'bot', ...resolved, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' } };
   }
 
   if (channelId) return { ok: false, error: 'Webhook mode does not use DISCORD_CHANNEL_ID.' };
+  if (parsedRoute?.kind === 'channel') return { ok: false, error: 'A channel route requires DISCORD_BOT_TOKEN; webhook delivery can only target its configured webhook channel or a thread.' };
+  if (parsedRoute?.kind === 'thread') threadId = parsedRoute.id;
+  if (threadId && !isSnowflake(threadId)) return { ok: false, error: 'DISCORD_THREAD_ID must be a Discord snowflake.' };
   let url;
   try {
     url = new URL(webhookUrl);
@@ -120,7 +131,32 @@ function validate(args, env) {
   if (!isHttp(url)) return { ok: false, error: 'DISCORD_WEBHOOK_URL must be an HTTP(S) URL.' };
   url.searchParams.set('wait', 'true');
   if (threadId) url.searchParams.set('thread_id', threadId);
-  return { ok: true, mode: 'webhook', destination: threadId ? 'thread' : 'webhook', url, headers: { 'content-type': 'application/json' } };
+  return {
+    ok: true,
+    mode: 'webhook',
+    route_kind: parsedRoute?.kind || (threadId ? 'legacy' : 'fallback'),
+    destination: parsedRoute ? 'dynamic_thread' : (threadId ? 'legacy_thread' : 'webhook_default'),
+    url,
+    headers: { 'content-type': 'application/json' },
+  };
+}
+
+function resolveBotDestination(route, channelId, threadId) {
+  if (route) return { id: route.id, route_kind: route.kind, destination: `dynamic_${route.kind}` };
+  if (Boolean(channelId) === Boolean(threadId)) {
+    return { error: 'Bot mode without --route requires exactly one destination: DISCORD_CHANNEL_ID or DISCORD_THREAD_ID.' };
+  }
+  const id = threadId || channelId;
+  if (!isSnowflake(id)) return { error: `${threadId ? 'DISCORD_THREAD_ID' : 'DISCORD_CHANNEL_ID'} must be a Discord snowflake.` };
+  return threadId
+    ? { id, route_kind: 'legacy', destination: 'legacy_thread' }
+    : { id, route_kind: 'fallback', destination: 'fallback_channel' };
+}
+
+function parseRoute(route) {
+  const match = /^discord:v1:(channel|thread):(\d{17,20}):(\d{17,20})$/.exec(route);
+  if (!match) return { error: 'route must be discord:v1:<channel|thread>:<guild-id>:<destination-id> with Discord snowflake IDs.' };
+  return { kind: match[1], guildId: match[2], id: match[3] };
 }
 
 function renderContent(args) {
@@ -189,6 +225,10 @@ function nonEmpty(input) {
 
 function isHttp(url) {
   return url.protocol === 'https:' || url.protocol === 'http:';
+}
+
+function isSnowflake(input) {
+  return typeof input === 'string' && /^\d{17,20}$/.test(input);
 }
 
 function sleep(milliseconds) {
