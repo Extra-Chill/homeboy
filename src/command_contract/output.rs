@@ -232,7 +232,8 @@ impl Commands {
             | Commands::Runtime(_)
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
-            | Commands::Stack(_) => registered_json_envelope_descriptor(self, output_file_mode),
+            | Commands::Stack(_)
+            | Commands::Check(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Rig(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Status(_)
             | Commands::Server(_)
