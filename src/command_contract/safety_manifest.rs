@@ -140,6 +140,27 @@ impl Default for CommandSafetyMetadata {
     }
 }
 
+impl CommandSafetyMetadata {
+    fn mutating(&mut self, output_notes: &'static str) {
+        self.mutates = true;
+        self.output_notes = output_notes;
+    }
+
+    fn operator_mutating(&mut self, output_notes: &'static str) {
+        self.mutating(output_notes);
+        self.operator = true;
+    }
+
+    fn guarded_operator_mutating(
+        &mut self,
+        output_notes: &'static str,
+        dangerous_flags: Vec<&'static str>,
+    ) {
+        self.operator_mutating(output_notes);
+        self.dangerous_flags = dangerous_flags;
+    }
+}
+
 fn flatten_manifest_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
     let mut flattened = Vec::new();
 
@@ -192,6 +213,14 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             }
             return metadata;
         }
+    } else {
+        // Dynamic commands are overlaid above. Any other unregistered command must not
+        // silently acquire the read-only defaults.
+        metadata.mutates = true;
+        metadata.operator = true;
+        metadata.output_notes =
+            "unregistered command path is conservatively classified as mutating";
+        return metadata;
     }
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
@@ -218,38 +247,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.output_notes = "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries";
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["config", "set"] | ["config", "remove"] | ["config", "reset"] => {
-            metadata.mutates = true;
-        }
-        ["project", "create"]
-        | ["project", "set"]
-        | ["project", "remove"]
-        | ["project", "rename"]
-        | ["project", "delete"]
-        | ["project", "init"]
-        | ["project", "components", "set"]
-        | ["project", "components", "attach-path"]
-        | ["project", "components", "remove"]
-        | ["project", "components", "clear"]
-        | ["project", "pin", "add"]
-        | ["project", "pin", "remove"]
-        | ["project", "pin", "rename"]
-        | ["project", "pin", "update"] => {
-            metadata.mutates = true;
-        }
-        ["component", "create"]
-        | ["component", "set"]
-        | ["component", "delete"]
-        | ["component", "rename"]
-        | ["component", "setup"] => {
-            metadata.mutates = true;
-        }
-        ["component", "reconcile"] | ["component", "artifacts"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "default output is non-mutating; pass --apply to repair or remove artifacts";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["extension", "setup"]
@@ -543,40 +540,29 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["tunnel", "service", "expose"]
         | ["tunnel", "service", "set"]
         | ["tunnel", "service", "remove"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates private service tunnel declarations";
+            metadata.operator_mutating("mutates private service tunnel declarations");
         }
         ["tunnel", "service", "start"] | ["tunnel", "service", "stop"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates private service tunnel runtime state";
+            metadata.operator_mutating("mutates private service tunnel runtime state");
         }
         ["tunnel", "preview-client", "start"]
         | ["tunnel", "preview-consumer", "run"]
         | ["tunnel", "preview-ingress", "serve"]
         | ["tunnel", "artifact-origin", "serve"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "starts or supervises tunnel preview runtime state";
+            metadata.operator_mutating("starts or supervises tunnel preview runtime state");
         }
         ["tunnel", "preview-ingress", "route"] | ["tunnel", "preview-ingress", "unroute"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates preview ingress route state";
+            metadata.operator_mutating("mutates preview ingress route state");
         }
         ["tunnel", "preview-ingress", "install"] => {
             metadata.operator = true;
             metadata.output_notes = "renders a non-destructive operator install plan";
         }
         ["stack", "create"] | ["stack", "add-pr"] | ["stack", "remove-pr"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "mutates persisted stack specification metadata";
+            metadata.mutating("mutates persisted stack specification metadata");
         }
         ["stack", "apply"] | ["stack", "rebase"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates the configured stack target branch";
+            metadata.operator_mutating("mutates the configured stack target branch");
             metadata.risk_exemption = Some(
                 "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
             );
@@ -588,25 +574,22 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes = "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed";
         }
         ["stack", "push"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "pushes the configured stack target branch to its remote";
+            metadata.operator_mutating("pushes the configured stack target branch to its remote");
             metadata.risk_exemption = Some(
                 "push is the explicit remote publication action; no dry-run contract exists yet",
             );
         }
         ["extension", "run"] | ["extension", "exec"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "executes extension-owned runtime commands with forwarded arguments that may mutate the target system";
-            metadata.dangerous_flags = vec!["extension runtime command", "passthrough args"];
+            metadata.guarded_operator_mutating(
+                "executes extension-owned runtime commands with forwarded arguments that may mutate the target system",
+                vec!["extension runtime command", "passthrough args"],
+            );
         }
         ["extension", "action"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes =
-                "executes extension-owned actions that may mutate the target system";
-            metadata.dangerous_flags = vec!["extension action"];
+            metadata.guarded_operator_mutating(
+                "executes extension-owned actions that may mutate the target system",
+                vec!["extension action"],
+            );
         }
         ["refactor", "undo", "delete"] => {
             metadata.mutates = true;
@@ -638,5 +621,64 @@ fn dynamic_command_for_path<'a>(
         dynamic_commands.iter().find(|entry| entry.name == *command)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_contract::{CommandSafetySpec, COMMAND_SPECS};
+
+    fn assert_safety(path: &[&str], expected: CommandSafetySpec) {
+        let path = path
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
+        let actual = command_safety_metadata(&path);
+        assert_eq!(actual.mutates, expected.mutates, "path: {path:?}");
+        assert_eq!(actual.operator, expected.operator, "path: {path:?}");
+        assert_eq!(actual.dry_run_flag, expected.dry_run_flag, "path: {path:?}");
+        assert_eq!(
+            actual.risk_exemption, expected.risk_exemption,
+            "path: {path:?}"
+        );
+        assert_eq!(
+            actual.dangerous_flags, expected.dangerous_flags,
+            "path: {path:?}"
+        );
+    }
+
+    #[test]
+    fn every_top_level_command_uses_registry_safety() {
+        for spec in COMMAND_SPECS {
+            assert_safety(&[spec.name], spec.safety);
+        }
+    }
+
+    #[test]
+    fn registry_drives_representative_nested_safety() {
+        for path in [
+            &["project", "components", "attach-path"][..],
+            &["config", "set"][..],
+            &["component", "reconcile"][..],
+            &["file", "delete"][..],
+            &["fleet", "exec"][..],
+            &["api", "http", "request"][..],
+        ] {
+            let spec = registered_command(path[0]).expect("registered top-level command");
+            let expected = spec
+                .path_safety(&path[1..])
+                .expect("registered nested path");
+            assert_safety(path, expected.safety);
+        }
+
+        assert_safety(&["project", "list"], CommandSafetySpec::read_only());
+    }
+
+    #[test]
+    fn unknown_top_level_paths_fail_closed() {
+        let metadata = command_safety_metadata(&["not-registered".to_string()]);
+        assert!(metadata.mutates);
+        assert!(metadata.operator);
     }
 }
