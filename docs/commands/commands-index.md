@@ -19,7 +19,6 @@
 - [fleet](fleet.md)
 - [fuzz](fuzz.md) — generic fuzz workload discovery, execution, and evidence
 - [git](git.md)
-- [http](http.md) — generic proxied authenticated HTTP requests
 - [logs](logs.md)
 - [observe](observe.md) — passive live observation into trace timeline evidence
 - [project](project.md)
