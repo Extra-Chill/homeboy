@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::{git, worktree};
+use crate::core::{git, worktree, worktree_providers};
 use crate::core::{Error, Result};
 
 use super::path_remap::{remap_local_path, LabPathRemap};
@@ -40,7 +40,7 @@ pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Resul
                     None,
                 )
             })?;
-            return worktree::resolve(value).map(|record| PathBuf::from(record.worktree_path));
+            return resolve_to_worktree_source_path(value);
         }
         if let Some(value) = arg.strip_prefix("--path=") {
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
@@ -49,12 +49,20 @@ pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Resul
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
         }
         if let Some(value) = arg.strip_prefix("--to-worktree=") {
-            return worktree::resolve(value).map(|record| PathBuf::from(record.worktree_path));
+            return resolve_to_worktree_source_path(value);
         }
     }
 
     std::env::current_dir()
         .map_err(|err| Error::internal_io(err.to_string(), Some("read cwd".to_string())))
+}
+
+fn resolve_to_worktree_source_path(value: &str) -> Result<PathBuf> {
+    match worktree::resolve_if_present(value)? {
+        Some(record) => Ok(PathBuf::from(record.worktree_path)),
+        None => worktree_providers::resolve_worktree_provider_handle(value)
+            .map(|worktree| PathBuf::from(worktree.path)),
+    }
 }
 
 fn extension_refresh_local_source_path(args: &[String]) -> Option<PathBuf> {

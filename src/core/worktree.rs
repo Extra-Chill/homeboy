@@ -339,6 +339,17 @@ pub fn resolve(id: &str) -> Result<TaskWorktreeRecord> {
     read_record(&metadata_dir()?, id)
 }
 
+/// Returns `None` only when no Homeboy task-worktree record exists. Callers
+/// that support an external provider can use this to avoid masking corrupt
+/// Homeboy records with a provider fallback.
+pub fn resolve_if_present(id: &str) -> Result<Option<TaskWorktreeRecord>> {
+    let path = record_path(&metadata_dir()?, id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_record_path(&path).map(Some)
+}
+
 pub fn resolve_workspace_ref(handle: &str) -> Result<WorkspaceRefRecord> {
     if let Ok(record) = read_record(&metadata_dir()?, handle) {
         return Ok(WorkspaceRefRecord::Task(record));

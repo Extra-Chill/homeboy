@@ -69,6 +69,79 @@ mod lab_source_path_tests {
             );
         });
     }
+
+    #[test]
+    fn lab_source_path_uses_provider_managed_cook_target_without_adopting_it() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let initialized = std::process::Command::new("git")
+                .args(["init", "-b", "cook-target"])
+                .current_dir(workspace.path())
+                .output()
+                .expect("initialize git repository");
+            assert!(initialized.status.success());
+            let provider_dir = tempfile::tempdir().expect("provider dir");
+            let script = provider_dir.path().join("provider");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                    serde_json::json!({
+                        "worktrees": [{
+                            "handle": "fixture@cook-target",
+                            "path": workspace.path(),
+                            "branch": "cook-target",
+                            "safety": { "dirty": false, "unpushed": false, "primary": false }
+                        }]
+                    })
+                ),
+            )
+            .expect("write provider script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&script)
+                    .expect("script metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&script, permissions).expect("make script executable");
+            }
+            let mut worktree_providers = HashMap::new();
+            worktree_providers.insert(
+                "fixture".to_string(),
+                defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: defaults::WorktreeProviderKind::Command,
+                    apply_enabled: false,
+                    commands: defaults::WorktreeProviderCommands {
+                        list: Some(vec![script.display().to_string()]),
+                        ..Default::default()
+                    },
+                },
+            );
+            defaults::save_config(&defaults::HomeboyConfig {
+                worktree_providers,
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save provider config");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--to-worktree".to_string(),
+                "fixture@cook-target".to_string(),
+            ];
+
+            assert_eq!(
+                lab_offload_source_path(&args).expect("provider target resolves before dispatch"),
+                workspace.path()
+            );
+            let record_path = crate::core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join("task-worktrees/fixture_cook-target.json");
+            assert!(!record_path.exists(), "provider target must not be adopted");
+        });
+    }
 }
 
 mod runner_resident_tests {

@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::defaults::{self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind};
@@ -67,6 +67,198 @@ pub struct WorktreeProviderRunRef {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_command: Option<String>,
+}
+
+/// A workspace returned by a command worktree provider's `list` command.
+///
+/// The command must return JSON with a `worktrees` array (optionally nested in
+/// `data`). Each matching row must include all fields below so Homeboy never
+/// guesses safety state for an externally managed destination.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderHandle {
+    pub handle: String,
+    pub path: String,
+    pub branch: String,
+    pub safety: WorktreeProviderHandleSafety,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WorktreeProviderHandleSafety {
+    pub dirty: bool,
+    pub unpushed: bool,
+    pub primary: bool,
+}
+
+/// Resolve an externally managed worktree handle without creating or adopting
+/// a Homeboy record. This is intentionally a lookup-only boundary.
+pub fn resolve_worktree_provider_handle(handle: &str) -> Result<WorktreeProviderHandle> {
+    resolve_worktree_provider_handle_from_config(handle, &defaults::load_config())
+}
+
+pub fn resolve_worktree_provider_handle_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderHandle> {
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    let mut attempted = Vec::new();
+
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled {
+            continue;
+        }
+        let Some(command) = provider.commands.list.as_ref() else {
+            continue;
+        };
+        attempted.push(provider_id.clone());
+        let worktrees = run_provider_list_command(&provider_id, command)?;
+        if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
+            validate_provider_handle(&provider_id, &worktree)?;
+            return Ok(worktree);
+        }
+    }
+
+    let configured = if attempted.is_empty() {
+        "no enabled worktree provider has commands.list configured".to_string()
+    } else {
+        format!("checked provider(s): {}", attempted.join(", "))
+    };
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "worktree handle `{handle}` is not a Homeboy task worktree and was not returned by a configured worktree provider ({configured})"
+        ),
+        Some(handle.to_string()),
+        Some(vec![
+            "Create the destination through its workspace provider, or use an existing Homeboy task worktree handle.".to_string(),
+            "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string(),
+        ]),
+    ))
+}
+
+fn run_provider_list_command(
+    provider_id: &str,
+    command: &[String],
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let (program, args) = command
+        .split_first()
+        .filter(|(program, _)| !program.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_providers.commands.list",
+                format!(
+                    "worktree provider `{provider_id}` list command must include an executable"
+                ),
+                Some(provider_id.to_string()),
+                None,
+            )
+        })?;
+    let output = Command::new(program).args(args).output().map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` list command could not start: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` list command failed with exit code {}",
+                output.status.code().unwrap_or(1)
+            ),
+            Some(provider_id.to_string()),
+            Some(vec![String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string()]),
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` list command returned invalid JSON: {error}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    let worktrees = value.get("worktrees").or_else(|| value.get("data").and_then(|data| data.get("worktrees"))).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` list response must include a worktrees array"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    serde_json::from_value::<Vec<WorktreeProviderHandle>>(worktrees.clone()).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` returned invalid worktree metadata: {error}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })
+}
+
+fn validate_provider_handle(provider_id: &str, worktree: &WorktreeProviderHandle) -> Result<()> {
+    let path = std::path::PathBuf::from(&worktree.path);
+    if !path.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` resolved `{}` to a missing directory {}",
+                worktree.handle,
+                path.display()
+            ),
+            Some(worktree.handle.clone()),
+            None,
+        ));
+    }
+    if worktree.branch.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` resolved `{}` without a branch",
+                worktree.handle
+            ),
+            Some(worktree.handle.clone()),
+            None,
+        ));
+    }
+    let blocked = [
+        (worktree.safety.dirty, "dirty"),
+        (worktree.safety.unpushed, "unpushed"),
+        (worktree.safety.primary, "primary"),
+    ]
+    .into_iter()
+    .filter_map(|(blocked, name)| blocked.then_some(name))
+    .collect::<Vec<_>>();
+    if !blocked.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` marked `{}` as {}; refusing to cook into an unsafe destination", worktree.handle, blocked.join(", ")),
+            Some(worktree.handle.clone()),
+            Some(vec!["Use a clean, pushed, non-primary provider-managed worktree on the intended branch.".to_string()]),
+        ));
+    }
+    if crate::core::git::current_branch(&path).as_deref() != Some(worktree.branch.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` branch metadata for `{}` does not match the checkout branch", worktree.handle),
+            Some(worktree.handle.clone()),
+            Some(vec![format!("Provider reported branch `{}`; refresh provider metadata and retry.", worktree.branch)]),
+        ));
+    }
+    Ok(())
 }
 
 pub fn cleanup_worktree_providers(
@@ -650,6 +842,66 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_clean_provider_managed_handle_without_a_homeboy_record() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+        let handle = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script]),
+                    ..Default::default()
+                },
+            }),
+        )
+        .expect("provider handle resolves");
+
+        assert_eq!(handle.path, workspace.path().display().to_string());
+        assert_eq!(handle.branch, "cook-target");
+    }
+
+    #[test]
+    fn rejects_provider_handles_with_unsafe_safety_metadata() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": true, "unpushed": false, "primary": false }
+            }]
+        }));
+        let err = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script]),
+                    ..Default::default()
+                },
+            }),
+        )
+        .expect_err("dirty provider handle must be rejected");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("dirty"));
+    }
+
+    #[test]
     fn provider_apply_captures_phase_progress_and_durable_refs() {
         let script = fake_provider_script_with_refs();
         let output = cleanup_worktree_providers_from_config(
@@ -720,6 +972,24 @@ mod tests {
         .expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
+    }
+
+    fn fake_list_provider_script(output: Value) -> String {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let script = dir.join("provider");
+        fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", output))
+            .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    fn git_init(path: &std::path::Path, branch: &str) {
+        let output = std::process::Command::new("git")
+            .args(["init", "-b", branch])
+            .current_dir(path)
+            .output()
+            .expect("initialize git repository");
+        assert!(output.status.success());
     }
 
     #[cfg(unix)]
