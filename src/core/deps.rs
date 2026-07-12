@@ -1,4 +1,5 @@
 use crate::core::component::{self, Component};
+use crate::core::extension;
 use crate::core::extension::build;
 use crate::core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -260,8 +261,26 @@ pub struct DependencyInstallPlanStep {
     /// Matches the `package_manager` reported by `deps status` for the same
     /// provider.
     pub provider_id: String,
-    /// Full install argv (program + args) the provider would run.
-    pub command: Vec<String>,
+    /// Portable install invocation the runner can execute without receiving a
+    /// controller-local extension path.
+    pub invocation: DependencyInstallInvocation,
+}
+
+/// An install command suitable for crossing a controller/runner boundary.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DependencyInstallInvocation {
+    /// A provider command that does not reference an installed extension path.
+    Argv { argv: Vec<String> },
+    /// An extension-owned entrypoint. The runner resolves `entrypoint` inside
+    /// its own materialized copy of `extension_id` before executing `argv`.
+    ExtensionEntrypoint {
+        extension_id: String,
+        entrypoint: String,
+        /// The executable and argument list with the entrypoint removed.
+        argv: Vec<String>,
+        entrypoint_index: usize,
+    },
 }
 
 /// Detect dependency providers for a workspace path and return the install
@@ -288,11 +307,37 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
         if let Some(command) = provider.install_command(&component, &resolved_path)? {
             steps.push(DependencyInstallPlanStep {
                 provider_id: status.package_manager,
-                command: command.argv(),
+                invocation: dependency_install_invocation(command.argv())?,
             });
         }
     }
     Ok(steps)
+}
+
+fn dependency_install_invocation(argv: Vec<String>) -> Result<DependencyInstallInvocation> {
+    for extension in extension::load_all_extensions()? {
+        let Some(root) = extension.extension_path else {
+            continue;
+        };
+        for (entrypoint_index, value) in argv.iter().enumerate() {
+            let path = Path::new(value);
+            if !path.is_absolute() {
+                continue;
+            }
+            if let Ok(entrypoint) = path.strip_prefix(&root) {
+                let entrypoint = entrypoint.to_string_lossy().to_string();
+                let mut portable_argv = argv;
+                portable_argv.remove(entrypoint_index);
+                return Ok(DependencyInstallInvocation::ExtensionEntrypoint {
+                    extension_id: extension.id,
+                    entrypoint,
+                    argv: portable_argv,
+                    entrypoint_index,
+                });
+            }
+        }
+    }
+    Ok(DependencyInstallInvocation::Argv { argv })
 }
 
 fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {
@@ -403,5 +448,46 @@ fn combine_provider_statuses(
         component_path: path.display().to_string(),
         package_manager,
         packages,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_owned_install_path_becomes_portable_invocation() {
+        crate::test_support::with_isolated_home(|home| {
+            let extension_id = "fixture-runtime";
+            let extension_root = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            std::fs::create_dir_all(extension_root.join("scripts")).expect("extension root");
+            std::fs::write(
+                extension_root.join(format!("{extension_id}.json")),
+                r#"{"name":"Fixture runtime","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            let invocation = dependency_install_invocation(vec![
+                "sh".to_string(),
+                extension_root
+                    .join("scripts/install.sh")
+                    .display()
+                    .to_string(),
+                "install".to_string(),
+            ])
+            .expect("portable invocation");
+
+            assert_eq!(
+                invocation,
+                DependencyInstallInvocation::ExtensionEntrypoint {
+                    extension_id: extension_id.to_string(),
+                    entrypoint: "scripts/install.sh".to_string(),
+                    argv: vec!["sh".to_string(), "install".to_string()],
+                    entrypoint_index: 1,
+                }
+            );
+        });
     }
 }
