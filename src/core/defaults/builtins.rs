@@ -142,7 +142,7 @@ pub(super) fn default_local_permissions() -> PermissionModes {
 pub(super) fn default_remote_permissions() -> PermissionModes {
     PermissionModes {
         file_mode: "g+w".to_string(),
-        dir_mode: "g+w".to_string(),
+        dir_mode: "g+ws".to_string(),
     }
 }
 
