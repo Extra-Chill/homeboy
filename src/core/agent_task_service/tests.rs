@@ -591,27 +591,15 @@ impl AgentTaskExecutorAdapter for CapturingExecutor {
 
 fn create_git_repo(path: &Path) {
     std::fs::create_dir_all(path).expect("repo dir");
-    run_git(path, &["init", "-q"]);
-    run_git(path, &["config", "user.email", "homeboy@example.com"]);
-    run_git(path, &["config", "user.name", "Homeboy Test"]);
-    std::fs::write(path.join("README.md"), "initial\n").expect("readme");
-    run_git(path, &["add", "."]);
-    run_git(path, &["commit", "-q", "-m", "initial"]);
-}
-
-fn run_git(dir: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: stdout={} stderr={}",
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    crate::test_support::run_git_fixture_command(path, &["init", "-q"]);
+    crate::test_support::run_git_fixture_command(
+        path,
+        &["config", "user.email", "homeboy@example.com"],
     );
+    crate::test_support::run_git_fixture_command(path, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(path.join("README.md"), "initial\n").expect("readme");
+    crate::test_support::run_git_fixture_command(path, &["add", "."]);
+    crate::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);
 }
 
 fn write_component_registration(home: &Path, id: &str, local_path: &Path) {

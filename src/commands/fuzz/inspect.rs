@@ -185,7 +185,7 @@ fn fuzz_inspect_evidence_ref(artifact: &ArtifactRecord) -> Option<EvidenceRef> {
 #[cfg(test)]
 mod tests {
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
-    use homeboy::test_support::with_isolated_home;
+    use homeboy::test_support::{with_isolated_home, ArtifactRootOverrideGuard};
 
     use super::super::types::FuzzInspectArgs;
     use super::run_inspect;
@@ -204,8 +204,8 @@ mod tests {
     #[test]
     fn inspect_prints_raw_fuzz_results_for_fuzz_run() {
         with_isolated_home(|home| {
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("fuzz", serde_json::json!({ "exit_code": 1 })))
@@ -243,15 +243,14 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("runs artifact get"));
-            homeboy::core::set_artifact_root_override(None);
         });
     }
 
     #[test]
     fn inspect_resolves_raw_results_through_lab_runner_job() {
         with_isolated_home(|home| {
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
             let store = ObservationStore::open_initialized().expect("store");
             let remote_job_id = "remote-job-inspect-5997";
             let runner_run = store
@@ -303,15 +302,14 @@ mod tests {
                     .and_then(|v| v.as_str()),
                 Some("lab-raw")
             );
-            homeboy::core::set_artifact_root_override(None);
         });
     }
 
     #[test]
     fn inspect_raw_flag_returns_text_body() {
         with_isolated_home(|home| {
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("fuzz", serde_json::json!({})))
@@ -331,15 +329,14 @@ mod tests {
             assert_eq!(output.status, "ok");
             assert!(output.result.is_none());
             assert_eq!(output.raw.as_deref(), Some("{\"ok\":true}"));
-            homeboy::core::set_artifact_root_override(None);
         });
     }
 
     #[test]
     fn inspect_discovers_canonical_envelope_with_generic_artifact_kind() {
         with_isolated_home(|home| {
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("fuzz", serde_json::json!({})))
@@ -397,15 +394,14 @@ mod tests {
             let summary = output.envelope_summary.expect("envelope summary");
             assert_eq!(summary.gate_status, "passed");
             assert_eq!(summary.campaign_id, "campaign-1");
-            homeboy::core::set_artifact_root_override(None);
         });
     }
 
     #[test]
     fn inspect_reports_not_found_without_raw_artifact() {
         with_isolated_home(|home| {
-            let artifact_root = home.path().join("agent-readable-artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
                 .start_run(sample_run("fuzz", serde_json::json!({})))
@@ -424,7 +420,6 @@ mod tests {
                 .next_steps
                 .iter()
                 .any(|step| step.contains("runs evidence")));
-            homeboy::core::set_artifact_root_override(None);
         });
     }
 }

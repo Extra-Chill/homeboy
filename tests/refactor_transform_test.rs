@@ -1,22 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy::core::refactor;
 
-fn tmp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("homeboy-refactor-{name}-{nanos}"))
-}
+#[allow(dead_code)]
+mod support;
 
 #[test]
 fn transform_output_samples_match_details_at_scale() {
-    let root = tmp_dir("transform-scale");
-    let src = root.join("src");
+    let root = support::temp_dir("refactor-transform-scale");
+    let src = root.path().join("src");
     fs::create_dir_all(&src).unwrap();
 
     for file_index in 0..200 {
@@ -29,7 +23,7 @@ fn transform_output_samples_match_details_at_scale() {
 
     let set = refactor::ad_hoc_transform("OLD", "NEW", "src/**/*.txt", "line");
     let result = refactor::apply_transforms(
-        &root,
+        root.path(),
         "ad-hoc",
         &set,
         false,
@@ -54,19 +48,18 @@ fn transform_output_samples_match_details_at_scale() {
 
     let json = serde_json::to_string(&result).unwrap();
     assert!(json.len() < 60_000, "json output was {} bytes", json.len());
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn transform_output_can_include_full_match_details() {
-    let root = tmp_dir("transform-full-details");
-    let src = root.join("src");
+    let root = support::temp_dir("refactor-transform-full-details");
+    let src = root.path().join("src");
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("file.txt"), "OLD one\nOLD two\nOLD three\n").unwrap();
 
     let set = refactor::ad_hoc_transform("OLD", "NEW", "src/**/*.txt", "line");
-    let result = refactor::apply_transforms(&root, "ad-hoc", &set, false, None, None).unwrap();
+    let result =
+        refactor::apply_transforms(root.path(), "ad-hoc", &set, false, None, None).unwrap();
     let rule = &result.rules[0];
 
     assert_eq!(rule.replacement_count, 3);
@@ -74,23 +67,21 @@ fn transform_output_can_include_full_match_details() {
     assert!(!rule.matches_truncated);
     assert_eq!(rule.omitted_match_count, 0);
     assert_eq!(rule.match_detail_limit, None);
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn rename_defaults_to_cwd_git_worktree_without_component_metadata() {
-    let root = tmp_dir("rename-cwd");
-    fs::create_dir_all(root.join("src")).unwrap();
+    let root = support::temp_dir("refactor-rename-cwd");
+    fs::create_dir_all(root.path().join("src")).unwrap();
     fs::write(
-        root.join("src/lib.rs"),
+        root.path().join("src/lib.rs"),
         "pub fn old_name() -> i32 { 1 }\npub fn call() -> i32 { old_name() }\n",
     )
     .unwrap();
 
     let git_init = Command::new("git")
         .arg("init")
-        .current_dir(&root)
+        .current_dir(root.path())
         .output()
         .expect("git init");
     assert!(
@@ -103,8 +94,8 @@ fn rename_defaults_to_cwd_git_worktree_without_component_metadata() {
         .args([
             "refactor", "rename", "--from", "old_name", "--to", "new_name", "--write",
         ])
-        .current_dir(&root)
-        .env("HOME", &root)
+        .current_dir(root.path())
+        .env("HOME", root.path())
         .output()
         .expect("run homeboy refactor rename");
 
@@ -114,11 +105,9 @@ fn rename_defaults_to_cwd_git_worktree_without_component_metadata() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    let source = fs::read_to_string(root.path().join("src/lib.rs")).unwrap();
     assert!(source.contains("new_name"));
     assert!(!source.contains("old_name"));
-
-    let _ = fs::remove_dir_all(root);
 }
 
 fn homeboy_bin() -> PathBuf {
