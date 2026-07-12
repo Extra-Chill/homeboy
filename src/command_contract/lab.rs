@@ -1313,8 +1313,7 @@ impl Commands {
 
         let mut extension_ids = BTreeSet::new();
         match self {
-            Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
-            Commands::Fuzz(args) => extension_ids.extend(args.lab_required_extension_ids()?),
+            Commands::Fuzz(args) => extension_ids.extend(args.lab_route_required_extension_ids()),
             Commands::Review(args) => {
                 extension_ids.extend(args.effective_extension_override_ids().iter().cloned());
                 extension_ids.extend(review_lab_extension_ids(args)?);
