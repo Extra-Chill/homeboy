@@ -23,6 +23,26 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
+    /// Installed notification transport for this run. Pair with
+    /// `--notification-route`; the route is opaque, non-secret data owned by
+    /// that transport.
+    #[arg(
+        long,
+        global = true,
+        requires = "notification_route",
+        value_name = "TRANSPORT"
+    )]
+    pub notification_transport: Option<String>,
+
+    /// Opaque, non-secret destination for `--notification-transport`.
+    #[arg(
+        long,
+        global = true,
+        requires = "notification_transport",
+        value_name = "ROUTE"
+    )]
+    pub notification_route: Option<String>,
+
     /// Suppress resource policy warnings for intentionally hot commands.
     #[arg(long, global = true)]
     pub force_hot: bool,

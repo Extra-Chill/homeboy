@@ -907,6 +907,7 @@ mod tests {
                 command_family: RunnerWorkloadCommandFamily::Quality,
             },
             agent_task: None,
+            notification_route: None,
             workspace_mappings: RunnerWorkloadWorkspaceMappings {
                 source_path_mode: "cwd_or_path_flag".to_string(),
                 workspace_mode_policy: "git".to_string(),

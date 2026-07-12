@@ -161,6 +161,10 @@ mod runner_workload_types {
         pub kind: RunnerWorkloadKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub agent_task: Option<RunnerWorkloadAgentTask>,
+        /// Opaque origin route copied into detached work so terminal mirroring
+        /// retains the initiating destination.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub notification_route: Option<crate::core::notification_route::NotificationRoute>,
         pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
         pub required_capabilities: Vec<RunnerWorkloadCapability>,
         pub required_secrets: RunnerWorkloadSecrets,

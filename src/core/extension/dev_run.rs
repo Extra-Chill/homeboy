@@ -446,6 +446,7 @@ fn extension_dev_run_workload(
             command_family: RunnerWorkloadCommandFamily::from_command_label(command_label),
         },
         agent_task: None,
+        notification_route: crate::core::notification_route::current(),
         workspace_mappings: RunnerWorkloadWorkspaceMappings {
             source_path_mode: "snapshot".to_string(),
             workspace_mode_policy: "snapshot_unique_workspace".to_string(),

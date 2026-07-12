@@ -297,6 +297,33 @@ mod tests {
     }
 
     #[test]
+    fn terminal_reconciliation_preserves_bound_notification_route() {
+        with_isolated_home(|_| {
+            let route = crate::core::notification_route::NotificationRoute::new(
+                "extension",
+                "opaque-route",
+            )
+            .expect("route");
+            let observation =
+                crate::core::notification_route::with_current(Some(route), || active_observation());
+            let run_id = observation.run_id().to_string();
+
+            observation
+                .finish_with_merged_metadata(RunStatus::Pass, serde_json::json!({"exit_code": 0}));
+
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(
+                run.metadata_json["notification_route"]["route"],
+                "opaque-route"
+            );
+        });
+    }
+
+    #[test]
     fn test_finish_error_with_merged_metadata_sets_error_status() {
         with_isolated_home(|_| {
             let observation = active_observation();

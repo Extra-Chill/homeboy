@@ -187,6 +187,9 @@ pub(super) fn exec_via_daemon(
             &events,
             &result,
             run_id.as_deref(),
+            runner_workload
+                .as_ref()
+                .and_then(|workload| workload.notification_route.as_ref()),
         )?
     } else {
         None

@@ -103,6 +103,7 @@ pub mod lifecycle;
 pub mod loop_lifecycle;
 pub(crate) mod markdown;
 pub mod matrix_artifact_summary;
+pub mod notification_route;
 pub mod notify;
 pub mod observation;
 pub mod output;

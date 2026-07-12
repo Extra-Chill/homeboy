@@ -432,6 +432,8 @@ fn maybe_notify(
             body: format!("{} {}", item.kind, item.id),
             status,
             run_id: item.id.clone(),
+            transport: None,
+            route: None,
         },
         args.notify_command.as_deref(),
     ))
