@@ -193,11 +193,7 @@ fn normalize_remote_path(path: &str) -> Result<String> {
             None,
         ));
     }
-    Ok(if path.is_empty() {
-        "/".to_string()
-    } else {
-        path.to_string()
-    })
+    Ok(crate::core::paths::normalize_remote_root(path))
 }
 
 fn normalize_includes(includes: &[String]) -> Result<Vec<String>> {
