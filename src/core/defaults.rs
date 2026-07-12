@@ -42,6 +42,11 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub agent_task: AgentTaskConfig,
 
+    /// Notification delivery policy. Transports are discovered from installed
+    /// extension manifests; this only selects the route-less operations default.
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+
     /// External worktree lifecycle providers keyed by provider id.
     ///
     /// Providers are command-backed integration points owned by the local
@@ -130,6 +135,7 @@ impl Default for HomeboyConfig {
             lab: LabConfig::default(),
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
+            notifications: NotificationConfig::default(),
             worktree_providers: HashMap::new(),
             github_hosts: HashMap::new(),
             settings: HashMap::new(),
@@ -139,6 +145,14 @@ impl Default for HomeboyConfig {
             resident_services: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationConfig {
+    /// Installed extension transport ID used only when a completed operation has
+    /// no route bound to its persisted run record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_transport: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

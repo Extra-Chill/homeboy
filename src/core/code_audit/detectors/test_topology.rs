@@ -381,6 +381,7 @@ JSON
             ci: None,
             source_snapshot: None,
             diagnostics: Default::default(),
+            notification_transports: Vec::new(),
             runtime: None,
             cli: None,
             build: None,

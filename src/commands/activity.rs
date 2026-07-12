@@ -55,9 +55,6 @@ pub struct ActivityWatchArgs {
     /// Emit a local completion notification when the item reaches a terminal state.
     #[arg(long)]
     pub notify: bool,
-    /// Override HOMEBOY_NOTIFY_COMMAND. Implies `--notify`.
-    #[arg(long, requires = "notify")]
-    pub notify_command: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -418,7 +415,7 @@ fn maybe_notify(
     item: &ActivityItem,
     timed_out: bool,
 ) -> Option<NotifyOutcome> {
-    if !args.notify && args.notify_command.is_none() {
+    if !args.notify {
         return None;
     }
     let status = if timed_out {
@@ -426,17 +423,14 @@ fn maybe_notify(
     } else {
         format!("{:?}", item.state).to_lowercase()
     };
-    Some(notify::dispatch(
-        &NotifyEvent {
-            title: format!("homeboy activity {status}"),
-            body: format!("{} {}", item.kind, item.id),
-            status,
-            run_id: item.id.clone(),
-            transport: None,
-            route: None,
-        },
-        args.notify_command.as_deref(),
-    ))
+    Some(notify::dispatch(&NotifyEvent {
+        title: format!("homeboy activity {status}"),
+        body: format!("{} {}", item.kind, item.id),
+        status,
+        run_id: item.id.clone(),
+        transport: None,
+        route: None,
+    }))
 }
 
 fn parse_duration(raw: &str) -> Result<Duration> {

@@ -19,6 +19,7 @@ pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
     }
 
     let mut manifest = config::load::<ExtensionManifest>(id)?;
+    manifest.validate_notification_transports()?;
     let extension_dir = paths::extension(id)?;
     manifest.extension_path = Some(extension_dir.to_string_lossy().to_string());
     Ok(manifest)
@@ -28,6 +29,7 @@ pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
     let extensions = config::list::<ExtensionManifest>()?;
     let mut extensions_with_paths = Vec::new();
     for mut extension in extensions {
+        extension.validate_notification_transports()?;
         let extension_dir = paths::extension(&extension.id)?;
         extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
         extensions_with_paths.push(extension);

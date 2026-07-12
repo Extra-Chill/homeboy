@@ -168,21 +168,15 @@ impl CliRuntime {
             Ok(parsed) => parsed,
             Err(err) => err.exit(),
         };
-        let notification_route = if let (Some(transport), Some(route)) = (
+        let notification_route = match crate::core::notification_route::from_cli_or_env(
             cli.notification_transport.as_deref(),
             cli.notification_route.as_deref(),
         ) {
-            Some(
-                match crate::core::notification_route::NotificationRoute::new(transport, route) {
-                    Ok(route) => route,
-                    Err(err) => {
-                        output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
-                        return std::process::ExitCode::from(2);
-                    }
-                },
-            )
-        } else {
-            None
+            Ok(route) => route,
+            Err(err) => {
+                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                return std::process::ExitCode::from(2);
+            }
         };
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);

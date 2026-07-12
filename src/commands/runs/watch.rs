@@ -44,14 +44,10 @@ pub struct RunsWatchArgs {
     #[arg(long, default_value = "2s")]
     pub interval: String,
     /// Emit a local completion notification when the run reaches a terminal
-    /// state. The notifier is whatever `HOMEBOY_NOTIFY_COMMAND` (or
-    /// `--notify-command`) points at; Homeboy does not hardcode an OS notifier.
+    /// state. Delivery resolves the run's installed extension transport, or an
+    /// explicitly configured operations transport for route-less runs.
     #[arg(long)]
     pub notify: bool,
-    /// Override the notify command template instead of reading
-    /// `HOMEBOY_NOTIFY_COMMAND`. Implies `--notify`.
-    #[arg(long, requires = "notify")]
-    pub notify_command: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -244,7 +240,7 @@ fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult) -> Option<NotifyOutc
     );
     let event =
         NotifyEvent::run_completed_with_route(&args.run_id, &result.run.status, route.as_ref());
-    Some(notify::dispatch(&event, args.notify_command.as_deref()))
+    Some(notify::dispatch(&event))
 }
 
 fn emit_progress(run_id: &str, run: &RunRecord, poll_count: u64) {

@@ -29,6 +29,13 @@ the higher-level system model and core/extension boundary, see
 
 - `defaults`
 - `artifact_root` — Optional directory where persisted run artifacts are copied. Override per command with `homeboy --artifact-root <dir>` or per process with `HOMEBOY_ARTIFACT_ROOT`.
+- `notifications.default_transport` — Optional installed extension notification transport ID used only for route-less operations. Routed runs select their transport from the persisted route.
+
+Notification caller context can be supplied per process with
+`HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`; both are
+required together. Explicit `--notification-transport` and
+`--notification-route` CLI values take precedence over these environment
+variables.
 - `github_hosts` — Host-scoped environment for `gh` subprocesses, keyed by GitHub hostname. Example: `/github_hosts/github.example.com/env/HTTPS_PROXY`.
 - `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set HOMEBOY_NO_UPDATE_CHECK=1.
 - `worktree_providers` — External worktree providers. A command provider that sets `commands.list` must also set `list_result_mapping`: JSONPath selectors for `items`, `handle`, `path`, `branch`, `dirty`, `unpushed`, and `primary`. `items` must resolve to one array; each item selector must resolve to exactly one value of its required type (strings for handle/path/branch, booleans for safety values). Homeboy does not infer response envelopes or safety values.

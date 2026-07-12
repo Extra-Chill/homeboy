@@ -18,6 +18,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
   "executable": {},
   "platform": {},
   "structured_sidecars": {},
+  "notification_transports": [],
   "materialization_source": {},
   "contract_producers": [],
   "commands": {},
@@ -47,6 +48,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`executable`** (object): Standalone tool runtime and inputs
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
+- **`notification_transports`** (array): Declares versioned, extension-owned completion notification transports
 - **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
 - **`contract_producers`** (array): Declares generic producer invocations Homeboy can call at explicit lifecycle phases
 - **`fuzz`** (object): Declares fuzz workload metadata, optional runner script, and optional campaign portability metadata
@@ -194,6 +196,28 @@ Extensions can declare which structured run-directory sidecars they emit. `struc
 - **`structured_sidecars.<name>.schema_version`** (string): Optional version of the sidecar payload contract.
 
 The generic `findings` and `producer.summary` names are the preferred contracts for normalized finding output and producer summaries. Legacy producer-specific names such as `lint.findings` can be declared during migration, but they use the same top-level declaration shape. Schema versions are read only from `structured_sidecars.<name>.schema_version`; nested producer fields such as `lint.findings_schema_version` do not declare sidecar contracts.
+
+## Notification transports
+
+Extensions own notification delivery. Each transport uses the versioned
+`homeboy/notification-transport/v1` contract and declares a literal command argv
+prefix, never a shell command or template.
+
+```json
+{
+  "notification_transports": [{
+    "schema": "homeboy/notification-transport/v1",
+    "id": "discord.run-completion",
+    "command": ["bin/notify-discord"]
+  }]
+}
+```
+
+Homeboy appends `--run-id`, `--status`, `--title`, `--body`, and, when bound,
+`--transport` and `--route` as individual argv values. Routes are opaque,
+non-secret transport-owned values. Transport IDs must be unique within an
+extension; an ID declared by multiple installed extensions is rejected at
+delivery time.
 
 Known sidecar names default to these run-directory paths when `path` is omitted:
 
