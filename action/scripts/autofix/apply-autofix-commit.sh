@@ -131,7 +131,7 @@ maybe_update_baseline() {
   if [ "$(scope_context)" != "pr" ]; then
     echo "Updating audit baseline (non-PR context)..."
     set +e
-    BASELINE_CMD="homeboy review audit ${COMP_ID} --baseline --path ${WORKSPACE}"
+    BASELINE_CMD="$(build_run_command "review audit --baseline" "${COMP_ID}" "${WORKSPACE}")"
     eval "${BASELINE_CMD}"
     BASELINE_EXIT=$?
     set -e

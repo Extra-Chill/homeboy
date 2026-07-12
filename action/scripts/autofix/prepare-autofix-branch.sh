@@ -199,7 +199,8 @@ fi
 if changes_are_only_drift "${WORKSPACE}" || (git diff --quiet && git diff --cached --quiet); then
   echo "Updating audit baseline..."
   set +e
-  homeboy review audit "${COMP_ID}" --baseline --path "${WORKSPACE}"
+  BASELINE_CMD="$(build_run_command "review audit --baseline" "${COMP_ID}" "${WORKSPACE}")"
+  eval "${BASELINE_CMD}"
   BASELINE_EXIT=$?
   set -e
   if [ "${BASELINE_EXIT}" -ne 0 ]; then

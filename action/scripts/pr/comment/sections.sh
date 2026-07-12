@@ -46,15 +46,12 @@ append_review_report_section() {
     return 0
   fi
 
-  local review_md review_exit scope_flags
+  local review_md review_exit review_cmd
   local -a REVIEW_CMD
-  REVIEW_CMD=(homeboy review "${COMP_ID}" --path "${WORKSPACE}" --report=pr-comment)
-
-  scope_flags="$(scope_flags_for "review")"
-  if [ -n "${scope_flags}" ]; then
-    # shellcheck disable=SC2206
-    REVIEW_CMD+=(${scope_flags})
-  fi
+  review_cmd="$(build_review_report_command "${COMP_ID}" "${WORKSPACE}")"
+  # Command fragments are generated internally from action inputs.
+  # shellcheck disable=SC2206
+  REVIEW_CMD=(${review_cmd})
 
   append_review_banner_args
 

@@ -935,8 +935,11 @@ build_review_report_command() {
   local component_id="$1"
   local workspace="$2"
   local full_cmd
+  local global_flags
 
-  full_cmd="homeboy review ${component_id} --path ${workspace} --report=pr-comment"
+  global_flags="$(homeboy_global_flags)"
+
+  full_cmd="homeboy ${global_flags}review ${component_id} --path ${workspace} --report=pr-comment"
 
   local scope
   scope="$(scope_flags_for "review")"
