@@ -2,7 +2,8 @@ use serde_json::json;
 
 use crate::core::api_jobs::{JobArtifactMetadata, JobEvent, JobEventKind};
 use crate::core::runner::{
-    RunnerExecMode, RunnerExecOutput, RunnerResourceGuardViolation, RunnerResourceMetrics,
+    RunnerExecMode, RunnerExecOutput, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
+    RunnerResourceMetrics,
 };
 use crate::core::runner_execution_envelope::{
     BinaryProvenance, OrchestrationTargetProvenance, RunnerExecutionRecord,
@@ -207,11 +208,18 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
                 peak_rss_bytes: Some(25_320_000_000),
                 sample_count: 93,
                 child_process_count_peak: Some(69),
+                resource_guard: Some(RunnerResourceGuardLimits {
+                    rss_limit_bytes: (96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10) / 4,
+                    process_count_limit: 128,
+                    concurrency: 4,
+                    memory_capacity_bytes: Some(96 * 1024 * 1024 * 1024),
+                    rss_limit_source: "capacity_aware".to_string(),
+                }),
                 guard_violation: Some(RunnerResourceGuardViolation {
                     reason: "rss_limit_exceeded".to_string(),
                     message: "runner job resource guard stopped process tree".to_string(),
                     rss_bytes: 25_320_000_000,
-                    rss_limit_bytes: 16 * 1024 * 1024 * 1024,
+                    rss_limit_bytes: (96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10) / 4,
                     process_count: 70,
                     process_count_limit: 128,
                 }),
@@ -241,6 +249,23 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
             .and_then(|metrics| metrics.guard_violation.as_ref())
             .map(|violation| violation.rss_bytes),
         Some(25_320_000_000)
+    );
+    assert_eq!(
+        result
+            .metrics
+            .as_ref()
+            .and_then(|metrics| metrics.resource_guard.as_ref())
+            .map(|limits| limits.rss_limit_source.as_str()),
+        Some("capacity_aware")
+    );
+    assert_eq!(
+        result.metrics.as_ref().and_then(|metrics| {
+            metrics
+                .resource_guard
+                .as_ref()
+                .and_then(|limits| limits.memory_capacity_bytes)
+        }),
+        Some(96 * 1024 * 1024 * 1024)
     );
 }
 
