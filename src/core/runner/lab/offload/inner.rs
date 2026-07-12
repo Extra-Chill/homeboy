@@ -372,14 +372,16 @@ pub(crate) fn exec_lab_context(
                 );
                 if let Some(job_id) = health.job_id.as_deref() {
                     if let Some(run_id) = context.agent_task_run_id.as_deref() {
-                        return Ok(in_flight_daemon_disconnect_outcome(
+                        return in_flight_daemon_disconnect_outcome(
                             context.plan,
                             runner_id,
                             job_id,
                             run_id,
+                            &remote_cwd,
+                            &context.remote_command,
                             &reason,
                             &err,
-                        ));
+                        );
                     }
                     return Err(in_flight_daemon_disconnect_error(
                         runner_id, job_id, None, &reason, &err,
