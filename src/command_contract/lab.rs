@@ -41,12 +41,8 @@ pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFA
 pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
 pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 
-/// Routing-policy flags shared by every Lab command representation
-/// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
-/// booleans travel together as one cohesive policy as a command is resolved
-/// from its contract into a route plan and finally an offload command, so they
-/// live in a single embedded struct rather than being duplicated field-by-field
-/// across the three layers.
+/// Routing-policy flags owned by the Lab command contract and retained through
+/// route planning, offload, and runner dispatch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabRoutingPolicy {
     /// Whether the command offloads to a default Lab runner without an explicit
