@@ -36,6 +36,19 @@ fn write_daemon_state_for_test(state: &DaemonState) {
     std::fs::write(&path, serde_json::to_string(state).expect("state json")).expect("write state");
 }
 
+fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
+    let path = state_path().expect("state path");
+    let content = serde_json::json!({
+        "address": address,
+        "pid": pid,
+        "state_path": path.display().to_string(),
+    })
+    .to_string();
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, &content).expect("write legacy state");
+    (path, content)
+}
+
 fn create_local_runner_for_file_api(id: &str, workspace_root: &std::path::Path) {
     crate::core::runner::create(
         &serde_json::json!({
@@ -364,6 +377,92 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
         .as_deref()
         .unwrap_or_default()
         .contains("invalid daemon lease"));
+}
+
+#[test]
+fn start_repair_archives_dead_known_legacy_lease() {
+    let _home = HomeGuard::new();
+    let (path, content) = write_legacy_daemon_state_for_test(u32::MAX, "127.0.0.1:1");
+
+    assert!(repair_legacy_lease_for_start().expect("repair legacy lease"));
+    assert!(
+        !path.exists(),
+        "legacy lease should be replaced by daemon startup"
+    );
+    let evidence: Vec<_> = std::fs::read_dir(path.parent().expect("state parent"))
+        .expect("state dir")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("state.json.legacy-lease-"))
+        })
+        .collect();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&evidence[0]).expect("evidence"),
+        content
+    );
+}
+
+#[test]
+fn start_repair_refuses_live_legacy_owner_pid_or_endpoint() {
+    let _home = HomeGuard::new();
+    let (path, _) = write_legacy_daemon_state_for_test(std::process::id(), "127.0.0.1:1");
+
+    let pid_error = repair_legacy_lease_for_start().expect_err("live pid is refused");
+    assert_eq!(pid_error.code.as_str(), "validation.invalid_argument");
+    assert!(pid_error.message.contains("still running"));
+    assert!(path.exists());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "address": listener.local_addr().expect("address").to_string(),
+            "pid": u32::MAX,
+            "state_path": path.display().to_string(),
+        })
+        .to_string(),
+    )
+    .expect("write legacy state");
+
+    let endpoint_error = repair_legacy_lease_for_start().expect_err("live endpoint is refused");
+    assert_eq!(endpoint_error.code.as_str(), "validation.invalid_argument");
+    assert!(endpoint_error.message.contains("still reachable"));
+    assert!(path.exists());
+}
+
+#[test]
+fn start_repair_refuses_unknown_corrupt_lease_with_actionable_diagnostic() {
+    let _home = HomeGuard::new();
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, r#"{"pid":4294967295,"broken":true}"#).expect("write corrupt lease");
+
+    let error = repair_legacy_lease_for_start().expect_err("unknown corrupt lease is refused");
+
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error
+        .message
+        .contains("neither the current schema nor the known pre-schema shape"));
+    assert!(serialized_contains(&error.details, "Inspect"));
+    assert!(
+        path.exists(),
+        "unknown state must remain for operator inspection"
+    );
+}
+
+#[test]
+fn start_repair_leaves_current_schema_lease_for_normal_lifecycle() {
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
+
+    assert!(!repair_legacy_lease_for_start().expect("current lease is not repaired"));
+    assert_eq!(read_status().expect("status").state.expect("state"), state);
 }
 
 #[test]

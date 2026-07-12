@@ -89,15 +89,9 @@ fn pr_readiness_flags_parse() {
 
 #[test]
 fn issue_find_path_flag_parses() {
-    let cli = TestCli::try_parse_from([
-        "git",
-        "issue",
-        "find",
-        "homeboy",
-        "--path",
-        "/tmp/homeboy",
-    ])
-    .expect("issue find flags parse");
+    let cli =
+        TestCli::try_parse_from(["git", "issue", "find", "homeboy", "--path", "/tmp/homeboy"])
+            .expect("issue find flags parse");
 
     match cli.command {
         GitCommand::Issue(IssueArgs {

@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
@@ -180,6 +180,17 @@ struct DaemonLeaseValidation {
     invalid_pid: Option<u32>,
 }
 
+/// The only pre-schema lease shape that can be repaired during daemon start.
+/// Keeping this separate from `DaemonState` prevents legacy data from becoming
+/// a supported format for normal reads, status, or stop operations.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDaemonState {
+    address: String,
+    pid: u32,
+    state_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status_code: u16,
@@ -262,6 +273,95 @@ pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
 
 fn state_path() -> Result<PathBuf> {
     paths::daemon_state_file()
+}
+
+pub(super) fn repair_legacy_lease_for_start() -> Result<bool> {
+    let path = state_path()?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", path.display())),
+            ))
+        }
+    };
+
+    // Current leases continue through the regular lifecycle without a legacy
+    // compatibility branch.
+    if serde_json::from_str::<DaemonState>(&content).is_ok() {
+        return Ok(false);
+    }
+
+    let legacy: LegacyDaemonState = serde_json::from_str(&content).map_err(|error| {
+        legacy_lease_repair_error(
+            &path,
+            format!("state is neither the current schema nor the known pre-schema shape: {error}"),
+        )
+    })?;
+    if legacy.state_path != path.display().to_string() {
+        return Err(legacy_lease_repair_error(
+            &path,
+            format!(
+                "legacy state_path `{}` does not match the expected state path",
+                legacy.state_path
+            ),
+        ));
+    }
+    let endpoint: SocketAddr = legacy.address.parse().map_err(|error| {
+        legacy_lease_repair_error(
+            &path,
+            format!("legacy address `{}` is invalid: {error}", legacy.address),
+        )
+    })?;
+    if pid_is_running(legacy.pid) {
+        return Err(legacy_lease_repair_error(
+            &path,
+            format!("legacy daemon pid {} is still running", legacy.pid),
+        ));
+    }
+    if TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_ok() {
+        return Err(legacy_lease_repair_error(
+            &path,
+            format!("legacy daemon endpoint {} is still reachable", endpoint),
+        ));
+    }
+
+    let evidence_path = path.with_file_name(format!(
+        "{}.legacy-lease-{}.json",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state.json"),
+        Uuid::new_v4()
+    ));
+    fs::rename(&path, &evidence_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "archive legacy daemon lease {} to {}",
+                path.display(),
+                evidence_path.display()
+            )),
+        )
+    })?;
+    Ok(true)
+}
+
+fn legacy_lease_repair_error(path: &Path, problem: impl Into<String>) -> Error {
+    Error::validation_invalid_argument(
+        "daemon_lease",
+        format!(
+            "daemon lease at {} cannot be safely repaired: {}",
+            path.display(),
+            problem.into()
+        ),
+        Some(path.display().to_string()),
+        Some(vec![format!(
+            "Inspect {} and verify its recorded PID and endpoint before retrying `homeboy daemon start`",
+            path.display()
+        )]),
+    )
 }
 
 pub fn read_status() -> Result<DaemonStatus> {
