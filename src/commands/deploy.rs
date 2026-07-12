@@ -45,7 +45,7 @@ pub struct DeployArgs {
     /// Preview what would be deployed without executing
     #[arg(long)]
     pub dry_run: bool,
-    /// Confirm dangerous deploy modes like --head or --force
+    /// Confirm dangerous deploy modes like --head, --ref, or --force
     #[arg(long)]
     pub apply: bool,
     /// Check component status without building or deploying
@@ -75,6 +75,13 @@ pub struct DeployArgs {
     /// Deploy from current branch HEAD instead of the latest tag
     #[arg(long)]
     pub head: bool,
+    /// Deploy an exact Git ref resolved from the declared component repository
+    #[arg(
+        long = "ref",
+        value_name = "GIT_REF_OR_SHA",
+        conflicts_with_all = ["head", "tagged", "version", "outdated", "behind_upstream", "check"]
+    )]
+    pub requested_ref: Option<String>,
     /// Force local tag-based build/deploy, ignoring reusable release assets
     #[arg(long)]
     pub tagged: bool,
@@ -205,15 +212,23 @@ pub fn run(
 // === Argument resolution helpers ===
 
 fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
-    if args.apply || args.dry_run || args.check || (!args.head && !args.force) {
+    if args.apply
+        || args.dry_run
+        || args.check
+        || (!args.head && args.requested_ref.is_none() && !args.force)
+    {
         return Ok(());
     }
 
-    let dangerous_flags = [(args.head, "--head"), (args.force, "--force")]
-        .into_iter()
-        .filter_map(|(enabled, flag)| enabled.then_some(flag))
-        .collect::<Vec<_>>()
-        .join(" and ");
+    let dangerous_flags = [
+        (args.head, "--head"),
+        (args.requested_ref.is_some(), "--ref"),
+        (args.force, "--force"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, flag)| enabled.then_some(flag))
+    .collect::<Vec<_>>()
+    .join(" and ");
 
     Err(homeboy::core::Error::validation_invalid_argument(
         "apply",
@@ -344,6 +359,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         expected_version: args.version.clone(),
         no_pull: args.no_pull,
         head: args.head,
+        requested_ref: args.requested_ref.clone(),
         tagged: args.tagged,
     }
 }

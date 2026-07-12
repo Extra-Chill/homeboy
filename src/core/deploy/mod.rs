@@ -2,6 +2,7 @@ mod effect;
 mod execution;
 mod generated_artifacts;
 mod orchestration;
+mod orchestration_ref_checkout;
 mod orchestration_tag_checkout;
 mod path_roots;
 pub(crate) mod permissions;
@@ -150,6 +151,7 @@ pub fn run_multi(
             expected_version: config.expected_version.clone(),
             no_pull: config.no_pull,
             head: config.head,
+            requested_ref: config.requested_ref.clone(),
             tagged: config.tagged,
         };
 
@@ -283,6 +285,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         }
     }

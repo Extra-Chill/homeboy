@@ -158,6 +158,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -214,6 +215,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: true,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -243,6 +245,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: true,
         };
 
@@ -283,6 +286,7 @@ mod tests {
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -323,6 +327,7 @@ mod tests {
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -354,6 +359,7 @@ mod tests {
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -398,6 +404,7 @@ mod tests {
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         };
 
@@ -467,6 +474,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: true,
+            requested_ref: None,
             tagged: false,
         };
 

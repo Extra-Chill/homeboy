@@ -75,6 +75,8 @@ pub struct DeployConfig {
     pub no_pull: bool,
     /// Deploy from current branch HEAD instead of latest tag
     pub head: bool,
+    /// Resolve and deploy this Git ref from each component's declared repository.
+    pub requested_ref: Option<String>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
 }
@@ -96,6 +98,7 @@ impl DeployConfig {
             expected_version: None,
             no_pull: true,
             head: true,
+            requested_ref: None,
             tagged: false,
         }
     }
@@ -316,6 +319,15 @@ pub struct ComponentDeployResult {
     /// The git ref (tag or branch) that was built and deployed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_ref: Option<String>,
+    /// Operator-provided exact source selector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
+    /// Immutable commit selected before packaging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_sha: Option<String>,
+    /// Declared repository used to resolve the requested ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Explicit build provenance: source/ref, whether a fresh build ran, and the
     /// identity of the artifact that shipped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,6 +360,9 @@ impl ComponentDeployResult {
             deploy_exit_code: None,
             release_state: None,
             deployed_ref: None,
+            requested_ref: None,
+            resolved_sha: None,
+            source: None,
             build_provenance: None,
         }
     }
@@ -434,6 +449,21 @@ impl ComponentDeployResult {
 
     pub(super) fn with_deployed_ref(mut self, git_ref: String) -> Self {
         self.deployed_ref = Some(git_ref);
+        self
+    }
+
+    pub(super) fn with_exact_ref_identity(
+        mut self,
+        requested_ref: &str,
+        resolved_sha: &str,
+        source: &str,
+    ) -> Self {
+        self.requested_ref = Some(requested_ref.to_string());
+        self.resolved_sha = Some(resolved_sha.to_string());
+        self.source = Some(source.to_string());
+        self.deployed_ref = Some(requested_ref.to_string());
+        self.git_head = Some(resolved_sha.to_string());
+        self.local_path = Some(source.to_string());
         self
     }
 
@@ -753,6 +783,28 @@ mod tests {
         let result = deploy_result().with_deployed_ref("v1.2.3".to_string());
 
         assert_eq!(result.deployed_ref.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn exact_ref_identity_is_persisted_in_serialized_deploy_evidence() {
+        let result = deploy_result().with_exact_ref_identity(
+            "origin/reviewed",
+            "0123456789abcdef0123456789abcdef01234567",
+            "/repos/component",
+        );
+        let evidence = serde_json::to_value(result).expect("serialize deploy evidence");
+
+        assert_eq!(evidence["requested_ref"], "origin/reviewed");
+        assert_eq!(
+            evidence["resolved_sha"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(evidence["source"], "/repos/component");
+        assert_eq!(evidence["deployed_ref"], "origin/reviewed");
+        assert_eq!(
+            evidence["git_head"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
     }
 
     #[test]
