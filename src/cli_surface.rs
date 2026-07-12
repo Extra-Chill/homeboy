@@ -935,6 +935,23 @@ mod tests {
     }
 
     #[test]
+    fn rig_lint_manifest_declares_static_read_only_behavior() {
+        let manifest = current_command_safety_manifest();
+        let lint = manifest
+            .find_path(&["rig", "lint"])
+            .expect("rig lint must be present in the command safety manifest");
+
+        assert!(!lint.mutates);
+        assert!(!lint.operator);
+        assert!(lint.output.structured);
+        assert!(lint
+            .output
+            .notes
+            .contains("without evaluating the live environment"));
+        assert_eq!(lint.docs.path.as_deref(), Some("docs/commands/rig.md"));
+    }
+
+    #[test]
     fn documented_docs_surface_matches_manifest_and_parser() {
         let readme = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"),

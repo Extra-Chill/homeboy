@@ -24,6 +24,16 @@ pub(crate) fn aggregate_evidence_refs(
                 .outcomes
                 .iter()
                 .flat_map(evidence_refs_for_outcome)
+                .chain(
+                    aggregate
+                        .child_runs
+                        .iter()
+                        .map(|child| AgentTaskEvidenceRef {
+                            kind: "agent-task-child-run".to_string(),
+                            uri: format!("homeboy://agent-task/run/{}", child.run_id),
+                            label: Some(format!("Child run for task `{}`", child.task_id)),
+                        }),
+                )
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

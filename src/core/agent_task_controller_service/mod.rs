@@ -20,10 +20,10 @@ use crate::core::agent_task::{
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
     self as controller, AgentTaskGateBundle, AgentTaskGateBundleCheckKind,
-    AgentTaskGateBundleResult, AgentTaskGateBundleStatus, AgentTaskGateCheckResult,
-    AgentTaskLoopActionDiagnostic, AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef,
-    AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopEntity,
-    AgentTaskLoopExternalEvent, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
+    AgentTaskGateBundleResult, AgentTaskGateCheckResult, AgentTaskLoopActionDiagnostic,
+    AgentTaskLoopActionStatus, AgentTaskLoopArtifactRef, AgentTaskLoopControllerRecord,
+    AgentTaskLoopControllerState, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
+    AgentTaskLoopGateStatus, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
     AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef,
     AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,
     AgentTaskLoopTaskLineage, AgentTaskLoopTerminalStatus, AgentTaskLoopTransition,

@@ -678,6 +678,9 @@ impl RunnerCommandPlan {
         let mut accepted_settings = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
         if let Some(workload) = workload {
+            let has_extension_overrides = !workload.extension_overrides.is_empty();
+            required_extensions.extend(workload.extension_overrides.iter().cloned());
+            command_extensions.extend(workload.extension_overrides.iter().cloned());
             let command = match workload.kind {
                 crate::command_contract::LabRigWorkloadKind::Bench => rig::RigWorkloadKind::Bench,
                 crate::command_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
@@ -694,9 +697,7 @@ impl RunnerCommandPlan {
                             .flat_map(|bench| bench.accepted_settings.iter().cloned()),
                     );
                 }
-                if !workload.extension_overrides.is_empty() {
-                    required_extensions.extend(workload.extension_overrides.iter().cloned());
-                    command_extensions.extend(workload.extension_overrides.iter().cloned());
+                if has_extension_overrides {
                     continue;
                 }
                 required_extensions.extend(rig::required_extension_ids_for_workload(
@@ -1420,6 +1421,60 @@ mod tests {
     }
 
     #[test]
+    fn extension_injection_deduplicates_split_and_equals_forms_and_rejects_unsupported_commands() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "--extension".to_string(),
+            "explicit-a".to_string(),
+            "--extension=explicit-b".to_string(),
+            "list".to_string(),
+        ];
+        assert_eq!(
+            inject_required_extension_args(
+                args.clone(),
+                &[
+                    "explicit-a".to_string(),
+                    "explicit-b".to_string(),
+                    "required".to_string(),
+                ],
+            ),
+            vec![
+                "homeboy",
+                "fuzz",
+                "--extension",
+                "required",
+                "--extension",
+                "explicit-a",
+                "--extension=explicit-b",
+                "list",
+            ]
+        );
+
+        let unsupported = vec!["homeboy".to_string(), "status".to_string()];
+        assert_eq!(
+            inject_required_extension_args(unsupported.clone(), &["required".to_string()]),
+            unsupported
+        );
+    }
+
+    #[test]
+    fn runner_command_plan_preserves_explicit_override_without_a_rig() {
+        let workload = crate::command_contract::LabRigWorkloadArguments {
+            kind: crate::command_contract::LabRigWorkloadKind::Fuzz,
+            rig_ids: Vec::new(),
+            component: None,
+            extension_overrides: vec!["explicit".to_string(), "explicit".to_string()],
+        };
+
+        let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], Path::new("."))
+            .expect("runner command plan");
+
+        assert_eq!(plan.required_extensions, vec!["explicit".to_string()]);
+        assert_eq!(plan.command_extensions, vec!["explicit".to_string()]);
+    }
+
+    #[test]
     fn final_remote_command_remaps_bench_env_subdirectory_under_extra_workspace() {
         let args = vec![
             "homeboy".to_string(),
@@ -1697,16 +1752,18 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            hot_label: "agent-task.run",
-            portable: true,
-            unsupported_reason: None,
-            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-            secret_env_sources: Vec::new(),
+            command: crate::command_contract::LabCommandContract {
+                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                ..crate::command_contract::LabCommandContract::portable(
+                    "agent-task.run",
+                    None,
+                    false,
+                    &[],
+                )
+            },
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
-            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
 
         let plan = provider_config_path_materialization_plan(
@@ -1781,16 +1838,19 @@ mod tests {
 
     fn test_lab_contract_with_agent_task_secrets() -> LabOffloadCommand {
         LabOffloadCommand {
-            hot_label: "agent-task.run",
-            portable: true,
-            unsupported_reason: None,
-            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-            secret_env_sources: vec![crate::command_contract::LabSecretEnvSource::AgentTask],
+            command: crate::command_contract::LabCommandContract {
+                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                secret_env_sources: &[crate::command_contract::LabSecretEnvSource::AgentTask],
+                ..crate::command_contract::LabCommandContract::portable(
+                    "agent-task.run",
+                    None,
+                    false,
+                    &[],
+                )
+            },
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
-            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
     }
 

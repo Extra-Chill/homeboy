@@ -123,6 +123,9 @@ pub(super) fn deploy_components(
         .iter()
         .map(|checkout| (checkout.component.id.clone(), checkout.identity.clone()))
         .collect();
+    for checkout in &exact_ref_checkouts {
+        checkout.verify()?;
+    }
     let components = if exact_ref_checkouts.is_empty() {
         components
     } else {
@@ -352,7 +355,13 @@ fn prepare_component_deployments(
     let mut failures = Vec::new();
 
     for component in components {
-        let component = crate::core::project::apply_component_overrides(component, project);
+        let source_path = component.local_path.clone();
+        let mut component = crate::core::project::apply_component_overrides(component, project);
+        if config.requested_ref.is_some() {
+            // Project overrides configure deployment behavior, but an exact-ref
+            // checkout is the authoritative source tree for every build stage.
+            component.local_path = source_path;
+        }
         let effective_config = config.clone();
 
         match prepare_component_deploy(
@@ -1209,6 +1218,75 @@ mod tests {
             "unexpected error: {:?}",
             failures[0].error
         );
+    }
+
+    #[test]
+    fn exact_ref_preflight_packages_verified_subpath_not_stale_checkout_artifact() {
+        let repo = TempDir::new().expect("repo");
+        let root = repo.path();
+        let component_path = root.join("packages/plugin");
+        std::fs::create_dir_all(&component_path).expect("component path");
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::write(component_path.join("target-marker.txt"), "target\n")
+            .expect("target marker");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "target"]);
+        run_git(root, &["branch", "target"]);
+
+        std::fs::remove_file(component_path.join("target-marker.txt")).expect("remove target");
+        std::fs::write(component_path.join("stale-marker.txt"), "stale\n").expect("stale marker");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "stale"]);
+
+        let stale_artifact = component_path.join("dist/plugin.zip");
+        std::fs::create_dir_all(stale_artifact.parent().expect("artifact parent")).expect("dist");
+        let stale_file = std::fs::File::create(&stale_artifact).expect("stale artifact");
+        let mut stale_zip = zip::ZipWriter::new(stale_file);
+        use std::io::Write;
+        stale_zip
+            .start_file(
+                "plugin/stale-marker.txt",
+                zip::write::FileOptions::default(),
+            )
+            .expect("stale entry");
+        stale_zip.write_all(b"stale\n").expect("stale bytes");
+        stale_zip.finish().expect("finish stale zip");
+
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: component_path.to_string_lossy().to_string(),
+            build_artifact: Some(stale_artifact.to_string_lossy().to_string()),
+            extract_command: Some("unzip -o {{artifact}}".to_string()),
+            ..Component::default()
+        };
+        let checkout =
+            ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
+        checkout.verify().expect("verify target ref");
+        let mut config = base_deploy_config();
+        config.requested_ref = Some("target".to_string());
+        config.force = true;
+        let prepared = prepare_component_deployments(
+            &[checkout.component.clone()],
+            &config,
+            &Project::default(),
+            "/srv/site",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("prepare exact-ref artifact");
+
+        let file = std::fs::File::open(prepared[0].artifact_path.as_ref().expect("artifact path"))
+            .expect("open artifact");
+        let mut archive = zip::ZipArchive::new(file).expect("read artifact");
+        assert!(archive
+            .by_name("plugin/packages/plugin/target-marker.txt")
+            .is_ok());
+        assert!(archive
+            .by_name("plugin/packages/plugin/stale-marker.txt")
+            .is_err());
     }
 
     fn deployed_result(id: &str) -> ComponentDeployResult {

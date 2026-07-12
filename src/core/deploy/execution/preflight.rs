@@ -116,7 +116,24 @@ pub(super) fn resolve_preflight_artifact_path(
             artifact_pattern,
             Some(Path::new(&component.local_path)),
         ) {
-            Ok(path) => path,
+            Ok(path) => {
+                if config.requested_ref.is_some()
+                    && !path.starts_with(Path::new(&component.local_path))
+                {
+                    return Err(failed_preflight_artifact_result(
+                        component,
+                        base_path,
+                        local_version,
+                        remote_version,
+                        build_exit_code,
+                        format!(
+                            "Exact-ref artifact '{}' is outside verified source tree '{}'; refusing to deploy unverified package bytes",
+                            path.display(), component.local_path
+                        ),
+                    ));
+                }
+                path
+            }
             Err(e) => {
                 let error_msg = if config.skip_build {
                     format!("{}. Release build may have failed.", e)

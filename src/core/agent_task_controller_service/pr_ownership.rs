@@ -34,12 +34,6 @@ pub(super) fn execute_own_pr_until_green_action(
         pr_number,
         ownership.path.clone(),
     )?;
-    let previous_retry_count = existing_pr_retry_count(record, &ownership.ownership_id);
-    let retry_count = if pr_needs_retry(&view.ci_state, view.review_decision.as_deref()) {
-        previous_retry_count.saturating_add(1)
-    } else {
-        previous_retry_count
-    };
     let update = AgentTaskPrOwnershipStatusUpdate {
         pr_number: Some(view.number),
         pr_url: Some(format!(
@@ -54,7 +48,6 @@ pub(super) fn execute_own_pr_until_green_action(
             .merge_state
             .clone()
             .or_else(|| Some(view.state.clone())),
-        retry_count,
         evidence: vec![AgentTaskLoopArtifactRef {
             uri: format!("github://{}/{}/pull/{}", view.owner, view.repo, view.number),
             kind: Some("github.pull_request".to_string()),
@@ -76,12 +69,6 @@ pub(super) fn execute_own_pr_until_green_action(
     ))
 }
 
-pub(super) fn pr_needs_retry(ci_state: &str, review_decision: Option<&str>) -> bool {
-    ci_state == "terminal_failed"
-        || ci_state == "stale"
-        || review_decision == Some("CHANGES_REQUESTED")
-}
-
 pub(super) fn find_pr_number(ownership: &AgentTaskPrOwnershipRequest) -> Result<Option<u64>> {
     let output = pr_find(
         ownership.component_id.as_deref(),
@@ -94,18 +81,6 @@ pub(super) fn find_pr_number(ownership: &AgentTaskPrOwnershipRequest) -> Result<
         },
     )?;
     Ok(output.items.into_iter().next().map(|item| item.number))
-}
-
-pub(super) fn existing_pr_retry_count(
-    record: &AgentTaskLoopControllerRecord,
-    ownership_id: &str,
-) -> u32 {
-    record
-        .pr_ownerships
-        .iter()
-        .find(|ownership| ownership.ownership_id == ownership_id)
-        .map(|ownership| ownership.retry_count)
-        .unwrap_or_default()
 }
 
 pub(super) fn queue_pr_ownership_follow_up(

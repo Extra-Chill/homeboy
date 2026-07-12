@@ -1516,12 +1516,12 @@ pub(super) fn execute_wait_for_controller_action(
 }
 
 /// A gate bundle blocks the loop (non-zero exit) when it failed outright or is
-/// still pending an external/manual result. Passed and non-blocking Warn
-/// bundles allow the loop to advance.
-fn gate_bundle_exit_code(status: AgentTaskGateBundleStatus) -> i32 {
+/// still pending an external/manual result. Satisfied bundles allow the loop
+/// to advance.
+fn gate_bundle_exit_code(status: AgentTaskLoopGateStatus) -> i32 {
     match status {
-        AgentTaskGateBundleStatus::Failed | AgentTaskGateBundleStatus::Pending => 1,
-        AgentTaskGateBundleStatus::Passed | AgentTaskGateBundleStatus::Warn => 0,
+        AgentTaskLoopGateStatus::Failed | AgentTaskLoopGateStatus::Pending => 1,
+        AgentTaskLoopGateStatus::Satisfied | AgentTaskLoopGateStatus::Missing => 0,
     }
 }
 
@@ -1568,7 +1568,7 @@ pub(super) fn execute_run_gates_action(
                 // arrived. Treat it as Pending (blocking) rather than a
                 // non-blocking Warn so a manual-only bundle never resolves to a
                 // false-green acceptance gate.
-                status: AgentTaskGateBundleStatus::Pending,
+                status: AgentTaskLoopGateStatus::Pending,
                 retryable: check.retryable,
                 classification: Some("manual_gate_requires_external_result".to_string()),
                 evidence: Vec::new(),
@@ -1577,7 +1577,7 @@ pub(super) fn execute_run_gates_action(
             AgentTaskGateBundleCheckKind::Api | AgentTaskGateBundleCheckKind::Tool => {
                 AgentTaskGateCheckResult {
                     check_id: check.check_id.clone(),
-                    status: AgentTaskGateBundleStatus::Failed,
+                    status: AgentTaskLoopGateStatus::Failed,
                     retryable: check.retryable,
                     classification: Some("unsupported_generic_gate_kind".to_string()),
                     evidence: Vec::new(),
@@ -1590,21 +1590,16 @@ pub(super) fn execute_run_gates_action(
 
     let status = if checks
         .iter()
-        .any(|check| check.status == AgentTaskGateBundleStatus::Failed)
+        .any(|check| check.status == AgentTaskLoopGateStatus::Failed)
     {
-        AgentTaskGateBundleStatus::Failed
+        AgentTaskLoopGateStatus::Failed
     } else if checks
         .iter()
-        .any(|check| check.status == AgentTaskGateBundleStatus::Pending)
+        .any(|check| check.status == AgentTaskLoopGateStatus::Pending)
     {
-        AgentTaskGateBundleStatus::Pending
-    } else if checks
-        .iter()
-        .any(|check| check.status == AgentTaskGateBundleStatus::Warn)
-    {
-        AgentTaskGateBundleStatus::Warn
+        AgentTaskLoopGateStatus::Pending
     } else {
-        AgentTaskGateBundleStatus::Passed
+        AgentTaskLoopGateStatus::Satisfied
     };
     let result = AgentTaskGateBundleResult {
         result_id: format!("gate-result-{}", record.gate_results.len() + 1),
@@ -1691,9 +1686,9 @@ pub(super) fn run_command_gate_check(
     let stderr = collect_capped_command_output(stderr, command, "stderr")?;
 
     let status = if !timed_out && exit_status.success() {
-        AgentTaskGateBundleStatus::Passed
+        AgentTaskLoopGateStatus::Satisfied
     } else {
-        AgentTaskGateBundleStatus::Failed
+        AgentTaskLoopGateStatus::Failed
     };
     Ok(AgentTaskGateCheckResult {
         check_id: check.check_id.clone(),

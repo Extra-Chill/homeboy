@@ -237,12 +237,12 @@ pub mod lifecycle {
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, list_records, load_plan, logs, mark_resuming,
         mark_running, record_completed_run, record_cook_attempt, record_pre_dispatch_failure,
-        record_promotion, record_remote_dispatch_failure, record_run_aggregate, retry,
-        run_record_exists, run_status, status, submit_plan, AgentTaskArtifactRef,
-        AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskEventEnvelope,
-        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
-        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
-        AgentTaskRunStatus, AgentTaskRunTask,
+        record_pre_execution_failure, record_promotion, record_remote_dispatch_failure,
+        record_run_aggregate, retry, run_record_exists, run_status, status, submit_plan,
+        AgentTaskArtifactRef, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
+        AgentTaskEventEnvelope, AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure,
+        AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord,
+        AgentTaskRunState, AgentTaskRunStatus, AgentTaskRunTask,
     };
 }
 
@@ -259,7 +259,7 @@ pub mod loop_controller {
         AgentTaskLoopControllerState, AgentTaskLoopControllerStatusReport,
         AgentTaskLoopDedupeRecord, AgentTaskLoopEntity, AgentTaskLoopExternalEvent,
         AgentTaskLoopFeedbackArtifact, AgentTaskLoopFeedbackStatus, AgentTaskLoopFindingPacket,
-        AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
+        AgentTaskLoopGateStatus, AgentTaskLoopHistoryEvent, AgentTaskLoopLocalFallbackPolicy,
         AgentTaskLoopPendingActionDiagnostic, AgentTaskLoopPolicy, AgentTaskLoopPolicyAction,
         AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef, AgentTaskLoopReviewFinding,
         AgentTaskLoopRunRef, AgentTaskLoopRunnerAvailability, AgentTaskLoopRunnerExecutionTarget,

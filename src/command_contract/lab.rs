@@ -41,12 +41,8 @@ pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFA
 pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
 pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 
-/// Routing-policy flags shared by every Lab command representation
-/// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
-/// booleans travel together as one cohesive policy as a command is resolved
-/// from its contract into a route plan and finally an offload command, so they
-/// live in a single embedded struct rather than being duplicated field-by-field
-/// across the three layers.
+/// Routing-policy flags owned by the Lab command contract and retained through
+/// route planning, offload, and runner dispatch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabRoutingPolicy {
     /// Whether the command offloads to a default Lab runner without an explicit
@@ -1075,6 +1071,10 @@ pub(super) fn apply_lab_contract_to_descriptor(
 }
 
 impl LabCommandContract {
+    pub const fn is_portable(self) -> bool {
+        matches!(self.portability, LabCommandPortability::Portable)
+    }
+
     pub(crate) fn into_route_contract(
         self,
         required_extensions: Vec<String>,
@@ -1313,8 +1313,7 @@ impl Commands {
 
         let mut extension_ids = BTreeSet::new();
         match self {
-            Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
-            Commands::Fuzz(args) => extension_ids.extend(args.lab_required_extension_ids()?),
+            Commands::Fuzz(args) => extension_ids.extend(args.lab_route_required_extension_ids()),
             Commands::Review(args) => {
                 extension_ids.extend(args.effective_extension_override_ids().iter().cloned());
                 extension_ids.extend(review_lab_extension_ids(args)?);

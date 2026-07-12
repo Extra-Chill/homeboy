@@ -288,7 +288,9 @@ pub enum DependencyInstallInvocation {
 ///
 /// Reuses [`provider::resolve_dependency_providers_optional`] (the detection
 /// behind `homeboy deps install`) so a manifest detected by an existing provider
-/// surfaces its install command here.
+/// surfaces its install command here. A linked extension set that does not
+/// provide dependency support is equivalent to no provider for this optional
+/// planning surface; invalid explicit capability ownership still fails.
 /// Providers whose install cannot be expressed as a standalone shell command
 /// (component-script/extension providers) are omitted. Returns an empty vector
 /// when no provider detects the workspace.
@@ -300,7 +302,20 @@ pub enum DependencyInstallInvocation {
 pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanStep>> {
     let (component, resolved_path) =
         resolve_component_path(None, Some(&path.display().to_string()))?;
-    let providers = provider::resolve_dependency_providers_optional(&component, &resolved_path)?;
+    let providers =
+        match provider::resolve_dependency_providers_optional(&component, &resolved_path) {
+            Ok(providers) => providers,
+            Err(error) => {
+                if !extension::has_linked_extension_for_capability(
+                    &component,
+                    crate::core::extension::ExtensionCapability::Deps,
+                )? {
+                    Vec::new()
+                } else {
+                    return Err(error);
+                }
+            }
+        };
     let mut steps = Vec::new();
     for provider in providers {
         let status = provider.status(&component, &resolved_path, None)?;
@@ -559,6 +574,37 @@ mod tests {
                     entrypoint_index: 1,
                 }
             );
+        });
+    }
+
+    #[test]
+    fn dependency_install_plan_skips_linked_extensions_without_deps_support() {
+        crate::test_support::with_isolated_home(|home| {
+            let project = tempfile::tempdir().expect("project tempdir");
+            let extension_id = "fixture-non-deps";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{"name":"Fixture non-deps","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                project.path().join("homeboy.json"),
+                format!(
+                    r#"{{"id":"fixture","local_path":"{}","extensions":{{"{extension_id}":{{}}}}}}"#,
+                    project.path().display()
+                ),
+            )
+            .expect("component manifest");
+
+            let plan = dependency_install_plan(project.path())
+                .expect("unrelated linked extensions do not require dependency hydration");
+
+            assert!(plan.is_empty());
         });
     }
 }

@@ -178,14 +178,26 @@ pub(crate) fn in_flight_daemon_disconnect_error(
     disconnected
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn in_flight_daemon_disconnect_outcome(
     plan: HomeboyPlan,
     runner_id: &str,
     job_id: &str,
     run_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
     reason: &str,
     err: &Error,
-) -> LabOffloadOutcome {
+) -> Result<LabOffloadOutcome> {
+    // The daemon job remains durable when the controller disconnects, so retain
+    // the typed lifecycle record needed to inspect and recover this run locally.
+    agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+        run_id,
+        runner_id,
+        runner_job_id: job_id,
+        remote_workspace,
+        remote_command,
+    })?;
     let plan = with_step(
         plan,
         PlanStep::builder("lab.exec.detached", "lab.exec.detached", PlanStepStatus::PartialSuccess)
@@ -230,13 +242,13 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
         "Runner job: homeboy runner job logs {runner_id} {job_id} --follow\n"
     ));
 
-    LabOffloadOutcome::Offloaded {
+    Ok(LabOffloadOutcome::Offloaded {
         plan,
         stdout: format!("{stdout}\n"),
         stderr,
         exit_code: 0,
         output_file_content: None,
-    }
+    })
 }
 
 pub(crate) fn automatic_capability_fallback(

@@ -994,8 +994,8 @@ impl RigRunObserver {
             _ => return,
         };
         let mut options = RigResourceLifecycleOptions::new(&self.run_id, lifecycle_status);
-        if let Some(cleanup_intent) = rig.lifecycle.cleanup {
-            options.cleanup_intent = cleanup_intent;
+        if let Some(cleanup) = &rig.lifecycle.cleanup {
+            options.cleanup_intent = cleanup.resource_cleanup_intent();
         }
         let index = rig_resource_lifecycle_index(&rig.id, &resources, options);
         if index.resources.is_empty() || index.validate().is_err() {

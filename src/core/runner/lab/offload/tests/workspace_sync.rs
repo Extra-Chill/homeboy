@@ -393,51 +393,66 @@ fn in_flight_daemon_disconnect_error_surfaces_inspection_commands() {
 
 #[test]
 fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
-    let source = Error::new(
-        ErrorCode::InternalUnexpected,
-        "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
-        serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "job_id": "job-123",
-        }),
-    );
+    crate::test_support::with_isolated_home(|_| {
+        let source = Error::new(
+            ErrorCode::InternalUnexpected,
+            "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
+            serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "job_id": "job-123",
+            }),
+        );
+        let remote_command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let outcome = in_flight_daemon_disconnect_outcome(
+            base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
+            "homeboy-lab",
+            "job-123",
+            "run-123",
+            "/runner/workspace/homeboy",
+            &remote_command,
+            "runner daemon health check failed",
+            &source,
+        )
+        .expect("detached lifecycle record");
 
-    let outcome = in_flight_daemon_disconnect_outcome(
-        base_lab_plan(Some(&portable_lab_command("agent-task cook"))),
-        "homeboy-lab",
-        "job-123",
-        "run-123",
-        "runner daemon health check failed",
-        &source,
-    );
+        let LabOffloadOutcome::Offloaded {
+            plan,
+            stdout,
+            stderr,
+            exit_code,
+            output_file_content,
+        } = outcome
+        else {
+            panic!("expected detached offloaded outcome");
+        };
 
-    let LabOffloadOutcome::Offloaded {
-        plan,
-        stdout,
-        stderr,
-        exit_code,
-        output_file_content,
-    } = outcome
-    else {
-        panic!("expected detached offloaded outcome");
-    };
-
-    assert_eq!(exit_code, 0);
-    assert!(output_file_content.is_none());
-    let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
-    assert_eq!(json["success"], serde_json::json!(true));
-    assert_eq!(json["data"]["status"], "dispatched_detached");
-    assert_eq!(json["data"]["followup_required"], true);
-    assert_eq!(json["data"]["durable_run_id"], "run-123");
-    assert_eq!(json["data"]["runner_id"], "homeboy-lab");
-    assert_eq!(json["data"]["job_id"], "job-123");
-    assert_eq!(
-        json["data"]["retrieval_commands"]["status"],
-        "homeboy agent-task status run-123"
-    );
-    assert!(stderr.contains("durable agent-task run `run-123` continues remotely"));
-    assert!(stderr.contains("homeboy agent-task logs run-123"));
-    assert!(plan.steps.iter().any(
-        |step| step.id == "lab.exec.detached" && step.status == PlanStepStatus::PartialSuccess
-    ));
+        assert_eq!(exit_code, 0);
+        assert!(output_file_content.is_none());
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+        assert_eq!(json["success"], serde_json::json!(true));
+        assert_eq!(json["data"]["status"], "dispatched_detached");
+        assert_eq!(json["data"]["followup_required"], true);
+        assert_eq!(json["data"]["durable_run_id"], "run-123");
+        assert_eq!(json["data"]["runner_id"], "homeboy-lab");
+        assert_eq!(json["data"]["job_id"], "job-123");
+        assert_eq!(
+            json["data"]["retrieval_commands"]["status"],
+            "homeboy agent-task status run-123"
+        );
+        assert!(stderr.contains("durable agent-task run `run-123` continues remotely"));
+        assert!(stderr.contains("homeboy agent-task logs run-123"));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.id == "lab.exec.detached"
+                && step.status == PlanStepStatus::PartialSuccess));
+        let record = crate::core::agent_task_lifecycle::status("run-123")
+            .expect("inspectable agent-task record");
+        assert_eq!(record.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(record.metadata["runner_job_id"], "job-123");
+    });
 }

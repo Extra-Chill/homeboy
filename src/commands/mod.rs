@@ -205,7 +205,6 @@ pub mod activity;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;
-pub mod api;
 pub mod artifact_postprocess;
 pub mod audit;
 pub mod audit_baseline;
@@ -217,19 +216,13 @@ pub mod cleanup;
 pub mod component;
 pub mod config;
 pub mod contract;
-pub mod daemon;
-pub mod db;
-pub mod deploy;
 pub mod docs;
 pub mod extension;
-pub mod file;
 pub mod fleet;
 pub mod fuzz;
-pub mod git;
 pub mod issues;
 pub mod json_output;
 pub mod lint;
-pub mod logs;
 pub mod observe;
 pub mod project;
 pub mod raw_output;
@@ -244,19 +237,21 @@ pub mod runner;
 pub mod runs;
 pub(crate) mod runs_proof_summary;
 pub(crate) mod runs_summary;
-pub mod self_cmd;
-pub mod server;
-pub mod ssh;
 pub mod stack;
-pub mod status;
 pub mod test;
 pub mod trace;
-pub mod triage;
 pub mod tunnel;
 pub mod undo;
-pub mod upgrade;
 pub mod utils;
 pub mod worktree;
+
+macro_rules! register_ops_command_modules {
+    ($(($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path),)*) => {
+        $(pub mod $module;)*
+    };
+}
+
+crate::ops_command_descriptors!(register_ops_command_modules);
 
 // Command-runtime infrastructure: the routing, adapter, output/response,
 // manifest, and summary plumbing that turns a parsed `Commands` value into a

@@ -15,9 +15,13 @@ use crate::core::error::{Error, Result};
 
 /// Structural, dependency, and generated directories the generic rig package lint never descends into.
 const STRUCTURAL_IGNORED_DIRECTORIES: &[&str] = &[
+    ".claude",
+    ".datamachine",
     ".git",
     ".homeboy",
     ".next",
+    ".opencode",
+    ".sampleplugin",
     ".venv",
     "bower_components",
     "build",
@@ -946,6 +950,18 @@ mod tests {
 
         assert!(policy.ignored_directory(OsStr::new("vendor")));
         assert!(policy.ignored_directory(OsStr::new("node_modules")));
+    }
+
+    #[test]
+    fn lint_ignores_shared_rig_package_metadata_directories() {
+        let policy = IgnorePolicy::new(&[]);
+
+        for directory in [".claude", ".datamachine", ".opencode", ".sampleplugin"] {
+            assert!(
+                policy.ignored_directory(OsStr::new(directory)),
+                "{directory} should be ignored by the generic package walk"
+            );
+        }
     }
 
     #[test]

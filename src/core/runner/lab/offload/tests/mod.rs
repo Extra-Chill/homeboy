@@ -28,37 +28,19 @@ mod workspace_sync;
 
 pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        hot_label: label,
-        portable: true,
-        unsupported_reason: None,
-        source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-        workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        secret_env_sources: Vec::new(),
+        command: crate::command_contract::LabCommandContract::portable(label, None, true, &[]),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
-        routing_policy: crate::command_contract::LabRoutingPolicy {
-            default_lab_offload: true,
-            infer_source_path_tools: true,
-            release_gate: false,
-            requires_extension_parity: true,
-            read_only_polling: false,
-        },
     }
 }
 
 pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        hot_label: "rig up",
-        portable: false,
-        unsupported_reason: Some(reason),
-        source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-        workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        secret_env_sources: Vec::new(),
+        command: crate::command_contract::LabCommandContract::local_only("rig up", reason),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
-        routing_policy: crate::command_contract::LabRoutingPolicy::default(),
     }
 }
 

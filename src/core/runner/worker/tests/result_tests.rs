@@ -209,17 +209,23 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
                 sample_count: 93,
                 child_process_count_peak: Some(69),
                 resource_guard: Some(RunnerResourceGuardLimits {
-                    rss_limit_bytes: (96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10) / 4,
+                    rss_limit_bytes: 23 * 1024 * 1024 * 1024,
                     process_count_limit: 128,
                     concurrency: 4,
                     memory_capacity_bytes: Some(96 * 1024 * 1024 * 1024),
-                    rss_limit_source: "capacity_aware".to_string(),
+                    host_headroom_bytes: Some((96 * 1024 * 1024 * 1024) / 10),
+                    aggregate_rss_budget_bytes: Some(
+                        96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10,
+                    ),
+                    active_rss_bytes: Some(64 * 1024 * 1024 * 1024),
+                    aggregate_rss_bytes: Some(87 * 1024 * 1024 * 1024),
+                    rss_limit_source: "active_load_aware".to_string(),
                 }),
                 guard_violation: Some(RunnerResourceGuardViolation {
                     reason: "rss_limit_exceeded".to_string(),
                     message: "runner job resource guard stopped process tree".to_string(),
                     rss_bytes: 25_320_000_000,
-                    rss_limit_bytes: (96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10) / 4,
+                    rss_limit_bytes: 23 * 1024 * 1024 * 1024,
                     process_count: 70,
                     process_count_limit: 128,
                 }),
@@ -256,7 +262,7 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
             .as_ref()
             .and_then(|metrics| metrics.resource_guard.as_ref())
             .map(|limits| limits.rss_limit_source.as_str()),
-        Some("capacity_aware")
+        Some("active_load_aware")
     );
     assert_eq!(
         result.metrics.as_ref().and_then(|metrics| {
@@ -267,6 +273,22 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
         }),
         Some(96 * 1024 * 1024 * 1024)
     );
+    let guard = result
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.resource_guard.as_ref())
+        .expect("resource guard evidence");
+    assert_eq!(
+        guard.host_headroom_bytes,
+        Some((96 * 1024 * 1024 * 1024) / 10)
+    );
+    assert_eq!(
+        guard.aggregate_rss_budget_bytes,
+        Some(96 * 1024 * 1024 * 1024 - (96 * 1024 * 1024 * 1024) / 10)
+    );
+    assert_eq!(guard.active_rss_bytes, Some(64 * 1024 * 1024 * 1024));
+    assert_eq!(guard.aggregate_rss_bytes, Some(87 * 1024 * 1024 * 1024));
+    assert_eq!(guard.rss_limit_bytes, 23 * 1024 * 1024 * 1024);
 }
 
 #[test]

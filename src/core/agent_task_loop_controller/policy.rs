@@ -267,7 +267,6 @@ pub struct AgentTaskPrOwnershipStatusUpdate {
     pub ci_summary: Option<String>,
     pub review_decision: Option<String>,
     pub merge_state: Option<String>,
-    pub retry_count: u32,
     pub evidence: Vec<AgentTaskLoopArtifactRef>,
     pub missing_pr: bool,
 }
@@ -278,5 +277,66 @@ impl AgentTaskPrOwnershipStatusUpdate {
             ci_state: Some("tracking".to_string()),
             ..Self::default()
         }
+    }
+}
+
+impl AgentTaskPrOwnershipState {
+    /// Derive the durable state and retry count together so every PR-ownership
+    /// poll applies the same transition rule.
+    pub(crate) fn from_status_update(
+        status: &AgentTaskPrOwnershipStatusUpdate,
+        request: &AgentTaskPrOwnershipRequest,
+        previous_retry_count: u32,
+    ) -> (Self, u32) {
+        let retry_count = if status
+            .ci_state
+            .as_deref()
+            .is_some_and(|state| state == "terminal_failed" || state == "stale")
+            || status.review_decision.as_deref() == Some("CHANGES_REQUESTED")
+        {
+            previous_retry_count.saturating_add(1)
+        } else {
+            previous_retry_count
+        };
+
+        let state =
+            if status.missing_pr {
+                Self::MissingPr
+            } else if status
+                .merge_state
+                .as_deref()
+                .is_some_and(|state| state.eq_ignore_ascii_case("MERGED"))
+            {
+                Self::Merged
+            } else if status
+                .ci_state
+                .as_deref()
+                .is_some_and(|state| state == "terminal_failed" || state == "stale")
+                || status.review_decision.as_deref() == Some("CHANGES_REQUESTED")
+            {
+                if retry_count >= request.max_retries {
+                    Self::RetryLimitReached
+                } else {
+                    Self::ChangesRequested
+                }
+            } else if status.ci_state.as_deref().is_some_and(|state| {
+                state == "pending" || state == "no_checks" || state == "tracking"
+            }) {
+                Self::WaitingForChecks
+            } else if status
+                .ci_state
+                .as_deref()
+                .is_some_and(|state| state == "terminal_green")
+            {
+                if request.merge_required {
+                    Self::WaitingForMerge
+                } else {
+                    Self::GreenReady
+                }
+            } else {
+                Self::Tracking
+            };
+
+        (state, retry_count)
     }
 }

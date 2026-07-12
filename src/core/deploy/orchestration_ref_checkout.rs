@@ -83,12 +83,41 @@ impl ExactRefCheckout {
 
         let mut materialized = component.clone();
         materialized.local_path = materialized_path.to_string_lossy().to_string();
+        materialized.build_artifact = component.build_artifact.as_deref().map(|artifact| {
+            rebase_source_path(
+                artifact,
+                Path::new(&component.local_path),
+                &materialized_path,
+            )
+        });
         Ok(Self {
             component: materialized,
             identity,
             source_root,
             worktree_path,
         })
+    }
+
+    pub(super) fn verify(&self) -> Result<()> {
+        let actual_sha = git::run_git(
+            &self.worktree_path,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            "verify exact deploy ref worktree",
+        )?
+        .trim()
+        .to_string();
+        if actual_sha != self.identity.resolved_sha {
+            return Err(Error::validation_invalid_argument(
+                "ref",
+                format!(
+                    "Materialized source verification failed for component '{}': expected commit '{}', found '{}'",
+                    self.component.id, self.identity.resolved_sha, actual_sha
+                ),
+                None,
+                None,
+            ));
+        }
+        Ok(())
     }
 
     fn cleanup(&mut self) {
@@ -100,6 +129,22 @@ impl ExactRefCheckout {
         );
         let _ = std::fs::remove_dir_all(&self.worktree_path);
     }
+}
+
+fn rebase_source_path(value: &str, original_root: &Path, materialized_root: &Path) -> String {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return value.to_string();
+    }
+
+    path.strip_prefix(original_root)
+        .map(|relative| {
+            materialized_root
+                .join(relative)
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_string())
 }
 
 impl Drop for ExactRefCheckout {
@@ -275,6 +320,29 @@ mod tests {
             resolve_exact_ref(&component, "missing-ref").expect_err("missing ref should fail");
         assert!(err.message.contains("Cannot resolve --ref 'missing-ref'"));
         assert!(err.message.contains(&identity.source));
+    }
+
+    #[test]
+    fn materialized_ref_verification_rejects_a_different_checkout_head() {
+        let repo = fixture_repo();
+        let component = fixture_component(repo.path());
+        std::fs::write(repo.path().join("other.txt"), "other\n").expect("other payload");
+        git(repo.path(), &["add", "other.txt"]);
+        commit(repo.path(), "other commit");
+        let other_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+        let checkout = ExactRefCheckout::materialize(&component, "accepted")
+            .expect("materialize accepted branch");
+        git(
+            Path::new(&checkout.component.local_path),
+            &["checkout", "--detach", &other_sha],
+        );
+
+        let error = checkout
+            .verify()
+            .expect_err("changed materialized HEAD must fail closed");
+        assert!(error
+            .message
+            .contains("Materialized source verification failed"));
     }
 
     #[test]
