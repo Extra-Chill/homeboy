@@ -1,4 +1,4 @@
-use super::args::{PrArgs, PrCommand};
+use super::args::{ComponentPathArgs, IssueArgs, IssueCommand, PrArgs, PrCommand};
 use super::GitCommand;
 use clap::Parser;
 
@@ -76,7 +76,7 @@ fn pr_readiness_flags_parse() {
                 PrCommand::Readiness {
                     component_id,
                     number,
-                    path,
+                    path_args: ComponentPathArgs { path },
                 },
         }) => {
             assert_eq!(component_id, "homeboy");
@@ -84,5 +84,33 @@ fn pr_readiness_flags_parse() {
             assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
         }
         _ => panic!("expected pr readiness command"),
+    }
+}
+
+#[test]
+fn issue_find_path_flag_parses() {
+    let cli = TestCli::try_parse_from([
+        "git",
+        "issue",
+        "find",
+        "homeboy",
+        "--path",
+        "/tmp/homeboy",
+    ])
+    .expect("issue find flags parse");
+
+    match cli.command {
+        GitCommand::Issue(IssueArgs {
+            command:
+                IssueCommand::Find {
+                    component_id,
+                    path_args: ComponentPathArgs { path },
+                    ..
+                },
+        }) => {
+            assert_eq!(component_id, "homeboy");
+            assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
+        }
+        _ => panic!("expected issue find command"),
     }
 }

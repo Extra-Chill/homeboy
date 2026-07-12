@@ -1,5 +1,12 @@
 use clap::{Args, Subcommand};
 
+#[derive(Args)]
+pub(super) struct ComponentPathArgs {
+    /// Workspace path to discover the component from a portable homeboy.json
+    #[arg(long, value_name = "PATH")]
+    pub(super) path: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // `git issue` subcommand tree
 // ---------------------------------------------------------------------------
@@ -55,9 +62,8 @@ pub(super) enum IssueCommand {
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Find issues matching filters (dedup primitive)
     Find {
@@ -80,9 +86,8 @@ pub(super) enum IssueCommand {
         #[arg(long, default_value_t = 30)]
         limit: usize,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Close an existing issue with a typed reason
     Close {
@@ -108,9 +113,8 @@ pub(super) enum IssueCommand {
         #[arg(long, value_name = "PATH")]
         comment_file: Option<String>,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Edit an existing issue's title, body, or labels
     Edit {
@@ -141,9 +145,8 @@ pub(super) enum IssueCommand {
         #[arg(long = "remove-label", value_name = "LABEL")]
         remove_labels: Vec<String>,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
 }
 
@@ -188,9 +191,8 @@ pub(super) enum PrCommand {
         #[arg(long)]
         draft: bool,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Edit an existing PR's title or body
     Edit {
@@ -213,9 +215,8 @@ pub(super) enum PrCommand {
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Find PRs matching filters
     Find {
@@ -238,9 +239,8 @@ pub(super) enum PrCommand {
         #[arg(long, default_value_t = 30)]
         limit: usize,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Explain PR merge readiness without attempting a merge
     Readiness {
@@ -251,9 +251,8 @@ pub(super) enum PrCommand {
         #[arg(short, long)]
         number: u64,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Post a comment on a PR. Three modes:
     ///
@@ -330,9 +329,8 @@ pub(super) enum PrCommand {
         #[arg(long, requires = "comment_key", value_delimiter = ',')]
         section_order: Option<Vec<String>>,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Report and optionally land a fleet of pull requests.
     Fleet {
@@ -355,9 +353,8 @@ pub(super) enum PrCommand {
         #[arg(long, default_value = "squash")]
         merge_method: String,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Compare GitHub mergeability with local git merge-tree evidence.
     ReconcileMergeability {
@@ -368,9 +365,8 @@ pub(super) enum PrCommand {
         #[arg(short, long)]
         number: u64,
 
-        /// Workspace path to discover the component from a portable homeboy.json
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
+        #[command(flatten)]
+        path_args: ComponentPathArgs,
     },
     /// Evaluate PR open/merge policy.
     Policy(PrPolicyArgs),
