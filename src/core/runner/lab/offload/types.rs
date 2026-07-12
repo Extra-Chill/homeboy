@@ -69,34 +69,30 @@ pub struct LabJobOverrides {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabOffloadCommand {
-    pub hot_label: &'static str,
+    pub command: crate::command_contract::LabCommandContract,
     pub portable: bool,
     pub unsupported_reason: Option<&'static str>,
-    pub source_path_mode: LabOffloadSourcePathMode,
-    pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
-    pub secret_env_sources: Vec<crate::command_contract::LabSecretEnvSource>,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
     pub workload: Option<crate::command_contract::LabRigWorkloadArguments>,
-    /// Routing-policy flags shared across the Lab command layers
-    /// (`default_lab_offload`, `infer_source_path_tools`, `release_gate`,
-    /// `requires_extension_parity`).
-    pub routing_policy: crate::command_contract::LabRoutingPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LabOffloadSourcePathMode {
-    CwdOrPathFlag,
-    RunnerResident,
+impl std::ops::Deref for LabOffloadCommand {
+    type Target = crate::command_contract::LabCommandContract;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LabOffloadWorkspaceModePolicy {
-    ChangedSinceGitElseSnapshot,
-    Git,
-    GitCheckoutRequired,
-    RunnerResident,
+impl std::ops::DerefMut for LabOffloadCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
 }
+
+pub type LabOffloadSourcePathMode = crate::command_contract::LabSourcePathMode;
+pub type LabOffloadWorkspaceModePolicy = crate::command_contract::LabWorkspaceModePolicy;
 
 pub enum LabOffloadOutcome {
     RunLocal {

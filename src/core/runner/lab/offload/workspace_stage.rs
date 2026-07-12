@@ -1874,16 +1874,20 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            hot_label: "agent-task.run",
+            command: crate::command_contract::LabCommandContract {
+                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                ..crate::command_contract::LabCommandContract::portable(
+                    "agent-task.run",
+                    None,
+                    false,
+                    &[],
+                )
+            },
             portable: true,
             unsupported_reason: None,
-            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-            secret_env_sources: Vec::new(),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
-            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
 
         let plan = provider_config_path_materialization_plan(
@@ -1958,16 +1962,21 @@ mod tests {
 
     fn test_lab_contract_with_agent_task_secrets() -> LabOffloadCommand {
         LabOffloadCommand {
-            hot_label: "agent-task.run",
+            command: crate::command_contract::LabCommandContract {
+                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                secret_env_sources: &[crate::command_contract::LabSecretEnvSource::AgentTask],
+                ..crate::command_contract::LabCommandContract::portable(
+                    "agent-task.run",
+                    None,
+                    false,
+                    &[],
+                )
+            },
             portable: true,
             unsupported_reason: None,
-            source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
-            workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-            secret_env_sources: vec![crate::command_contract::LabSecretEnvSource::AgentTask],
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
-            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
     }
 

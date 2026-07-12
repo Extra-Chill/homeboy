@@ -1435,17 +1435,17 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
     )
     .build();
     let command_contract = crate::core::runner::LabOffloadCommand {
-        hot_label: "tunnel preview-client start",
+        command: crate::command_contract::LabCommandContract::portable(
+            "tunnel preview-client start",
+            None,
+            false,
+            &[],
+        ),
         portable: true,
         unsupported_reason: None,
-        source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
-        workspace_mode_policy:
-            crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        secret_env_sources: Vec::new(),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
-        routing_policy: crate::command_contract::LabRoutingPolicy::default(),
     };
     let workload = crate::core::runner::workload::build_runner_workload(
         crate::core::runner::workload::RunnerWorkloadBuildInput {
