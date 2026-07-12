@@ -451,6 +451,7 @@ pub fn lab_offload_command_from_route_contract(
     let hot_label = route_contract.command.hot_label;
     let portability = route_contract.command.portability;
     let secret_env_sources = route_contract.command.secret_env_sources.to_vec();
+    let workload = route_contract.workload.clone();
     let plan = lab_route_plan_from_route_contract(route_contract);
     runners::LabOffloadCommand {
         hot_label,
@@ -486,6 +487,7 @@ pub fn lab_offload_command_from_route_contract(
         secret_env_sources,
         required_extensions: plan.required_extensions,
         required_capabilities: plan.required_capabilities,
+        workload,
         routing_policy: plan.routing_policy,
     }
 }

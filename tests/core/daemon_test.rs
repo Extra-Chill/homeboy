@@ -1444,6 +1444,7 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
         secret_env_sources: Vec::new(),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
+        workload: None,
         routing_policy: crate::command_contract::LabRoutingPolicy::default(),
     };
     let workload = crate::core::runner::workload::build_runner_workload(

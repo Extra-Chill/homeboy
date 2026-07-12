@@ -609,6 +609,7 @@ mod tests {
                 name: "playwright".to_string(),
                 required: true,
             }],
+            workload: None,
             routing_policy: LabRoutingPolicy {
                 requires_extension_parity: true,
                 ..LabRoutingPolicy::default()

@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn lab_workload_arguments_follow_subcommands_and_option_values() {
+    let cli = FuzzCli::try_parse_from(
+        "fuzz run --seed value component --rig=r --extension=x".split_whitespace(),
+    )
+    .expect("fuzz run should parse");
+    let workload = cli.args.lab_rig_workload_arguments().unwrap();
+    assert_eq!(workload.component.as_deref(), Some("component"));
+    assert_eq!(workload.extension_overrides, ["x"]);
+
+    let cli = FuzzCli::try_parse_from(["fuzz", "list", "--rig", "r"]).unwrap();
+    assert_eq!(
+        cli.args.lab_rig_workload_arguments().unwrap().component,
+        None
+    );
+}
+
+#[test]
 fn fuzz_discover_merges_inventory_artifacts_with_provenance() {
     let temp = tempfile::tempdir().expect("tempdir");
     let first = temp.path().join("first.json");

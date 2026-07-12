@@ -477,6 +477,7 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
             secret_env_sources: Vec::new(),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
+            workload: None,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
         let workload = crate::core::runner::workload::build_runner_workload(

@@ -153,6 +153,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
     extra_workspaces.extend(rig_declared_path_input_extra_workspaces(
         &offload_args,
+        contract.workload.as_ref(),
         source_path,
     )?);
     extra_workspaces.extend(runtime_refresh_source_extra_workspaces(
@@ -429,8 +430,11 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     let late_path_setting_workspaces =
         path_setting_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
-    let late_declared_path_input_workspaces =
-        rig_declared_path_input_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
+    let late_declared_path_input_workspaces = rig_declared_path_input_extra_workspaces(
+        &remapped_args,
+        contract.workload.as_ref(),
+        Path::new(&synced.local_path),
+    )?;
     let mut late_path_input_workspaces = late_path_setting_workspaces;
     late_path_input_workspaces.extend(late_declared_path_input_workspaces);
     let late_synced_path_settings = sync_extra_lab_workspaces(
@@ -466,7 +470,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         .output_file_requested
         .then(|| remote_lab_output_file(&remote_cwd));
     let runner_command_plan = RunnerCommandPlan::for_offload(
-        &remapped_args,
+        contract.workload.as_ref(),
         &contract.required_extensions,
         Path::new(&synced.local_path),
     )?;
@@ -727,39 +731,78 @@ struct RunnerCommandPlan {
 
 impl RunnerCommandPlan {
     fn for_offload(
-        args: &[String],
+        workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
         route_required_extensions: &[String],
         primary_source_path: &Path,
     ) -> Result<Self> {
-        let rig_extensions = rig_extensions_from_primary_rig(args, primary_source_path, true)?;
-        let accepted_settings = rig_accepted_settings_from_primary_rig(args, primary_source_path)?;
-        let rig_dispatch_extensions =
-            rig_extensions_from_primary_rig(args, primary_source_path, false)?;
         let mut required_extensions = std::collections::BTreeSet::new();
+        let mut command_extensions = std::collections::BTreeSet::new();
+        let mut accepted_settings = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
-        required_extensions.extend(rig_extensions);
-        let command_extensions = if rig_dispatch_extensions.is_empty() {
-            route_required_extensions.to_vec()
-        } else {
-            rig_dispatch_extensions
-        };
+        if let Some(workload) = workload {
+            let command = match workload.kind {
+                crate::command_contract::LabRigWorkloadKind::Bench => rig::RigWorkloadKind::Bench,
+                crate::command_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
+            };
+            for rig_id in &workload.rig_ids {
+                let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
+                    continue;
+                };
+                if matches!(command, rig::RigWorkloadKind::Bench) {
+                    accepted_settings.extend(
+                        spec.bench
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|bench| bench.accepted_settings.iter().cloned()),
+                    );
+                }
+                if !workload.extension_overrides.is_empty() {
+                    required_extensions.extend(workload.extension_overrides.iter().cloned());
+                    command_extensions.extend(workload.extension_overrides.iter().cloned());
+                    continue;
+                }
+                required_extensions.extend(rig::required_extension_ids_for_workload(
+                    &spec,
+                    command,
+                    workload.component.as_deref(),
+                ));
+                let workload_extensions = rig::extension_ids_for_workloads(&spec, command);
+                if workload_extensions.len() == 1 {
+                    command_extensions.extend(workload_extensions);
+                }
+                command_extensions.extend(rig::component_extension_ids_for_workload(
+                    &spec,
+                    command,
+                    workload.component.as_deref(),
+                ));
+            }
+        }
+        if command_extensions.is_empty() {
+            command_extensions.extend(route_required_extensions.iter().cloned());
+        }
         Ok(Self {
             required_extensions: required_extensions.into_iter().collect(),
-            command_extensions,
-            accepted_settings,
+            command_extensions: command_extensions.into_iter().collect(),
+            accepted_settings: accepted_settings.into_iter().collect(),
         })
     }
 }
 
 fn rig_declared_path_input_extra_workspaces(
     args: &[String],
+    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
     primary_source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
-    if !args.iter().any(|arg| arg == "bench") {
+    if !workload.is_some_and(|workload| {
+        matches!(
+            workload.kind,
+            crate::command_contract::LabRigWorkloadKind::Bench
+        )
+    }) {
         return Ok(Vec::new());
     }
 
-    let path_inputs = rig_path_inputs_from_primary_rig(args, primary_source_path)?;
+    let path_inputs = rig_path_inputs_from_primary_rig(workload, primary_source_path)?;
     if path_inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -772,17 +815,16 @@ fn rig_declared_path_input_extra_workspaces(
 }
 
 fn rig_path_inputs_from_primary_rig(
-    args: &[String],
+    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
     primary_source_path: &Path,
 ) -> Result<Vec<String>> {
-    let rig_ids = rig_ids_from_args(args);
-    if rig_ids.is_empty() {
+    let Some(workload) = workload else {
         return Ok(Vec::new());
-    }
+    };
 
     let mut path_inputs = std::collections::BTreeSet::new();
-    for rig_id in rig_ids {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
+    for rig_id in &workload.rig_ids {
+        let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
             continue;
         };
         if let Some(bench) = spec.bench.as_ref() {
@@ -912,81 +954,6 @@ fn collect_json_string_values(value: &serde_json::Value, values: &mut Vec<String
     }
 }
 
-fn rig_accepted_settings_from_primary_rig(
-    args: &[String],
-    primary_source_path: &Path,
-) -> Result<Vec<String>> {
-    if !args.iter().any(|arg| arg == "bench") {
-        return Ok(Vec::new());
-    }
-
-    let rig_ids = rig_ids_from_args(args);
-    if rig_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut accepted_settings = std::collections::BTreeSet::new();
-    for rig_id in rig_ids {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
-            continue;
-        };
-        if let Some(bench) = spec.bench.as_ref() {
-            accepted_settings.extend(bench.accepted_settings.iter().cloned());
-        }
-    }
-
-    Ok(accepted_settings.into_iter().collect())
-}
-
-fn rig_extensions_from_primary_rig(
-    args: &[String],
-    primary_source_path: &Path,
-    required: bool,
-) -> Result<Vec<String>> {
-    let command = if args.iter().any(|arg| arg == "bench") {
-        rig::RigWorkloadKind::Bench
-    } else if args.iter().any(|arg| arg == "fuzz") {
-        rig::RigWorkloadKind::Fuzz
-    } else {
-        return Ok(Vec::new());
-    };
-
-    let explicit_component = rig_workload_component_from_args(args, command);
-    let explicit_extensions = extension_overrides_from_args(args);
-    let mut extension_ids = std::collections::BTreeSet::new();
-    for rig_id in rig_ids_from_args(args) {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
-            continue;
-        };
-        if !explicit_extensions.is_empty() {
-            extension_ids.extend(explicit_extensions.iter().cloned());
-            continue;
-        }
-        if required {
-            extension_ids.extend(rig::required_extension_ids_for_workload(
-                &spec,
-                command,
-                explicit_component.as_deref(),
-            ));
-            continue;
-        }
-        let workload_extensions = rig::extension_ids_for_workloads(&spec, command);
-        extension_ids.extend(
-            (workload_extensions.len() == 1)
-                .then_some(workload_extensions)
-                .into_iter()
-                .flatten(),
-        );
-        extension_ids.extend(rig::component_extension_ids_for_workload(
-            &spec,
-            command,
-            explicit_component.as_deref(),
-        ));
-    }
-
-    Ok(extension_ids.into_iter().collect())
-}
-
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
     if !primary_source_path.join("rig.json").is_file() && !primary_source_path.join("rigs").is_dir()
     {
@@ -1004,19 +971,6 @@ fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Opt
         Some(discovered.id.as_str()),
     )?;
     Ok(Some(spec))
-}
-
-fn rig_ids_from_args(args: &[String]) -> Vec<String> {
-    values_for_flag(args, "--rig")
-        .into_iter()
-        .flat_map(|value| {
-            value
-                .split(',')
-                .filter(|id| !id.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 fn extension_overrides_from_args(args: &[String]) -> Vec<String> {
@@ -1046,112 +1000,6 @@ fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
-}
-
-fn rig_workload_component_from_args(
-    args: &[String],
-    command: rig::RigWorkloadKind,
-) -> Option<String> {
-    let mut command_seen = false;
-    let mut subcommand_seen = false;
-    let mut skip_next = false;
-    let flags_with_values = [
-        "--extension",
-        "--path",
-        "--iterations",
-        "--warmup",
-        "--runs",
-        "--run-id",
-        "--shared-state",
-        "--concurrency",
-        "--matrix",
-        "--runner-pool",
-        "--matrix-max-tasks",
-        "--matrix-max-queue-depth",
-        "--expected-artifact",
-        "--regression-threshold",
-        "--setting",
-        "--setting-json",
-        "--status-file",
-        "--report",
-        "--rig",
-        "--rig-order",
-        "--rig-concurrency",
-        "--scenario",
-        "--profile",
-        "--ci-profile",
-        "--output",
-        "--runner",
-    ];
-    let fuzz_flags_with_values = [
-        "--extension",
-        "--path",
-        "--rig",
-        "--setting",
-        "--setting-json",
-        "--workload",
-        "--run-id",
-        "--tracker-ref",
-        "--seed",
-        "--inventory",
-        "--sequence-plan",
-        "--max-duration",
-        "--gate-profile",
-        "--isolation",
-        "--isolation-proof",
-        "--expect-metric",
-        "--action-model",
-        "--exploration-policy",
-        "--request-id",
-        "--operation",
-        "--operation-family",
-        "--case-budget",
-        "--duration-budget-seconds",
-        "--campaign-manifest",
-        "--campaign-workload",
-        "--lab-runner",
-        "--required-artifact",
-        "--output",
-        "--runner",
-    ];
-    for arg in args.iter().skip(1) {
-        if arg == "--" {
-            return None;
-        }
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if !command_seen {
-            if matches!(
-                (command, arg.as_str()),
-                (rig::RigWorkloadKind::Bench, "bench") | (rig::RigWorkloadKind::Fuzz, "fuzz")
-            ) {
-                command_seen = true;
-            }
-            continue;
-        }
-        if matches!(command, rig::RigWorkloadKind::Fuzz)
-            && !subcommand_seen
-            && matches!(arg.as_str(), "list" | "run" | "plan" | "run-campaign")
-        {
-            subcommand_seen = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            let takes_value = match command {
-                rig::RigWorkloadKind::Bench => flags_with_values.contains(&arg.as_str()),
-                rig::RigWorkloadKind::Fuzz => fuzz_flags_with_values.contains(&arg.as_str()),
-                rig::RigWorkloadKind::Trace => false,
-            };
-            if takes_value {
-                skip_next = true;
-            }
-            continue;
-        }
-        return Some(arg.clone());
-    }
-    None
 }
 
 fn inject_required_extension_args(
@@ -1198,6 +1046,19 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rig_workload(
+        kind: crate::command_contract::LabRigWorkloadKind,
+        rig_id: &str,
+        component: Option<&str>,
+    ) -> crate::command_contract::LabRigWorkloadArguments {
+        crate::command_contract::LabRigWorkloadArguments {
+            kind,
+            rig_ids: vec![rig_id.to_string()],
+            component: component.map(str::to_string),
+            extension_overrides: Vec::new(),
+        }
+    }
 
     fn command_plan(required_extensions: &[&str]) -> RunnerCommandPlan {
         RunnerCommandPlan {
@@ -1543,8 +1404,13 @@ mod tests {
                 local: "/controller/workspaces/static-site-importer".to_string(),
                 remote: "/runner/workspaces/static-site-importer".to_string(),
             }];
-            let plan =
-                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+            let workload = rig_workload(
+                crate::command_contract::LabRigWorkloadKind::Bench,
+                "static-site-importer-fixture-matrix",
+                Some("static-site-importer"),
+            );
+            let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], &primary)
+                .expect("runner command plan");
 
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
@@ -1623,8 +1489,13 @@ mod tests {
                 "--rig".to_string(),
                 "jetpack-api-route-inventory".to_string(),
             ];
-            let plan =
-                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+            let workload = rig_workload(
+                crate::command_contract::LabRigWorkloadKind::Fuzz,
+                "jetpack-api-route-inventory",
+                None,
+            );
+            let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], &primary)
+                .expect("runner command plan");
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
                 &args,
@@ -1701,8 +1572,13 @@ mod tests {
                 "--campaign-workload".to_string(),
                 "rest-api-read".to_string(),
             ];
-            let plan =
-                RunnerCommandPlan::for_offload(&args, &[], &primary).expect("runner command plan");
+            let workload = rig_workload(
+                crate::command_contract::LabRigWorkloadKind::Fuzz,
+                "jetpack-api-route-inventory",
+                None,
+            );
+            let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], &primary)
+                .expect("runner command plan");
             let command = build_lab_offload_remote_command(
                 &["/runner/bin/homeboy".to_string()],
                 &args,
@@ -1920,8 +1796,14 @@ mod tests {
                 fixture_root.display().to_string(),
             ];
 
-            let workspaces = rig_declared_path_input_extra_workspaces(&args, &primary)
-                .expect("declared path input workspaces");
+            let workload = rig_workload(
+                crate::command_contract::LabRigWorkloadKind::Bench,
+                "static-site-importer-fixture-matrix",
+                Some("static-site-importer"),
+            );
+            let workspaces =
+                rig_declared_path_input_extra_workspaces(&args, Some(&workload), &primary)
+                    .expect("declared path input workspaces");
             let paths = workspaces
                 .iter()
                 .map(|workspace| workspace.path.clone())
@@ -2051,6 +1933,7 @@ mod tests {
             secret_env_sources: Vec::new(),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
+            workload: None,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
 
@@ -2134,6 +2017,7 @@ mod tests {
             secret_env_sources: vec![crate::command_contract::LabSecretEnvSource::AgentTask],
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
+            workload: None,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
     }
