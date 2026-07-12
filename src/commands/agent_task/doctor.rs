@@ -31,7 +31,15 @@ use super::args::AgentTaskDoctorArgs;
 /// Run the cook readiness repair chain and return a combined verdict.
 pub(crate) fn doctor(args: AgentTaskDoctorArgs) -> CmdResult<Value> {
     let provider_stage = provider_stage(&args);
-    let runner_stage = runner_stage(&args)?;
+    let runner_stage = if provider_stage.ready {
+        runner_stage(&args)?
+    } else {
+        json!({
+            "status": "skipped",
+            "checks": [],
+            "skipped_reason": "provider contract readiness failed before runner checks",
+        })
+    };
 
     let verdict = combine_verdict(&provider_stage, &runner_stage);
     let exit_code = if verdict.ready { 0 } else { 1 };
@@ -187,6 +195,8 @@ fn runner_stage(args: &AgentTaskDoctorArgs) -> homeboy::core::Result<Value> {
             path: args.path.clone(),
             extensions: args.extensions.clone(),
             required_tools: args.required_tools.clone(),
+            agent_backend: args.backend.clone(),
+            agent_selector: args.selector.clone(),
             scope: RunnerDoctorScope::LabOffload,
             repair: args.repair,
         },
@@ -261,9 +271,15 @@ fn first_runner_error(runner: &Value) -> Option<Value> {
         .iter()
         .find(|check| check.get("status").and_then(Value::as_str) == Some(error_label))
         .map(|check| {
+            let check_id = check.get("id").and_then(Value::as_str).unwrap_or_default();
+            let code = if check_id.starts_with("agent_task.provider_executor_resolution.") {
+                json!("executor_require_graph_unresolved")
+            } else {
+                check.get("id").cloned().unwrap_or(Value::Null)
+            };
             json!({
                 "stage": "runner_readiness",
-                "code": check.get("id").cloned().unwrap_or(Value::Null),
+                "code": code,
                 "message": check.get("message").cloned().unwrap_or(Value::Null),
                 "remediation": check.get("remediation").cloned().unwrap_or(Value::Null),
                 "details": check.get("details").cloned().unwrap_or(Value::Null),

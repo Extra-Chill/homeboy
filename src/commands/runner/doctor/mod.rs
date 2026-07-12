@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use homeboy::core::agent_tasks::provider::{
-    AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
+    AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
 };
 use homeboy::core::engine::shell;
 use homeboy::core::runners::{
@@ -33,6 +33,8 @@ pub struct RunnerDoctorOptions {
     pub path: Option<String>,
     pub extensions: Vec<String>,
     pub required_tools: Vec<String>,
+    pub agent_backend: Option<String>,
+    pub agent_selector: Option<String>,
     pub scope: RunnerDoctorScope,
     pub repair: bool,
 }

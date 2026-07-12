@@ -709,7 +709,7 @@ fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
         "extension_path": provider.extension_path.as_deref(),
     })
 }
-pub(super) fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
+pub(crate) fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
     if let Some(display) = provider.invocation.display.as_deref() {
         return render_provider_command_template(display, provider);
     }
@@ -752,7 +752,7 @@ fn render_provider_invocation_argv(provider: &AgentTaskExecutorProvider) -> Vec<
         .collect()
 }
 
-pub(super) fn provider_command_parts(
+pub(crate) fn provider_command_parts(
     provider: &AgentTaskExecutorProvider,
 ) -> Option<(String, Vec<String>, Option<PathBuf>)> {
     let (argv, cwd) = if !provider.invocation.argv.is_empty() {
@@ -784,6 +784,150 @@ pub(super) fn provider_command_parts(
     let mut parts = argv.into_iter();
     let program = parts.next()?;
     Some((program, parts.collect(), cwd))
+}
+
+/// Result of probing whether a provider's executor entrypoint actually loads on
+/// disk — i.e. its module require graph resolves against the materialized
+/// runtime layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderExecutorResolution {
+    /// The executor entrypoint loaded and printed its provider contract; the
+    /// require graph resolves.
+    Resolved,
+    /// The probe could not be run (no command parts, or the invocation is not a
+    /// runtime we can safely dry-load). Not a failure — nothing to assert.
+    Skipped { reason: String },
+    /// The executor entrypoint failed to load: its require graph does not
+    /// resolve on disk (e.g. a shared runtime package was never materialized).
+    Unresolved { command: String, detail: String },
+}
+
+/// Grace window for the `--provider-contract` dry load. This only parses the
+/// executor module and prints a static contract, so it returns near-instantly;
+/// the timeout only guards against a pathological hang.
+const EXECUTOR_RESOLUTION_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Probe whether a provider's executor entrypoint resolves its module require
+/// graph on disk, without executing an agent task.
+///
+/// Every CLI-runtime executor wrapper resolves its full `require()` chain at
+/// module load (top-level requires run before any argument handling) and
+/// implements a `--provider-contract` flag that prints the static provider
+/// contract and exits 0 *before* reading any request from stdin. Invoking the
+/// wrapper with `--provider-contract` and closed stdin therefore forces the
+/// entire require graph to load: if a shared runtime package (e.g.
+/// `agent-task-contracts`) was never materialized next to the runtime, Node
+/// aborts at load with `MODULE_NOT_FOUND` and exits non-zero — exactly the
+/// failure that would otherwise only surface mid-cook as empty provider stdout.
+///
+/// This is the on-disk resolution check the doctor readiness verdict was
+/// missing (Extra-Chill/homeboy#7736): provider *contract* discovery reads
+/// declared metadata and never loads the executor, so a partially-materialized
+/// install passed readiness while every cook crashed.
+pub(crate) fn probe_provider_executor_resolves(
+    provider: &AgentTaskExecutorProvider,
+) -> ProviderExecutorResolution {
+    let command = render_provider_command_display(provider);
+    let Some((program, args, cwd)) = provider_command_parts(provider) else {
+        return ProviderExecutorResolution::Skipped {
+            reason: format!("provider '{}' has no resolvable command", provider.id),
+        };
+    };
+
+    // Only node-runtime executors implement the `--provider-contract` dry-load
+    // contract. Other runtimes are skipped rather than probed with a flag they
+    // do not understand (which could block reading stdin). Core stays
+    // runtime-agnostic: it keys off the resolved program basename, not a
+    // hard-coded ecosystem/provider name.
+    let program_name = Path::new(&program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program.as_str());
+    let is_node_runtime = program_name == "node" || program_name == "nodejs";
+    if !is_node_runtime {
+        return ProviderExecutorResolution::Skipped {
+            reason: format!(
+                "provider '{}' executor program '{program_name}' does not implement the --provider-contract dry-load probe",
+                provider.id
+            ),
+        };
+    }
+
+    let mut probe_args = args.clone();
+    probe_args.push("--provider-contract".to_string());
+
+    let mut command_builder = Command::new(&program);
+    command_builder
+        .args(&probe_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command_builder.current_dir(cwd);
+    }
+
+    let mut child = match command_builder.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ProviderExecutorResolution::Unresolved {
+                command: command.clone(),
+                detail: format!("failed to spawn executor probe: {error}"),
+            };
+        }
+    };
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= EXECUTOR_RESOLUTION_PROBE_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return ProviderExecutorResolution::Unresolved {
+                        command,
+                        detail: "executor resolution probe timed out".to_string(),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                return ProviderExecutorResolution::Unresolved {
+                    command,
+                    detail: format!("executor resolution probe wait failed: {error}"),
+                };
+            }
+        }
+    };
+
+    if status.success() {
+        return ProviderExecutorResolution::Resolved;
+    }
+
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut stderr| {
+            let mut buffer = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut buffer);
+            String::from_utf8_lossy(&buffer).trim().to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            "executor exited non-zero while loading its module require graph".to_string()
+        });
+
+    ProviderExecutorResolution::Unresolved {
+        command,
+        detail: first_stderr_lines(&stderr, 8),
+    }
+}
+
+/// Keep the first `max` lines of captured stderr so the blocker carries the
+/// actionable `MODULE_NOT_FOUND` / require-stack context without dumping an
+/// unbounded trace.
+fn first_stderr_lines(stderr: &str, max: usize) -> String {
+    stderr.lines().take(max).collect::<Vec<_>>().join("\n")
 }
 
 pub(super) fn provider_command_env(
@@ -894,5 +1038,117 @@ pub(super) fn failure_outcome(
         workflow: None,
         follow_up: None,
         metadata: Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod executor_resolution_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Build a minimal node-runtime provider whose invocation runs the given
+    /// script path under `node`, mirroring how installed CLI executor wrappers
+    /// are invoked (`node <wrapper>.cjs`).
+    fn node_provider(script: &std::path::Path) -> AgentTaskExecutorProvider {
+        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.node.provider",
+            "backend": "test",
+            "invocation": {
+                "argv": ["node", script.display().to_string()],
+            },
+        }))
+        .expect("provider parses");
+        // Ensure no legacy string command path is taken.
+        provider.command.clear();
+        provider
+    }
+
+    fn write_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("create script");
+        file.write_all(body.as_bytes()).expect("write script");
+        path
+    }
+
+    #[test]
+    fn resolved_when_provider_contract_dry_load_exits_zero() {
+        let dir = tempfile::tempdir().expect("dir");
+        // Emulates a healthy executor wrapper: handles --provider-contract
+        // before reading stdin, after resolving its (here trivial) require graph.
+        let script = write_script(
+            dir.path(),
+            "healthy-executor.cjs",
+            r#"if (process.argv.includes('--provider-contract')) {
+  process.stdout.write(JSON.stringify({ id: 'test.node.provider' }));
+  process.exit(0);
+}
+process.exit(2);
+"#,
+        );
+        let provider = node_provider(&script);
+
+        assert_eq!(
+            probe_provider_executor_resolves(&provider),
+            ProviderExecutorResolution::Resolved
+        );
+    }
+
+    #[test]
+    fn unresolved_when_require_graph_is_broken() {
+        let dir = tempfile::tempdir().expect("dir");
+        // Emulates the #7736 failure: a top-level require of a runtime package
+        // that was never materialized. Node aborts at module load with
+        // MODULE_NOT_FOUND before any argument handling runs.
+        let script = write_script(
+            dir.path(),
+            "broken-executor.cjs",
+            "require('./this-shared-runtime-package-was-never-materialized');\n",
+        );
+        let provider = node_provider(&script);
+
+        match probe_provider_executor_resolves(&provider) {
+            ProviderExecutorResolution::Unresolved { detail, .. } => {
+                assert!(
+                    detail.contains("MODULE_NOT_FOUND") || detail.contains("Cannot find module"),
+                    "expected module resolution failure in detail, got: {detail}"
+                );
+            }
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipped_for_non_node_runtime() {
+        // A provider whose program is not a node runtime does not implement the
+        // --provider-contract dry-load contract and must be skipped, not failed.
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.binary.provider",
+            "backend": "test",
+            "invocation": { "argv": ["/usr/bin/some-native-executor", "--json"] },
+        }))
+        .expect("provider parses");
+
+        match probe_provider_executor_resolves(&provider) {
+            ProviderExecutorResolution::Skipped { reason } => {
+                assert!(reason.contains("does not implement the --provider-contract"));
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipped_when_provider_has_no_command() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.empty.provider",
+            "backend": "test",
+        }))
+        .expect("provider parses");
+
+        match probe_provider_executor_resolves(&provider) {
+            ProviderExecutorResolution::Skipped { reason } => {
+                assert!(reason.contains("no resolvable command"));
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
     }
 }

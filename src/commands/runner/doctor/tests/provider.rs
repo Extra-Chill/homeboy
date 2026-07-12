@@ -1,8 +1,10 @@
 use super::super::*;
 use homeboy::core::agent_tasks::provider::{
-    AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+    AgentTaskExecutorProvider, AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
 };
+use serde_json::json;
 use std::collections::BTreeMap;
+use std::io::Write;
 use types::RunnerDoctorStatus;
 
 #[test]
@@ -127,4 +129,68 @@ fn path_within_canonical_root_is_segment_aware() {
     ));
     // Empty root is treated as "no canonical constraint".
     assert!(probes::path_within_canonical_root("/anywhere", ""));
+}
+
+#[test]
+fn local_provider_executor_resolution_check_blocks_broken_require_graph() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("broken-executor.cjs");
+    let mut file = std::fs::File::create(&script).expect("create script");
+    file.write_all(b"require('./missing-shared-runtime-package');\n")
+        .expect("write script");
+    let provider = node_provider("test.node.provider", "test", &script);
+
+    let checks = probes::local_provider_executor_resolution_checks(
+        &[provider],
+        Some("test"),
+        Some("test.node.provider"),
+    );
+
+    assert_eq!(checks.len(), 1);
+    let check = &checks[0];
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
+    assert!(check.id.contains("test.node.provider"));
+    assert!(check.message.contains("could not load"));
+    assert!(check.details.get("detail").is_some_and(
+        |detail| detail.contains("MODULE_NOT_FOUND") || detail.contains("Cannot find module")
+    ));
+}
+
+#[test]
+fn local_provider_executor_resolution_check_filters_to_selected_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let selected_script = dir.path().join("selected-executor.cjs");
+    std::fs::write(
+        &selected_script,
+        "if (process.argv.includes('--provider-contract')) process.exit(0); process.exit(2);\n",
+    )
+    .expect("write selected script");
+    let other_script = dir.path().join("other-executor.cjs");
+    std::fs::write(&other_script, "require('./missing-package');\n").expect("write other script");
+    let selected = node_provider("selected.provider", "test", &selected_script);
+    let other = node_provider("other.provider", "other", &other_script);
+
+    let checks = probes::local_provider_executor_resolution_checks(
+        &[selected, other],
+        Some("test"),
+        Some("selected.provider"),
+    );
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].status, RunnerDoctorStatus::Ok);
+    assert_eq!(
+        checks[0].details.get("provider_id").map(String::as_str),
+        Some("selected.provider")
+    );
+}
+
+fn node_provider(id: &str, backend: &str, script: &std::path::Path) -> AgentTaskExecutorProvider {
+    serde_json::from_value(json!({
+        "id": id,
+        "backend": backend,
+        "invocation": {
+            "argv": ["node", script.display().to_string()]
+        }
+    }))
+    .expect("provider parses")
 }

@@ -308,8 +308,8 @@ pub mod provider {
         AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
     pub(crate) use super::super::agent_task_provider::{
-        provider_runner_secret_env_for_plan_with_providers,
-        provider_secret_sources_for_plan_with_providers,
+        probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
+        provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
     };
 }
 
