@@ -6,6 +6,7 @@
 - [api](api.md)
 - [bench](bench.md) — performance benchmarks + p95 regression ratchet
 - [cargo](cargo.md) — extension-provided Cargo routing when installed
+- [check](check.md) — unified audit, lint, test, build, and review quality-gate entrypoint
 - [cleanup](cleanup.md) — declared reconstructable artifact cleanup across managed worktrees
 - [component](component.md)
 - [config](config.md)
