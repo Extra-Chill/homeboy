@@ -348,7 +348,6 @@ fn unsupported_raw_command(message: &'static str) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::CommandDispatchFamily;
     use crate::commands::agent_task::{
         AgentTaskArgs, AgentTaskCommand, AgentTaskControllerArgs, AgentTaskControllerCommand,
         AgentTaskControllerDispatchArgs, AgentTaskControllerRunFromSpecArgs, StatusArgs,
@@ -527,15 +526,22 @@ mod tests {
 
     #[test]
     fn json_dispatch_family_comes_from_command_registry() {
-        assert_eq!(
-            dispatch_family(&Commands::Contract(
-                crate::commands::contract::ContractArgs {
-                    command: crate::commands::contract::ContractCommand::Manifest(
-                        crate::commands::manifest::ManifestArgs {},
-                    ),
-                }
-            )),
-            CommandDispatchFamily::Workspace
-        );
+        use clap::Parser;
+
+        for spec in crate::command_contract::COMMAND_SPECS {
+            let Some(argv) = spec.representative_argv else {
+                continue;
+            };
+            let cli = crate::cli_surface::Cli::try_parse_from(argv)
+                .unwrap_or_else(|error| panic!("failed to parse `{}`: {error}", spec.name));
+
+            assert_eq!(cli.command.top_level_name(), spec.name);
+            assert_eq!(
+                dispatch_family(&cli.command),
+                spec.dispatch_family(),
+                "JSON dispatch family drifted for `{}`",
+                spec.name
+            );
+        }
     }
 }

@@ -215,42 +215,13 @@ impl Commands {
             ),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
-            Commands::Refactor(_) => registered_json_envelope_descriptor(self, output_file_mode),
-            Commands::Release(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
-            Commands::Activity(_)
-            | Commands::AgentTask(_)
-            | Commands::Project(_)
-            | Commands::Component(_)
-            | Commands::Config(_)
-            | Commands::Extension(_)
-            | Commands::Cleanup(_)
-            | Commands::Report(_)
-            | Commands::Runner(_)
-            | Commands::Runtime(_)
-            | Commands::Worktree(_)
-            | Commands::Tunnel(_)
-            | Commands::Stack(_) => registered_json_envelope_descriptor(self, output_file_mode),
-            Commands::Rig(_) => registered_json_envelope_descriptor(self, output_file_mode),
-            Commands::Status(_)
-            | Commands::Server(_)
-            | Commands::Db(_)
-            | Commands::Deps(_)
-            | Commands::File(_)
-            | Commands::Logs(_)
-            | Commands::Deploy(_)
-            | Commands::Daemon(_)
-            | Commands::Git(_)
-            | Commands::SelfCmd(_)
-            | Commands::Api(_)
-            | Commands::Upgrade(_)
-            | Commands::Ssh(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Fleet(_) | Commands::Observe(_) | Commands::Contract(_) => {
                 unreachable!("adapter-backed command descriptor returned before legacy routing")
             }
-            Commands::Triage(_) => registered_json_envelope_descriptor(self, output_file_mode),
+            _ => registered_json_envelope_descriptor(self, output_file_mode),
         }
     }
 
@@ -319,4 +290,30 @@ fn registered_json_envelope_descriptor(
     registered_command(command.top_level_name())
         .expect("top-level command should be registered")
         .output_descriptor(output_file_mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn representative_default_output_descriptors_come_from_command_registry() {
+        for spec in crate::command_contract::COMMAND_SPECS {
+            let Some(argv) = spec.representative_argv else {
+                continue;
+            };
+            let cli = Cli::try_parse_from(argv)
+                .unwrap_or_else(|error| panic!("failed to parse `{}`: {error}", spec.name));
+
+            assert_eq!(cli.command.top_level_name(), spec.name);
+            assert_eq!(
+                cli.command.output_descriptor(false),
+                spec.output_descriptor(CommandOutputFileMode::None),
+                "default output descriptor drifted for `{}`",
+                spec.name
+            );
+        }
+    }
 }
