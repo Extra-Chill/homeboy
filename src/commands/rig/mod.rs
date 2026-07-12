@@ -421,7 +421,7 @@ fn release_lock(rig_id: &str, force: bool) -> CmdResult<RigCommandOutput> {
     Ok((
         RigCommandOutput::ReleaseLock(RigReleaseLockOutput {
             command: "rig.release_lock",
-            outcome,
+            report: outcome,
         }),
         0,
     ))

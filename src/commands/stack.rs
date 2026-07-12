@@ -11,7 +11,7 @@ use homeboy::core::stack::{
     StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
-use super::CmdResult;
+use super::{CmdResult, CommandReport};
 
 #[derive(Args)]
 pub struct StackArgs {
@@ -189,54 +189,13 @@ pub struct StackMutationOutput {
     pub stack: StackSpec,
 }
 
-#[derive(Serialize)]
-pub struct StackApplyOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: ApplyOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackRebaseOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: RebaseOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackStatusOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: StatusOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackSyncOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: SyncOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackPushOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: PushOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackDiffOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: DiffOutput,
-}
-
-#[derive(Serialize)]
-pub struct StackInspectOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: InspectOutput,
-}
+pub type StackApplyOutput = CommandReport<ApplyOutput>;
+pub type StackRebaseOutput = CommandReport<RebaseOutput>;
+pub type StackStatusOutput = CommandReport<StatusOutput>;
+pub type StackSyncOutput = CommandReport<SyncOutput>;
+pub type StackPushOutput = CommandReport<PushOutput>;
+pub type StackDiffOutput = CommandReport<DiffOutput>;
+pub type StackInspectOutput = CommandReport<InspectOutput>;
 
 pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackCommandOutput> {
     match args.command {

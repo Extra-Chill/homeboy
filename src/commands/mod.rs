@@ -1,8 +1,17 @@
 use base64::Engine;
 use clap::Args;
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
+
+/// Common JSON envelope for commands whose report is flattened into the root object.
+#[derive(Debug, Serialize)]
+pub struct CommandReport<T> {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: T,
+}
 
 pub(crate) use crate::core::markdown::escape_markdown_table_cell;
 
@@ -274,6 +283,47 @@ pub(crate) use infra::summary_json;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[derive(Serialize)]
+    struct SnapshotReport {
+        status: &'static str,
+        count: u8,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyCommandReport<T> {
+        command: &'static str,
+        #[serde(flatten)]
+        report: T,
+    }
+
+    #[test]
+    fn command_report_matches_legacy_envelope_snapshot() {
+        let output = CommandReport {
+            command: "stack.status",
+            report: SnapshotReport {
+                status: "clean",
+                count: 2,
+            },
+        };
+        let legacy_output = LegacyCommandReport {
+            command: "stack.status",
+            report: SnapshotReport {
+                status: "clean",
+                count: 2,
+            },
+        };
+
+        let serialized = serde_json::to_string(&output).expect("serialize command report");
+        assert_eq!(
+            serialized,
+            serde_json::to_string(&legacy_output).expect("serialize legacy command report")
+        );
+        assert_eq!(
+            serialized,
+            r#"{"command":"stack.status","status":"clean","count":2}"#
+        );
+    }
 
     #[test]
     fn merge_dynamic_args_accepts_explicit_json() {
