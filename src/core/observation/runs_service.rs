@@ -220,7 +220,7 @@ mod run_lookup {
             .collect()
     }
 
-    fn run_matches_label(run: &RunRecord, label: &str) -> bool {
+    pub(super) fn run_matches_label(run: &RunRecord, label: &str) -> bool {
         if run.id == label {
             return true;
         }
@@ -834,52 +834,8 @@ mod artifact_resolve {
     /// known metadata pointer (lab label / proof provenance) equals the label.
     pub fn match_run_label(runs: &[RunRecord], label: &str) -> Option<RunRecord> {
         runs.iter()
-            .find(|run| run_matches_label(run, label))
+            .find(|run| super::run_lookup::run_matches_label(run, label))
             .cloned()
-    }
-
-    fn run_matches_label(run: &RunRecord, label: &str) -> bool {
-        if run.id == label {
-            return true;
-        }
-        if let Some(command) = run.command.as_deref() {
-            if command_run_id_label(command) == Some(label) {
-                return true;
-            }
-        }
-        for pointer in [
-            "/requested_run_id",
-            "/lab/run_label",
-            "/lab/explicit_run_id",
-            "/lab/requested_run_id",
-            "/lab/mirror_run_id",
-            "/proof/provenance/run_id",
-            "/caller_run_id",
-            "/mirror_run_id",
-            "/persisted_run_id",
-            "/run_id",
-        ] {
-            if run.metadata_json.pointer(pointer).and_then(Value::as_str) == Some(label) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Parse the `--run-id <value>` proof label out of a command string.
-    fn command_run_id_label(command: &str) -> Option<&str> {
-        let mut expect_value = false;
-        for token in command.split_whitespace() {
-            if expect_value {
-                return (!token.is_empty()).then_some(token);
-            }
-            if token == "--run-id" {
-                expect_value = true;
-            } else if let Some(value) = token.strip_prefix("--run-id=") {
-                return (!value.is_empty()).then_some(value);
-            }
-        }
-        None
     }
 }
 pub use artifact_resolve::*;
@@ -1620,46 +1576,85 @@ mod tests {
 
     #[test]
     fn match_run_label_resolves_label_from_command_id_and_metadata() {
-        let by_command = labeled_run(
-            "8752006e-uuid",
-            "homeboy bench run homeboy --run-id my-matrix-run",
-            Value::Null,
-        );
-        let by_command_eq = labeled_run(
-            "uuid-2",
-            "homeboy bench run homeboy --run-id=eq-label",
-            Value::Null,
-        );
-        let by_metadata = labeled_run(
-            "uuid-3",
-            "homeboy bench run homeboy",
-            serde_json::json!({ "lab": { "run_label": "meta-label" } }),
-        );
-        let runs = vec![
-            by_command.clone(),
-            by_command_eq.clone(),
-            by_metadata.clone(),
+        let cases = [
+            ("persisted-id", "", serde_json::json!(null)),
+            (
+                "command-label",
+                "--run-id command-label",
+                serde_json::json!(null),
+            ),
+            (
+                "command-equals-label",
+                "--run-id=command-equals-label",
+                serde_json::json!(null),
+            ),
+            (
+                "requested",
+                "",
+                serde_json::json!({ "requested_run_id": "requested" }),
+            ),
+            (
+                "lab-label",
+                "",
+                serde_json::json!({ "lab": { "run_label": "lab-label" } }),
+            ),
+            (
+                "lab-explicit",
+                "",
+                serde_json::json!({ "lab": { "explicit_run_id": "lab-explicit" } }),
+            ),
+            (
+                "lab-requested",
+                "",
+                serde_json::json!({ "lab": { "requested_run_id": "lab-requested" } }),
+            ),
+            (
+                "lab-mirror",
+                "",
+                serde_json::json!({ "lab": { "mirror_run_id": "lab-mirror" } }),
+            ),
+            (
+                "proof",
+                "",
+                serde_json::json!({ "proof": { "provenance": { "run_id": "proof" } } }),
+            ),
+            (
+                "caller",
+                "",
+                serde_json::json!({ "caller_run_id": "caller" }),
+            ),
+            (
+                "mirror",
+                "",
+                serde_json::json!({ "mirror_run_id": "mirror" }),
+            ),
+            (
+                "persisted",
+                "",
+                serde_json::json!({ "persisted_run_id": "persisted" }),
+            ),
+            ("run", "", serde_json::json!({ "run_id": "run" })),
         ];
+        let runs = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (label, command, metadata))| {
+                let id = if index == 0 {
+                    (*label).to_string()
+                } else {
+                    format!("uuid-{index}")
+                };
+                labeled_run(&id, command, metadata.clone())
+            })
+            .collect::<Vec<_>>();
 
-        // Human label carried in the command resolves to its observation UUID.
-        assert_eq!(
-            match_run_label(&runs, "my-matrix-run").map(|run| run.id),
-            Some("8752006e-uuid".to_string())
-        );
-        assert_eq!(
-            match_run_label(&runs, "eq-label").map(|run| run.id),
-            Some("uuid-2".to_string())
-        );
-        assert_eq!(
-            match_run_label(&runs, "meta-label").map(|run| run.id),
-            Some("uuid-3".to_string())
-        );
-
-        // The observation UUID itself still resolves (back-compat).
-        assert_eq!(
-            match_run_label(&runs, "8752006e-uuid").map(|run| run.id),
-            Some("8752006e-uuid".to_string())
-        );
+        for (index, (label, _, _)) in cases.iter().enumerate() {
+            assert_eq!(
+                match_run_label(&runs, label).map(|run| run.id),
+                Some(runs[index].id.clone()),
+                "label source `{label}` should resolve"
+            );
+        }
 
         // An unknown label matches nothing.
         assert!(match_run_label(&runs, "nope").is_none());
