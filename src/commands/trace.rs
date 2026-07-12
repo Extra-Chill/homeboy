@@ -885,7 +885,7 @@ fn rig_owned_trace_workload_expansion_warnings(
         id,
     )
     .into_iter()
-    .filter(|expansion| !path_is_under(&expansion.expanded_path, root))
+    .filter(|expansion| !homeboy::core::local_path_is_contained(root, &expansion.expanded_path))
     .map(|expansion| {
         let freshness = if expansion.expanded_path.is_file() {
             " If this is stale, refresh/reinstall the rig package or sync edits to the executed path before rerunning."
@@ -901,12 +901,6 @@ fn rig_owned_trace_workload_expansion_warnings(
         )
     })
     .collect()
-}
-
-fn path_is_under(path: &Path, root: &Path) -> bool {
-    let normalized_path = path.components().collect::<PathBuf>();
-    let normalized_root = root.components().collect::<PathBuf>();
-    normalized_path == normalized_root || normalized_path.starts_with(normalized_root)
 }
 
 #[derive(Clone)]
