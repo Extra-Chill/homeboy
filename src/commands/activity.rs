@@ -218,7 +218,7 @@ fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
             "activity {}: {:?} (poll {})",
             args.id, item.state, poll_count
         );
-        if !item.state.is_active() {
+        if !activity::is_active(item.state) {
             return Ok(watch_output(
                 args,
                 item,
@@ -258,7 +258,7 @@ fn watch_output(
     let notify = maybe_notify(&args, &item, timed_out);
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
-    } else if item.state.is_failure() {
+    } else if activity::is_failure(item.state) {
         1
     } else {
         0

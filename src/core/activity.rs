@@ -4,9 +4,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::agent_task_lifecycle::{self, AgentTaskRunRecord, AgentTaskRunState};
-use crate::core::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent, JobStatus};
+use crate::core::agent_task_lifecycle::{self, AgentTaskRunRecord};
+use crate::core::api_jobs::{self, ActiveRunnerJobSummary, Job, JobEvent};
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
+use crate::core::run_lifecycle_record::RunExecutionState;
+use crate::core::run_lifecycle_status::RunLifecycleStatus;
 use crate::core::{paths, runners, Error, Result};
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
@@ -17,31 +19,14 @@ pub enum ActivityScope {
     All,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityState {
-    Queued,
-    Running,
-    Succeeded,
-    PartialFailure,
-    Failed,
-    Cancelled,
-    TimedOut,
-    Stale,
-    Unknown,
+pub type ActivityState = RunLifecycleStatus;
+
+pub fn is_active(state: ActivityState) -> bool {
+    matches!(state, ActivityState::Queued | ActivityState::Running)
 }
 
-impl ActivityState {
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
-    }
-
-    pub fn is_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::PartialFailure | Self::Failed | Self::TimedOut | Self::Stale | Self::Unknown
-        )
-    }
+pub fn is_failure(state: ActivityState) -> bool {
+    !is_active(state) && !matches!(state, ActivityState::Succeeded | ActivityState::Cancelled)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -203,7 +188,7 @@ fn counts_for_items(items: &[ActivityItem]) -> ActivityCounts {
         ..Default::default()
     };
     for item in items {
-        if item.state.is_active() {
+        if is_active(item.state) {
             counts.active += 1;
         }
         match item.state {
@@ -239,7 +224,7 @@ impl ActivityCollector {
         let mut items = self.items.into_values().collect::<Vec<_>>();
         items.sort_by(|left, right| item_sort_key(right).cmp(&item_sort_key(left)));
         if scope == ActivityScope::ActiveRecent {
-            items.retain(|item| item.state.is_active() || item.finished_at.is_some());
+            items.retain(|item| is_active(item.state) || item.finished_at.is_some());
         }
         items.truncate(limit.max(1));
         items
@@ -278,8 +263,8 @@ fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.runner.transport.is_none() {
         existing.runner.transport = incoming.runner.transport.clone();
     }
-    if incoming.state.is_active()
-        || (!existing.state.is_active() && incoming.updated_at > existing.updated_at)
+    if is_active(incoming.state)
+        || (!is_active(existing.state) && incoming.updated_at > existing.updated_at)
     {
         existing.state = incoming.state.clone();
     }
@@ -309,7 +294,7 @@ fn append_actions(target: &mut Vec<ActivityNextAction>, incoming: &[ActivityNext
 
 fn item_sort_key(item: &ActivityItem) -> (bool, Option<DateTime<Utc>>, String) {
     (
-        item.state.is_active(),
+        is_active(item.state),
         item.updated_at
             .as_deref()
             .or(Some(item.created_at.as_str()))
@@ -336,6 +321,12 @@ fn action(label: impl Into<String>, command: impl Into<String>) -> ActivityNextA
         label: label.into(),
         command: command.into(),
     }
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339()
 }
 
 mod observation {
@@ -397,7 +388,7 @@ mod observation {
         })
     }
 
-    fn state_from_run_status(status: &str) -> ActivityState {
+    pub(super) fn state_from_run_status(status: &str) -> ActivityState {
         match RunStatus::from_label(status) {
             Some(RunStatus::Running) => ActivityState::Running,
             Some(RunStatus::Pass | RunStatus::Skipped) => ActivityState::Succeeded,
@@ -409,7 +400,7 @@ mod observation {
 
     fn actions_for_observation_run(run_id: &str, state: ActivityState) -> Vec<ActivityNextAction> {
         let mut actions = vec![action("show run", format!("homeboy runs show {run_id}"))];
-        if state.is_active() {
+        if is_active(state) {
             actions.push(action(
                 "watch run",
                 format!("homeboy activity watch {run_id}"),
@@ -443,15 +434,15 @@ mod agent_tasks {
         let runner_id = metadata_string(&record.metadata, &["runner_id"]);
         let job_id = metadata_string(&record.metadata, &["runner_job_id", "job_id"]);
         let remote_run_id = metadata_string(&record.metadata, &["remote_run_id"]);
-        let state = state_from_agent_task(record.state);
+        let state = ActivityState::from(RunExecutionState::from(record.state));
         ActivityItem {
             id: record.run_id.clone(),
             kind: "agent-task".to_string(),
             source_store: "agent-task.lifecycle".to_string(),
-            state: state.clone(),
+            state,
             created_at: record.submitted_at.clone(),
             updated_at: record.updated_at.clone(),
-            finished_at: if state.is_active() {
+            finished_at: if is_active(state) {
                 None
             } else {
                 record.updated_at.clone()
@@ -494,17 +485,6 @@ mod agent_tasks {
         }
     }
 
-    fn state_from_agent_task(state: AgentTaskRunState) -> ActivityState {
-        match state {
-            AgentTaskRunState::Queued => ActivityState::Queued,
-            AgentTaskRunState::Running => ActivityState::Running,
-            AgentTaskRunState::Succeeded => ActivityState::Succeeded,
-            AgentTaskRunState::PartialFailure => ActivityState::PartialFailure,
-            AgentTaskRunState::Failed => ActivityState::Failed,
-            AgentTaskRunState::Cancelled => ActivityState::Cancelled,
-        }
-    }
-
     fn actions_for_agent_task(run_id: &str, state: ActivityState) -> Vec<ActivityNextAction> {
         let mut actions = vec![
             action("status", format!("homeboy agent-task status {run_id}")),
@@ -514,9 +494,9 @@ mod agent_tasks {
                 format!("homeboy agent-task artifacts {run_id}"),
             ),
         ];
-        if state.is_active() {
+        if is_active(state) {
             actions.push(action("watch", format!("homeboy activity watch {run_id}")));
-        } else if state.is_failure() {
+        } else if is_failure(state) {
             actions.push(action(
                 "retry",
                 format!("homeboy agent-task retry --run {run_id}"),
@@ -545,14 +525,14 @@ mod daemon_jobs {
     }
 
     pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<ActivityItem> {
-        let state = state_from_job(job.status);
+        let state = ActivityState::from(job.status);
         let job_id = job.id.to_string();
         let (durable_run_id, agent_task_run_id) = job_run_refs(store, &job);
         Ok(ActivityItem {
             id: job_id.clone(),
             kind: job.operation.clone(),
             source_store: "daemon.jobs-json".to_string(),
-            state: state.clone(),
+            state,
             created_at: ms_to_rfc3339(job.created_at_ms),
             updated_at: Some(ms_to_rfc3339(job.updated_at_ms)),
             finished_at: job.finished_at_ms.map(ms_to_rfc3339),
@@ -607,17 +587,7 @@ mod daemon_jobs {
             .map(str::to_string)
     }
 
-    fn state_from_job(status: JobStatus) -> ActivityState {
-        match status {
-            JobStatus::Queued => ActivityState::Queued,
-            JobStatus::Running => ActivityState::Running,
-            JobStatus::Succeeded => ActivityState::Succeeded,
-            JobStatus::Failed => ActivityState::Failed,
-            JobStatus::Cancelled => ActivityState::Cancelled,
-        }
-    }
-
-    fn actions_for_job(
+    pub(super) fn actions_for_job(
         runner_id: Option<&str>,
         job_id: &str,
         state: ActivityState,
@@ -628,7 +598,7 @@ mod daemon_jobs {
                 "logs",
                 format!("homeboy runner job logs {runner_id} {job_id}"),
             ));
-            if state.is_active() {
+            if is_active(state) {
                 actions.push(action(
                     "follow logs",
                     format!("homeboy runner job logs {runner_id} {job_id} --follow"),
@@ -638,12 +608,6 @@ mod daemon_jobs {
             actions.push(action("daemon status", "homeboy daemon status"));
         }
         actions
-    }
-
-    fn ms_to_rfc3339(ms: u64) -> String {
-        DateTime::<Utc>::from_timestamp_millis(ms as i64)
-            .unwrap_or_else(Utc::now)
-            .to_rfc3339()
     }
 }
 
@@ -666,7 +630,7 @@ mod runner_sessions {
         let state = if job.stale_reason.is_some() {
             ActivityState::Stale
         } else {
-            state_from_job(job.status)
+            ActivityState::from(job.status)
         };
         ActivityItem {
             id: job
@@ -675,7 +639,7 @@ mod runner_sessions {
                 .unwrap_or_else(|| job.job_id.clone()),
             kind: job.kind.clone(),
             source_store: "runner.session".to_string(),
-            state: state.clone(),
+            state,
             created_at: ms_to_rfc3339(job.started_at_ms),
             updated_at: Some(ms_to_rfc3339(job.updated_at_ms)),
             finished_at: None,
@@ -697,33 +661,16 @@ mod runner_sessions {
         }
     }
 
-    fn state_from_job(status: JobStatus) -> ActivityState {
-        match status {
-            JobStatus::Queued => ActivityState::Queued,
-            JobStatus::Running => ActivityState::Running,
-            JobStatus::Succeeded => ActivityState::Succeeded,
-            JobStatus::Failed => ActivityState::Failed,
-            JobStatus::Cancelled => ActivityState::Cancelled,
-        }
-    }
-
     fn actions_for_runner_job(
         runner_id: &str,
         job_id: &str,
         state: ActivityState,
     ) -> Vec<ActivityNextAction> {
-        let mut actions = vec![action(
-            "logs",
-            format!("homeboy runner job logs {runner_id} {job_id}"),
-        )];
-        if state.is_active() {
-            actions.push(action(
-                "follow logs",
-                format!("homeboy runner job logs {runner_id} {job_id} --follow"),
-            ));
+        let mut actions = daemon_jobs::actions_for_job(Some(runner_id), job_id, state);
+        if is_active(state) {
             actions.push(action("watch", format!("homeboy activity watch {job_id}")));
         }
-        if state.is_failure() {
+        if is_failure(state) {
             actions.push(action(
                 "reconcile",
                 format!("homeboy runner job logs {runner_id} {job_id}"),
@@ -731,17 +678,12 @@ mod runner_sessions {
         }
         actions
     }
-
-    fn ms_to_rfc3339(ms: u64) -> String {
-        DateTime::<Utc>::from_timestamp_millis(ms as i64)
-            .unwrap_or_else(Utc::now)
-            .to_rfc3339()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::agent_task_lifecycle::AgentTaskRunState;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
         ActivityItem {
@@ -808,6 +750,38 @@ mod tests {
         assert_eq!(counts.queued, 1);
         assert_eq!(counts.running, 1);
         assert_eq!(counts.stale, 1);
+    }
+
+    #[test]
+    fn observation_status_projection_preserves_every_label_and_unknown_values() {
+        for case in "running:running,pass:succeeded,skipped:succeeded,fail:failed,error:failed,stale:stale,:unknown,future_status:unknown".split(',') {
+            let (status, expected) = case.split_once(':').expect("status case");
+            assert_eq!(serde_json::to_value(observation::state_from_run_status(status)).unwrap(), expected, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn agent_task_status_projection_preserves_every_state() {
+        for label in "queued,running,succeeded,partial_failure,failed,cancelled".split(',') {
+            let state: AgentTaskRunState = serde_json::from_value(label.into()).unwrap();
+            let expected: ActivityState = serde_json::from_value(label.into()).unwrap();
+            assert_eq!(
+                ActivityState::from(RunExecutionState::from(state)),
+                expected,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_policy_preserves_active_and_failure_sets() {
+        for case in "unknown:01,queued:10,running:10,succeeded:00,partial_failure:01,failed:01,cancelled:00,timed_out:01,stale:01".split(',') {
+            let (label, flags) = case.split_once(':').expect("policy case");
+            let state: ActivityState = serde_json::from_value(label.into()).unwrap();
+            let (active, failure) = (flags.starts_with('1'), flags.ends_with('1'));
+            assert_eq!(is_active(state), active, "{state:?} active");
+            assert_eq!(is_failure(state), failure, "{state:?} failure");
+        }
     }
 
     #[test]

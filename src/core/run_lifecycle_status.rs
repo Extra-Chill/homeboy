@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::api_jobs::JobStatus;
 use crate::core::run_lifecycle_record::RunExecutionState;
 
 pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
@@ -55,6 +56,18 @@ impl From<RunExecutionState> for RunLifecycleStatus {
     }
 }
 
+impl From<JobStatus> for RunLifecycleStatus {
+    fn from(status: JobStatus) -> Self {
+        match status {
+            JobStatus::Queued => Self::Queued,
+            JobStatus::Running => Self::Running,
+            JobStatus::Succeeded => Self::Succeeded,
+            JobStatus::Failed => Self::Failed,
+            JobStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,14 +101,17 @@ mod tests {
     }
 
     #[test]
-    fn execution_state_projects_to_canonical_status() {
-        assert_eq!(
-            RunLifecycleStatus::from(RunExecutionState::Running),
-            RunLifecycleStatus::Running
-        );
-        assert_eq!(
-            RunLifecycleStatus::from(RunExecutionState::Failed),
-            RunLifecycleStatus::Failed
-        );
+    fn source_states_project_to_canonical_status() {
+        for label in "unknown,queued,running,succeeded,partial_failure,failed,cancelled".split(',')
+        {
+            let source: RunExecutionState = serde_json::from_value(label.into()).unwrap();
+            let expected: RunLifecycleStatus = serde_json::from_value(label.into()).unwrap();
+            assert_eq!(RunLifecycleStatus::from(source), expected, "{source:?}");
+        }
+        for label in "queued,running,succeeded,failed,cancelled".split(',') {
+            let source: JobStatus = serde_json::from_value(label.into()).unwrap();
+            let expected: RunLifecycleStatus = serde_json::from_value(label.into()).unwrap();
+            assert_eq!(RunLifecycleStatus::from(source), expected, "{source:?}");
+        }
     }
 }
