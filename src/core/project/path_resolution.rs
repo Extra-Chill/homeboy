@@ -56,6 +56,10 @@ fn resolve_with_path_roots(
     base_path_value: &str,
     path: &str,
 ) -> crate::core::error::Result<Option<String>> {
+    if project.path_roots.is_empty() {
+        return Ok(None);
+    }
+
     for rule in project_remote_path_root_rules(project) {
         if !path_matches_prefix(path, &rule.path_prefix) {
             continue;
@@ -97,11 +101,19 @@ fn project_remote_path_root_rules(project: &Project) -> Vec<RemotePathRootRule> 
         extension_ids.extend(extensions.keys().cloned());
     }
 
-    // Attached components only carry IDs at the project layer; load each to read
-    // the extensions declared in its repo-owned metadata. Failures are
-    // non-fatal — a missing component must not break file path resolution.
+    // Build the inventory once. component::load() rebuilds the full inventory,
+    // so calling it for every attachment makes file operations scale as
+    // attachments × workspace size.
+    let components: HashMap<_, _> = component::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|component| (component.id.clone(), component))
+        .collect();
+
+    // Attached components only carry IDs at the project layer. Missing
+    // components remain non-fatal for ad-hoc file path resolution.
     for attachment in &project.components {
-        if let Ok(loaded) = component::load(&attachment.id) {
+        if let Some(loaded) = components.get(&attachment.id) {
             if let Some(extensions) = &loaded.extensions {
                 extension_ids.extend(extensions.keys().cloned());
             }
