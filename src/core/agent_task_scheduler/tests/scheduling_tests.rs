@@ -341,6 +341,7 @@ mod provider_rotation_tests {
         AgentTaskProviderRotationPolicy {
             entries,
             max_attempts: None,
+            ..AgentTaskProviderRotationPolicy::default()
         }
     }
 
@@ -429,10 +430,30 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn primary_success_does_not_rotate() {
+        let executor = RotationScriptedExecutor::new(vec![success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation")
+            .is_none());
+    }
+
+    #[test]
     fn rotates_on_transient_and_timeout_classifications() {
         for classification in [
             AgentTaskFailureClassification::Transient,
             AgentTaskFailureClassification::Timeout,
+            AgentTaskFailureClassification::Stalled,
+            AgentTaskFailureClassification::RateLimited,
         ] {
             let status = if classification == AgentTaskFailureClassification::Timeout {
                 AgentTaskOutcomeStatus::Timeout
@@ -546,6 +567,7 @@ mod provider_rotation_tests {
                 entry("fallback-backend-c"),
             ],
             max_attempts: Some(2),
+            ..AgentTaskProviderRotationPolicy::default()
         });
 
         let aggregate = scheduler.run(plan);

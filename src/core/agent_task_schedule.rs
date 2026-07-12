@@ -530,11 +530,6 @@ mod config {
         /// the wall-clock `timeout_ms` / `max_runtime_ms` limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub liveness_timeout_ms: Option<u64>,
-        /// Upper bound for explicit rate-limit backoff hints (e.g. HTTP
-        /// `Retry-After`). Prevents a misbehaving backend from delaying the
-        /// rotation chain indefinitely.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub max_backoff_ms: Option<u64>,
     }
 
     impl AgentTaskProviderRotationPolicy {

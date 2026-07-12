@@ -930,6 +930,7 @@ mod tests {
                         },
                     ],
                     max_attempts: Some(2),
+                    ..Default::default()
                 },
             );
             defaults::save_config(&config).expect("save config");

@@ -48,6 +48,7 @@ fn request_round_trips_generic_agent_task_shape() {
         limits: AgentTaskLimits {
             timeout_ms: Some(300_000),
             max_runtime_ms: Some(240_000),
+            liveness_timeout_ms: None,
             max_output_bytes: Some(1_000_000),
         },
         expected_artifacts: vec!["patch".to_string(), "report".to_string()],

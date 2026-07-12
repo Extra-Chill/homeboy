@@ -1056,9 +1056,9 @@ impl AgentTaskScheduleSupport {
     /// Apply one rotation entry onto the re-dispatched request's executor.
     /// Unset entry fields inherit the failing attempt's values; the entry's
     /// `provider_config` object is merged over the executor config, mirroring
-    /// the dispatch provider-config layering. Also copies policy-level
-    /// liveness/backoff limits into the request so the provider runner can
-    /// enforce them per attempt.
+    /// the dispatch provider-config layering. Also copies the policy-level
+    /// liveness limit into the request so the provider runner can enforce it
+    /// per attempt.
     pub(super) fn apply_rotation_entry(
         request: &mut AgentTaskRequest,
         entry: &AgentTaskProviderRotationEntry,
@@ -1107,18 +1107,14 @@ impl AgentTaskScheduleSupport {
         Self::apply_rotation_policy_limits(request, policy);
     }
 
-    /// Copy policy-level liveness/backoff limits into the request when the
-    /// request does not already set them. Keeps per-task or per-entry
-    /// overrides authoritative.
+    /// Copy the policy-level liveness limit into the request when the request
+    /// does not already set it. Keeps a per-task override authoritative.
     pub(super) fn apply_rotation_policy_limits(
         request: &mut AgentTaskRequest,
         policy: &AgentTaskProviderRotationPolicy,
     ) {
         if request.limits.liveness_timeout_ms.is_none() {
             request.limits.liveness_timeout_ms = policy.liveness_timeout_ms;
-        }
-        if request.limits.max_backoff_ms.is_none() {
-            request.limits.max_backoff_ms = policy.max_backoff_ms;
         }
     }
 

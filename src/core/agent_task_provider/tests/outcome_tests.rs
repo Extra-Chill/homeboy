@@ -372,6 +372,30 @@ fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {
 }
 
 #[test]
+fn typed_provider_quota_normalizes_to_rate_limited_and_preserves_retry_hint() {
+    let outcome: AgentTaskOutcome = serde_json::from_value(json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "quota-task",
+        "status": "provider_error",
+        "failure_classification": "provider_quota",
+        "summary": "quota exceeded",
+        "metadata": { "retry_after_ms": 1500 }
+    }))
+    .expect("OpenCode quota outcome is accepted");
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::RateLimited)
+    );
+    assert_eq!(outcome.metadata["retry_after_ms"], json!(1500));
+    assert_eq!(
+        serde_json::to_value(outcome).expect("serialize normalized outcome")
+            ["failure_classification"],
+        json!("rate_limited")
+    );
+}
+
+#[test]
 fn empty_failed_run_result_surfaces_explanatory_diagnostic() {
     // Mirrors the #4105 repro: a failed run-result that is an empty shell.
     let mut outcome = failed_outcome_with_run_result(json!({

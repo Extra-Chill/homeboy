@@ -162,10 +162,6 @@ pub struct AgentTaskLimits {
     /// classified as stalled/rate_limited so rotation can advance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_timeout_ms: Option<u64>,
-    /// Upper bound for explicit rate-limit backoff hints (e.g. HTTP
-    /// `Retry-After`) when retrying a rate-limited attempt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_backoff_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_bytes: Option<u64>,
 }
