@@ -460,19 +460,20 @@ fn remote_provider_executor_resolution_check(
     client: &SshClient,
     provider: &AgentTaskExecutorProvider,
 ) -> RunnerCheck {
-    let Some((program, args, cwd)) =
-        crate::core::agent_task_provider::provider_command_parts(provider)
-    else {
+    let Some(entrypoint) = remote_provider_executor_entrypoint(provider) else {
         return provider_executor_resolution_skipped_check(
             provider,
-            format!("provider '{}' has no resolvable command", provider.id),
+            format!(
+                "provider '{}' has no runtime-relative entrypoint for a runner-local dry-load probe",
+                provider.id
+            ),
         );
     };
 
-    let program_name = Path::new(&program)
+    let program_name = Path::new(entrypoint.program.value())
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or(program.as_str());
+        .unwrap_or(entrypoint.program.value());
     if program_name != "node" && program_name != "nodejs" {
         return provider_executor_resolution_skipped_check(
             provider,
@@ -483,9 +484,8 @@ fn remote_provider_executor_resolution_check(
         );
     }
 
-    let command_display =
-        crate::core::agent_task_provider::render_provider_command_display(provider);
-    let shell_command = provider_executor_resolution_remote_shell(&program, &args, cwd.as_deref());
+    let command_display = entrypoint.display();
+    let shell_command = provider_executor_resolution_remote_shell(&entrypoint);
     let output = client.execute(&shell_command);
     if output.success {
         return provider_executor_resolution_ok_check(provider, Some(command_display));
@@ -507,21 +507,116 @@ fn remote_provider_executor_resolution_check(
     provider_executor_resolution_error_check(provider, command_display, detail)
 }
 
-fn provider_executor_resolution_remote_shell(
-    program: &str,
-    args: &[String],
-    cwd: Option<&Path>,
+/// A provider command represented relative to a named agent runtime. This is
+/// safe to send to a remote runner because the runner expands it below its own
+/// Homeboy runtime materialization root instead of receiving a controller path.
+pub(super) struct RemoteProviderExecutorEntrypoint {
+    pub(super) runtime_id: String,
+    pub(super) program: RemoteProviderExecutorEntrypointPart,
+    pub(super) args: Vec<RemoteProviderExecutorEntrypointPart>,
+    pub(super) cwd: Option<String>,
+}
+
+pub(super) enum RemoteProviderExecutorEntrypointPart {
+    Literal(String),
+    RuntimeRelative(String),
+}
+
+impl RemoteProviderExecutorEntrypointPart {
+    fn value(&self) -> &str {
+        match self {
+            Self::Literal(value) | Self::RuntimeRelative(value) => value,
+        }
+    }
+}
+
+impl RemoteProviderExecutorEntrypoint {
+    pub(super) fn display(&self) -> String {
+        let mut argv = vec![self.part_display(&self.program)];
+        argv.extend(self.args.iter().map(|arg| self.part_display(arg)));
+        argv.join(" ")
+    }
+
+    fn part_display(&self, part: &RemoteProviderExecutorEntrypointPart) -> String {
+        match part {
+            RemoteProviderExecutorEntrypointPart::Literal(value) => value.clone(),
+            RemoteProviderExecutorEntrypointPart::RuntimeRelative(value) => {
+                format!("<runtime:{}>/{}", self.runtime_id, value)
+            }
+        }
+    }
+}
+
+pub(super) fn remote_provider_executor_entrypoint(
+    provider: &AgentTaskExecutorProvider,
+) -> Option<RemoteProviderExecutorEntrypoint> {
+    let runtime_id = provider.runtime_id.as_deref()?.trim();
+    let runtime_root = Path::new(provider.runtime_path.as_deref()?.trim());
+    if runtime_id.is_empty() || runtime_root.as_os_str().is_empty() {
+        return None;
+    }
+    let (program, args, cwd) = crate::core::agent_task_provider::provider_command_parts(provider)?;
+    let program = runtime_relative_entrypoint_part(runtime_root, &program)?;
+    // A bare executable such as `node` is runner-local by definition. Any
+    // absolute invocation value must be rooted in the declared runtime.
+    let args = args
+        .iter()
+        .map(|arg| runtime_relative_entrypoint_part(runtime_root, arg))
+        .collect::<Option<Vec<_>>>()?;
+    let cwd = match cwd.as_deref() {
+        Some(cwd) => Some(runtime_relative_path(runtime_root, &cwd.to_string_lossy())?),
+        None => None,
+    };
+
+    Some(RemoteProviderExecutorEntrypoint {
+        runtime_id: runtime_id.to_string(),
+        program,
+        args,
+        cwd,
+    })
+}
+
+fn runtime_relative_entrypoint_part(
+    runtime_root: &Path,
+    value: &str,
+) -> Option<RemoteProviderExecutorEntrypointPart> {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Some(RemoteProviderExecutorEntrypointPart::Literal(
+            value.to_string(),
+        ));
+    }
+    path.strip_prefix(runtime_root).ok().map(|path| {
+        RemoteProviderExecutorEntrypointPart::RuntimeRelative(path.to_string_lossy().to_string())
+    })
+}
+
+fn runtime_relative_path(runtime_root: &Path, value: &str) -> Option<String> {
+    Path::new(value)
+        .strip_prefix(runtime_root)
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+pub(super) fn provider_executor_resolution_remote_shell(
+    entrypoint: &RemoteProviderExecutorEntrypoint,
 ) -> String {
-    let mut argv = Vec::with_capacity(args.len() + 2);
-    argv.push(common::shell_word(program));
-    argv.extend(args.iter().map(|arg| common::shell_word(arg)));
+    let runtime_root = format!(
+        "runtime_root=\"$HOME/.config/homeboy/agent-runtimes\"/{}",
+        common::shell_word(&entrypoint.runtime_id)
+    );
+    let runner_path = |value: &str| format!("\"$runtime_root\"/{}", common::shell_word(value));
+    let shell_part = |part: &RemoteProviderExecutorEntrypointPart| match part {
+        RemoteProviderExecutorEntrypointPart::Literal(value) => common::shell_word(value),
+        RemoteProviderExecutorEntrypointPart::RuntimeRelative(value) => runner_path(value),
+    };
+    let mut argv = Vec::with_capacity(entrypoint.args.len() + 2);
+    argv.push(shell_part(&entrypoint.program));
+    argv.extend(entrypoint.args.iter().map(shell_part));
     argv.push(common::shell_word("--provider-contract"));
     let invocation = argv.join(" ");
-    let invocation = if let Some(cwd) = cwd {
-        format!(
-            "cd {} && {invocation}",
-            common::shell_word(&cwd.to_string_lossy())
-        )
+    let invocation = if let Some(cwd) = &entrypoint.cwd {
+        format!("cd {} && {invocation}", runner_path(cwd))
     } else {
         invocation
     };
@@ -529,7 +624,7 @@ fn provider_executor_resolution_remote_shell(
     // Keep the remote SSH command bounded even if an executor ignores the
     // dry-load flag and waits for input. Stdin is closed and stderr is captured.
     format!(
-        "tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (sleep 20; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
+        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (sleep 20; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
     )
 }
 
