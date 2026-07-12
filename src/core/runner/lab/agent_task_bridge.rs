@@ -11,11 +11,12 @@
 use std::fs;
 
 use crate::command_contract::{
-    RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    AgentTaskDispatchIdentity, RunnerWorkloadAgentTask,
+    RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 };
 use crate::core::agent_task::AgentTaskEvidenceRef;
 use crate::core::agent_task_lifecycle::{
-    AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
+    record_runner_job_identity, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
 };
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::core::agent_tasks::provider::{
@@ -158,6 +159,7 @@ fn mirror_typed_agent_task_run_plan_lifecycle(
         &agent_task.run_id,
         event.aggregate,
         notification_route,
+        Some(&event.identity),
     )
 }
 
@@ -176,11 +178,21 @@ fn mirror_legacy_agent_task_run_plan_lifecycle(
     }
     // Legacy runner compatibility: only pre-typed runner workloads reach this
     // branch, so argv/stdout recovery is intentionally centralized here.
-    let aggregate = match agent_task_run_plan_lifecycle_event_from_job_events(job_events) {
-        Some(event) => event.aggregate,
-        None => legacy_agent_task_run_plan_aggregate(stdout, output_file_content)?,
-    };
-    mirror_agent_task_run_plan_aggregate(&plan_spec, &run_id, aggregate, notification_route)
+    let (aggregate, dispatch_identity) =
+        match agent_task_run_plan_lifecycle_event_from_job_events(job_events) {
+            Some(event) => (event.aggregate, Some(event.identity)),
+            None => (
+                legacy_agent_task_run_plan_aggregate(stdout, output_file_content)?,
+                None,
+            ),
+        };
+    mirror_agent_task_run_plan_aggregate(
+        &plan_spec,
+        &run_id,
+        aggregate,
+        notification_route,
+        dispatch_identity.as_ref(),
+    )
 }
 
 fn legacy_agent_task_run_plan_aggregate(
@@ -214,6 +226,7 @@ fn mirror_agent_task_run_plan_aggregate(
     run_id: &str,
     aggregate: AgentTaskAggregate,
     notification_route: Option<&NotificationRoute>,
+    dispatch_identity: Option<&AgentTaskDispatchIdentity>,
 ) -> Result<()> {
     let raw_plan = config::read_json_spec_to_string(plan_spec)?;
     let plan: AgentTaskPlan = serde_json::from_str(&raw_plan).map_err(|error| {
@@ -228,6 +241,11 @@ fn mirror_agent_task_run_plan_aggregate(
     }
     agent_task_lifecycle::mark_running(run_id)?;
     agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
+    if let Some(identity) = dispatch_identity.filter(|identity| {
+        !identity.runner_id.trim().is_empty() && !identity.runner_job_id.trim().is_empty()
+    }) {
+        record_runner_job_identity(run_id, &identity.runner_id, &identity.runner_job_id)?;
+    }
     Ok(())
 }
 
@@ -1032,6 +1050,100 @@ mod tests {
                 Some(&events),
             )
             .expect("typed mirror uses job event");
+        });
+    }
+
+    #[test]
+    fn typed_run_plan_lifecycle_preserves_completed_noop_and_remote_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let plan_path = temp.path().join("plan.json");
+            fs::write(
+                &plan_path,
+                r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-noop","tasks":[]}"#,
+            )
+            .expect("write plan");
+            let agent_task = RunnerWorkloadAgentTask {
+                run_id: "run-completed-noop".to_string(),
+                plan_ref: Some(format!("@{}", plan_path.display())),
+                resolved_provider_policy: None,
+                dispatch_kind:
+                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                lifecycle_mirror_policy:
+                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            };
+            let events = vec![JobEvent {
+                sequence: 1,
+                job_id: uuid::Uuid::nil(),
+                kind: JobEventKind::Result,
+                timestamp_ms: 1,
+                message: None,
+                data: Some(serde_json::json!({
+                    "agent_task_lifecycle_event": {
+                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                        "identity": {
+                            "runner_id": "lab-default",
+                            "runner_job_id": "job-completed-noop",
+                            "run_id": "run-completed-noop"
+                        },
+                        "aggregate": {
+                            "schema": "homeboy/agent-task-aggregate/v1",
+                            "plan_id": "plan-noop",
+                            "status": "succeeded",
+                            "totals": {"skipped": 0, "succeeded": 1, "failed": 0},
+                            "outcomes": [{
+                                "schema": "homeboy/agent-task-outcome/v1",
+                                "task_id": "cook",
+                                "status": "no_op",
+                                "summary": "no_changes",
+                                "artifacts": [],
+                                "typed_artifacts": [],
+                                "evidence_refs": [],
+                                "diagnostics": [],
+                                "outputs": null,
+                                "metadata": {"child_run_id": "attempt-noop-1"}
+                            }],
+                            "child_runs": [{
+                                "task_id": "cook",
+                                "run_id": "attempt-noop-1",
+                                "state": "succeeded",
+                                "metadata": {}
+                            }]
+                        }
+                    }
+                })),
+            }];
+
+            mirror_agent_task_run_plan_lifecycle(
+                &[],
+                Some(&agent_task),
+                None,
+                "not parsed",
+                None,
+                Some(&events),
+            )
+            .expect("completed no-op mirror");
+
+            let record = agent_task_lifecycle::status("run-completed-noop").expect("status");
+            let artifacts =
+                agent_task_lifecycle::artifacts("run-completed-noop").expect("artifacts");
+            let (_, aggregate_path) = agent_task_lifecycle::aggregate_source("run-completed-noop")
+                .expect("aggregate source");
+            let aggregate: AgentTaskAggregate =
+                serde_json::from_str(&fs::read_to_string(aggregate_path).expect("aggregate"))
+                    .expect("aggregate JSON");
+
+            assert_eq!(record.state, AgentTaskRunState::Succeeded);
+            assert_eq!(record.metadata["runner_id"], "lab-default");
+            assert_eq!(record.metadata["runner_job_id"], "job-completed-noop");
+            assert_eq!(
+                aggregate.outcomes[0].status,
+                crate::core::agent_task::AgentTaskOutcomeStatus::NoOp
+            );
+            assert!(artifacts.evidence_refs.iter().any(|reference| {
+                reference.kind == "agent-task-child-run"
+                    && reference.uri == "homeboy://agent-task/run/attempt-noop-1"
+            }));
         });
     }
 
