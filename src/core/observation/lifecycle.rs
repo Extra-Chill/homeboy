@@ -124,6 +124,10 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
         return None;
     }
 
+    if run_has_active_remote_job(run) {
+        return None;
+    }
+
     let Some(owner_pid) = run_owner_pid(run) else {
         return Some(
             "running status has no owner metadata; run may predate reconciliation support"
@@ -139,6 +143,14 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
                 .to_string(),
         )
     }
+}
+
+pub fn run_has_active_remote_job(run: &RunRecord) -> bool {
+    run.metadata_json
+        .pointer("/lab/remote_job_status")
+        .or_else(|| run.metadata_json.pointer("/lab/remote_job/status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| matches!(status, "queued" | "running"))
 }
 
 pub fn run_owner_pid(run: &RunRecord) -> Option<u32> {
@@ -223,6 +235,12 @@ mod tests {
             .as_deref()
             .expect("status note")
             .contains("owner process is not running"));
+
+        let active_remote = running_run(serde_json::json!({
+            "homeboy_run_owner": { "pid": u32::MAX },
+            "lab": { "remote_job_status": "running" }
+        }));
+        assert!(running_status_note(&active_remote).is_none());
     }
 
     #[test]

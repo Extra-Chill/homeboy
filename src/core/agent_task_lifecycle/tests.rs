@@ -100,6 +100,53 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 }
 
 #[test]
+fn detached_lab_handoff_upgrades_existing_observation_record() {
+    with_isolated_home(|_| {
+        let store = crate::core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        store
+            .upsert_imported_run(&crate::core::observation::RunRecord {
+                id: "agent-task-detached".to_string(),
+                kind: "agent-task".to_string(),
+                component_id: Some("homeboy".to_string()),
+                started_at: "2026-07-12T00:00:00Z".to_string(),
+                finished_at: None,
+                status: "running".to_string(),
+                command: Some("homeboy agent-task cook".to_string()),
+                cwd: None,
+                homeboy_version: Some("test".to_string()),
+                git_sha: None,
+                rig_id: None,
+                metadata_json: json!({
+                    "lab": {
+                        "remote_job_id": "job-123",
+                        "remote_job_status": "running"
+                    }
+                }),
+            })
+            .expect("pre-existing observation");
+
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-detached",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .expect("detached handoff recorded");
+
+        let loaded = status("agent-task-detached").expect("typed status resolves");
+        let observation = store
+            .get_run("agent-task-detached")
+            .expect("read observation")
+            .expect("observation exists");
+        assert_eq!(loaded.state, AgentTaskRunState::Running);
+        assert_eq!(observation.metadata_json["lab"]["remote_job_id"], "job-123");
+        assert!(observation.metadata_json.get("agent_task_run").is_some());
+    });
+}
+
+#[test]
 fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     with_isolated_home(|_| {
         let plan = test_plan();

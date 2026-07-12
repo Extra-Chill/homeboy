@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
-    run_owner_pid, runs_service, ObservationStore, RunListFilter, RunRecord, RunStatus,
+    run_has_active_remote_job, run_owner_pid, runs_service, ObservationStore, RunListFilter,
+    RunRecord, RunStatus,
 };
 use homeboy::core::process::pid_is_running;
 
@@ -131,6 +132,10 @@ fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static
 where
     F: Fn(u32) -> bool,
 {
+    if run_has_active_remote_job(run) {
+        return None;
+    }
+
     if let Some(owner_pid) = run_owner_pid(run) {
         return (!pid_is_alive(owner_pid)).then_some("owner_process_not_running");
     }
@@ -558,5 +563,28 @@ mod tests {
             .as_deref()
             .expect("status note")
             .contains("owner process is not running"));
+    }
+
+    #[test]
+    fn active_remote_job_is_not_reconciled_when_controller_owner_exits() {
+        let run = RunRecord {
+            id: "run-1".to_string(),
+            kind: "bench".to_string(),
+            component_id: Some("homeboy".to_string()),
+            started_at: "2026-07-12T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: Some("homeboy bench".to_string()),
+            cwd: Some("/tmp".to_string()),
+            homeboy_version: Some("test".to_string()),
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({
+                "homeboy_run_owner": { "pid": u32::MAX },
+                "lab": { "remote_job_status": "running" }
+            }),
+        };
+
+        assert_eq!(stale_running_reason(&run, &|_| false), None);
     }
 }
