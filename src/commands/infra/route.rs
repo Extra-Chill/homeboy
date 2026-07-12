@@ -1303,6 +1303,7 @@ mod tests {
 
     #[test]
     fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         crate::test_support::with_isolated_home(|home| {
             runners::create(
                 r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
