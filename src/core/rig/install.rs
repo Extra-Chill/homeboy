@@ -427,69 +427,21 @@ fn package_source_roots_for_dependencies(
     prepared: &PreparedSource,
     rigs: &[DiscoveredRig],
 ) -> Result<PackageDependencySourceRoots> {
-    let mut dependency_paths = Vec::new();
-    for rig in rigs {
-        let value = read_json_value(&rig.rig_path)?;
-        let spec: RigPackageMetadata = serde_json::from_value(value).map_err(|e| {
-            Error::validation_invalid_argument(
-                "rig_spec",
-                format!(
-                    "Rig spec schema is not compatible with this Homeboy binary: {}",
-                    e
-                ),
-                Some(rig.rig_path.to_string_lossy().to_string()),
-                None,
-            )
-        })?;
-        for dependency in spec.package_dependencies {
-            dependency_paths.push((rig.id.clone(), dependency));
-        }
-    }
-
-    if dependency_paths.is_empty() {
+    let Some((source_root, package_root)) = resolve_package_dependency_roots(
+        &prepared.package_path,
+        Some(&prepared.source_root),
+        rigs,
+    )?
+    else {
         return Ok(PackageDependencySourceRoots {
             source_root: prepared.source_root.clone(),
             package_path: prepared.package_path.clone(),
             discovery_path: prepared.discovery_path.clone(),
         });
-    }
-
-    let repo_root = git::repo_root(&prepared.package_path)
-        .or_else(|| materialized_runner_source_root(&prepared.package_path))
-        .unwrap_or_else(|| prepared.source_root.clone());
-    let repo_root = repo_root.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package source root {}",
-                repo_root.display()
-            )),
-        )
-    })?;
-    let package_root = prepared.package_path.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package path {}",
-                prepared.package_path.display()
-            )),
-        )
-    })?;
-    if !package_root.starts_with(&repo_root) {
-        return Err(Error::validation_invalid_argument(
-            "package_dependencies",
-            "Rig package dependencies require the selected package path to stay inside the package source root",
-            Some(prepared.package_path.to_string_lossy().to_string()),
-            Some(vec![format!("source root: {}", repo_root.display())]),
-        ));
-    }
-
-    for (rig_id, dependency) in dependency_paths {
-        validate_package_dependency_path(&rig_id, &dependency, &package_root, &repo_root)?;
-    }
+    };
 
     Ok(PackageDependencySourceRoots {
-        source_root: repo_root,
+        source_root,
         package_path: package_root.clone(),
         discovery_path: package_root,
     })
@@ -499,6 +451,17 @@ pub(crate) fn local_package_source_root_for_dependencies(
     package_path: &Path,
     rigs: &[DiscoveredRig],
 ) -> Result<PathBuf> {
+    if let Some((source_root, _)) = resolve_package_dependency_roots(package_path, None, rigs)? {
+        return Ok(source_root);
+    }
+    canonical_package_path(package_path, "path")
+}
+
+fn resolve_package_dependency_roots(
+    package_path: &Path,
+    fallback_source_root: Option<&Path>,
+    rigs: &[DiscoveredRig],
+) -> Result<Option<(PathBuf, PathBuf)>> {
     let mut dependency_paths = Vec::new();
     for rig in rigs {
         let value = read_json_value(&rig.rig_path)?;
@@ -518,44 +481,41 @@ pub(crate) fn local_package_source_root_for_dependencies(
         }
     }
 
-    let package_root = package_path.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package path {}",
-                package_path.display()
-            )),
-        )
-    })?;
     if dependency_paths.is_empty() {
-        return Ok(package_root);
+        return Ok(None);
     }
 
-    let repo_root = git::repo_root(&package_root)
+    let package_root = canonical_package_path(package_path, "path")?;
+    let source_root = git::repo_root(&package_root)
         .or_else(|| materialized_runner_source_root(&package_root))
+        .or_else(|| fallback_source_root.map(Path::to_path_buf))
         .unwrap_or_else(|| package_root.clone());
-    let repo_root = repo_root.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package source root {}",
-                repo_root.display()
-            )),
-        )
-    })?;
-    if !package_root.starts_with(&repo_root) {
+    let source_root = canonical_package_path(&source_root, "source root")?;
+    if !package_root.starts_with(&source_root) {
         return Err(Error::validation_invalid_argument(
             "package_dependencies",
             "Rig package dependencies require the selected package path to stay inside the package source root",
             Some(package_path.to_string_lossy().to_string()),
-            Some(vec![format!("source root: {}", repo_root.display())]),
+            Some(vec![format!("source root: {}", source_root.display())]),
         ));
     }
 
     for (rig_id, dependency) in dependency_paths {
-        validate_package_dependency_path(&rig_id, &dependency, &package_root, &repo_root)?;
+        validate_package_dependency_path(&rig_id, &dependency, &package_root, &source_root)?;
     }
-    Ok(repo_root)
+    Ok(Some((source_root, package_root)))
+}
+
+fn canonical_package_path(package_path: &Path, label: &str) -> Result<PathBuf> {
+    package_path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "resolve rig package {label} {}",
+                package_path.display()
+            )),
+        )
+    })
 }
 
 fn validate_package_dependency_path(
