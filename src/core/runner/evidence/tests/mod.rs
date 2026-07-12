@@ -155,6 +155,13 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             &events,
             &json!({"exit_code":0,"output":{"command":"bench"}}),
             None,
+            Some(
+                &crate::core::notification_route::NotificationRoute::new(
+                    "extension",
+                    "opaque-origin-route",
+                )
+                .expect("route"),
+            ),
         )
         .expect("mirror job");
         assert_eq!(run.kind, "runner-exec");
@@ -171,6 +178,10 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
         assert_eq!(
             run.metadata_json["lab"]["agent_task_lifecycle_event"]["aggregate"]["plan_id"].as_str(),
             Some("plan-from-result")
+        );
+        assert_eq!(
+            run.metadata_json["notification_route"]["route"],
+            "opaque-origin-route"
         );
     });
 }
@@ -216,6 +227,7 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
             &job,
             &[],
             &json!({"exit_code":0}),
+            None,
             None,
         )
         .expect("mirror job");
@@ -269,6 +281,7 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
             &[],
             &json!({}),
             Some("ssi-fixture-matrix-summary"),
+            None,
         )
         .expect("mirror job");
 

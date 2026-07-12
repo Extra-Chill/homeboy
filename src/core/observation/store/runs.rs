@@ -41,9 +41,12 @@ impl ObservationStore {
 
     pub fn start_run_with_context(
         &self,
-        run: NewRunRecord,
+        mut run: NewRunRecord,
         context: RunContext,
     ) -> Result<RunRecord> {
+        if let Some(route) = crate::core::notification_route::current() {
+            route.insert_into_metadata(&mut run.metadata_json);
+        }
         validate_required("kind", &run.kind)?;
         let id = Uuid::new_v4().to_string();
         let started_at = chrono::Utc::now().to_rfc3339();
@@ -99,7 +102,23 @@ impl ObservationStore {
         validate_required("run_id", run_id)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
         let rows = match metadata_json {
-            Some(metadata_json) => {
+            Some(mut metadata_json) => {
+                // Terminal reconciliation often supplies fresh evidence metadata.
+                // Keep the route that was durably bound before execution unless a
+                // caller explicitly supplies a replacement route.
+                if crate::core::notification_route::NotificationRoute::from_metadata(&metadata_json)
+                    .is_none()
+                {
+                    if let Some(existing) = self.get_run(run_id)? {
+                        if let Some(route) =
+                            crate::core::notification_route::NotificationRoute::from_metadata(
+                                &existing.metadata_json,
+                            )
+                        {
+                            route.insert_into_metadata(&mut metadata_json);
+                        }
+                    }
+                }
                 let serialized = serialize_metadata(&metadata_json)?;
                 execute_with_retry("finish run record with metadata", || {
                     self.connection.execute(
@@ -302,6 +321,20 @@ impl ObservationStore {
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
         validate_required("run.id", &run.id)?;
+        let mut run = run.clone();
+        if crate::core::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
+            .is_none()
+        {
+            if let Some(existing) = self.get_run(&run.id)? {
+                if let Some(route) =
+                    crate::core::notification_route::NotificationRoute::from_metadata(
+                        &existing.metadata_json,
+                    )
+                {
+                    route.insert_into_metadata(&mut run.metadata_json);
+                }
+            }
+        }
         let metadata_json = serialize_metadata(&run.metadata_json)?;
         execute_with_retry("upsert imported run record", || {
             self.connection.execute(

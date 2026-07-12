@@ -141,6 +141,7 @@ pub struct AgentTaskBatchChildIssue {
     pub problem: String,
 }
 
+/// Child runs inherit the current run-scoped notification route at submission.
 pub fn submit_plan_batch(
     plan: &AgentTaskPlan,
     requested_batch_id: Option<&str>,
@@ -543,6 +544,32 @@ mod tests {
         let status = status("batch/audit").expect("batch status");
         assert_eq!(status.totals.queued, 2);
         assert_eq!(status.commands.run_next, "homeboy agent-task run-next");
+    }
+
+    #[test]
+    fn batch_children_inherit_the_scoped_notification_route() {
+        let _lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = isolated_homeboy_data();
+        let plan = AgentTaskPlan::new("fanout/routes", vec![request("a"), request("b")]);
+        let route = crate::core::notification_route::NotificationRoute::new(
+            "extension",
+            "opaque-parent-route",
+        )
+        .expect("route");
+
+        let batch = crate::core::notification_route::with_current(Some(route), || {
+            submit_plan_batch(&plan, Some("batch-routes")).expect("batch submitted")
+        });
+
+        for child in batch.child_runs {
+            let record = agent_task_lifecycle::status(&child.run_id).expect("child record");
+            assert_eq!(
+                record.metadata["notification_route"]["route"],
+                "opaque-parent-route"
+            );
+        }
     }
 
     #[test]

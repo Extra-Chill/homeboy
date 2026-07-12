@@ -616,13 +616,21 @@ fn completion_notify_loop(interval: std::time::Duration) {
             }
             let running_after = list_running_run_ids(&store);
             for completed_id in tracker.observe(running_after) {
-                let status = store
-                    .get_run(&completed_id)
-                    .ok()
-                    .flatten()
-                    .map(|run| run.status)
-                    .unwrap_or_else(|| "unknown".to_string());
-                let event = crate::core::notify::NotifyEvent::run_completed(&completed_id, &status);
+                let run = store.get_run(&completed_id).ok().flatten();
+                let status = run
+                    .as_ref()
+                    .map(|run| run.status.as_str())
+                    .unwrap_or("unknown");
+                let route = run.as_ref().and_then(|run| {
+                    crate::core::notification_route::NotificationRoute::from_metadata(
+                        &run.metadata_json,
+                    )
+                });
+                let event = crate::core::notify::NotifyEvent::run_completed_with_route(
+                    &completed_id,
+                    status,
+                    route.as_ref(),
+                );
                 let _ = crate::core::notify::dispatch(&event, None);
             }
         }

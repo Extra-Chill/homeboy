@@ -25,6 +25,7 @@ pub use lifecycle::{
 
 pub use loop_inventory_run::persist_loop_inventory_run;
 
+pub use crate::core::notification_route::NotificationRoute;
 pub use budget_findings::finding_records_from_budget;
 pub use context::{RunContext, RunProvenance};
 pub use observed_workflow::{

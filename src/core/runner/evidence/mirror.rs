@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent};
 use crate::core::error::{Error, Result};
 use crate::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
+use crate::core::notification_route::NotificationRoute;
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::redaction::redact_argv_display;
 use crate::core::runner::agent_task_lifecycle_event::{
@@ -44,10 +45,22 @@ pub fn mirror_daemon_evidence(
     events: &[JobEvent],
     result: &Value,
     run_id: Option<&str>,
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result, run_id)?;
-    let remote_runs = mirror_remote_observation_runs(&store, runner, job, result)?;
+    let local_job_run = mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        job,
+        events,
+        result,
+        run_id,
+        notification_route,
+    )?;
+    let remote_runs =
+        mirror_remote_observation_runs(&store, runner, job, result, notification_route)?;
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
     let primary_run = primary_mirrored_run(&remote_runs).unwrap_or(local_job_run);
     Ok(Some(MirroredDaemonEvidence {
@@ -65,9 +78,20 @@ pub fn mirror_reverse_broker_evidence(
     events: &[JobEvent],
     result: &Value,
     run_id: Option<&str>,
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result, run_id)?;
+    let mut run = mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        job,
+        events,
+        result,
+        run_id,
+        notification_route,
+    )?;
     let artifacts = mirror_reverse_broker_artifacts(&store, runner, broker_url, &run.id, job)?;
 
     let mut metadata = run.metadata_json.clone();
@@ -111,6 +135,7 @@ pub fn mirror_daemon_job_progress(
         events,
         &json!({}),
         run_id,
+        None,
     )
 }
 
@@ -132,9 +157,11 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result, None)?;
+    mirror_job_run(
+        &store, &runner, cwd, &command, &job, &events, &result, None, None,
+    )?;
     Ok(Some(mirror_remote_observation_runs(
-        &store, &runner, &job, &result,
+        &store, &runner, &job, &result, None,
     )?))
 }
 
@@ -257,6 +284,7 @@ pub(super) fn mirror_job_run(
     events: &[JobEvent],
     result: &Value,
     run_id: Option<&str>,
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<RunRecord> {
     let inferred_label = runner_exec_run_label(command);
     let agent_task_lifecycle_event = agent_task_run_plan_lifecycle_event_from_value(result)
@@ -290,6 +318,10 @@ pub(super) fn mirror_job_run(
         rig_id: None,
         metadata_json: json!({ "lab": lab }),
     };
+    let mut run = run;
+    if let Some(notification_route) = notification_route {
+        notification_route.insert_into_metadata(&mut run.metadata_json);
+    }
     import_run_if_absent(store, &run)?;
     store.get_run(&run.id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -304,10 +336,17 @@ fn mirror_remote_observation_runs(
     runner: &Runner,
     job: &Job,
     result: &Value,
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<Vec<RunRecord>> {
     let explicit_run_ids = explicit_observation_run_ids(result, job);
     if !explicit_run_ids.is_empty() {
-        return mirror_remote_observation_runs_by_id(store, runner, job, &explicit_run_ids);
+        return mirror_remote_observation_runs_by_id(
+            store,
+            runner,
+            job,
+            &explicit_run_ids,
+            notification_route,
+        );
     }
 
     let data = daemon_api_get(&runner.id, "/runs?limit=100")?;
@@ -331,7 +370,10 @@ fn mirror_remote_observation_runs(
         let Some(detail) = detail_body.get("run") else {
             continue;
         };
-        let run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        let mut run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        if let Some(notification_route) = notification_route {
+            notification_route.insert_into_metadata(&mut run.metadata_json);
+        }
         import_run_if_absent(store, &run)?;
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
             import_artifact_if_absent(store, &artifact)?;
@@ -346,6 +388,7 @@ fn mirror_remote_observation_runs_by_id(
     runner: &Runner,
     job: &Job,
     run_ids: &[String],
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<Vec<RunRecord>> {
     let mut mirrored = Vec::new();
     for run_id in run_ids {
@@ -357,7 +400,10 @@ fn mirror_remote_observation_runs_by_id(
         let Some(detail) = detail_body.get("run") else {
             continue;
         };
-        let run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        let mut run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        if let Some(notification_route) = notification_route {
+            notification_route.insert_into_metadata(&mut run.metadata_json);
+        }
         import_run_if_absent(store, &run)?;
         for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
             import_artifact_if_absent(store, &artifact)?;

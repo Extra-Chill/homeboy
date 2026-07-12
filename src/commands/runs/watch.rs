@@ -239,7 +239,11 @@ fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult) -> Option<NotifyOutc
     if !args.notify || result.conclusion != WatchConclusion::Terminal {
         return None;
     }
-    let event = NotifyEvent::run_completed(&args.run_id, &result.run.status);
+    let route = homeboy::core::notification_route::NotificationRoute::from_metadata(
+        &result.run.metadata_json,
+    );
+    let event =
+        NotifyEvent::run_completed_with_route(&args.run_id, &result.run.status, route.as_ref());
     Some(notify::dispatch(&event, args.notify_command.as_deref()))
 }
 

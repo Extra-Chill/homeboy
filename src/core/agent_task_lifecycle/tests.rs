@@ -1107,6 +1107,12 @@ fn retry_submits_new_run_from_existing_plan() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("run-original")).expect("submitted");
+        let mut source = store::read_record("run-original").expect("source");
+        source.metadata["notification_route"] = json!({
+            "transport": "extension",
+            "route": "opaque-origin"
+        });
+        store::write_record(&source).expect("route persisted");
 
         let record = retry("run-original", Some("run-retry")).expect("retry submitted");
         let loaded_plan = load_plan("run-retry").expect("retry plan loaded");
@@ -1114,6 +1120,10 @@ fn retry_submits_new_run_from_existing_plan() {
         assert_eq!(record.run_id, "run-retry");
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retry_of"], json!("run-original"));
+        assert_eq!(
+            record.metadata["notification_route"]["route"],
+            "opaque-origin"
+        );
         assert_eq!(loaded_plan.plan_id, "plan-a");
     });
 }

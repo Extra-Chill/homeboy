@@ -28,6 +28,7 @@ use crate::core::api_jobs::JobEvent;
 #[cfg(test)]
 use crate::core::api_jobs::JobEventKind;
 use crate::core::artifact_manifest::ArtifactManifest;
+use crate::core::notification_route::NotificationRoute;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
     parse_offloaded_run_plan_envelope,
@@ -111,19 +112,31 @@ pub(super) fn sync_inline_agent_task_file(
 pub(super) fn mirror_agent_task_run_plan_lifecycle(
     args: &[String],
     agent_task: Option<&RunnerWorkloadAgentTask>,
+    notification_route: Option<&NotificationRoute>,
     stdout: &str,
     output_file_content: Option<&str>,
     job_events: Option<&[JobEvent]>,
 ) -> Result<()> {
     if let Some(agent_task) = agent_task {
-        return mirror_typed_agent_task_run_plan_lifecycle(agent_task, job_events);
+        return mirror_typed_agent_task_run_plan_lifecycle(
+            agent_task,
+            notification_route,
+            job_events,
+        );
     }
 
-    mirror_legacy_agent_task_run_plan_lifecycle(args, stdout, output_file_content, job_events)
+    mirror_legacy_agent_task_run_plan_lifecycle(
+        args,
+        notification_route,
+        stdout,
+        output_file_content,
+        job_events,
+    )
 }
 
 fn mirror_typed_agent_task_run_plan_lifecycle(
     agent_task: &RunnerWorkloadAgentTask,
+    notification_route: Option<&NotificationRoute>,
     job_events: Option<&[JobEvent]>,
 ) -> Result<()> {
     if agent_task.lifecycle_mirror_policy
@@ -140,11 +153,17 @@ fn mirror_typed_agent_task_run_plan_lifecycle(
     let Some(event) = agent_task_run_plan_lifecycle_event_from_job_events(job_events) else {
         return Ok(());
     };
-    mirror_agent_task_run_plan_aggregate(plan_spec, &agent_task.run_id, event.aggregate)
+    mirror_agent_task_run_plan_aggregate(
+        plan_spec,
+        &agent_task.run_id,
+        event.aggregate,
+        notification_route,
+    )
 }
 
 fn mirror_legacy_agent_task_run_plan_lifecycle(
     args: &[String],
+    notification_route: Option<&NotificationRoute>,
     stdout: &str,
     output_file_content: Option<&str>,
     job_events: Option<&[JobEvent]>,
@@ -161,7 +180,7 @@ fn mirror_legacy_agent_task_run_plan_lifecycle(
         Some(event) => event.aggregate,
         None => legacy_agent_task_run_plan_aggregate(stdout, output_file_content)?,
     };
-    mirror_agent_task_run_plan_aggregate(&plan_spec, &run_id, aggregate)
+    mirror_agent_task_run_plan_aggregate(&plan_spec, &run_id, aggregate, notification_route)
 }
 
 fn legacy_agent_task_run_plan_aggregate(
@@ -194,6 +213,7 @@ fn mirror_agent_task_run_plan_aggregate(
     plan_spec: &str,
     run_id: &str,
     aggregate: AgentTaskAggregate,
+    notification_route: Option<&NotificationRoute>,
 ) -> Result<()> {
     let raw_plan = config::read_json_spec_to_string(plan_spec)?;
     let plan: AgentTaskPlan = serde_json::from_str(&raw_plan).map_err(|error| {
@@ -203,6 +223,9 @@ fn mirror_agent_task_run_plan_aggregate(
         )
     })?;
     agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+    if let Some(notification_route) = notification_route {
+        crate::core::agent_task_lifecycle::persist_notification_route(run_id, notification_route)?;
+    }
     agent_task_lifecycle::mark_running(run_id)?;
     agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     Ok(())
@@ -951,7 +974,7 @@ mod tests {
             lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
         };
 
-        mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), stdout, None, None)
+        mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), None, stdout, None, None)
             .expect("typed path does not parse stdout fallback");
     }
 
@@ -1003,6 +1026,7 @@ mod tests {
             mirror_agent_task_run_plan_lifecycle(
                 &[],
                 Some(&agent_task),
+                None,
                 "not json and should not be parsed",
                 None,
                 Some(&events),
@@ -1040,7 +1064,7 @@ mod tests {
                 "\"outcomes\":[]}}"
             );
 
-            mirror_agent_task_run_plan_lifecycle(&args, None, stdout, None, None)
+            mirror_agent_task_run_plan_lifecycle(&args, None, None, stdout, None, None)
                 .expect("legacy mirror uses stdout fallback");
         });
     }

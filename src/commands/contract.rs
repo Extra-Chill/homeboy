@@ -1606,10 +1606,7 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
     contract_schema!(LOOP_RUN_SCHEMA, LoopRunRecord),
     contract_schema!(LOOP_ITERATION_SCHEMA, LoopIterationRecord),
     contract_schema!(LOOP_EVIDENCE_SCHEMA, LoopEvidenceRecord),
-    contract_schema!(
-        RUNNER_EXECUTION_ENVELOPE_SCHEMA,
-        RunnerExecutionEnvelope
-    ),
+    contract_schema!(RUNNER_EXECUTION_ENVELOPE_SCHEMA, RunnerExecutionEnvelope),
     contract_schema!(RUNNER_EXECUTION_RECORD_SCHEMA, RunnerExecutionRecord),
     contract_schema!(PATH_MATERIALIZATION_PLAN_SCHEMA, PathMaterializationPlan),
     contract_schema!(RUN_OUTCOME_ENVELOPE_SCHEMA, RunOutcomeEnvelope),

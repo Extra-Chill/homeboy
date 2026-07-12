@@ -21,6 +21,9 @@ pub fn submit_plan(
             metadata["runner_id"] = json!(runner_id);
         }
     }
+    if let Some(route) = crate::core::notification_route::current() {
+        route.insert_into_metadata(&mut metadata);
+    }
 
     let record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
@@ -41,6 +44,16 @@ pub fn submit_plan(
     };
     store::write_record(&record)?;
     Ok(record)
+}
+
+/// Bind an inherited route when a detached workload recreates an agent-task run.
+pub fn persist_notification_route(
+    run_id: &str,
+    route: &crate::core::notification_route::NotificationRoute,
+) -> Result<()> {
+    let mut record = store::read_record(run_id)?;
+    route.insert_into_metadata(&mut record.metadata);
+    store::write_record(&record)
 }
 
 pub fn record_completed_run(
@@ -449,6 +462,16 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     let plan = store::read_plan_path(&source.plan_path)?;
     let mut retry = submit_plan(&plan, requested_run_id)?;
     let metadata = retry.ensure_metadata_object();
+    if let Some(route) =
+        crate::core::notification_route::NotificationRoute::from_metadata(&source.metadata)
+    {
+        // Retries are new durable runs, but retain the initiating route. Resume
+        // operates on the same record and therefore needs no copy.
+        metadata.insert(
+            crate::core::notification_route::NOTIFICATION_ROUTE_METADATA_KEY.to_string(),
+            serde_json::to_value(route).expect("notification route is serializable"),
+        );
+    }
     metadata.insert("retry_of".to_string(), json!(source.run_id));
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
     store::write_record(&retry)?;

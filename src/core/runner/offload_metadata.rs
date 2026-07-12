@@ -352,6 +352,7 @@ mod tests {
                 command_family: RunnerWorkloadCommandFamily::Quality,
             },
             agent_task: None,
+            notification_route: None,
             workspace_mappings: RunnerWorkloadWorkspaceMappings {
                 source_path_mode: "cwd_or_path_flag".to_string(),
                 workspace_mode_policy: "changed_since_git_else_snapshot".to_string(),

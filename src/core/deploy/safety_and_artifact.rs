@@ -570,9 +570,17 @@ mod tests {
             .expect("target dir")
             .permissions()
             .mode();
-        assert_ne!(0, file_mode & 0o020, "deployed file should be group-writable");
+        assert_ne!(
+            0,
+            file_mode & 0o020,
+            "deployed file should be group-writable"
+        );
         assert_ne!(0, dir_mode & 0o020, "deployed dir should be group-writable");
-        assert_ne!(0, dir_mode & 0o2000, "deployed dir should inherit its group");
+        assert_ne!(
+            0,
+            dir_mode & 0o2000,
+            "deployed dir should inherit its group"
+        );
     }
 
     #[test]

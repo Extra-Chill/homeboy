@@ -64,6 +64,7 @@ fn build_runner_workload_with_command_label(
             command_family,
         },
         agent_task: None,
+        notification_route: crate::core::notification_route::current(),
         workspace_mappings: RunnerWorkloadWorkspaceMappings {
             source_path_mode: source_path_mode_label(input.command.source_path_mode).to_string(),
             workspace_mode_policy: workspace_mode_policy_label(input.command.workspace_mode_policy)

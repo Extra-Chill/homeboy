@@ -13,6 +13,7 @@
 
 use std::process::Command;
 
+use crate::core::notification_route::NotificationRoute;
 use serde::Serialize;
 
 /// Environment variable holding the notify command template.
@@ -24,7 +25,7 @@ use serde::Serialize;
 /// tokenization, the event controls values.
 ///
 /// Supported placeholders: `{run_id}`, `{status}`, `{title}`, `{body}`,
-/// `{message}` (title + " — " + body).
+/// `{message}` (title + " — " + body), `{transport}`, and `{route}`.
 ///
 /// Examples:
 /// - `notify-send {title} {body}`
@@ -39,6 +40,10 @@ pub struct NotifyEvent {
     pub status: String,
     pub title: String,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 impl NotifyEvent {
@@ -49,7 +54,22 @@ impl NotifyEvent {
             status: status.to_string(),
             title: format!("homeboy run {status}"),
             body: format!("Run {run_id} finished with status {status}"),
+            transport: None,
+            route: None,
         }
+    }
+
+    pub fn run_completed_with_route(
+        run_id: &str,
+        status: &str,
+        route: Option<&NotificationRoute>,
+    ) -> Self {
+        let mut event = Self::run_completed(run_id, status);
+        if let Some(route) = route {
+            event.transport = Some(route.transport.clone());
+            event.route = Some(route.route.clone());
+        }
+        event
     }
 
     fn message(&self) -> String {
@@ -63,6 +83,8 @@ impl NotifyEvent {
             .replace("{title}", &self.title)
             .replace("{body}", &self.body)
             .replace("{message}", &self.message())
+            .replace("{transport}", self.transport.as_deref().unwrap_or(""))
+            .replace("{route}", self.route.as_deref().unwrap_or(""))
     }
 }
 
@@ -205,6 +227,24 @@ mod tests {
         assert_eq!(
             argv[3],
             "homeboy run pass — Run run-123 finished with status pass"
+        );
+    }
+
+    #[test]
+    fn render_argv_keeps_route_as_one_argv_value() {
+        let route = NotificationRoute::new("extension", "thread 42; not a command").expect("route");
+        let event = NotifyEvent::run_completed_with_route("run-123", "pass", Some(&route));
+        assert_eq!(
+            render_argv("notify {transport} {route}", &event),
+            ["notify", "extension", "thread 42; not a command"]
+        );
+    }
+
+    #[test]
+    fn route_less_events_remain_compatible_with_route_placeholders() {
+        assert_eq!(
+            render_argv("notify {transport} {route}", &event()),
+            ["notify"]
         );
     }
 

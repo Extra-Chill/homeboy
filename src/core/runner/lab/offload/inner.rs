@@ -272,6 +272,10 @@ pub(crate) fn exec_lab_context(
         .runner_workload
         .as_ref()
         .and_then(|workload| workload.agent_task.clone());
+    let notification_route = context
+        .runner_workload
+        .as_ref()
+        .and_then(|workload| workload.notification_route.clone());
 
     let base_env = build_lab_offload_env_with_passthroughs(&context.lab_metadata);
     context.lab_metadata["env_resolution"] = lab_env_resolution_report(
@@ -541,6 +545,7 @@ pub(crate) fn exec_lab_context(
     mirror_agent_task_run_plan_lifecycle(
         request.normalized_args,
         agent_task_workload.as_ref(),
+        notification_route.as_ref(),
         &stdout,
         output_file_content.as_deref(),
         exec_output.job_events.as_deref(),
