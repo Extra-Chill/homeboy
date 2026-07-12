@@ -193,7 +193,6 @@ function providerContract(options = {}) {
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
     backend: WP_CODEBOX_BACKEND,
     runtime_id: options.runtimeId || options.runtime_id || runtimeManifest().id || 'wp-codebox',
-    command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     invocation: runtimeCommandInvocation(options),
     ...agentTaskProviderContractFields(),
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),

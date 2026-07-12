@@ -29,7 +29,14 @@
       "label": "Codex agent task executor",
       "backend": "codex",
       "runtime": "codex",
-      "command": "node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs",
+      "invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [

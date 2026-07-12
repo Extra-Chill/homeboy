@@ -51,7 +51,11 @@ function providerContract(options = {}) {
 		label: options.label || CLAUDE_CODE_PROVIDER_LABEL,
 		backend: 'claude-code',
 		runtime: 'claude-code',
-		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-claude-code-agent-task-executor.cjs',
+		invocation: options.invocation || {
+			schema: 'homeboy/command-invocation/v1',
+			argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-claude-code-agent-task-executor.cjs'],
+			display: 'node {{runtime_path}}/scripts/agent/homeboy-claude-code-agent-task-executor.cjs',
+		},
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('claude-code', CLAUDE_CODE_REQUIRED_SECRET_ENV)],
 		capabilities: CLAUDE_CODE_CAPABILITIES,

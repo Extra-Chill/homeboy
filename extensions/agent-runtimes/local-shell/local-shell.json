@@ -32,7 +32,6 @@
       "label": "Local shell agent task executor",
       "backend": "local-shell",
       "runtime_id": "local-shell",
-      "command": "node {{runtime_path}}/scripts/agent/homeboy-local-shell-agent-task-executor.cjs",
       "invocation": {
         "schema": "homeboy/command-invocation/v1",
         "argv": [

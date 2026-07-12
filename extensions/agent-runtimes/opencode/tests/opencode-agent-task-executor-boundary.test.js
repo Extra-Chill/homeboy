@@ -80,9 +80,9 @@ try {
 	fs.mkdirSync(runtimesRoot, { recursive: true });
 	fs.symlinkSync(runtimeRoot, runtimePath, 'dir');
 
-	const command = provider.command.replaceAll('{{runtime_path}}', runtimePath);
-	const [, scriptPath] = command.match(/^node\s+(.+)$/) || [];
-	assert(scriptPath, 'provider command should be a node script command');
+	const [program, scriptTemplate] = provider.invocation.argv;
+	assert.equal(program, 'node');
+	const scriptPath = scriptTemplate.replaceAll('{{runtime_path}}', runtimePath);
 	assert.equal(
 		path.normalize(scriptPath),
 		path.join(runtimePath, 'scripts', 'agent', 'homeboy-opencode-agent-task-executor.cjs')

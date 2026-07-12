@@ -29,7 +29,6 @@
       "label": "OpenCode agent task executor",
       "backend": "opencode",
       "runtime_id": "opencode",
-      "command": "node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs",
       "invocation": {
         "schema": "homeboy/command-invocation/v1",
         "argv": [

@@ -24,7 +24,11 @@ function providerContract(options = {}) {
 		label: options.label || PI_PROVIDER_LABEL,
 		backend: PI_BACKEND,
 		runtime: PI_BACKEND,
-		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs',
+		invocation: options.invocation || {
+			schema: 'homeboy/command-invocation/v1',
+			argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs'],
+			display: 'node {{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs',
+		},
 		...agentTaskProviderContractFields(),
 		secret_env_requirements: [],
 		capabilities: [

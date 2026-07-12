@@ -49,7 +49,11 @@ function providerContract(options = {}) {
 		label: options.label || CODEX_PROVIDER_LABEL,
 		backend: CODEX_RUNTIME_ID,
 		runtime: CODEX_RUNTIME_ID,
-		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs',
+		invocation: options.invocation || {
+			schema: 'homeboy/command-invocation/v1',
+			argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs'],
+			display: 'node {{runtime_path}}/scripts/agent/homeboy-codex-agent-task-executor.cjs',
+		},
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', CODEX_SECRET_ENV)],
 		capabilities: CODEX_CAPABILITIES,

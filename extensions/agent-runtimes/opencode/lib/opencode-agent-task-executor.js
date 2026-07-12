@@ -195,7 +195,6 @@ function providerContract(options = {}) {
 		label: options.label || OPENCODE_PROVIDER_LABEL,
 		backend: 'opencode',
 		runtime_id: 'opencode',
-		command: options.command || OPENCODE_COMMAND,
 		invocation: options.invocation || OPENCODE_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV)],

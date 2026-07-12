@@ -10,7 +10,14 @@
       "id": "fixture-runtime.agent-task-executor",
       "label": "Fixture agent task executor",
       "backend": "fixture-runtime",
-      "command": "node {{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs",
+      "invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [

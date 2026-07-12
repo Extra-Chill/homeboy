@@ -38,7 +38,7 @@ Each `agent_task_executors[]` entry must declare:
 - `id`: stable provider id. Use a namespaced id such as `runtime-id.provider-id`.
 - `label`: human-readable provider label.
 - `backend`: backend selector value used by requests, for example `codebox` or `opencode`.
-- `command`: shell command Homeboy runs after interpolation.
+- `invocation.argv`: argv-form command Homeboy runs after interpolation.
 - `request_schema`: accepted request schema, currently `homeboy/agent-task-request/v1`.
 - `outcome_schema`: emitted outcome schema, currently `homeboy/agent-task-outcome/v1`.
 - `request_required_fields`: request paths the provider requires before execution.
@@ -71,11 +71,17 @@ should publish canonical ids only.
 
 ## `runtime_path` Interpolation
 
-Provider commands should reference runtime-local files with `{{runtime_path}}`:
+Provider invocations should reference runtime-local files with `{{runtime_path}}`:
 
 ```json
 {
-  "command": "node {{runtime_path}}/scripts/agent/example-agent-task-executor.cjs"
+  "invocation": {
+    "schema": "homeboy/command-invocation/v1",
+    "argv": [
+      "node",
+      "{{runtime_path}}/scripts/agent/example-agent-task-executor.cjs"
+    ]
+  }
 }
 ```
 
@@ -84,9 +90,10 @@ runtime package directory before execution. Runtime packages should keep command
 paths relative to that directory so linked installs, extracted installs, and
 remote runners resolve the same files.
 
-Provider commands may use normal shell syntax, but portable single-executable
-commands are preferred. Avoid commands that depend on the monorepo checkout
-layout unless that layout is part of the package contract.
+`invocation.argv` passes arguments directly without shell interpretation. Use a
+shell executable explicitly in `argv` only when a runtime contract requires
+shell semantics. Avoid commands that depend on the monorepo checkout layout
+unless that layout is part of the package contract.
 
 ## Provider Command Contract
 
