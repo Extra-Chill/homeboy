@@ -1,5 +1,6 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
+use crate::core::rig::install::local_package_source_root_for_dependencies;
 use crate::core::rig::{
     declared_id, discover_rigs, install, list, list_ids, load, load_local_source,
     read_source_metadata, read_stack_source_metadata, run_check, run_lint,
@@ -180,8 +181,12 @@ mod install_flows {
             read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
         let repo_root = repo.path().canonicalize().expect("canonical repo root");
         let package_root = nested.canonicalize().expect("canonical package root");
+        let rigs = discover_rigs(&nested).expect("discover local rigs");
+        let local_source_root = local_package_source_root_for_dependencies(&nested, &rigs)
+            .expect("resolve local source root");
 
         assert_eq!(result.source_root, repo_root);
+        assert_eq!(local_source_root, result.source_root);
         assert_eq!(result.package_path, package_root);
         assert_eq!(
             metadata.source_root.as_deref(),
@@ -224,8 +229,12 @@ mod install_flows {
             read_source_metadata("static-site-importer-fixture-matrix").expect("metadata");
         let source_root = snapshot.canonicalize().expect("canonical source root");
         let package_root = nested.canonicalize().expect("canonical package root");
+        let rigs = discover_rigs(&nested).expect("discover materialized rigs");
+        let local_source_root = local_package_source_root_for_dependencies(&nested, &rigs)
+            .expect("resolve materialized source root");
 
         assert_eq!(result.source_root, source_root);
+        assert_eq!(local_source_root, result.source_root);
         assert_eq!(result.package_path, package_root);
         assert_eq!(
             metadata.source_root.as_deref(),
