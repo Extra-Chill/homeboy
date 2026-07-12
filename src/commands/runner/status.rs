@@ -1084,6 +1084,11 @@ mod tests {
         assert!(hint.contains("homeboy 0.259.0+daemon"));
         assert!(hint.contains("job command binary"));
         assert!(hint.contains("homeboy 0.262.0+binary"));
+        let job_binary_refresh = format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(hint.contains(&job_binary_refresh));
         assert!(hint.contains(
             "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
         ));
@@ -1092,10 +1097,10 @@ mod tests {
             .iter()
             .find(|command| command.scope == "daemon_refresh")
             .expect("daemon refresh command");
-        assert_eq!(
-            refresh.command,
+        assert!(refresh.command.starts_with(&job_binary_refresh));
+        assert!(refresh.command.ends_with(
             "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
-        );
+        ));
         assert!(refresh
             .description
             .contains("configured job command binary"));
