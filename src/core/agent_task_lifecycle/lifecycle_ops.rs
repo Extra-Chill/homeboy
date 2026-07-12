@@ -158,6 +158,21 @@ pub fn record_run_aggregate(
     record_aggregate(&mut record, plan, aggregate)
 }
 
+/// Retain the runner-side job identity after a completed remote aggregate is
+/// mirrored so the controller record remains joinable to daemon evidence.
+pub fn record_runner_job_identity(
+    run_id: &str,
+    runner_id: &str,
+    runner_job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_id".to_string(), json!(runner_id));
+    metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = resolve_run_id(run_id)?;
