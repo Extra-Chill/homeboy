@@ -237,9 +237,6 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 	const config = request.executor?.config || {};
 	const model = config.model || request.executor?.model || request.model;
 	const smallModel = config.small_model || config.smallModel;
-	if (!model && !smallModel) {
-		return '';
-	}
 
 	const content = parseOpenCodeConfigContent(existingContent);
 	content.$schema = content.$schema || 'https://opencode.ai/config.json';
@@ -254,8 +251,11 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 
 	if (smallModel) {
 		content.small_model = smallModel;
-		content.agent.title = { ...objectValue(content.agent.title), model: smallModel };
 	}
+
+	// Homeboy owns durable task identity, so OpenCode must not create a competing
+	// provider session title from an ambient or run-scoped configuration layer.
+	content.agent.title = { ...objectValue(content.agent.title), disable: true };
 
 	return JSON.stringify(content);
 }

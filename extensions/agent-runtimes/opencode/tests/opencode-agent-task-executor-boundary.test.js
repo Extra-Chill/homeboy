@@ -97,6 +97,8 @@ assert.equal(process.argv.at(-1), 'Prove the OpenCode provider boundary without 
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN, 'refresh-token-must-not-leak');
 assert.equal(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, 'access-token-must-not-leak');
 assert.equal(process.env.UNDECLARED_SECRET, undefined);
+const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+assert.equal(config.agent.title.disable, true);
 process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
 process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
 process.exit(0);
@@ -159,7 +161,8 @@ assert.equal(config.$schema, 'https://opencode.ai/config.json');
 assert.equal(config.model, 'opencode-go/kimi-k2.7-code');
 assert.equal(config.agent.build.model, 'opencode-go/kimi-k2.7-code');
 assert.equal(config.small_model, 'zai-coding-plan/glm-5.2');
-assert.equal(config.agent.title.model, 'zai-coding-plan/glm-5.2');
+assert.equal(config.agent.title.disable, true);
+assert.equal(config.agent.title.model, 'ambient-title-model-must-not-change');
 assert.deepEqual(config.mcp, { example: { type: 'local' } });
 assert.equal(Object.hasOwn(config, 'agents'), false);
 process.exit(0);
@@ -178,6 +181,7 @@ process.exit(0);
 					OPENCODE_CONFIG_CONTENT: JSON.stringify({
 						mcp: { example: { type: 'local' } },
 						agents: { build: { model: 'invalid-plural-key/must-not-survive' } },
+						agent: { title: { disable: false, model: 'ambient-title-model-must-not-change' } },
 					}),
 				},
 				small_model: 'zai-coding-plan/glm-5.2',

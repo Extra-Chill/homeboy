@@ -37,8 +37,16 @@ For deterministic run-scoped selection, the executor also injects
 
 - `model` and `agent.build.model` from `executor.config.model`,
   `executor.model`, or top-level `model`.
-- `small_model` and `agent.title.model` from `executor.config.small_model`
-  or `executor.config.smallModel` when provided.
+- `small_model` from `executor.config.small_model` or
+  `executor.config.smallModel` when provided.
+- `agent.title.disable: true` for every agent-task run, after ambient config
+  content is layered. Homeboy owns durable task, run, and pull request identity,
+  so OpenCode session-title generation is not used. There is no title opt-in in
+  this executor; a provider title failure therefore cannot affect coding work.
+
+The title-disable overlay does not change the requested primary build model.
+Ambient `agent.title` configuration may supply other fields, but cannot re-enable
+title generation for an agent-task run.
 
 Direct runtime verification can be done with a temporary config overlay, without
 editing global OpenCode config:
