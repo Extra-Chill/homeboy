@@ -6,6 +6,7 @@
 use serde::Serialize;
 
 use crate::commands::bench::{BenchOutput, RigRunBenchPlan};
+use crate::commands::CommandReport;
 use homeboy::core::rig::{self, RigResourcesSpec, RigSpec};
 
 /// Tagged union of every rig command's output.
@@ -42,12 +43,7 @@ pub struct RigRunOutput {
     pub bench: Option<BenchOutput>,
 }
 
-#[derive(Serialize)]
-pub struct RigReleaseLockOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub outcome: rig::ReleaseLeaseOutcome,
-}
+pub type RigReleaseLockOutput = CommandReport<rig::ReleaseLeaseOutcome>;
 
 #[derive(Serialize)]
 pub struct RigListOutput {
@@ -86,12 +82,7 @@ pub struct RigShowOutput {
     pub resources: RigResourcesSpec,
 }
 
-#[derive(Serialize)]
-pub struct RigUpOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::UpReport,
-}
+pub type RigUpOutput = CommandReport<rig::UpReport>;
 
 #[derive(Serialize)]
 pub struct RigUpPlanOutput {
@@ -115,40 +106,11 @@ pub struct RigUpPlanStep {
     pub runner_exec_command: String,
 }
 
-#[derive(Serialize)]
-pub struct RigCheckOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::CheckReport,
-}
-
-#[derive(Serialize)]
-pub struct RigDownOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::DownReport,
-}
-
-#[derive(Serialize)]
-pub struct RigRepairOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::RepairReport,
-}
-
-#[derive(Serialize)]
-pub struct RigSyncOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::RigStackSyncReport,
-}
-
-#[derive(Serialize)]
-pub struct RigStatusOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::RigStatusReport,
-}
+pub type RigCheckOutput = CommandReport<rig::CheckReport>;
+pub type RigDownOutput = CommandReport<rig::DownReport>;
+pub type RigRepairOutput = CommandReport<rig::RepairReport>;
+pub type RigSyncOutput = CommandReport<rig::RigStackSyncReport>;
+pub type RigStatusOutput = CommandReport<rig::RigStatusReport>;
 
 #[derive(Serialize)]
 pub struct RigInstallOutput {
@@ -180,19 +142,8 @@ pub struct RigInstalledStackSummary {
     pub source_revision: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct RigUpdateOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::RigSourceUpdateResult,
-}
-
-#[derive(Serialize)]
-pub struct RigSourcesOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: RigSourcesReport,
-}
+pub type RigUpdateOutput = CommandReport<rig::RigSourceUpdateResult>;
+pub type RigSourcesOutput = CommandReport<RigSourcesReport>;
 
 #[derive(Serialize)]
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
@@ -202,12 +153,7 @@ pub enum RigSourcesReport {
     Refresh(rig::RigSourceUpdateResult),
 }
 
-#[derive(Serialize)]
-pub struct RigAppOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub report: rig::AppLauncherReport,
-}
+pub type RigAppOutput = CommandReport<rig::AppLauncherReport>;
 
 #[cfg(test)]
 mod tests {

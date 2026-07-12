@@ -17,7 +17,7 @@ use homeboy::core::refactor::auto::transaction::{
 };
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
-use super::{CmdResult, GlobalArgs};
+use super::{CmdResult, CommandReport, GlobalArgs};
 
 #[derive(Args)]
 pub struct CiArgs {
@@ -241,12 +241,7 @@ pub enum CiOutput {
     Triage(CiFailureTriageOutput),
 }
 
-#[derive(Debug, Serialize)]
-pub struct CiDifferentialGateCommandOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub decision: DifferentialGateDecision,
-}
+pub type CiDifferentialGateCommandOutput = CommandReport<DifferentialGateDecision>;
 
 #[derive(Debug, Serialize)]
 pub struct CiScopeCommandOutput {
@@ -259,12 +254,7 @@ pub struct CiScopeCommandOutput {
     pub command_flags: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CiPlanCommandOutput {
-    pub command: &'static str,
-    #[serde(flatten)]
-    pub plan: CiPlan,
-}
+pub type CiPlanCommandOutput = CommandReport<CiPlan>;
 
 #[derive(Debug, Serialize)]
 pub struct CiAutofixCommandOutput {
@@ -318,7 +308,7 @@ fn run_differential_gate(
     Ok((
         CiOutput::DifferentialGate(CiDifferentialGateCommandOutput {
             command: "ci.differential-gate",
-            decision,
+            report: decision,
         }),
         exit_code,
     ))
@@ -343,7 +333,7 @@ fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     Ok((
         CiOutput::Plan(CiPlanCommandOutput {
             command: "ci.plan",
-            plan,
+            report: plan,
         }),
         0,
     ))
@@ -717,8 +707,8 @@ mod tests {
             panic!("expected ci differential gate output");
         };
         assert_eq!(output.command, "ci.differential-gate");
-        assert_eq!(output.decision.status, "baseline_red");
-        assert!(output.decision.passed);
+        assert_eq!(output.report.status, "baseline_red");
+        assert!(output.report.passed);
     }
 
     #[test]
@@ -738,8 +728,8 @@ mod tests {
         let CiOutput::DifferentialGate(output) = output else {
             panic!("expected ci differential gate output");
         };
-        assert_eq!(output.decision.status, "failed");
-        assert!(!output.decision.passed);
+        assert_eq!(output.report.status, "failed");
+        assert!(!output.report.passed);
     }
 
     #[test]
