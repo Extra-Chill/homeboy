@@ -58,7 +58,8 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
     assert!(command.contains("git clone \"$bundle\" \"$tmp\""));
     assert!(command.contains("remote set-url origin https://github.com/Extra-Chill/homeboy.git"));
     assert!(command.contains("checkout -B main abc123"));
-    assert!(command.contains("config branch.main.merge refs/heads/main"));
+    assert!(!command.contains("config branch.main.remote origin"));
+    assert!(!command.contains("config branch.main.merge refs/heads/main"));
     assert!(command.contains("git -C \"$tmp\" reset --hard abc123"));
     assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
     assert!(command.contains("exit 97"));

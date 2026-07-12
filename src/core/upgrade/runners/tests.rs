@@ -1091,7 +1091,7 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
 }
 
 #[test]
-fn runner_source_prepare_fast_forwards_attached_upstream_branch() {
+fn runner_source_prepare_preserves_local_only_branch_identity() {
     let fixture = remote_source_fixture();
     let checkout = fixture.root.path().join("attached");
     run_git(
@@ -1102,20 +1102,21 @@ fn runner_source_prepare_fast_forwards_attached_upstream_branch() {
             checkout.to_str().unwrap(),
         ],
     );
-    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+    run_git(&checkout, &["switch", "-c", "ops/install-7851"]);
+    let expected_head = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+    add_remote_commit(&fixture.seed, "remote update");
 
     run_source_prepare_script(&checkout);
 
-    assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), "main");
-    assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), expected_head);
     assert_eq!(
-        git_stdout(&checkout, &["rev-parse", "origin/main"]),
-        expected_head
+        git_stdout(&checkout, &["branch", "--show-current"]),
+        "ops/install-7851"
     );
+    assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), expected_head);
 }
 
 #[test]
-fn runner_source_prepare_updates_detached_checkout_to_remote_default() {
+fn runner_source_prepare_preserves_detached_source_identity() {
     let fixture = remote_source_fixture();
     let checkout = fixture.root.path().join("detached");
     run_git(
@@ -1127,7 +1128,8 @@ fn runner_source_prepare_updates_detached_checkout_to_remote_default() {
         ],
     );
     run_git(&checkout, &["checkout", "--detach", "HEAD"]);
-    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+    let expected_head = git_stdout(&checkout, &["rev-parse", "HEAD"]);
+    add_remote_commit(&fixture.seed, "remote update");
 
     run_source_prepare_script(&checkout);
 
@@ -1158,7 +1160,8 @@ fn runner_source_prepare_detached_checkout_ignores_default_branch_checked_out_el
             "HEAD",
         ],
     );
-    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+    let expected_head = git_stdout(&detached, &["rev-parse", "HEAD"]);
+    add_remote_commit(&fixture.seed, "remote update");
 
     run_source_prepare_script(&detached);
 

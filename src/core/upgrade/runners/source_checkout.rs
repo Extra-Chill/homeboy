@@ -149,17 +149,9 @@ pub fn runner_source_checkout_prepare_options(
 
 pub fn runner_source_checkout_prepare_script() -> &'static str {
     r#"set -e
-git fetch origin
-if git symbolic-ref -q HEAD >/dev/null && git rev-parse --abbrev-ref --symbolic-full-name @{upstream} >/dev/null 2>&1; then
-  git pull --ff-only
-  exit 0
-fi
-remote_head="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
-if [ -z "$remote_head" ]; then
-  echo "Cannot determine origin default branch for source checkout" >&2
-  exit 1
-fi
-git checkout --detach "$remote_head"
+# Source sync already materializes the controller-selected commit. Do not fetch,
+# pull, or rewrite it: the source may be detached or on a local-only branch.
+git rev-parse --verify HEAD >/dev/null
 "#
 }
 
