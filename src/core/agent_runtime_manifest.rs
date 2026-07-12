@@ -46,6 +46,8 @@ pub struct AgentRuntimeManifest {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_task_executors: Vec<AgentTaskExecutorProvider>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_path_fields: Vec<String>,
     #[serde(
         default,
         skip_serializing_if = "AgentRuntimeMaterializationContract::is_empty"
@@ -459,6 +461,7 @@ pub(crate) fn discover_agent_runtime_catalog_from_extensions(
                 id: runtime.id.clone(),
                 label: runtime.label.clone(),
                 agent_task_executors: providers,
+                config_path_fields: runtime.config_path_fields.clone(),
                 materialization: serde_json::from_value(
                     runtime
                         .extra

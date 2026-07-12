@@ -52,6 +52,22 @@ pub(super) fn exec_via_daemon(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
+    persist_runner_execution_transition(
+        &RunnerExecutionRecord::planned(
+            format!("runner-exec:{}:daemon", runner.id),
+            runner.id.clone(),
+            "daemon",
+        )
+        .with_path_materialization_plan(path_materialization_plan.clone())
+        .with_orchestration_provenance(orchestration_target_provenance(
+            runner,
+            None,
+            Some(&source_snapshot),
+            &[],
+        )),
+        &cwd,
+        &command,
+    )?;
     let lifecycle = RunnerJobLifecycleMetadata {
         source: Some("runner-daemon".to_string()),
         kind: Some("runner.exec".to_string()),
@@ -111,6 +127,23 @@ pub(super) fn exec_via_daemon(
     let mut job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    persist_runner_execution_transition(
+        &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "daemon")
+            .with_job_id(job.id.to_string())
+            .with_path_materialization_plan(path_materialization_plan.clone())
+            .with_orchestration_provenance(orchestration_target_provenance(
+                runner,
+                None,
+                Some(&source_snapshot),
+                &[],
+            ))
+            .with_next_actions(runner_execution_next_actions(
+                &runner.id,
+                &job.id.to_string(),
+            )),
+        &cwd,
+        &command,
+    )?;
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
         .flatten();
@@ -243,6 +276,7 @@ pub(super) fn exec_via_daemon(
         &artifacts,
         Some(&runner_result),
     );
+    persist_runner_execution_transition(&execution_record, &cwd, &command)?;
 
     Ok((
         RunnerExecOutput {

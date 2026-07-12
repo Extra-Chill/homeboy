@@ -40,7 +40,8 @@ pub(in crate::core::runner) fn preflight_provider_config_paths_materialized_in_a
         let Ok(value) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
-        collect_unmaterialized_paths(&value, "$", mappings, &mut failures);
+        let declared_path_fields = declared_config_path_fields(&value);
+        collect_unmaterialized_paths(&value, "$", mappings, &declared_path_fields, &mut failures);
     }
 
     if failures.is_empty() {
@@ -308,6 +309,7 @@ fn collect_unmaterialized_paths(
     value: &Value,
     location: &str,
     mappings: &[LabPathRemap],
+    declared_path_fields: &[String],
     failures: &mut Vec<UnmaterializedPath>,
 ) {
     match value {
@@ -317,6 +319,7 @@ fn collect_unmaterialized_paths(
                     item,
                     &format!("{location}[{index}]"),
                     mappings,
+                    declared_path_fields,
                     failures,
                 );
             }
@@ -324,10 +327,20 @@ fn collect_unmaterialized_paths(
         Value::Object(map) => {
             for (key, item) in map {
                 let child_location = format!("{location}.{key}");
-                if is_materializable_provider_config_path_key(key) {
+                if is_materializable_provider_config_path_key(
+                    key,
+                    &child_location,
+                    declared_path_fields,
+                ) {
                     collect_unmaterialized_path_strings(item, &child_location, mappings, failures);
                 } else {
-                    collect_unmaterialized_paths(item, &child_location, mappings, failures);
+                    collect_unmaterialized_paths(
+                        item,
+                        &child_location,
+                        mappings,
+                        declared_path_fields,
+                        failures,
+                    );
                 }
             }
         }
@@ -380,18 +393,32 @@ fn collect_unmaterialized_path_strings(
     }
 }
 
-fn is_materializable_provider_config_path_key(key: &str) -> bool {
-    matches!(
+fn declared_config_path_fields(value: &Value) -> Vec<String> {
+    value
+        .get("config_path_fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_materializable_provider_config_path_key(
+    key: &str,
+    location: &str,
+    declared_path_fields: &[String],
+) -> bool {
+    declared_path_fields.iter().any(|field| {
+        let normalized = field.trim().trim_start_matches("$.").trim_end_matches("[]");
+        normalized == key
+            || normalized == location.trim_start_matches("$.")
+            || normalized
+                .strip_suffix(".*")
+                .is_some_and(|prefix| location.trim_start_matches("$.").starts_with(prefix))
+    }) || matches!(
         key,
-        "workspace_root"
-            | "source"
-            | "source_cli"
-            | "provider_root"
-            | "provider_support"
-            | "runtime_component_paths"
-            | "provider_plugin_paths"
-            | "component_contracts"
-            | "path"
+        "workspace_root" | "source" | "source_cli" | "provider_root" | "provider_support" | "path"
     )
 }
 
@@ -709,6 +736,33 @@ fn provider_plugin_path_is_resolvable(path: &str, mappings: &[&LabPathRemap]) ->
         let prefix = format!("{}/", mapping.remote.trim_end_matches('/'));
         trimmed.starts_with(&prefix)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_config_path_field_is_validated_without_core_key_knowledge() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("runtime");
+        std::fs::create_dir_all(&path).expect("runtime");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({
+                "config_path_fields": ["opaque.runtime_path"],
+                "opaque": { "runtime_path": path }
+            })
+            .to_string(),
+        ];
+
+        let error = preflight_provider_config_paths_materialized_in_args(&args, &[])
+            .expect_err("declared controller path must be materialized");
+        assert!(error.message.contains("were not materialized"));
+    }
 }
 
 /// A provider-config spec that points at a controller-local file (`@path`). These

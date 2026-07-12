@@ -124,49 +124,14 @@ fn prepare_lab_offload_workspace_stage_inner(
         &runner,
         &offload_args,
     )?;
-    let (offload_args, workspace_ref_resolutions) =
-        resolve_path_setting_workspace_refs_in_args(&offload_args)?;
-    let mut extra_workspaces = lab_extra_workspaces(source_path)?;
-    // Sync any controller-local directories referenced by --provider-config
-    // (runtime components, provider plugins, extra mount sources) so the cook
-    // config's paths resolve on the runner after remapping.
-    extra_workspaces.extend(provider_config_extra_workspaces(
+    let materialization_planner = PathMaterializationPlanner::plan(
         &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_plan_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_fanout_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(workspace_ref_extra_workspaces(
-        &workspace_ref_resolutions,
-        source_path,
-    )?);
-    extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
-    extra_workspaces.extend(rig_declared_path_input_extra_workspaces(
-        &offload_args,
-        contract.workload.as_ref(),
-        source_path,
-    )?);
-    extra_workspaces.extend(runtime_refresh_source_extra_workspaces(
-        &offload_args,
+        contract,
         source_path,
         request.allow_dirty_lab_workspace,
-    )?);
-    extra_workspaces.extend(extension_source_extra_workspaces(
-        &offload_args,
-        source_path,
-        request.allow_dirty_lab_workspace,
-    )?);
-    extra_workspaces.extend(rig_component_path_env_extra_workspaces(source_path)?);
+    )?;
+    let offload_args = materialization_planner.args;
+    let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
     // token the git-mode remote path is keyed only on (source path, HEAD), so a
     // later unrelated run at the same HEAD reuses the earlier run's checkout and
@@ -426,33 +391,6 @@ fn prepare_lab_offload_workspace_stage_inner(
             &mut workspace_mapping,
             Some(synced_entry.entry),
             synced_entry.step_id,
-        );
-    }
-    let late_path_setting_workspaces =
-        path_setting_extra_workspaces(&remapped_args, Path::new(&synced.local_path))?;
-    let late_declared_path_input_workspaces = rig_declared_path_input_extra_workspaces(
-        &remapped_args,
-        contract.workload.as_ref(),
-        Path::new(&synced.local_path),
-    )?;
-    let mut late_path_input_workspaces = late_path_setting_workspaces;
-    late_path_input_workspaces.extend(late_declared_path_input_workspaces);
-    let late_synced_path_settings = sync_extra_lab_workspaces(
-        runner_id,
-        &synced.local_path,
-        late_path_input_workspaces,
-        &mut workspace_mapping,
-    )?;
-    if !late_synced_path_settings.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_late_path_settings", "lab.sync_late_path_settings")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", late_synced_path_settings.len())
-                        .json("workspaces", &late_synced_path_settings),
-                )
-                .build(),
         );
     }
     let path_remaps = path_remaps_from_workspace_mapping(
@@ -785,172 +723,6 @@ impl RunnerCommandPlan {
             command_extensions: command_extensions.into_iter().collect(),
             accepted_settings: accepted_settings.into_iter().collect(),
         })
-    }
-}
-
-fn rig_declared_path_input_extra_workspaces(
-    args: &[String],
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
-    primary_source_path: &Path,
-) -> Result<Vec<ExtraLabWorkspace>> {
-    if !workload.is_some_and(|workload| {
-        matches!(
-            workload.kind,
-            crate::command_contract::LabRigWorkloadKind::Bench
-        )
-    }) {
-        return Ok(Vec::new());
-    }
-
-    let path_inputs = rig_path_inputs_from_primary_rig(workload, primary_source_path)?;
-    if path_inputs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    path_values_extra_workspaces(
-        declared_path_input_values(args, &path_inputs),
-        primary_source_path,
-        "rig_path_input",
-    )
-}
-
-fn rig_path_inputs_from_primary_rig(
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
-    primary_source_path: &Path,
-) -> Result<Vec<String>> {
-    let Some(workload) = workload else {
-        return Ok(Vec::new());
-    };
-
-    let mut path_inputs = std::collections::BTreeSet::new();
-    for rig_id in &workload.rig_ids {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
-            continue;
-        };
-        if let Some(bench) = spec.bench.as_ref() {
-            path_inputs.extend(bench.path_inputs.iter().cloned());
-        }
-    }
-
-    Ok(path_inputs.into_iter().collect())
-}
-
-fn declared_path_input_values(args: &[String], path_inputs: &[String]) -> Vec<String> {
-    let mut values = Vec::new();
-    for input in path_inputs {
-        if input.starts_with("--") {
-            values.extend(values_for_flag_including_passthrough(args, input));
-        } else {
-            values.extend(values_for_setting_path(args, input));
-        }
-    }
-    values
-}
-
-fn values_for_flag_including_passthrough(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == flag {
-            if let Some(value) = iter.peek() {
-                values.push((*value).to_string());
-            }
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            values.push(value.to_string());
-        }
-    }
-    values
-}
-
-fn values_for_setting_path(args: &[String], setting_path: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--setting" {
-            if let Some(raw) = iter.next() {
-                collect_setting_path_values(raw, setting_path, false, &mut values);
-            }
-            continue;
-        }
-        if arg == "--setting-json" {
-            if let Some(raw) = iter.next() {
-                collect_setting_path_values(raw, setting_path, true, &mut values);
-            }
-            continue;
-        }
-        if let Some(raw) = arg.strip_prefix("--setting=") {
-            collect_setting_path_values(raw, setting_path, false, &mut values);
-            continue;
-        }
-        if let Some(raw) = arg.strip_prefix("--setting-json=") {
-            collect_setting_path_values(raw, setting_path, true, &mut values);
-        }
-    }
-    values
-}
-
-fn collect_setting_path_values(
-    raw: &str,
-    setting_path: &str,
-    json: bool,
-    values: &mut Vec<String>,
-) {
-    let Some((key, value)) = raw.split_once('=') else {
-        return;
-    };
-    if key == setting_path {
-        values.push(value.to_string());
-        return;
-    }
-    let Some(suffix) = setting_path
-        .strip_prefix(key)
-        .and_then(|suffix| suffix.strip_prefix('.'))
-    else {
-        return;
-    };
-    if !json {
-        return;
-    }
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
-        return;
-    };
-    collect_json_path_values(&parsed, suffix, values);
-}
-
-fn collect_json_path_values(
-    value: &serde_json::Value,
-    dotted_path: &str,
-    values: &mut Vec<String>,
-) {
-    let mut current = value;
-    for segment in dotted_path.split('.') {
-        let Some(next) = current.get(segment) else {
-            return;
-        };
-        current = next;
-    }
-    collect_json_string_values(current, values);
-}
-
-fn collect_json_string_values(value: &serde_json::Value, values: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(text) => values.push(text.to_string()),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_json_string_values(item, values);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for item in map.values() {
-                collect_json_string_values(item, values);
-            }
-        }
-        _ => {}
     }
 }
 

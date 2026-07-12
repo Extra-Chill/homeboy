@@ -109,6 +109,32 @@ fn fuzz_manifest_support_does_not_require_execution_script() {
 }
 
 #[test]
+fn extension_manifest_parses_declared_provider_config_path_fields() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "agent_runtimes": [{
+            "id": "example-runtime",
+            "config_path_fields": [
+                "provider_plugin_paths[]",
+                "runtime_component_paths.*",
+                "component_contracts[].path"
+            ]
+        }]
+    }))
+    .expect("manifest with path field declarations");
+
+    assert_eq!(
+        manifest.agent_runtimes[0].config_path_fields,
+        vec![
+            "provider_plugin_paths[]",
+            "runtime_component_paths.*",
+            "component_contracts[].path"
+        ]
+    );
+}
+
+#[test]
 fn extension_manifest_parses_trace_browser_evidence_adapters() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
