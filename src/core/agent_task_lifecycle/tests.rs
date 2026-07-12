@@ -100,6 +100,37 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 }
 
 #[test]
+fn detached_runner_failure_transitions_parent_and_task_terminal() {
+    let plan = test_plan();
+    let mut record = AgentTaskRunRecord {
+        schema: schemas::RUN.to_string(),
+        run_id: "detached-run".to_string(),
+        plan_id: plan.plan_id.clone(),
+        state: AgentTaskRunState::Running,
+        submitted_at: now_timestamp(),
+        updated_at: None,
+        plan_path: "plan.json".to_string(),
+        aggregate_path: None,
+        totals: None,
+        tasks: plan.tasks.iter().map(queued_task).collect(),
+        artifact_refs: Vec::new(),
+        provider_handles: Vec::new(),
+        latest_executor_evidence: None,
+        lifecycle: lifecycle_for_submitted_plan(&plan),
+        metadata: json!({ "runner_id": "homeboy-lab", "runner_job_id": "job-123" }),
+    };
+    record.tasks[0].state = AgentTaskState::Running;
+
+    apply_runner_job_terminal_state(&mut record, crate::core::api_jobs::JobStatus::Failed, &[]);
+
+    assert_eq!(record.state, AgentTaskRunState::Failed);
+    assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+    assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
+    assert_eq!(record.metadata["runner_job_status"], "failed");
+    assert_eq!(record.metadata["retryable"], true);
+}
+
+#[test]
 fn detached_lab_handoff_upgrades_existing_observation_record() {
     with_isolated_home(|_| {
         let store = crate::core::observation::ObservationStore::open_initialized()

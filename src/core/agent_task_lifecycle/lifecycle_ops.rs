@@ -169,6 +169,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             record = reconciled;
         }
     }
+    reconcile_runner_job_terminal_state(&mut record);
     record.annotate_stale_running();
     if requested_run_id != record.run_id {
         if let Ok(index) = store::read_cook_index(&requested_run_id) {
@@ -181,6 +182,66 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         }
     }
     Ok(record)
+}
+
+fn reconcile_runner_job_terminal_state(record: &mut AgentTaskRunRecord) {
+    if record.state != AgentTaskRunState::Running {
+        return;
+    }
+    let (Some(runner_id), Some(job_id)) = (
+        record.runner_id().map(str::to_string),
+        record.runner_job_id().map(str::to_string),
+    ) else {
+        return;
+    };
+    let Ok(snapshot) = crate::core::runners::runner_job_log_snapshot(&runner_id, &job_id) else {
+        return;
+    };
+    if !matches!(
+        snapshot.job.status,
+        crate::core::api_jobs::JobStatus::Succeeded
+            | crate::core::api_jobs::JobStatus::Failed
+            | crate::core::api_jobs::JobStatus::Cancelled
+    ) {
+        return;
+    }
+    apply_runner_job_terminal_state(record, snapshot.job.status, &snapshot.events);
+    let _ = store::write_record(record);
+}
+
+pub(crate) fn apply_runner_job_terminal_state(
+    record: &mut AgentTaskRunRecord,
+    status: crate::core::api_jobs::JobStatus,
+    events: &[crate::core::api_jobs::JobEvent],
+) {
+    let (run_state, task_state) = match status {
+        crate::core::api_jobs::JobStatus::Succeeded => {
+            (AgentTaskRunState::Succeeded, AgentTaskState::Succeeded)
+        }
+        crate::core::api_jobs::JobStatus::Cancelled => {
+            (AgentTaskRunState::Cancelled, AgentTaskState::Cancelled)
+        }
+        crate::core::api_jobs::JobStatus::Failed => {
+            (AgentTaskRunState::Failed, AgentTaskState::Failed)
+        }
+        _ => return,
+    };
+    record.updated_at = Some(now_timestamp());
+    set_run_state(record, run_state);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = task_state;
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_status".to_string(), json!(status));
+    metadata.insert("runner_job_events".to_string(), json!(events));
+    metadata.insert(
+        "retryable".to_string(),
+        json!(run_state != AgentTaskRunState::Succeeded),
+    );
+    metadata.remove("stale_running");
+    metadata.remove("stale_running_reason");
 }
 
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
