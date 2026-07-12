@@ -1,26 +1,10 @@
-//! `agent-task doctor`: the single preflight/repair path for cook readiness.
-//!
-//! Operators previously had to hand-chain several repair/update/diagnostic
-//! commands before an `agent-task cook` could even queue: update extensions
-//! locally and on the runner, verify `agent-task providers`, reason about the
-//! configured vs bare runner Homeboy binary, reconnect a stale Lab daemon, and
-//! retry. This handler runs that whole readiness chain in sequence, reusing the
-//! existing provider-contract and runner-doctor logic, and returns a single
-//! ready/blocked verdict with one issue-shaped blocker when a cook would not be
-//! safe to queue (#4864).
-//!
-//! Stage 1 verifies extension-declared executor providers, the selected
-//! backend/selector mapping, and provider secret readiness. Stage 2 reuses
-//! `runner doctor --scope lab-offload [--repair]` to verify controller binary,
-//! runner configured/bare binary, active daemon compatibility, installed
-//! extension revisions, managed runner sources, and provider runner readiness —
-//! applying safe repairs (daemon reconnect) when `--repair` is set. The handler
-//! stays runtime-agnostic: every provider/backend fact comes from
-//! extension-declared contracts, never hard-coded ecosystem names.
+//! Combined provider and runner readiness for `agent-task cook`.
 
 use serde_json::{json, Value};
 
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{
+    resolve_provider_for_backend, ExtensionProviderAgentTaskExecutor, ProviderResolution,
+};
 
 use super::super::runner::doctor::{
     self, RunnerDoctorOptions, RunnerDoctorScope, RunnerDoctorStatus,
@@ -87,84 +71,71 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         homeboy::core::agent_tasks::provider::default_backend().unwrap_or_default();
     let selected_backend = args.backend.clone().or_else(|| default_backend.clone());
 
-    // Map the selected backend (and optional selector) onto a declared provider
-    // so we can confirm the cook has a concrete provider to dispatch to.
-    let backend_match = selected_backend.as_deref().map(|backend| {
-        let candidates: Vec<&_> = providers
-            .iter()
-            .filter(|provider| provider.backend == backend)
-            .collect();
-        let selected = match args.selector.as_deref() {
-            Some(selector) => candidates
-                .iter()
-                .find(|provider| provider.id == selector)
-                .copied(),
-            None => candidates.first().copied(),
-        };
-        (candidates.len(), selected)
-    });
-
-    let mut blocker = None;
-    let provider_ready;
-    let mapping_value;
-
-    match (selected_backend.as_deref(), backend_match) {
-        (None, _) => {
-            provider_ready = false;
-            blocker = Some(json!({
+    let (provider_ready, blocker, mapping_value) = match selected_backend.as_deref() {
+        None => (
+            false,
+            Some(json!({
                 "stage": "provider_contracts",
                 "code": "backend_unresolved",
                 "message": "No executor backend was selected and no default backend is configured",
                 "remediation": "Pass --backend or configure a default coding backend before cooking",
-            }));
-            mapping_value = json!({ "selected_backend": Value::Null });
-        }
-        (Some(backend), Some((count, selected))) => {
-            if let Some(provider) = selected {
-                provider_ready = true;
-                mapping_value = json!({
-                    "selected_backend": backend,
-                    "selector": args.selector,
-                    "provider_id": provider.id,
-                    "provider_label": provider.label,
-                    "candidate_count": count,
-                    "default_backend": default_backend,
-                });
-            } else {
-                provider_ready = false;
-                blocker = Some(json!({
-                    "stage": "provider_contracts",
-                    "code": "selector_unmatched",
-                    "message": format!(
-                        "No provider for backend `{backend}` matched provider id `{}`",
-                        args.selector.as_deref().unwrap_or("")
-                    ),
-                    "remediation": "List providers with `homeboy agent-task providers` and pass --provider-id/--selector with a declared provider id, not a model or provider family",
-                }));
-                mapping_value = json!({
-                    "selected_backend": backend,
-                    "selector": args.selector,
-                    "candidate_count": count,
-                    "default_backend": default_backend,
-                });
+            })),
+            json!({ "selected_backend": Value::Null }),
+        ),
+        Some(backend) => {
+            match resolve_provider_for_backend(providers, backend, args.selector.as_deref()) {
+                ProviderResolution::Resolved(provider) => {
+                    let candidate_count = providers
+                        .iter()
+                        .filter(|candidate| candidate.backend == backend)
+                        .count()
+                        .max(1);
+                    (
+                        true,
+                        None,
+                        json!({
+                        "selected_backend": backend,
+                        "selector": args.selector,
+                        "provider_id": provider.id,
+                        "provider_label": provider.label,
+                        "candidate_count": candidate_count,
+                        "default_backend": default_backend,
+                        }),
+                    )
+                }
+                resolution => {
+                    let candidate_count = match resolution {
+                        ProviderResolution::AmbiguousExtensionAlias { ref candidate_ids } => {
+                            candidate_ids.len()
+                        }
+                        ProviderResolution::SelectorMismatch {
+                            ref available_ids, ..
+                        } => available_ids.len(),
+                        ProviderResolution::NotFound => 0,
+                        ProviderResolution::Resolved(_) => unreachable!(),
+                    };
+                    (
+                        false,
+                        Some(json!({
+                        "stage": "provider_contracts",
+                        "code": "selector_unmatched",
+                        "message": format!(
+                            "No provider for backend `{backend}` matched provider id `{}`",
+                            args.selector.as_deref().unwrap_or("")
+                        ),
+                        "remediation": "List providers with `homeboy agent-task providers` and pass --provider-id/--selector with a declared provider id, not a model or provider family",
+                        })),
+                        json!({
+                        "selected_backend": backend,
+                        "selector": args.selector,
+                        "candidate_count": candidate_count,
+                        "default_backend": default_backend,
+                        }),
+                    )
+                }
             }
         }
-        (Some(backend), None) => {
-            // Unreachable in practice (Some backend always builds a match), but
-            // keep the arm total and issue-shaped rather than panicking.
-            provider_ready = false;
-            blocker = Some(json!({
-                "stage": "provider_contracts",
-                "code": "backend_unmapped",
-                "message": format!("Backend `{backend}` could not be mapped to a declared provider"),
-                "remediation": "Verify provider contracts with `homeboy agent-task providers`",
-            }));
-            mapping_value = json!({
-                "selected_backend": backend,
-                "default_backend": default_backend,
-            });
-        }
-    }
+    };
 
     let value = json!({
         "schema": "homeboy/agent-task-providers/v1",

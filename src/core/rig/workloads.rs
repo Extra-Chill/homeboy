@@ -37,6 +37,63 @@ pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) ->
     ids
 }
 
+pub fn required_extension_ids_for_workload(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    explicit_component: Option<&str>,
+) -> Vec<String> {
+    let workload_extensions = extension_ids_for_workloads(rig_spec, kind);
+    let mut extension_ids = BTreeSet::new();
+    for extension_id in &workload_extensions {
+        extension_ids.extend(env_provider_extensions_for_extension_workloads(
+            rig_spec,
+            kind,
+            extension_id,
+        ));
+    }
+    extension_ids.extend(workload_extensions);
+    extension_ids.extend(component_extension_ids_for_workload(
+        rig_spec,
+        kind,
+        explicit_component,
+    ));
+    extension_ids.into_iter().collect()
+}
+
+pub fn component_extension_ids_for_workload(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    explicit_component: Option<&str>,
+) -> Vec<String> {
+    let component_ids = explicit_component
+        .map(|id| vec![id.to_string()])
+        .or_else(|| match kind {
+            RigWorkloadKind::Bench => rig_spec.bench.as_ref().map(|bench| {
+                if bench.components.is_empty() {
+                    bench.default_component.iter().cloned().collect()
+                } else {
+                    bench.components.clone()
+                }
+            }),
+            RigWorkloadKind::Fuzz => rig_spec
+                .fuzz
+                .as_ref()
+                .and_then(|fuzz| fuzz.default_component.as_ref())
+                .map(|component| vec![component.clone()]),
+            RigWorkloadKind::Trace => None,
+        })
+        .unwrap_or_default();
+
+    component_ids
+        .iter()
+        .filter_map(|component_id| rig_spec.components.get(component_id))
+        .filter_map(|component| component.extensions.as_ref())
+        .flat_map(|extensions| extensions.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 pub fn workloads_for_extension(
     rig_spec: &RigSpec,
     kind: RigWorkloadKind,

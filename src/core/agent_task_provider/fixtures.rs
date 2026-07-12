@@ -1,51 +1,21 @@
 use super::command_runner::failure_outcome;
 use super::*;
 
-pub(super) fn run_fixture_provider(request: &AgentTaskRequest) -> AgentTaskOutcome {
+pub(super) fn run_fixture_provider(
+    request: &AgentTaskRequest,
+    artifact_root: &Path,
+) -> AgentTaskOutcome {
     let mode = request
         .executor
         .config
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("success");
-    let artifact_root = fixture_artifact_root(request);
-    if let Err(error) = std::fs::create_dir_all(&artifact_root) {
-        return failure_outcome(
-            request,
-            AgentTaskOutcomeStatus::ProviderError,
-            AgentTaskFailureClassification::Provider,
-            "agent_task.fixture_artifact_root_failed",
-            error.to_string(),
-            json!({ "artifact_root": artifact_root.display().to_string() }),
-        );
-    }
-
     match mode {
-        "empty_patch" => fixture_empty_patch_outcome(request, &artifact_root),
-        "empty_runtime_bundle" => fixture_empty_runtime_bundle_outcome(request, &artifact_root),
-        _ => fixture_success_outcome(request, &artifact_root),
+        "empty_patch" => fixture_empty_patch_outcome(request, artifact_root),
+        "empty_runtime_bundle" => fixture_empty_runtime_bundle_outcome(request, artifact_root),
+        _ => fixture_success_outcome(request, artifact_root),
     }
-}
-
-fn fixture_artifact_root(request: &AgentTaskRequest) -> PathBuf {
-    request
-        .executor
-        .config
-        .get("artifact_root")
-        .and_then(Value::as_str)
-        .map(|path| {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(path)
-            }
-        })
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("homeboy-agent-task-fixture-{}", request.task_id))
-        })
 }
 
 fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> AgentTaskOutcome {

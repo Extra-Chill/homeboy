@@ -134,7 +134,9 @@ pub use offload_metadata::{
     lab_offload_metadata_with_workspace_mapping_and_runner_workload,
 };
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
-pub use resource_metrics::{RunnerResourceGuardViolation, RunnerResourceMetrics};
+pub use resource_metrics::{
+    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+};
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,

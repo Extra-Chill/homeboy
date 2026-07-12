@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
@@ -139,6 +140,34 @@ pub struct AgentTaskRequest {
     pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+/// Provider-facing request materialized on the host that executes the task.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentTaskExecutorRequest {
+    #[serde(flatten)]
+    pub request: AgentTaskRequest,
+    pub artifacts_path: PathBuf,
+    pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTaskArtifactsPathProvenance {
+    pub owner: String,
+    pub locality: String,
+    pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub task_id: String,
+    pub attempt: u32,
+}
+
+impl std::ops::Deref for AgentTaskExecutorRequest {
+    type Target = AgentTaskRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
 }
 
 impl AgentTaskRequest {

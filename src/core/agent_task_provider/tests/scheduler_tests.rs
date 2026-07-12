@@ -30,6 +30,74 @@ fn scheduler_dispatches_extension_provider_command() {
 }
 
 #[test]
+fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests() {
+    let runner_root = crate::core::artifacts::root().expect("runner artifact root");
+    {
+        let controller_root = tempfile::tempdir().expect("controller root");
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let valid=path.isAbsolute(req.artifacts_path)&&fs.statSync(req.artifacts_path).isDirectory()&&req.artifacts_path_provenance.owner==='homeboy'&&req.artifacts_path_provenance.locality==='runner'&&!req.artifacts_path.startsWith(req.executor.config.controller_root); fs.writeFileSync(path.join(req.artifacts_path, req.task_id+'.txt'),'captured'); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:valid?(req.executor.config.no_op?'no_op':'succeeded'):'failed',summary:req.artifacts_path,artifacts:[]}));")
+        );
+        let (mut no_op, provider) = request("task-no-op", command);
+        no_op.executor.config = json!({
+            "controller_root": controller_root.path(),
+            "no_op": true
+        });
+        let mut editing = no_op.clone();
+        editing.task_id = "task-editing".to_string();
+        editing.executor.config["no_op"] = json!(false);
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]))
+            .with_run_id("runner-local-artifact-run");
+
+        let aggregate = scheduler.run(AgentTaskPlan::new(
+            "runner-local-artifact-plan",
+            vec![no_op, editing],
+        ));
+
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
+        assert_eq!(
+            aggregate.outcomes[1].status,
+            AgentTaskOutcomeStatus::Succeeded
+        );
+        for outcome in &aggregate.outcomes {
+            let path = PathBuf::from(outcome.summary.as_deref().expect("artifacts path"));
+            assert!(path.starts_with(&runner_root));
+            assert!(!path.starts_with(controller_root.path()));
+            assert!(path.join(format!("{}.txt", outcome.task_id)).is_file());
+        }
+        assert_ne!(aggregate.outcomes[0].summary, aggregate.outcomes[1].summary);
+    }
+}
+
+#[test]
+fn executor_artifact_paths_are_distinct_per_run() {
+    {
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:req.artifacts_path}));")
+        );
+        let (request, provider) = request("same-task", command);
+        let first =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider.clone(),
+            ]))
+            .with_run_id("run-one")
+            .run(AgentTaskPlan::new("plan", vec![request.clone()]));
+        let second =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]))
+            .with_run_id("run-two")
+            .run(AgentTaskPlan::new("plan", vec![request]));
+
+        assert_ne!(first.outcomes[0].summary, second.outcomes[0].summary);
+    }
+}
+
+#[test]
 fn scheduler_reports_missing_extension_provider() {
     let (request, _provider) = request("task-missing-provider", "unused".to_string());
     let scheduler = AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::default());

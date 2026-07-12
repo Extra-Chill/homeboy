@@ -10,11 +10,11 @@ use serde_json::{json, Value};
 
 use crate::core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionState,
-    AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
-    AgentTaskTypedArtifact, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
-    AGENT_TOOL_RESULT_SCHEMA,
+    AgentTaskArtifact, AgentTaskArtifactsPathProvenance, AgentTaskDiagnostic, AgentTaskEvidenceRef,
+    AgentTaskExecutionState, AgentTaskExecutorRequest, AgentTaskFailureClassification,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
+    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::core::agent_task_gate_executor::{is_repo_local_gate_request, run_repo_local_gate_task};
 use crate::core::agent_task_scheduler::{
@@ -53,9 +53,10 @@ pub(crate) use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, ProviderExecutorResolution,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
+pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{
-    resolve_provider_for_backend, role_aliases_for_executor, role_aliases_for_provider,
-    selector_runtime_provider_hint, timeout_artifact_discovery_for_executor, ProviderResolution,
+    role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,
+    timeout_artifact_discovery_for_executor,
 };
 pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,

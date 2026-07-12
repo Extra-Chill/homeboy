@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
     check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
-    extension_ids_for_workloads, extension_workload_inputs, runner_capabilities_for_extension,
-    trace_dependencies_for_extension, workload_path_expansions_for_extension,
-    workloads_for_extension, RigWorkloadKind,
+    extension_ids_for_workloads, extension_workload_inputs, required_extension_ids_for_workload,
+    runner_capabilities_for_extension, trace_dependencies_for_extension,
+    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
 };
 
 #[test]
@@ -70,6 +70,38 @@ fn test_env_provider_extensions_for_extension_workloads_are_deduplicated() {
             "fixture-runtime",
         ),
         vec!["artifact-helper".to_string(), "fixture-runtime".to_string()]
+    );
+}
+
+#[test]
+fn required_workload_extensions_include_environment_and_default_components() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "fixture-bench",
+            "components": {
+                "app": {
+                    "path": "/tmp/app",
+                    "extensions": { "component-helper": {}, "shared": {} }
+                }
+            },
+            "bench": { "components": ["app"] },
+            "bench_workloads": {
+                "shared": [{
+                    "path": "/tmp/one.bench.mjs",
+                    "env_provider_extensions": ["environment-helper", "shared"]
+                }]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+
+    assert_eq!(
+        required_extension_ids_for_workload(&rig_spec, RigWorkloadKind::Bench, None),
+        vec![
+            "component-helper".to_string(),
+            "environment-helper".to_string(),
+            "shared".to_string(),
+        ]
     );
 }
 

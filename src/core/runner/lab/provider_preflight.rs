@@ -1,24 +1,4 @@
-//! AgentTask provider preflight for Lab offload.
-//!
-//! Before dispatching an `agent-task cook` command to a Lab
-//! runner, Homeboy verifies that the requested executor backend/selector is
-//! actually selectable *on that runner* — not just locally. This module owns
-//! that command-specific bridge end to end:
-//!
-//! - parsing the backend/selector out of the offload argv
-//!   (`agent_task_provider_selection_from_args`),
-//! - probing `agent-task providers` on the runner and parsing its (possibly
-//!   chatter-wrapped) JSON envelope,
-//! - resolving the requested backend/selector against the runner-reported
-//!   provider list using the same `resolve_provider_for_backend` contract that
-//!   execution-time selection uses,
-//! - optionally refreshing a safe runner session once and re-probing, and
-//! - turning an unselectable provider into a precise, operator-actionable
-//!   validation error.
-//!
-//! Keeping this off the `offload` request path makes the offload module's
-//! surface narrower: it only calls `preflight_agent_task_provider_on_runner`
-//! and never reaches into provider discovery internals.
+//! Agent-task provider readiness on a selected Lab runner.
 
 use std::path::Path;
 
@@ -590,7 +570,7 @@ mod tests {
     fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
         let stdout = concat!(
             "Preparing runtime...\n",
-            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"variant-a\",\"backend\":\"primary\",\"default_backend\":true,\"command\":\"provider-a agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
+            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"variant-a\",\"backend\":\"primary\",\"default_backend\":true,\"argv\":[\"provider-a\",\"agent\"],\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
         );
 
         let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
@@ -604,12 +584,17 @@ mod tests {
     fn parsed_provider_availability_accepts_unique_extension_alias() {
         let stdout = concat!(
             "Preparing runtime...\n",
-            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"extension-a.agent-task-executor\",\"backend\":\"renamed-backend\",\"default_backend\":true,\"command\":\"extension-a agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\",\"extension_id\":\"extension-a\"}]}}\n"
+            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"extension-a.agent-task-executor\",\"backend\":\"renamed-backend\",\"default_backend\":true,\"argv\":[\"extension-a\",\"agent\"],\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\",\"extension_id\":\"extension-a\"}]}}\n"
         );
 
         let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
 
         assert!(provider_available(&providers, "extension-a", None));
+        let mut selection = AgentTaskProviderSelection {
+            backend: "extension-a".to_string(),
+            selector: None,
+        };
+        assert!(runner_provider_unavailable_reason(&providers, &selection).is_none());
         assert!(provider_available(
             &providers,
             "extension-a",
@@ -620,6 +605,25 @@ mod tests {
             "extension-a",
             Some("missing")
         ));
+
+        selection.selector = Some("missing".to_string());
+        assert!(runner_provider_unavailable_reason(&providers, &selection)
+            .expect("missing selector reason")
+            .contains("does not match any"));
+
+        let mut ambiguous = providers.clone();
+        let mut second = ambiguous[0].clone();
+        second.id = "extension-a.second".to_string();
+        ambiguous.push(second);
+        selection.selector = None;
+        assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
+            .expect("ambiguous alias reason")
+            .contains("matches extension alias"));
+
+        selection.backend = "unknown".to_string();
+        assert!(runner_provider_unavailable_reason(&ambiguous, &selection)
+            .expect("unknown backend reason")
+            .contains("none declare backend"));
     }
 
     #[test]

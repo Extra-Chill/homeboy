@@ -37,14 +37,14 @@ const PROVIDER_TRANSIENT_BASE_BACKOFF_MS: u64 = 250;
 /// escalating backoff. Permanent failures (auth, validation, malformed input,
 /// capability gaps) fail fast on the first attempt. Each retry is surfaced in
 /// the returned outcome diagnostics so the behaviour is visible in run output.
-pub(super) fn run_provider_command(
-    request: &AgentTaskRequest,
+pub(super) fn run_materialized_provider_command(
+    request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
     run_id: Option<&str>,
 ) -> AgentTaskOutcome {
     let mut attempt = 1;
     loop {
-        let mut outcome = run_provider_command_once(request, provider);
+        let mut outcome = run_materialized_provider_command_once(request, provider);
         classify_transient_provider_outcome(&mut outcome);
 
         let retryable = outcome_is_transient(&outcome);
@@ -223,8 +223,8 @@ fn annotate_transient_retry(outcome: &mut AgentTaskOutcome, attempts: u32, exhau
     });
 }
 
-pub(super) fn run_provider_command_once(
-    request: &AgentTaskRequest,
+pub(super) fn run_materialized_provider_command_once(
+    request: &AgentTaskExecutorRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
@@ -250,8 +250,8 @@ pub(super) fn run_provider_command_once(
     );
     let process_timeout = timeout_with_grace(requested_timeout_ms);
     let mut provider_request = request.clone();
-    provider_request.limits.timeout_ms = Some(requested_timeout_ms);
-    provider_request.normalize_artifact_declarations();
+    provider_request.request.limits.timeout_ms = Some(requested_timeout_ms);
+    provider_request.request.normalize_artifact_declarations();
     let input = match serde_json::to_vec(&provider_request) {
         Ok(input) => input,
         Err(error) => {
@@ -499,6 +499,43 @@ pub(super) fn run_provider_command_once(
                 &provider_output_redactions(request, provider),
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn run_provider_command(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    run_id: Option<&str>,
+) -> AgentTaskOutcome {
+    let materialized = test_executor_request(request);
+    run_materialized_provider_command(&materialized, provider, run_id)
+}
+
+#[cfg(test)]
+pub(super) fn run_provider_command_once(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> AgentTaskOutcome {
+    let materialized = test_executor_request(request);
+    run_materialized_provider_command_once(&materialized, provider)
+}
+
+#[cfg(test)]
+fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
+    AgentTaskExecutorRequest {
+        request: request.clone(),
+        artifacts_path: std::env::temp_dir()
+            .join("homeboy-agent-task-provider-tests")
+            .join(crate::core::paths::sanitize_path_segment(&request.task_id)),
+        artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
+            owner: "homeboy".to_string(),
+            locality: "runner".to_string(),
+            plan_id: "provider-unit-test".to_string(),
+            run_id: None,
+            task_id: request.task_id.clone(),
+            attempt: 1,
+        },
     }
 }
 

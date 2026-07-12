@@ -387,7 +387,7 @@ pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<Pro
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan);
 
-    command_output(&mut command)
+    command_output(&mut command, plan.runner.settings.concurrency_limit)
 }
 
 pub(crate) fn execute_runner_process_until_cancelled_with_progress(
@@ -399,7 +399,12 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan);
 
-    command_output_until_cancelled_with_progress(&mut command, is_cancelled, progress_sink)
+    command_output_until_cancelled_with_progress(
+        &mut command,
+        is_cancelled,
+        progress_sink,
+        plan.runner.settings.concurrency_limit,
+    )
 }
 
 pub(super) fn apply_runner_process_env(
@@ -470,8 +475,11 @@ pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
     &["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP"]
 }
 
-pub(super) fn command_output(command: &mut std::process::Command) -> Result<ProcessOutput> {
-    let measured = measured_command_output(command)?;
+pub(super) fn command_output(
+    command: &mut std::process::Command,
+    concurrency_limit: Option<usize>,
+) -> Result<ProcessOutput> {
+    let measured = measured_command_output(command, concurrency_limit)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -486,11 +494,13 @@ pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
     let measured = measured_command_output_until_cancelled_with_progress(
         command,
         is_cancelled,
         progress_sink,
+        concurrency_limit,
     )?;
     let output = measured.output;
     Ok(ProcessOutput {
