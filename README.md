@@ -66,9 +66,9 @@ cd homeboy && cargo install --path .
 Documentation is checked into this repo and embedded in the binary:
 
 ```bash
-homeboy docs list
-homeboy docs index
-homeboy docs commands/commands-index
+homeboy self docs list
+homeboy self docs index
+homeboy self docs commands/commands-index
 ```
 
 The checked-in documentation starts at [docs/index.md](docs/index.md).

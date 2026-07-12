@@ -935,6 +935,34 @@ mod tests {
     }
 
     #[test]
+    fn documented_docs_surface_matches_manifest_and_parser() {
+        let readme = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("failed to read README");
+        let manifest = current_command_safety_manifest();
+
+        for argv in [
+            ["homeboy", "self", "docs", "list"].as_slice(),
+            ["homeboy", "self", "docs", "index"].as_slice(),
+            ["homeboy", "self", "docs", "commands/commands-index"].as_slice(),
+        ] {
+            Cli::try_parse_from(argv).unwrap_or_else(|error| {
+                panic!("documented docs command form failed to parse: {argv:?}\n{error}")
+            });
+        }
+
+        assert!(current_command_surface().contains_path(&["self", "docs"]));
+        assert!(manifest.find_path(&["self", "docs"]).is_some());
+        assert!(readme.contains("homeboy self docs list"));
+        assert!(!readme.contains("homeboy docs"));
+        assert!(
+            current_command_surface_doctor_report().agrees,
+            "documented command index must agree with the manifest and parser"
+        );
+    }
+
+    #[test]
     fn core_command_docs_do_not_drift_from_registry() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let registered_docs = crate::command_contract::COMMAND_SPECS

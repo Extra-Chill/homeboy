@@ -27,18 +27,94 @@ the higher-level system model and core/extension boundary, see
 
 ### `HomeboyConfig`
 
-- `defaults`
+- `defaults` — Built-in install, version-discovery, deploy, and permission defaults.
+- `bench` — Benchmark execution policy.
+- `lab` — Preferred runner and runner workspace retention policy.
+- `triage` — Triage priority-label configuration.
+- `agent_task` — Default backend, secret sources, and provider rotation policy for agent-task dispatch.
+- `notifications` — Notification delivery policy for route-less completed operations.
+- `worktree_providers` — External worktree lifecycle providers keyed by provider ID. A command provider that sets `commands.list` must also set `list_result_mapping`: JSONPath selectors for `items`, `handle`, `path`, `branch`, `dirty`, `unpushed`, and `primary`. `items` must resolve to one array; each item selector must resolve to exactly one value of its required type (strings for handle/path/branch, booleans for safety values). Homeboy does not infer response envelopes or safety values.
+- `github_hosts` — Host-scoped environment for `gh` subprocesses, keyed by GitHub hostname. Component-level `github.hosts` entries override these global defaults.
+- `settings` — Generic extension and executor settings, addressed through `/settings/...`.
+- `release_gate` — Routing safety policy for release-gate hot commands.
 - `artifact_root` — Optional directory where persisted run artifacts are copied. Override per command with `homeboy --artifact-root <dir>` or per process with `HOMEBOY_ARTIFACT_ROOT`.
-- `notifications.default_transport` — Optional installed extension notification transport ID used only for route-less operations. Routed runs select their transport from the persisted route.
+- `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set `HOMEBOY_NO_UPDATE_CHECK=1`.
+- `resident_services` — Long-running services to restart after `homeboy upgrade` swaps the on-disk binary.
 
 Notification caller context can be supplied per process with
 `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`; both are
 required together. Explicit `--notification-transport` and
 `--notification-route` CLI values take precedence over these environment
 variables.
-- `github_hosts` — Host-scoped environment for `gh` subprocesses, keyed by GitHub hostname. Example: `/github_hosts/github.example.com/env/HTTPS_PROXY`.
-- `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set HOMEBOY_NO_UPDATE_CHECK=1.
-- `worktree_providers` — External worktree providers. A command provider that sets `commands.list` must also set `list_result_mapping`: JSONPath selectors for `items`, `handle`, `path`, `branch`, `dirty`, `unpushed`, and `primary`. `items` must resolve to one array; each item selector must resolve to exactly one value of its required type (strings for handle/path/branch, booleans for safety values). Homeboy does not infer response envelopes or safety values.
+
+### `BenchConfig`
+
+- `local_execution` — Local benchmark execution policy: `allowed` (default) or `denied`.
+
+### `LabConfig`
+
+- `preferred_runner` — Default Lab runner ID.
+- `runner_workspace_ttl` — Optional workspace retention duration for runner materialization.
+
+### `TriageConfig`
+
+- `priority_labels` — Optional labels treated as priority during triage.
+
+### `AgentTaskConfig`
+
+- `default_backend` — Optional default agent-task backend.
+- `secrets` — Secret sources keyed by secret name.
+- `rotation` — Global provider rotation policy. Per-plan `options.rotation` and per-task `metadata.provider_rotation` take precedence.
+
+### `AgentTaskSecretSource`
+
+- `source` — Secret source kind; defaults to `env`.
+- `env_var`
+- `path`
+- `scope`
+- `name`
+- `field`
+- `value`
+
+### `NotificationConfig`
+
+- `default_transport` — Optional installed extension transport used only when a completed operation has no persisted route.
+
+### `ResidentServiceConfig`
+
+- `id` — Stable service identifier used in upgrade result reporting.
+- `systemd_unit` — Unit restarted with `systemctl restart <unit>` when no explicit command is set.
+- `restart_command` — Explicit restart command, overriding the systemd default.
+
+### `WorktreeProviderConfig`
+
+- `enabled` — Whether the provider is available; defaults to `true`.
+- `kind` — Provider kind. Current supported value: `command`.
+- `apply_enabled` — Whether mutating provider operations are enabled.
+- `commands` — Provider command argv arrays.
+- `list_result_mapping` — Required projection contract when `commands.list` is configured.
+
+### `WorktreeProviderCommands`
+
+- `list`
+- `cleanup_preview`
+- `cleanup_apply`
+- `artifacts_preview`
+- `artifacts_apply`
+
+### `WorktreeProviderListResultMapping`
+
+- `items`
+- `handle`
+- `path`
+- `branch`
+- `dirty`
+- `unpushed`
+- `primary`
+
+### `ReleaseGateConfig`
+
+- `local_hot` — Policy for force-local or stale-runner fallback of release-gate hot commands: `fail_closed` (default) or `allowed`. `HOMEBOY_RELEASE_GATE_LOCAL_HOT` overrides this value for one process.
 
 ### `InstallMethodsConfig`
 
