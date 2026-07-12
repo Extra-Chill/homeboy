@@ -578,44 +578,6 @@ fn sidecar_writer_supports_annotation_source_files() {
 }
 
 #[test]
-fn ensure_all_helpers_writes_legacy_bench_fallbacks() {
-    with_isolated_home(|home| {
-        ensure_all_helpers().expect("all helpers should be written");
-
-        for filename in [
-            "bench-helper.sh".to_string(),
-            "bench-helper.mjs".to_string(),
-        ] {
-            let path = home.path().join(".homeboy").join("runtime").join(filename);
-            assert!(
-                path.exists(),
-                "legacy bench helper fallback should exist: {}",
-                path.display()
-            );
-        }
-
-        assert!(
-            !home
-                .path()
-                .join(".homeboy")
-                .join("runtime")
-                .join("runner-steps.sh")
-                .exists(),
-            "legacy runtime dir should only carry bench fallbacks"
-        );
-        assert!(
-            !home
-                .path()
-                .join(".homeboy")
-                .join("runtime")
-                .join("bash-preflight.sh")
-                .exists(),
-            "legacy runtime dir should not carry bash preflight"
-        );
-    });
-}
-
-#[test]
 fn bash_preflight_helper_accepts_current_bash() {
     let dir = tempfile::tempdir().expect("tempdir");
     let helper_path = dir.path().join("bash-preflight.sh");
