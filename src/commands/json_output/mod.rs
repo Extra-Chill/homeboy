@@ -350,8 +350,7 @@ mod tests {
         assert_eq!(run.exit_code, 7);
         assert_eq!(run.presentation.stdout.as_deref(), Some("3 items\n"));
         assert_eq!(
-            super::super::output_runtime::select_output_file_result(
-                &run,
+            run.output_file_result(
                 crate::command_contract::CommandOutputFileMode::GenericEnvelope,
             )
             .as_ref()

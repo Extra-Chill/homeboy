@@ -56,10 +56,10 @@ fn validation_error_writes_json_output_file() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let output_file_bytes = std::fs::read(&output_path).expect("read output file");
+    assert_eq!(output.stdout, output_file_bytes);
     let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    let file_json: Value =
-        serde_json::from_str(&std::fs::read_to_string(&output_path).expect("read output file"))
-            .expect("output file json");
+    let file_json: Value = serde_json::from_slice(&output_file_bytes).expect("output file json");
 
     assert_eq!(file_json, stdout_json);
     assert_eq!(file_json["schema"], "homeboy/command-result/v3");

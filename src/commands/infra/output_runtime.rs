@@ -74,6 +74,19 @@ impl CommandRun {
             raw_stdout: Some(raw_stdout),
         }
     }
+
+    pub(crate) fn output_file_result(
+        &self,
+        mode: CommandOutputFileMode,
+    ) -> &homeboy::core::Result<Value> {
+        match mode {
+            CommandOutputFileMode::TraceJsonSummaryArtifact => self
+                .output_file_result
+                .as_ref()
+                .unwrap_or(&self.stdout_result),
+            _ => &self.stdout_result,
+        }
+    }
 }
 
 pub struct OutputService<'a> {
@@ -86,15 +99,10 @@ impl<'a> OutputService<'a> {
     }
 
     pub fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
-        let run = CommandRun::from_stdout_result(result, exit_code);
-        self.write_output_file(&run, CommandOutputFileMode::GenericEnvelope);
-        output::print_json_result_for_command(
-            run.stdout_result,
-            run.exit_code,
-            &run.command,
-            presentation_envelope(run.presentation),
-        )
-        .ok();
+        self.emit_run(
+            CommandRun::from_stdout_result(result, exit_code),
+            CommandOutputFileMode::GenericEnvelope,
+        );
     }
 
     pub fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
@@ -145,16 +153,17 @@ pub fn run_command(
     let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
-    match crate::commands::raw_output::prepare_command_run(command, global, plan.stdout) {
-        crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
+    let run = match crate::commands::raw_output::prepare_command_run(command, global, plan.stdout) {
+        crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
-            let run = run_json(*command, spec, global, plan.output_file, output_file);
-            output_service.emit_run(run, plan.output_file)
+            return output_service.emit_run(
+                run_json(*command, spec, global, plan.output_file, output_file),
+                plan.output_file,
+            );
         }
-        crate::commands::raw_output::CommandRunPreparation::Raw(run) => {
-            output_service.emit_run(run, plan.output_file)
-        }
-    }
+        crate::commands::raw_output::CommandRunPreparation::Raw(run) => run,
+    };
+    output_service.emit_run(run, plan.output_file)
 }
 
 pub fn emit_json_result(
@@ -240,18 +249,10 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
                 output::write_json_to_file(&run.stdout_result, path, run.exit_code);
             }
         }
-        CommandOutputFileMode::TraceJsonSummaryArtifact => {
+        CommandOutputFileMode::TraceJsonSummaryArtifact
+        | CommandOutputFileMode::GenericEnvelope => {
             output::write_json_to_file_for_command(
-                select_output_file_result(run, mode),
-                path,
-                run.exit_code,
-                &run.command,
-                presentation_envelope(run.presentation.clone()),
-            );
-        }
-        CommandOutputFileMode::GenericEnvelope => {
-            output::write_json_to_file_for_command(
-                &run.stdout_result,
+                run.output_file_result(mode),
                 path,
                 run.exit_code,
                 &run.command,
@@ -272,21 +273,6 @@ fn presentation_envelope(
         stdout: presentation.stdout,
         stderr: presentation.stderr,
     })
-}
-
-pub fn select_output_file_result(
-    run: &CommandRun,
-    mode: CommandOutputFileMode,
-) -> &homeboy::core::Result<Value> {
-    match mode {
-        CommandOutputFileMode::TraceJsonSummaryArtifact => run
-            .output_file_result
-            .as_ref()
-            .unwrap_or(&run.stdout_result),
-        CommandOutputFileMode::None
-        | CommandOutputFileMode::ReviewStableArtifact
-        | CommandOutputFileMode::GenericEnvelope => &run.stdout_result,
-    }
 }
 
 #[cfg(test)]
@@ -333,7 +319,7 @@ mod tests {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputFileMode::TraceJsonSummaryArtifact)
+            run.output_file_result(CommandOutputFileMode::TraceJsonSummaryArtifact)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "summary" })
@@ -345,7 +331,7 @@ mod tests {
         let run = run_with_output_file_result(None);
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputFileMode::TraceJsonSummaryArtifact)
+            run.output_file_result(CommandOutputFileMode::TraceJsonSummaryArtifact)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
@@ -357,7 +343,7 @@ mod tests {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
         assert_eq!(
-            select_output_file_result(&run, CommandOutputFileMode::GenericEnvelope)
+            run.output_file_result(CommandOutputFileMode::GenericEnvelope)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
@@ -374,7 +360,7 @@ mod tests {
 
         assert_eq!(run.presentation.stdout.as_deref(), Some("short summary\n"));
         assert_eq!(
-            select_output_file_result(&run, CommandOutputFileMode::GenericEnvelope)
+            run.output_file_result(CommandOutputFileMode::GenericEnvelope)
                 .as_ref()
                 .unwrap(),
             &json!({ "kind": "stdout" })
