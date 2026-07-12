@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.10] - 2026-07-12
+
+### Fixed
+- authorize CI review execution on warm runners
+
 ## [2.8.9] - 2026-07-05
 
 ### Fixed
