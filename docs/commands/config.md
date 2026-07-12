@@ -42,6 +42,9 @@ homeboy config set /defaults/permissions/local/file_mode '"g+r"'
 # Store copied run artifacts in a repo- or agent-readable directory
 homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'
 
+# Select the installed transport for route-less operations
+homeboy config set /notifications/default_transport '"discord.run-completion"'
+
 # Apply environment to every gh subprocess for a GitHub Enterprise host
 homeboy config set /github_hosts/github.example.com/env/HTTPS_PROXY '"socks5://127.0.0.1:8080"'
 
@@ -85,6 +88,9 @@ homeboy config path
 ```json
 {
   "artifact_root": null,
+  "notifications": {
+    "default_transport": "discord.run-completion"
+  },
   "github_hosts": {
     "github.example.com": {
       "env": {

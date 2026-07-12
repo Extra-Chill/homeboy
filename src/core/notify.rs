@@ -1,39 +1,12 @@
-//! Pluggable, OS-agnostic local completion notifications.
-//!
-//! Homeboy never hardcodes a specific desktop notifier. Operators wire
-//! whichever local notifier they prefer — `terminal-notifier`, `notify-send`,
-//! a `curl` webhook, a Slack post, a `say` voice line — through a single
-//! command template. The template is read from [`NOTIFY_COMMAND_ENV`] (or an
-//! explicit per-call override) and is the only coupling point to the host
-//! environment.
-//!
-//! Both `homeboy runs watch --notify` and the local daemon's completion
-//! tracker dispatch through here so the notification surface is defined in
-//! exactly one place.
+//! Transport-neutral completion notifications delivered by installed extensions.
 
 use std::process::Command;
 
-use crate::core::notification_route::NotificationRoute;
 use serde::Serialize;
 
-/// Environment variable holding the notify command template.
-///
-/// The template is split on whitespace into an argv vector and then each token
-/// has its `{placeholder}` substrings replaced from the event fields. Splitting
-/// before substituting means a single `{body}` token expands to one argv
-/// element even though the body contains spaces — the template author controls
-/// tokenization, the event controls values.
-///
-/// Supported placeholders: `{run_id}`, `{status}`, `{title}`, `{body}`,
-/// `{message}` (title + " — " + body), `{transport}`, and `{route}`.
-///
-/// Examples:
-/// - `notify-send {title} {body}`
-/// - `terminal-notifier -title {title} -message {body}`
-/// - `say {message}`
-pub const NOTIFY_COMMAND_ENV: &str = "HOMEBOY_NOTIFY_COMMAND";
+use crate::core::notification_route::NotificationRoute;
 
-/// A completion event worth surfacing to the operator who walked away.
+/// A completion event passed to extension transports as typed argv values.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotifyEvent {
     pub run_id: String,
@@ -47,7 +20,6 @@ pub struct NotifyEvent {
 }
 
 impl NotifyEvent {
-    /// Build the conventional "a watched run finished" event.
     pub fn run_completed(run_id: &str, status: &str) -> Self {
         Self {
             run_id: run_id.to_string(),
@@ -72,38 +44,39 @@ impl NotifyEvent {
         event
     }
 
-    fn message(&self) -> String {
-        format!("{} — {}", self.title, self.body)
-    }
-
-    fn substitute(&self, token: &str) -> String {
-        token
-            .replace("{run_id}", &self.run_id)
-            .replace("{status}", &self.status)
-            .replace("{title}", &self.title)
-            .replace("{body}", &self.body)
-            .replace("{message}", &self.message())
-            .replace("{transport}", self.transport.as_deref().unwrap_or(""))
-            .replace("{route}", self.route.as_deref().unwrap_or(""))
+    fn argv(&self) -> Vec<String> {
+        let mut argv = vec![
+            "--run-id".to_string(),
+            self.run_id.clone(),
+            "--status".to_string(),
+            self.status.clone(),
+            "--title".to_string(),
+            self.title.clone(),
+            "--body".to_string(),
+            self.body.clone(),
+        ];
+        if let Some(transport) = &self.transport {
+            argv.extend(["--transport".to_string(), transport.clone()]);
+        }
+        if let Some(route) = &self.route {
+            argv.extend(["--route".to_string(), route.clone()]);
+        }
+        argv
     }
 }
 
-/// How a notification was (or was not) delivered.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotifyDelivery {
-    /// A configured command was executed. `exit_code` is `None` when the
-    /// process was spawned but its status could not be read.
-    Command {
-        command: String,
+    Transport {
+        extension_id: String,
+        transport_id: String,
+        command: Vec<String>,
         exit_code: Option<i32>,
     },
-    /// No command was configured; the event was written to stderr as a
-    /// best-effort fallback so the operator still sees the completion locally.
-    Stderr,
+    NotConfigured,
 }
 
-/// Result of attempting to deliver one notification.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotifyOutcome {
     pub delivered: bool,
@@ -112,82 +85,82 @@ pub struct NotifyOutcome {
     pub error: Option<String>,
 }
 
-/// The configured notify command template, if any, from the environment.
-pub fn configured_command() -> Option<String> {
-    std::env::var(NOTIFY_COMMAND_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-/// Render a command template into an argv vector for one event.
-///
-/// Pure and deterministic: whitespace-tokenizes the template, then substitutes
-/// placeholders within each token. Empty tokens (from repeated whitespace) are
-/// dropped.
-pub fn render_argv(template: &str, event: &NotifyEvent) -> Vec<String> {
-    template
-        .split_whitespace()
-        .map(|token| event.substitute(token))
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-/// Deliver one notification, best-effort.
-///
-/// Resolution order for the command template: explicit `command_override`, then
-/// [`NOTIFY_COMMAND_ENV`]. When neither is set the event is written to stderr so
-/// a local operator still sees it. A spawn/exec failure is captured in the
-/// returned outcome and never propagated — a missing notifier must not fail the
-/// run the caller is watching.
-pub fn dispatch(event: &NotifyEvent, command_override: Option<&str>) -> NotifyOutcome {
-    let template = command_override
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(configured_command);
-
-    let Some(template) = template else {
-        eprintln!("homeboy notify [{}]: {}", event.status, event.message());
+/// Deliver an event through the route's installed extension transport. Route-less
+/// events use only the configured operations default and otherwise do nothing.
+pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
+    let transport_id = event.transport.clone().or_else(|| {
+        crate::core::defaults::load_config()
+            .notifications
+            .default_transport
+    });
+    let Some(transport_id) = transport_id else {
         return NotifyOutcome {
-            delivered: true,
-            delivery: NotifyDelivery::Stderr,
+            delivered: false,
+            delivery: NotifyDelivery::NotConfigured,
             error: None,
         };
     };
 
-    let argv = render_argv(&template, event);
-    let Some((program, args)) = argv.split_first() else {
-        return NotifyOutcome {
-            delivered: false,
-            delivery: NotifyDelivery::Command {
-                command: template,
-                exit_code: None,
-            },
-            error: Some("notify command template produced no program token".to_string()),
+    let extensions = match crate::core::extension::load_all_extensions() {
+        Ok(extensions) => extensions,
+        Err(err) => return missing_transport(&transport_id, err.message),
+    };
+    let matches: Vec<_> = extensions
+        .iter()
+        .flat_map(|extension| {
+            extension
+                .notification_transports
+                .iter()
+                .filter(|transport| transport.id == transport_id)
+                .map(move |transport| (extension, transport))
+        })
+        .collect();
+    let [(extension, transport)] = matches.as_slice() else {
+        let detail = if matches.is_empty() {
+            "is not declared by an installed extension".to_string()
+        } else {
+            "is declared by more than one installed extension".to_string()
         };
+        return missing_transport(&transport_id, detail);
     };
 
-    match Command::new(program).args(args).status() {
+    let mut argv = transport.command.clone();
+    argv.extend(event.argv());
+    let program = argv.first().expect("validated transport command").clone();
+    match Command::new(&program).args(&argv[1..]).status() {
         Ok(status) => NotifyOutcome {
             delivered: status.success(),
-            delivery: NotifyDelivery::Command {
-                command: template,
+            delivery: NotifyDelivery::Transport {
+                extension_id: extension.id.clone(),
+                transport_id,
+                command: argv,
                 exit_code: status.code(),
             },
-            error: if status.success() {
-                None
-            } else {
-                Some(format!("notify command exited with {status}"))
-            },
+            error: (!status.success())
+                .then(|| format!("notification transport exited with {status}")),
         },
         Err(err) => NotifyOutcome {
             delivered: false,
-            delivery: NotifyDelivery::Command {
-                command: template,
+            delivery: NotifyDelivery::Transport {
+                extension_id: extension.id.clone(),
+                transport_id,
+                command: argv,
                 exit_code: None,
             },
-            error: Some(format!("failed to run notify command `{program}`: {err}")),
+            error: Some(format!(
+                "failed to run notification transport `{program}`: {err}"
+            )),
         },
+    }
+}
+
+fn missing_transport(transport_id: &str, detail: String) -> NotifyOutcome {
+    NotifyOutcome {
+        delivered: false,
+        delivery: NotifyDelivery::NotConfigured,
+        error: Some(format!(
+            "notification transport `{transport_id}` {detail}; install or configure an extension that declares it"
+        )),
     }
 }
 
@@ -195,82 +168,102 @@ pub fn dispatch(event: &NotifyEvent, command_override: Option<&str>) -> NotifyOu
 mod tests {
     use super::*;
 
-    fn event() -> NotifyEvent {
-        NotifyEvent::run_completed("run-123", "pass")
+    fn install_transport(id: &str, command: Vec<&str>) {
+        let mut manifest: crate::core::extension::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Test transport",
+                "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": crate::core::extension::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": id,
+                    "command": command,
+                }]
+            }))
+            .unwrap();
+        manifest.id = "test-transport".to_string();
+        crate::core::extension::save_manifest(&manifest).unwrap();
     }
 
     #[test]
-    fn run_completed_builds_status_message() {
-        let event = event();
-        assert_eq!(event.run_id, "run-123");
-        assert_eq!(event.status, "pass");
-        assert!(event.message().contains("run-123"));
-        assert!(event.message().contains("pass"));
-    }
-
-    #[test]
-    fn render_argv_substitutes_placeholders_and_preserves_value_spaces() {
-        let argv = render_argv("notify-send {title} {body}", &event());
-        assert_eq!(argv[0], "notify-send");
-        assert_eq!(argv[1], "homeboy run pass");
-        // `{body}` carries spaces but stays a single argv element.
-        assert_eq!(argv[2], "Run run-123 finished with status pass");
-        assert_eq!(argv.len(), 3);
-    }
-
-    #[test]
-    fn render_argv_supports_message_and_status_tokens() {
-        let argv = render_argv("logger -t homeboy-{status} {message}", &event());
-        assert_eq!(argv[0], "logger");
-        assert_eq!(argv[1], "-t");
-        assert_eq!(argv[2], "homeboy-pass");
-        assert_eq!(
-            argv[3],
-            "homeboy run pass — Run run-123 finished with status pass"
-        );
-    }
-
-    #[test]
-    fn render_argv_keeps_route_as_one_argv_value() {
-        let route = NotificationRoute::new("extension", "thread 42; not a command").expect("route");
+    fn event_argv_keeps_opaque_route_as_one_value() {
+        let route = NotificationRoute::new("discord.run-completion", "thread 42; opaque").unwrap();
         let event = NotifyEvent::run_completed_with_route("run-123", "pass", Some(&route));
         assert_eq!(
-            render_argv("notify {transport} {route}", &event),
-            ["notify", "extension", "thread 42; not a command"]
+            event.argv(),
+            [
+                "--run-id",
+                "run-123",
+                "--status",
+                "pass",
+                "--title",
+                "homeboy run pass",
+                "--body",
+                "Run run-123 finished with status pass",
+                "--transport",
+                "discord.run-completion",
+                "--route",
+                "thread 42; opaque"
+            ]
         );
     }
 
     #[test]
-    fn route_less_events_remain_compatible_with_route_placeholders() {
-        assert_eq!(
-            render_argv("notify {transport} {route}", &event()),
-            ["notify"]
-        );
+    fn route_less_event_without_operations_policy_is_not_delivered() {
+        crate::test_support::with_isolated_home(|_| {
+            let outcome = dispatch(&NotifyEvent::run_completed("run-123", "pass"));
+            assert!(!outcome.delivered);
+            assert_eq!(outcome.delivery, NotifyDelivery::NotConfigured);
+            assert!(outcome.error.is_none());
+        });
     }
 
     #[test]
-    fn dispatch_without_command_falls_back_to_stderr() {
-        let outcome = dispatch(&event(), None);
-        assert!(outcome.delivered);
-        assert_eq!(outcome.delivery, NotifyDelivery::Stderr);
-        assert!(outcome.error.is_none());
+    fn installed_transport_receives_typed_event_argv() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport("test.run-completion", vec!["true"]);
+            let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
+            let outcome = dispatch(&NotifyEvent::run_completed_with_route(
+                "run-123",
+                "pass",
+                Some(&route),
+            ));
+            assert!(outcome.delivered);
+            let NotifyDelivery::Transport { command, .. } = outcome.delivery else {
+                panic!("expected transport delivery");
+            };
+            assert_eq!(command[0], "true");
+            assert!(command
+                .windows(2)
+                .any(|pair| pair == ["--route", "route-42"]));
+        });
     }
 
     #[test]
-    fn dispatch_runs_configured_command_override() {
-        // `true` is a portable no-op that exits 0 on the supported platforms.
-        let outcome = dispatch(&event(), Some("true"));
-        assert!(outcome.delivered);
-        match outcome.delivery {
-            NotifyDelivery::Command { exit_code, .. } => assert_eq!(exit_code, Some(0)),
-            other => panic!("expected command delivery, got {other:?}"),
-        }
+    fn missing_selected_transport_reports_diagnostic() {
+        crate::test_support::with_isolated_home(|_| {
+            let route = NotificationRoute::new("missing.transport", "route-42").unwrap();
+            let outcome = dispatch(&NotifyEvent::run_completed_with_route(
+                "run-123",
+                "pass",
+                Some(&route),
+            ));
+            assert!(!outcome.delivered);
+            assert!(outcome.error.unwrap().contains("missing.transport"));
+        });
     }
 
     #[test]
-    fn dispatch_reports_missing_program_as_error_without_panicking() {
-        let outcome = dispatch(&event(), Some("homeboy-no-such-notifier-binary {message}"));
-        assert!(!outcome.delivered);
-        assert!(outcome.error.is_some());
+    fn route_less_event_uses_explicit_operations_default_transport() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport("test.run-completion", vec!["true"]);
+            crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
+                notifications: crate::core::defaults::NotificationConfig {
+                    default_transport: Some("test.run-completion".to_string()),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(dispatch(&NotifyEvent::run_completed("run-123", "pass")).delivered);
+        });
     }
 }

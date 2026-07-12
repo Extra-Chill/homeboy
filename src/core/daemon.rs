@@ -582,13 +582,9 @@ const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
 /// notification when one completes, so a detached/offloaded run never becomes a
 /// ghost.
 ///
-/// The thread is inert — and therefore not spawned — unless a notify command is
-/// configured (`HOMEBOY_NOTIFY_COMMAND`). This keeps default daemon behavior
-/// unchanged: operators opt in by wiring their own notifier.
+/// Delivery is route-driven. Route-less completions are considered only when an
+/// explicit operations default transport is configured.
 fn spawn_completion_notifier() {
-    if crate::core::notify::configured_command().is_none() {
-        return;
-    }
     let interval = std::env::var(COMPLETION_NOTIFY_INTERVAL_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -631,7 +627,7 @@ fn completion_notify_loop(interval: std::time::Duration) {
                     status,
                     route.as_ref(),
                 );
-                let _ = crate::core::notify::dispatch(&event, None);
+                let _ = crate::core::notify::dispatch(&event);
             }
         }
         std::thread::sleep(interval);
