@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::shell;
 use homeboy::core::fuzz::{
@@ -901,59 +901,49 @@ fn validate_runner_exec_artifact_path(
     runner: &runner::Runner,
     path: &Path,
 ) -> homeboy::core::Result<()> {
-    if !path.is_absolute() {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "runner exec artifact path must resolve to an absolute runner-side path",
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "runner exec artifact path must not contain parent directory components",
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
-
     let roots = allowed_runner_exec_artifact_roots(runner);
-    if roots.iter().any(|root| path_is_within_root(path, root)) {
-        return Ok(());
+    match homeboy::core::paths::authorize_remote_artifact_path(
+        path,
+        &roots,
+        homeboy::core::paths::RemotePathRootContainment::NativePath,
+    ) {
+        Ok(()) => Ok(()),
+        Err(homeboy::core::paths::RemotePathAuthorizationError::NotAbsolute) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner exec artifact path must resolve to an absolute runner-side path",
+                Some(path.display().to_string()),
+                None,
+            ))
+        }
+        Err(homeboy::core::paths::RemotePathAuthorizationError::ContainsParentDir) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner exec artifact path must not contain parent directory components",
+                Some(path.display().to_string()),
+                None,
+            ))
+        }
+        Err(homeboy::core::paths::RemotePathAuthorizationError::OutsideAllowedRoots) => {
+            Err(Error::validation_invalid_argument(
+                "path",
+                "runner exec artifact path must be under an allowed runner workspace/output root",
+                Some(path.display().to_string()),
+                Some(vec![format!("Allowed roots: {}", roots.join(", "))]),
+            ))
+        }
     }
-
-    Err(Error::validation_invalid_argument(
-        "path",
-        "runner exec artifact path must be under an allowed runner workspace/output root",
-        Some(path.display().to_string()),
-        Some(vec![format!(
-            "Allowed roots: {}",
-            roots
-                .iter()
-                .map(|root| root.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )]),
-    ))
 }
 
-fn allowed_runner_exec_artifact_roots(runner: &runner::Runner) -> Vec<PathBuf> {
+fn allowed_runner_exec_artifact_roots(runner: &runner::Runner) -> Vec<String> {
     let mut roots = Vec::new();
-    roots.extend(runner.workspace_root.as_deref().map(PathBuf::from));
-    roots.extend(runner.policy.workspace_roots.iter().map(PathBuf::from));
-    roots.extend(runner.env.get("HOMEBOY_ARTIFACT_ROOT").map(PathBuf::from));
-    roots.retain(|root| root.is_absolute());
+    roots.extend(runner.workspace_root.iter().cloned());
+    roots.extend(runner.policy.workspace_roots.iter().cloned());
+    roots.extend(runner.env.get("HOMEBOY_ARTIFACT_ROOT").cloned());
+    roots.retain(|root| Path::new(root).is_absolute());
     roots.sort();
     roots.dedup();
     roots
-}
-
-fn path_is_within_root(path: &Path, root: &Path) -> bool {
-    path == root || path.starts_with(root)
 }
 
 fn runner_exec_attach_download_path(

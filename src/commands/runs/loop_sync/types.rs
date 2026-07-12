@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use homeboy::core::observation::ArtifactRecord;
+use homeboy::core::observation::{disk_budget::DiskBudget, ArtifactRecord};
 use serde::Serialize;
 use serde_json::Value;
-
-use super::super::disk::DiskBudget;
 
 #[derive(Args, Clone)]
 pub struct RunsLoopSyncArgs {

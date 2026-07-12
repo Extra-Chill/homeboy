@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::core::error::{Error, Result};
 
-use super::discovery::{discover_attached_component, infer_attached_component_id};
+use crate::core::component::{discover_from_portable, infer_portable_component_id};
 use crate::core::project::{load, save, Project, ProjectComponentAttachment};
 
 fn component_ids_from_attachments(components: &[ProjectComponentAttachment]) -> Vec<String> {
@@ -172,7 +172,7 @@ fn preserve_remote_path_on_reattach(
     // Resolve the current component to capture its remote_path.
     let current_attachment = project.components.iter().find(|c| c.id == component_id);
     let current_remote_path = current_attachment
-        .and_then(|a| discover_attached_component(Path::new(&a.local_path)))
+        .and_then(|a| discover_from_portable(Path::new(&a.local_path)))
         .map(|c| c.remote_path.clone())
         .unwrap_or_default();
 
@@ -181,7 +181,7 @@ fn preserve_remote_path_on_reattach(
     }
 
     // Check whether the new path's homeboy.json provides a remote_path.
-    let new_remote_path = discover_attached_component(Path::new(new_local_path))
+    let new_remote_path = discover_from_portable(Path::new(new_local_path))
         .map(|c| c.remote_path.clone())
         .unwrap_or_default();
 
@@ -214,7 +214,7 @@ fn attach_discovered_component_path_unlocked(
     project_id: &str,
     local_path: &Path,
 ) -> Result<String> {
-    let inferred_id = infer_attached_component_id(local_path)?;
+    let inferred_id = infer_portable_component_id(local_path)?;
 
     // When the inferred ID doesn't match any existing project component, check
     // whether a directory-name fallback produced a version-stamped ID (e.g.

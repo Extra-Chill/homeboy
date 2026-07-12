@@ -1,7 +1,7 @@
 use homeboy::core::observation::evidence_report::{self, RunEvidenceReport};
-use homeboy::core::observation::{runs_service, ObservationStore};
+use homeboy::core::observation::{disk_budget::disk_budget, runs_service, ObservationStore};
 
-use super::{disk, require_run, run_summary, CmdResult, RunSummary, RunsOutput};
+use super::{require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 
 /// `runs evidence` output. The report shaping lives in
 /// [`homeboy::core::observation::evidence_report`]; this adapter only embeds
@@ -16,7 +16,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
         &store, &run,
     )?);
     let artifact_root = homeboy::core::artifacts::root()?;
-    let disk_budget = disk::disk_budget(
+    let disk_budget = disk_budget(
         &artifact_root,
         "artifact",
         "disk budget probing is not implemented for this platform",

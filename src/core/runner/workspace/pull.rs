@@ -239,14 +239,14 @@ fn normalize_local_destination(path: &str) -> Result<String> {
 fn allowed_runner_workspace_roots(runner: &Runner) -> Result<Vec<String>> {
     let mut roots = Vec::new();
     if let Some(root) = runner.workspace_root.as_deref() {
-        roots.push(normalize_root(root));
+        roots.push(crate::core::paths::normalize_remote_root(root));
     }
     roots.extend(
         runner
             .policy
             .workspace_roots
             .iter()
-            .map(|root| normalize_root(root)),
+            .map(|root| crate::core::paths::normalize_remote_root(root)),
     );
     roots.sort();
     roots.dedup();
@@ -265,18 +265,8 @@ fn allowed_runner_workspace_roots(runner: &Runner) -> Result<Vec<String>> {
     Ok(roots)
 }
 
-fn normalize_root(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn path_is_within_root(path: &str, root: &str) -> bool {
-    let root = normalize_root(root);
-    path == root || path.starts_with(&format!("{root}/"))
+    crate::core::paths::remote_path_is_within_root(path, root)
 }
 
 fn join_remote_path(base: &str, include: &str) -> String {

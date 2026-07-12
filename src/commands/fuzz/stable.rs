@@ -312,8 +312,6 @@ fn resolve_rig_id(manifest_path: &Path, rig_ref: &str) -> Result<String> {
 
 #[derive(Deserialize)]
 struct StableWorkloadManifest {
-    #[allow(dead_code)]
-    schema: Option<String>,
     profile_id: Option<String>,
     rig: String,
     #[serde(default)]

@@ -15,7 +15,7 @@ use homeboy::core::Error;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::commands::utils::output::write_output_file;
+use crate::core::io::output_file::write_output_file;
 
 pub fn route_after_parse(
     cli: &Cli,

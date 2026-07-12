@@ -7,7 +7,7 @@ use homeboy::core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::output::{write_output_file_atomically, OutputWriteOptions};
+use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
 const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v3";
 pub const ACTIONABLE_METADATA_KEY: &str = "_homeboy_actionable";

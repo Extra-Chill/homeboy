@@ -21,9 +21,11 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             poll_ms,
             compact,
             tail_kb,
-        } => job_logs(&runner_id, &job_id, follow, poll_ms, compact, tail_kb).map_job_daemon(),
+        } => map_daemon_job(job_logs(
+            &runner_id, &job_id, follow, poll_ms, compact, tail_kb,
+        )),
         RunnerJobCommand::Cancel { runner_id, job_id } => {
-            job_cancel(&runner_id, &job_id).map_job_daemon()
+            map_daemon_job(job_cancel(&runner_id, &job_id))
         }
         RunnerJobCommand::Reconcile { runner_id } => job_reconcile(&runner_id),
         RunnerJobCommand::Artifacts {
@@ -34,14 +36,8 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
     }
 }
 
-trait RunnerJobCommandResultExt {
-    fn map_job_daemon(self) -> CmdResult<RunnerJobCommandOutput>;
-}
-
-impl RunnerJobCommandResultExt for CmdResult<RunnerJobOutput> {
-    fn map_job_daemon(self) -> CmdResult<RunnerJobCommandOutput> {
-        self.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(output), exit_code))
-    }
+fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(output), exit_code))
 }
 
 fn job_reconcile(runner_id: &str) -> CmdResult<RunnerJobCommandOutput> {

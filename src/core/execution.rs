@@ -130,28 +130,6 @@ pub enum ExecutionPhase {
     Publish,
 }
 
-impl ExecutionMode {
-    /// Normalize legacy CLI mode values into the shared execution vocabulary.
-    pub(crate) fn from_cli_value(value: &str) -> Option<Self> {
-        match value {
-            "plan" | "preview" => Some(Self::Plan),
-            "dry-run" | "dry_run" => Some(Self::DryRun),
-            "capture-patch" | "capture_patch" => Some(Self::CapturePatch),
-            "apply" | "write" => Some(Self::Apply),
-            "execute" | "run" => Some(Self::Execute),
-            _ => None,
-        }
-    }
-}
-
-impl std::str::FromStr for ExecutionMode {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Self::from_cli_value(value).ok_or_else(|| format!("unknown execution mode: {value}"))
-    }
-}
-
 /// High-level request to execute a plan or command-shaped workflow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRequest {
@@ -443,23 +421,6 @@ mod tests {
     use crate::core::release::{
         ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
-
-    #[test]
-    fn execution_mode_normalizes_cli_spellings() {
-        assert_eq!(
-            ExecutionMode::from_cli_value("dry-run"),
-            Some(ExecutionMode::DryRun)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_value("write"),
-            Some(ExecutionMode::Apply)
-        );
-        assert_eq!(
-            ExecutionMode::from_cli_value("execute"),
-            Some(ExecutionMode::Execute)
-        );
-        assert_eq!(ExecutionMode::from_cli_value("unknown"), None);
-    }
 
     #[test]
     fn lifecycle_vocabulary_serializes_in_order() {

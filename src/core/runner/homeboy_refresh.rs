@@ -887,20 +887,11 @@ fn sanitize_ref(value: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect();
-    sanitized.trim_matches('-').to_string().if_empty("main")
-}
-
-trait IfEmpty {
-    fn if_empty(self, fallback: &str) -> String;
-}
-
-impl IfEmpty for String {
-    fn if_empty(self, fallback: &str) -> String {
-        if self.is_empty() {
-            fallback.to_string()
-        } else {
-            self
-        }
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        "main".to_string()
+    } else {
+        sanitized.to_string()
     }
 }
 

@@ -820,17 +820,6 @@ mod tests {
             .collect()
     }
 
-    fn visible_long_flags(command: &clap::Command) -> Vec<String> {
-        let mut flags: Vec<String> = command
-            .get_arguments()
-            .filter(|arg| !arg.is_hide_set())
-            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-            .collect();
-        flags.sort();
-        flags.dedup();
-        flags
-    }
-
     fn assert_docs_cover_subcommands(command_name: &str) {
         let command = root_command(command_name);
         let docs = command_doc(command_name);
@@ -839,18 +828,6 @@ mod tests {
             assert!(
                 docs.contains(&format!("`{subcommand}")),
                 "docs/commands/{command_name}.md does not document `{subcommand}` from live help"
-            );
-        }
-    }
-
-    fn assert_docs_cover_flags(command_name: &str) {
-        let command = root_command(command_name);
-        let docs = command_doc(command_name);
-
-        for flag in visible_long_flags(&command) {
-            assert!(
-                docs.contains(&flag),
-                "docs/commands/{command_name}.md does not document `{flag}` from live help"
             );
         }
     }

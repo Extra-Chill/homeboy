@@ -343,6 +343,68 @@ pub(crate) fn join_remote_child(base_path: Option<&str>, dir: &str, child: &str)
     }
 }
 
+/// The lexical authorization failure for a runner-side path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePathAuthorizationError {
+    NotAbsolute,
+    ContainsParentDir,
+    OutsideAllowedRoots,
+}
+
+/// The containment semantics selected by a runner artifact caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemotePathRootContainment {
+    RemoteString,
+    NativePath,
+}
+
+/// Normalize a remote root without accessing the remote filesystem.
+pub fn normalize_remote_root(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Return whether an absolute remote path is contained by a remote root.
+pub fn remote_path_is_within_root(path: &str, root: &str) -> bool {
+    let root = normalize_remote_root(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+/// Validate lexical authorization for a runner-side artifact path.
+///
+/// This deliberately does not canonicalize filesystem paths: callers use it
+/// for remote path policy, while deletion paths enforce stronger symlink-safe
+/// invariants separately.
+pub fn authorize_remote_artifact_path(
+    path: &Path,
+    allowed_roots: &[String],
+    containment: RemotePathRootContainment,
+) -> std::result::Result<(), RemotePathAuthorizationError> {
+    if !path.is_absolute() {
+        return Err(RemotePathAuthorizationError::NotAbsolute);
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(RemotePathAuthorizationError::ContainsParentDir);
+    }
+    if allowed_roots.iter().any(|root| match containment {
+        RemotePathRootContainment::RemoteString => {
+            remote_path_is_within_root(&path.display().to_string(), root)
+        }
+        RemotePathRootContainment::NativePath => path == Path::new(root) || path.starts_with(root),
+    }) {
+        Ok(())
+    } else {
+        Err(RemotePathAuthorizationError::OutsideAllowedRoots)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +499,41 @@ mod tests {
             join_remote_child(Some("/var/www/site"), "/var/log", "syslog").unwrap(),
             "/var/log/syslog"
         );
+    }
+
+    #[test]
+    fn authorize_remote_artifact_path_checks_lexical_policy() {
+        let roots = vec!["/runner/workspace/".to_string()];
+        assert_eq!(
+            authorize_remote_artifact_path(
+                Path::new("relative"),
+                &roots,
+                RemotePathRootContainment::RemoteString,
+            ),
+            Err(RemotePathAuthorizationError::NotAbsolute)
+        );
+        assert_eq!(
+            authorize_remote_artifact_path(
+                Path::new("/runner/workspace/../secret"),
+                &roots,
+                RemotePathRootContainment::RemoteString,
+            ),
+            Err(RemotePathAuthorizationError::ContainsParentDir)
+        );
+        assert_eq!(
+            authorize_remote_artifact_path(
+                Path::new("/other/artifact"),
+                &roots,
+                RemotePathRootContainment::RemoteString,
+            ),
+            Err(RemotePathAuthorizationError::OutsideAllowedRoots)
+        );
+        assert!(authorize_remote_artifact_path(
+            Path::new("/runner/workspace/out"),
+            &roots,
+            RemotePathRootContainment::RemoteString,
+        )
+        .is_ok());
     }
 
     #[test]
