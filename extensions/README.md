@@ -46,6 +46,7 @@ when a reusable integration needs documentation outside its owning project.
 | `go` | Go project type — Cargo-equivalent CLI integration for services and binaries |
 | `swift` | Swift project type — testing infrastructure for macOS, iOS, and Swift CLI projects |
 | `managed-preview` | Provider command helpers for Homeboy managed service public previews |
+| `discord` | Outbound Discord run-completion notifications via Homeboy's transport-agnostic notify command |
 
 ## Scope
 
@@ -61,6 +62,7 @@ Install extensions one at a time. Homeboy clones this repo, detects the monorepo
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id wordpress
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id nodejs
+homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id discord
 ```
 
 Remote runners need the same extension IDs installed on the runner host before
