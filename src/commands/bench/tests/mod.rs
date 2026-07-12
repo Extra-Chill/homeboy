@@ -1,12 +1,11 @@
 use super::*;
-use crate::test_support::with_isolated_home;
+use crate::test_support::{git_fixture_output, run_git_fixture_command, with_isolated_home};
 use clap::error::ErrorKind;
 use clap::Parser;
 use homeboy::core::extension::bench::aggregate_comparison;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
@@ -248,39 +247,17 @@ fn install_git_rig_package(
     )
     .expect("write package rig");
 
-    git(&package_root, &["init", "-b", "main"]);
-    git(&package_root, &["config", "user.name", "Test User"]);
-    git(&package_root, &["config", "user.email", "test@example.com"]);
-    git(&package_root, &["add", "."]);
-    git(&package_root, &["commit", "-m", "Initial rig package"]);
-    let revision = git_output(&package_root, &["rev-parse", "--short", "HEAD"]);
+    run_git_fixture_command(&package_root, &["init", "-b", "main"]);
+    run_git_fixture_command(&package_root, &["config", "user.name", "Test User"]);
+    run_git_fixture_command(&package_root, &["config", "user.email", "test@example.com"]);
+    run_git_fixture_command(&package_root, &["add", "."]);
+    run_git_fixture_command(&package_root, &["commit", "-m", "Initial rig package"]);
+    let revision = git_fixture_output(&package_root, &["rev-parse", "--short", "HEAD"]);
     fs::write(package_root.join("untracked.txt"), "dirty\n").expect("dirty package");
 
     homeboy::core::rig::install(package_root.to_string_lossy().as_ref(), Some(rig_id), false)
         .expect("install rig package");
     (package_root, revision)
-}
-
-fn git(repo: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {:?} failed", args);
-}
-
-fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("run git");
-    assert!(output.status.success(), "git {:?} failed", args);
-    String::from_utf8(output.stdout)
-        .expect("git output utf8")
-        .trim()
-        .to_string()
 }
 
 fn write_local_rig_package(

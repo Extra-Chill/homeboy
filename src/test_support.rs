@@ -35,6 +35,21 @@ pub(crate) struct AuditHomeGuard {
     _guard: MutexGuard<'static, ()>,
 }
 
+pub(crate) struct ArtifactRootOverrideGuard;
+
+impl ArtifactRootOverrideGuard {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        crate::core::set_artifact_root_override(Some(path));
+        Self
+    }
+}
+
+impl Drop for ArtifactRootOverrideGuard {
+    fn drop(&mut self) {
+        crate::core::set_artifact_root_override(None);
+    }
+}
+
 impl AuditGuard {
     pub(crate) fn new() -> Self {
         let home_guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -217,7 +232,7 @@ fn shared_empty_git_repo_template() -> &'static Path {
     SHARED_EMPTY_GIT_REPO_TEMPLATE
         .get_or_init(|| {
             let temp = TempDir::new().expect("git template tempdir");
-            run_git_fixture_command(temp.path(), &["init", "-q"]);
+            run_git_template_command(temp.path(), &["init", "-q"]);
             temp
         })
         .path()
@@ -227,11 +242,11 @@ fn shared_committed_git_repo_template() -> &'static Path {
     SHARED_COMMITTED_GIT_REPO_TEMPLATE
         .get_or_init(|| {
             let temp = TempDir::new().expect("committed git template tempdir");
-            run_git_fixture_command(temp.path(), &["init", "-q"]);
+            run_git_template_command(temp.path(), &["init", "-q"]);
             std::fs::write(temp.path().join("README.md"), "# homeboy test fixture\n")
                 .expect("git template readme");
-            run_git_fixture_command(temp.path(), &["add", "README.md"]);
-            run_git_fixture_command(temp.path(), &["commit", "-q", "-m", "test fixture"]);
+            run_git_template_command(temp.path(), &["add", "README.md"]);
+            run_git_template_command(temp.path(), &["commit", "-q", "-m", "test fixture"]);
             temp
         })
         .path()
@@ -252,17 +267,57 @@ fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn run_git_fixture_command(repo: &Path, args: &[&str]) {
-    let status = Command::new("git")
+pub(crate) fn run_git_fixture_command(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git fixture command");
+    assert!(
+        output.status.success(),
+        "git fixture command {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_git_template_command(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
         .args(args)
         .current_dir(repo)
         .env("GIT_AUTHOR_NAME", "homeboy-test")
         .env("GIT_AUTHOR_EMAIL", "homeboy-test@example.invalid")
         .env("GIT_COMMITTER_NAME", "homeboy-test")
         .env("GIT_COMMITTER_EMAIL", "homeboy-test@example.invalid")
-        .status()
+        .output()
+        .expect("git template command");
+    assert!(
+        output.status.success(),
+        "git template command {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+pub(crate) fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
         .expect("git fixture command");
-    assert!(status.success(), "git fixture command {:?} failed", args);
+    assert!(
+        output.status.success(),
+        "git fixture command {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git fixture output utf8")
+        .trim()
+        .to_string()
 }
 
 fn minimal_source_grammar() -> &'static str {

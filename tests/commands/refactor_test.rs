@@ -1,32 +1,20 @@
-use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use homeboy::core::refactor;
 
-fn tmp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("homeboy-refactor-{name}-{nanos}"))
-}
+#[path = "../support/mod.rs"]
+#[allow(dead_code)]
+mod support;
 
 #[test]
 fn test_build_plan() {
-    let root = tmp_dir("missing");
-    fs::create_dir_all(&root).unwrap();
+    let root = support::temp_dir("refactor-missing");
 
-    let result = refactor::build_plan("src/missing.rs", &root, "grouped", true);
+    let result = refactor::build_plan("src/missing.rs", root.path(), "grouped", true);
     assert!(result.is_err());
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn test_apply_plan_skeletons() {
-    let root = tmp_dir("skeletons");
-    fs::create_dir_all(&root).unwrap();
+    let root = support::temp_dir("refactor-skeletons");
 
     let plan = refactor::DecomposePlan {
         file: "src/core/deploy.rs".to_string(),
@@ -55,10 +43,8 @@ fn test_apply_plan_skeletons() {
         warnings: vec![],
     };
 
-    let created = refactor::apply_plan_skeletons(&plan, &root).unwrap();
+    let created = refactor::apply_plan_skeletons(&plan, root.path()).unwrap();
     assert_eq!(created.len(), 2);
-    assert!(root.join("src/core/deploy/types.inc").exists());
-    assert!(root.join("src/core/deploy/execution.inc").exists());
-
-    let _ = fs::remove_dir_all(root);
+    assert!(root.path().join("src/core/deploy/types.inc").exists());
+    assert!(root.path().join("src/core/deploy/execution.inc").exists());
 }
