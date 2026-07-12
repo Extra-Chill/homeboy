@@ -44,7 +44,9 @@ pub use capability::{
     resolve_execution_context, resolve_extension_for_capability, ExtensionCapability,
     ExtensionExecutionContext, ScenarioRunnerOptions,
 };
-pub(crate) use capability::{extension_guidance_hints, stderr_tail};
+pub(crate) use capability::{
+    extension_guidance_hints, has_linked_extension_for_capability, stderr_tail,
+};
 pub(crate) use compiler_warning_contract::{
     extensions_for_compiler_warning_contract, run_compiler_warning_contract_script,
     CompilerWarningContract,
