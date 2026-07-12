@@ -5,6 +5,10 @@ use super::runner_readiness::{
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
 use crate::core::agent_task_executor_evidence::link_latest_executor_evidence;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
@@ -73,6 +77,10 @@ fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// provider blip. Leaves permanent provider failures untouched so they keep
 /// failing fast.
 fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
+    if outcome_text_is_rate_limited(outcome) {
+        outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
+        return;
+    }
     let already_transient =
         outcome.failure_classification == Some(AgentTaskFailureClassification::Transient);
     let provider_failure = matches!(
@@ -93,6 +101,17 @@ fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_transient(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
     }
+}
+
+fn outcome_text_is_rate_limited(outcome: &AgentTaskOutcome) -> bool {
+    outcome
+        .summary
+        .as_deref()
+        .is_some_and(is_rate_limited_provider_error)
+        || outcome.diagnostics.iter().any(|diagnostic| {
+            is_rate_limited_provider_error(&diagnostic.message)
+                || is_rate_limited_provider_error(&diagnostic.data.to_string())
+        })
 }
 
 /// Gather the human-facing text of an outcome (summary, diagnostic messages,
@@ -121,7 +140,7 @@ fn outcome_text_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// failure. Matching is case-insensitive.
 pub(super) fn is_transient_provider_error(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
-    const TRANSIENT_PATTERNS: [&str; 16] = [
+    const TRANSIENT_PATTERNS: [&str; 15] = [
         "curl error 28",
         "operation timed out",
         "timed out",
@@ -137,7 +156,6 @@ pub(super) fn is_transient_provider_error(text: &str) -> bool {
         "service unavailable",
         "bad gateway",
         "gateway timeout",
-        "too many requests",
     ];
 
     if TRANSIENT_PATTERNS
@@ -147,14 +165,31 @@ pub(super) fn is_transient_provider_error(text: &str) -> bool {
         return true;
     }
 
-    // HTTP 5xx and 429 status codes are transient; 4xx (except 429) are not.
+    // HTTP 5xx status codes are transient; rate-limit 429 is distinct so the
+    // scheduler can rotate rather than retry the same throttled provider.
     transient_status_code(&lowered)
 }
 
-/// Detect a transient HTTP status code (5xx or 429) mentioned in error text,
-/// while leaving permanent 4xx codes (400/401/403/404/422) non-retryable.
+pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    [
+        "too many requests",
+        "rate limit",
+        "rate-limit",
+        "provider_quota",
+        "provider quota",
+        "quota exceeded",
+        "exceeded your quota",
+    ]
+    .iter()
+    .any(|pattern| lowered.contains(pattern))
+        || contains_status_code_token(&lowered, "429")
+}
+
+/// Detect a transient HTTP 5xx status code mentioned in error text, while
+/// leaving permanent 4xx codes and rate-limit 429 non-retryable here.
 fn transient_status_code(lowered: &str) -> bool {
-    const TRANSIENT_CODES: [&str; 7] = ["429", "500", "502", "503", "504", "522", "524"];
+    const TRANSIENT_CODES: [&str; 6] = ["500", "502", "503", "504", "522", "524"];
     TRANSIENT_CODES
         .iter()
         .any(|code| contains_status_code_token(lowered, code))
@@ -288,37 +323,117 @@ pub(super) fn run_provider_command_once(
         }
     };
 
+    let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_progress: Arc<AtomicU64> = Arc::new(AtomicU64::new(now_unix_ms()));
+
+    let stdout_reader = child.stdout.take().map(|stdout| {
+        spawn_output_reader(
+            stdout,
+            Arc::clone(&stdout_buffer),
+            Arc::clone(&last_progress),
+        )
+    });
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        spawn_output_reader(
+            stderr,
+            Arc::clone(&stderr_buffer),
+            Arc::clone(&last_progress),
+        )
+    });
+
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = std::io::Write::write_all(&mut stdin, &input);
+        let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let output = {
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => break child.wait_with_output(),
-                Ok(None) if started.elapsed() >= process_timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return failure_outcome(
-                        request,
-                        AgentTaskOutcomeStatus::Timeout,
-                        AgentTaskFailureClassification::Timeout,
-                        "agent_task.provider_timeout",
-                        format!(
-                            "provider '{}' exceeded timeout_ms={}",
-                            provider.id, requested_timeout_ms
-                        ),
-                        json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
-                    );
+    let started = Instant::now();
+    let liveness_timeout = request
+        .limits
+        .liveness_timeout_ms
+        .map(Duration::from_millis);
+    let (status, killed_for_liveness, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (Some(status), false, false),
+            Ok(None) => {
+                let elapsed = started.elapsed();
+                if elapsed >= process_timeout {
+                    break (None, false, true);
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(error) => break Err(error),
+                if let Some(liveness) = liveness_timeout {
+                    let progress_age = Duration::from_millis(
+                        now_unix_ms().saturating_sub(last_progress.load(Ordering::SeqCst)),
+                    );
+                    if progress_age >= liveness {
+                        break (None, true, false);
+                    }
+                    // Wake up at the earlier of process timeout and liveness deadline.
+                    let remaining_liveness = liveness.saturating_sub(progress_age);
+                    let sleep_for = remaining_liveness
+                        .min(process_timeout - elapsed)
+                        .min(Duration::from_millis(50));
+                    if sleep_for > Duration::ZERO {
+                        std::thread::sleep(sleep_for);
+                    }
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
+            Err(_) => break (None, false, false),
         }
     };
 
-    let Ok(output) = output else {
+    if killed_for_liveness || timed_out {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    if let Some(handle) = stdout_reader {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_reader {
+        let _ = handle.join();
+    }
+
+    let stdout_bytes = stdout_buffer.lock().expect("stdout buffer").clone();
+    let stderr_bytes = stderr_buffer.lock().expect("stderr buffer").clone();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+
+    if killed_for_liveness {
+        let (status, classification, message) =
+            classify_stall_or_rate_limit(&stdout, &stderr, &provider.id, requested_timeout_ms);
+        return failure_outcome(
+            request,
+            status,
+            classification,
+            "agent_task.provider_liveness_timeout",
+            message,
+            json!({
+                "provider": provider.id,
+                "command": command,
+                "timeout_ms": requested_timeout_ms,
+                "process_timeout_ms": process_timeout.as_millis(),
+                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "stdout_bytes": stdout_bytes.len(),
+                "stderr_bytes": stderr_bytes.len(),
+            }),
+        );
+    }
+
+    if timed_out {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Timeout,
+            AgentTaskFailureClassification::Timeout,
+            "agent_task.provider_timeout",
+            format!(
+                "provider '{}' exceeded timeout_ms={}",
+                provider.id, requested_timeout_ms
+            ),
+            json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
+        );
+    }
+    let Some(status) = status else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -328,9 +443,6 @@ pub(super) fn run_provider_command_once(
             json!({ "provider": provider.id, "command": command }),
         );
     };
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stdout.is_empty() {
         return failure_outcome(
             request,
@@ -342,7 +454,7 @@ pub(super) fn run_provider_command_once(
                 &provider.id,
                 &provider.backend,
                 &command,
-                &output.status,
+                &status,
                 &stdout,
                 &stderr,
                 &provider_output_redactions(request, provider),
@@ -362,7 +474,7 @@ pub(super) fn run_provider_command_once(
                 request,
                 provider,
                 &command,
-                &output.status,
+                &status,
                 &stdout,
                 &stderr,
             );
@@ -381,13 +493,72 @@ pub(super) fn run_provider_command_once(
                 &provider.id,
                 &provider.backend,
                 &command,
-                &output.status,
+                &status,
                 &stdout,
                 &stderr,
                 &provider_output_redactions(request, provider),
             ),
         ),
     }
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn spawn_output_reader<R>(
+    mut reader: R,
+    buffer: Arc<Mutex<Vec<u8>>>,
+    last_progress: Arc<AtomicU64>,
+) -> std::thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut chunk = [0; 4096];
+        loop {
+            let Ok(read) = reader.read(&mut chunk) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            buffer.lock().expect("output buffer").extend(&chunk[..read]);
+            last_progress.store(now_unix_ms(), Ordering::SeqCst);
+        }
+    })
+}
+
+fn classify_stall_or_rate_limit(
+    stdout: &str,
+    stderr: &str,
+    provider_id: &str,
+    requested_timeout_ms: u64,
+) -> (
+    AgentTaskOutcomeStatus,
+    AgentTaskFailureClassification,
+    String,
+) {
+    let output = format!("{stdout}\n{stderr}");
+    if is_rate_limited_provider_error(&output) {
+        return (
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::RateLimited,
+            format!("provider '{provider_id}' reported a rate limit before becoming unresponsive"),
+        );
+    }
+    (
+        AgentTaskOutcomeStatus::ProviderError,
+        AgentTaskFailureClassification::Stalled,
+        format!(
+            "provider '{provider_id}' produced no stdout/stderr progress before timeout_ms={requested_timeout_ms}"
+        ),
+    )
 }
 
 fn executor_process_diagnostic_data(

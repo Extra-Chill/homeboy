@@ -91,6 +91,20 @@ pub enum AgentTaskFailureClassification {
     /// bounded backoff because the same request can succeed on a later attempt.
     Transient,
     Timeout,
+    /// Provider attempt produced no output/progress within the configured
+    /// liveness window. Distinguishes a silent hang from a wall-clock timeout
+    /// so the scheduler can rotate instead of waiting indefinitely.
+    Stalled,
+    /// Provider or backend explicitly signaled a rate limit (HTTP 429 or
+    /// generic rate-limit text). Distinct from transient so callers can
+    /// respect retry-after hints and the scheduler can rotate when the
+    /// pinned model is throttled.
+    #[serde(
+        alias = "provider_quota",
+        alias = "quota_exceeded",
+        alias = "rate_limit"
+    )]
+    RateLimited,
     PolicyDenied,
     CapabilityMissing,
     InvalidInput,

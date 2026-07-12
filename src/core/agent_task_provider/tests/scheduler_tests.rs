@@ -1,5 +1,8 @@
 use super::common::{request, script};
 use super::*;
+use crate::core::agent_task_scheduler::{
+    AgentTaskAggregateStatus, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
+};
 use std::sync::Mutex;
 
 static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -251,6 +254,66 @@ fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout(
 }
 
 #[test]
+fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
+    let pid_path = unique_state_path("stalled-child");
+    let _ = fs::remove_file(&pid_path);
+    let pid = pid_path.to_string_lossy().replace('\\', "\\\\");
+    let primary_command = format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs'); fs.writeFileSync('{pid}', String(process.pid)); setInterval(() => {{}}, 1000);"
+        ))
+    );
+    let fallback_command = format!(
+        "node {}",
+        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'fallback completed'}));")
+    );
+    let (request, primary) = request("task-stalled-rotation", primary_command);
+    let mut fallback = primary.clone();
+    fallback.id = "fallback.provider".to_string();
+    fallback.backend = "fallback".to_string();
+    fallback.command = fallback_command;
+    let scheduler =
+        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+            primary, fallback,
+        ]));
+    let mut plan = AgentTaskPlan::new("plan-stalled-rotation", vec![request]);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback".to_string()),
+            ..AgentTaskProviderRotationEntry::default()
+        }],
+        liveness_timeout_ms: Some(50),
+        ..AgentTaskProviderRotationPolicy::default()
+    });
+
+    let aggregate = scheduler.run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    let attempts = aggregate.outcomes[0]
+        .metadata
+        .pointer("/provider_rotation/attempts")
+        .and_then(Value::as_array)
+        .expect("rotation evidence");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["failure_classification"], json!("stalled"));
+    assert_eq!(attempts[1]["backend"], json!("fallback"));
+
+    let child_pid = fs::read_to_string(&pid_path).expect("stalled child wrote pid");
+    assert!(
+        !std::process::Command::new("kill")
+            .args(["-0", child_pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("check child process")
+            .success(),
+        "liveness timeout must reap the provider child"
+    );
+    let _ = fs::remove_file(&pid_path);
+}
+
+#[test]
 fn provider_can_return_timeout_payload_during_wrapper_grace() {
     let command = format!(
         "node {}",
@@ -453,7 +516,7 @@ fn is_transient_provider_error_classifies_transient_and_permanent_text() {
     assert!(is_transient_provider_error("connection reset by peer"));
     assert!(is_transient_provider_error("503 Service Unavailable"));
     assert!(is_transient_provider_error("HTTP 502 Bad Gateway"));
-    assert!(is_transient_provider_error("429 Too Many Requests"));
+    assert!(!is_transient_provider_error("429 Too Many Requests"));
 
     // Permanent failures must not be treated as transient.
     assert!(!is_transient_provider_error(

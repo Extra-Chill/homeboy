@@ -324,6 +324,8 @@ fn reconcile_outcome(
             AgentTaskFailureClassification::Provider
                 | AgentTaskFailureClassification::Transient
                 | AgentTaskFailureClassification::Timeout
+                | AgentTaskFailureClassification::Stalled
+                | AgentTaskFailureClassification::RateLimited
         )
     ) {
         return (

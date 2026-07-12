@@ -1023,10 +1023,10 @@ impl AgentTaskScheduleSupport {
     }
 
     /// Rotation triggers only on provider capacity failures (`provider`,
-    /// `transient`, `timeout` classifications). Task-level failures
-    /// (`execution_failed`, `policy_denied`, `invalid_input`,
-    /// `capability_missing`, `unknown`) never rotate so a provider swap cannot
-    /// mask a real task failure or policy denial (#6978).
+    /// `transient`, `timeout`, `stalled`, `rate_limited` classifications).
+    /// Task-level failures (`execution_failed`, `policy_denied`,
+    /// `invalid_input`, `capability_missing`, `unknown`) never rotate so a
+    /// provider swap cannot mask a real task failure or policy denial (#6978).
     pub(super) fn should_rotate_provider(
         outcome: &AgentTaskOutcome,
         policy: &AgentTaskProviderRotationPolicy,
@@ -1047,6 +1047,8 @@ impl AgentTaskScheduleSupport {
                     AgentTaskFailureClassification::Provider
                         | AgentTaskFailureClassification::Transient
                         | AgentTaskFailureClassification::Timeout
+                        | AgentTaskFailureClassification::Stalled
+                        | AgentTaskFailureClassification::RateLimited
                 )
             )
     }
@@ -1054,10 +1056,13 @@ impl AgentTaskScheduleSupport {
     /// Apply one rotation entry onto the re-dispatched request's executor.
     /// Unset entry fields inherit the failing attempt's values; the entry's
     /// `provider_config` object is merged over the executor config, mirroring
-    /// the dispatch provider-config layering.
+    /// the dispatch provider-config layering. Also copies the policy-level
+    /// liveness limit into the request so the provider runner can enforce it
+    /// per attempt.
     pub(super) fn apply_rotation_entry(
         request: &mut AgentTaskRequest,
         entry: &AgentTaskProviderRotationEntry,
+        policy: &AgentTaskProviderRotationPolicy,
     ) {
         let executor = &mut request.executor;
         if let Some(backend) = &entry.backend {
@@ -1098,6 +1103,18 @@ impl AgentTaskScheduleSupport {
             {
                 selection.ai_provider_id = Some(provider.to_string());
             }
+        }
+        Self::apply_rotation_policy_limits(request, policy);
+    }
+
+    /// Copy the policy-level liveness limit into the request when the request
+    /// does not already set it. Keeps a per-task override authoritative.
+    pub(super) fn apply_rotation_policy_limits(
+        request: &mut AgentTaskRequest,
+        policy: &AgentTaskProviderRotationPolicy,
+    ) {
+        if request.limits.liveness_timeout_ms.is_none() {
+            request.limits.liveness_timeout_ms = policy.liveness_timeout_ms;
         }
     }
 

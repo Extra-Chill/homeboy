@@ -436,6 +436,8 @@ fn agent_task_failure_classifications() -> Vec<String> {
         AgentTaskFailureClassification::Provider,
         AgentTaskFailureClassification::Transient,
         AgentTaskFailureClassification::Timeout,
+        AgentTaskFailureClassification::Stalled,
+        AgentTaskFailureClassification::RateLimited,
         AgentTaskFailureClassification::PolicyDenied,
         AgentTaskFailureClassification::CapabilityMissing,
         AgentTaskFailureClassification::InvalidInput,

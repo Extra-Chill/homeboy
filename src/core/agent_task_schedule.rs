@@ -506,13 +506,13 @@ mod config {
     /// Operator-configured provider rotation policy for agent-task execution.
     ///
     /// On a rotation-eligible failure (provider capacity classifications only:
-    /// `provider`, `transient`, `timeout`), the scheduler re-dispatches the same
-    /// task contract with the next entry in the chain until entries are
-    /// exhausted or the attempt bound is reached. Task-level failures
-    /// (`execution_failed`, `policy_denied`, `invalid_input`,
-    /// `capability_missing`) never rotate so a provider swap cannot mask a real
-    /// task failure or policy denial. The policy is pure operator data — core
-    /// hardcodes no provider or model names (#6978).
+    /// `provider`, `transient`, `timeout`, `stalled`, `rate_limited`), the
+    /// scheduler re-dispatches the same task contract with the next entry in the
+    /// chain until entries are exhausted or the attempt bound is reached.
+    /// Task-level failures (`execution_failed`, `policy_denied`,
+    /// `invalid_input`, `capability_missing`) never rotate so a provider swap
+    /// cannot mask a real task failure or policy denial. The policy is pure
+    /// operator data — core hardcodes no provider or model names (#6978).
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct AgentTaskProviderRotationPolicy {
         /// Ordered rotation chain. The first attempt always uses the task's own
@@ -524,6 +524,12 @@ mod config {
         /// Defaults to `entries.len() + 1` when unset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub max_attempts: Option<u32>,
+        /// Per-attempt liveness deadline: if the provider process produces no
+        /// stdout/stderr progress within this window, the attempt is killed and
+        /// treated as a rotation-eligible stall. When unset, attempts only obey
+        /// the wall-clock `timeout_ms` / `max_runtime_ms` limits.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub liveness_timeout_ms: Option<u64>,
     }
 
     impl AgentTaskProviderRotationPolicy {
