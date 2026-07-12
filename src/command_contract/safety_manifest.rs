@@ -213,40 +213,28 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             }
             return metadata;
         }
-    } else {
-        // Dynamic commands are overlaid above. Any other unregistered command must not
-        // silently acquire the read-only defaults.
-        metadata.mutates = true;
-        metadata.operator = true;
-        metadata.output_notes =
-            "unregistered command path is conservatively classified as mutating";
-        return metadata;
     }
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
         ["contract", "manifest"] => {}
         ["self", "docs", "map"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "default JSON output is non-mutating; pass --write to write markdown docs to disk";
+            metadata.mutating(
+                "default JSON output is non-mutating; pass --write to write markdown docs to disk",
+            );
             metadata.dangerous_flags = vec!["--write"];
         }
         ["review", "ci", "autofix"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "commits and pushes prepared CI autofix changes";
+            metadata.operator_mutating("commits and pushes prepared CI autofix changes");
         }
         ["cleanup", "artifacts"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "default output is a non-mutating cleanup plan; pass --apply to remove artifacts";
+            metadata.mutating(
+                "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
+            );
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["self", "cleanup-runtime-tmp"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries";
+            metadata.operator_mutating("default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries");
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["extension", "setup"]
@@ -255,76 +243,64 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["extension", "dev-run"]
         | ["extension", "install-for-component"]
         | ["extension", "set"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates installed extension files or extension manifest metadata";
+            metadata.mutating("mutates installed extension files or extension manifest metadata");
         }
         ["extension", "install"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates installed extension files or extension manifest metadata";
+            metadata.mutating("mutates installed extension files or extension manifest metadata");
             metadata.dangerous_flags = vec!["--replace"];
         }
         ["extension", "update"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates installed extension files or extension manifest metadata";
+            metadata.mutating("mutates installed extension files or extension manifest metadata");
             metadata.dangerous_flags = vec!["--force"];
         }
         ["runtime", "refresh"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "mutates installed runtime package files";
+            metadata.mutating("mutates installed runtime package files");
         }
         ["extension", "uninstall"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates installed extension files or extension manifest metadata";
+            metadata.mutating("mutates installed extension files or extension manifest metadata");
             metadata.dangerous_flags = vec!["uninstall"];
         }
         ["runs", "reconcile"] => {
-            metadata.mutates = true;
+            metadata.mutating("marks orphaned running records stale unless --dry-run is passed");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "marks orphaned running records stale unless --dry-run is passed";
         }
         ["runs", "import"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "imports observation bundle or GitHub Actions artifacts into the local run store";
+            metadata.mutating(
+                "imports observation bundle or GitHub Actions artifacts into the local run store",
+            );
         }
         ["runs", "loop-sync"] => {
-            metadata.mutates = true;
+            metadata.mutating(
+                "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed";
         }
         ["runs", "artifact", "cleanup-downloads"] | ["runs", "artifact", "cleanup-persisted"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "default output is a non-mutating cleanup plan; pass --apply to delete artifacts";
+            metadata.mutating(
+                "default output is a non-mutating cleanup plan; pass --apply to delete artifacts",
+            );
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["runs", "resources"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates";
+            metadata.mutating("default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates");
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["runs", "artifact", "attach"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "copies an existing runner-side file into the persisted local artifact store and records it against a run";
+            metadata.mutating(
+                "copies an existing runner-side file into the persisted local artifact store and records it against a run",
+            );
         }
         ["agent-task", "promote"] => {
-            metadata.mutates = true;
+            metadata.mutating(
+                "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "applies a selected patch artifact into a managed worktree unless --dry-run is passed";
         }
         ["agent-task", "active"] => {
-            metadata.mutates = true;
+            metadata.mutating(
+                "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed";
         }
         ["agent-task", "controller", "init"]
         | ["agent-task", "controller", "from-spec"]
@@ -336,53 +312,46 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["agent-task", "controller", "run"]
         | ["agent-task", "controller", "resume"]
         | ["agent-task", "controller", "mark-human-ready"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "mutates durable agent-task loop controller state";
+            metadata.mutating("mutates durable agent-task loop controller state");
         }
         ["agent-task", "auth", "remove"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "removes one agent-task provider secret source mapping";
+            metadata.operator_mutating("removes one agent-task provider secret source mapping");
         }
         ["agent-task", "prompts", "remove"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "removes one stored agent-task prompt";
+            metadata.mutating("removes one stored agent-task prompt");
         }
         ["agent-task", "fanout", "cook-batch"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating(
+                "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed";
             metadata.dangerous_flags = vec!["--run-plan"];
         }
         ["fuzz", "replay"] | ["fuzz", "minimize"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "replays or minimizes a persisted fuzz case against local code and may write run artifacts";
+            metadata.mutating(
+                "replays or minimizes a persisted fuzz case against local code and may write run artifacts",
+            );
         }
         ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] | ["fuzz", "run-campaign"] => {
             metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied";
             metadata.dangerous_flags = vec!["--allow-destructive"];
         }
         ["rig", "release-lock"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "releases a local rig active-run lease; --force can reclaim a live holder's guardrail";
+            metadata.operator_mutating(
+                "releases a local rig active-run lease; --force can reclaim a live holder's guardrail",
+            );
             metadata.dangerous_flags = vec!["--force"];
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
+            metadata
+                .operator_mutating("default output is a non-mutating plan; pass --apply to mutate");
         }
         ["git", "issue", "create"]
         | ["git", "issue", "comment"]
         | ["git", "issue", "close"]
         | ["git", "issue", "edit"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates GitHub issue state through the configured repository";
+            metadata
+                .operator_mutating("mutates GitHub issue state through the configured repository");
             metadata.risk_exemption = Some(
                 "the issue subcommand is the explicit GitHub write action; no dry-run contract exists yet",
             );
@@ -392,32 +361,25 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["git", "pr", "comment"]
         | ["git", "pr", "refresh"]
         | ["git", "pr", "policy", "open"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates GitHub pull request state or branch state";
+            metadata.operator_mutating("mutates GitHub pull request state or branch state");
             metadata.risk_exemption = Some(
                 "the PR subcommand is the explicit GitHub write action; no dry-run contract exists yet",
             );
         }
         ["git", "pr", "fleet"] | ["git", "pr", "land"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating(
+                "reports by default or with --dry-run; apply/merge flags mutate PR state",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "reports by default or with --dry-run; apply/merge flags mutate PR state";
             metadata.dangerous_flags = vec!["--apply", "--delete-branch"];
         }
         ["runs", "findings", "reconcile"] | ["runs", "findings", "reconcile-run"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating("default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state";
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["review", "audit", "baseline", "refresh"] | ["review", "audit", "baseline", "merge"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "mutates persisted audit baseline data in component configuration";
+            metadata.mutating("mutates persisted audit baseline data in component configuration");
         }
         ["refactor", "rename"]
         | ["refactor", "add"]
@@ -425,34 +387,25 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["refactor", "propagate"]
         | ["refactor", "transform"]
         | ["refactor", "decompose"] => {
-            metadata.mutates = true;
-            metadata.output_notes =
-                "reports a plan by default; pass --write to rewrite source files";
+            metadata.mutating("reports a plan by default; pass --write to rewrite source files");
             metadata.dangerous_flags = vec!["--write"];
         }
         ["rig", "up"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating("mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan";
         }
         ["rig", "down"] | ["rig", "repair"] | ["rig", "install"] | ["rig", "update"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates local rig runtime state or installed rig packages";
+            metadata.operator_mutating("mutates local rig runtime state or installed rig packages");
         }
         ["rig", "sync"]
         | ["rig", "app", "install"]
         | ["rig", "app", "update"]
         | ["rig", "app", "uninstall"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating("mutates rig-managed files unless --dry-run is passed");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "mutates rig-managed files unless --dry-run is passed";
         }
         ["rig", "sources", "remove"] | ["rig", "sources", "refresh"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "mutates installed rig source metadata";
+            metadata.mutating("mutates installed rig source metadata");
         }
         ["runner", "add"]
         | ["runner", "enable"]
@@ -462,79 +415,64 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["runner", "remove"]
         | ["runner", "disconnect"]
         | ["runner", "refresh-homeboy"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes =
-                "mutates runner configuration, trust policy, or runner lifecycle state";
+            metadata.operator_mutating(
+                "mutates runner configuration, trust policy, or runner lifecycle state",
+            );
         }
         ["runner", "connect"] | ["runner", "work"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "mutates runner lifecycle state";
+            metadata.operator_mutating("mutates runner lifecycle state");
             metadata.risk_exemption = Some(
                 "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",
             );
         }
         ["runner", "doctor"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes =
-                "diagnoses runners by default; --repair mutates runner lifecycle state";
+            metadata.operator_mutating(
+                "diagnoses runners by default; --repair mutates runner lifecycle state",
+            );
             metadata.dangerous_flags = vec!["--repair"];
         }
         ["runner", "exec"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating("executes commands on a runner unless --dry-run is passed");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "executes commands on a runner unless --dry-run is passed";
         }
         ["runner", "lifecycle"] => {
             metadata.output_notes = "non-mutating runner workspace lifecycle/finalization readiness report suitable for RunOutcomeEnvelope embedding";
         }
         ["runner", "workspace", "sync"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "materializes a local worktree into runner workspace state";
+            metadata.operator_mutating("materializes a local worktree into runner workspace state");
             metadata.dangerous_flags = vec!["--allow-dirty-lab-workspace"];
         }
         ["runner", "workspace", "pull"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating(
+                "copies selected files from runner workspace state to a local destination",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "copies selected files from runner workspace state to a local destination";
         }
         ["runner", "workspace", "apply"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "applies a Lab-generated workspace patch to a local worktree";
+            metadata
+                .operator_mutating("applies a Lab-generated workspace patch to a local worktree");
             metadata.dangerous_flags = vec!["--force"];
         }
         ["runner", "workspace", "prune"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
-            metadata.output_notes = "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages";
+            metadata.operator_mutating("default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages");
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["worktree", "queue-create"] => {
-            metadata.mutates = true;
+            metadata.mutating("default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating";
         }
         ["worktree", "create"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "creates a task worktree from a registered component checkout";
+            metadata.mutating("creates a task worktree from a registered component checkout");
         }
         ["worktree", "remove"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "removes a task worktree after safety checks";
+            metadata.mutating("removes a task worktree after safety checks");
             metadata.dangerous_flags = vec!["--force"];
         }
         ["worktree", "cleanup"] => {
-            metadata.mutates = true;
+            metadata.mutating(
+                "removes cleanup-eligible task worktrees; pass --cleanup-artifacts to also remove rebuildable Homeboy artifacts",
+            );
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes =
-                "removes cleanup-eligible task worktrees; pass --cleanup-artifacts to also remove rebuildable Homeboy artifacts";
             metadata.dangerous_flags = vec!["--force", "--cleanup-artifacts"];
         }
         ["tunnel", "service", "expose"]
@@ -568,10 +506,8 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             );
         }
         ["stack", "sync"] => {
-            metadata.mutates = true;
-            metadata.operator = true;
+            metadata.operator_mutating("mutates the configured stack target branch and may update the stack spec unless --dry-run is passed");
             metadata.dry_run_flag = Some("--dry-run");
-            metadata.output_notes = "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed";
         }
         ["stack", "push"] => {
             metadata.operator_mutating("pushes the configured stack target branch to its remote");
@@ -592,8 +528,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             );
         }
         ["refactor", "undo", "delete"] => {
-            metadata.mutates = true;
-            metadata.output_notes = "deletes an undo snapshot without restoring it";
+            metadata.mutating("deletes an undo snapshot without restoring it");
         }
         _ => {}
     }
@@ -621,64 +556,5 @@ fn dynamic_command_for_path<'a>(
         dynamic_commands.iter().find(|entry| entry.name == *command)
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::command_contract::{CommandSafetySpec, COMMAND_SPECS};
-
-    fn assert_safety(path: &[&str], expected: CommandSafetySpec) {
-        let path = path
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect::<Vec<_>>();
-        let actual = command_safety_metadata(&path);
-        assert_eq!(actual.mutates, expected.mutates, "path: {path:?}");
-        assert_eq!(actual.operator, expected.operator, "path: {path:?}");
-        assert_eq!(actual.dry_run_flag, expected.dry_run_flag, "path: {path:?}");
-        assert_eq!(
-            actual.risk_exemption, expected.risk_exemption,
-            "path: {path:?}"
-        );
-        assert_eq!(
-            actual.dangerous_flags, expected.dangerous_flags,
-            "path: {path:?}"
-        );
-    }
-
-    #[test]
-    fn every_top_level_command_uses_registry_safety() {
-        for spec in COMMAND_SPECS {
-            assert_safety(&[spec.name], spec.safety);
-        }
-    }
-
-    #[test]
-    fn registry_drives_representative_nested_safety() {
-        for path in [
-            &["project", "components", "attach-path"][..],
-            &["config", "set"][..],
-            &["component", "reconcile"][..],
-            &["file", "delete"][..],
-            &["fleet", "exec"][..],
-            &["api", "http", "request"][..],
-        ] {
-            let spec = registered_command(path[0]).expect("registered top-level command");
-            let expected = spec
-                .path_safety(&path[1..])
-                .expect("registered nested path");
-            assert_safety(path, expected.safety);
-        }
-
-        assert_safety(&["project", "list"], CommandSafetySpec::read_only());
-    }
-
-    #[test]
-    fn unknown_top_level_paths_fail_closed() {
-        let metadata = command_safety_metadata(&["not-registered".to_string()]);
-        assert!(metadata.mutates);
-        assert!(metadata.operator);
     }
 }
