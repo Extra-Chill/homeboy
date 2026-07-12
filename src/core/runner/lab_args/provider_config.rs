@@ -8,11 +8,18 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::cli_surface::{Cli, Commands};
+use crate::commands::agent_task::AgentTaskCommand;
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
+use crate::core::agent_task_dispatch_service::{
+    resolve_dispatch_request, AgentTaskDispatchCommand, ResolvedAgentTaskProviderPolicy,
+};
+use crate::core::agent_tasks::scheduler::AgentTaskRetryPolicy;
 use crate::core::config::read_json_spec_to_string;
 use crate::core::defaults;
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::{Error, Result};
+use clap::Parser;
 
 use super::envelope::{ArgValue, ExecutionEnvelope};
 use super::path_remap::{remap_local_path, remap_paths_in_value, LabPathRemap};
@@ -186,6 +193,74 @@ pub(in crate::core::runner) fn inject_agent_task_default_provider_config_in_args
     if !inserted {
         out.push("--provider-config".to_string());
         out.push(config);
+    }
+    Ok(out)
+}
+
+/// Compile controller-side provider selection before Lab serializes argv. The
+/// runner receives typed data and cannot reinterpret omitted flags using its own
+/// defaults, while capability and secret discovery remain runner-local.
+pub(in crate::core::runner) fn inject_agent_task_resolved_provider_policy_in_args(
+    args: &[String],
+) -> Result<Vec<String>> {
+    if !is_agent_task_dispatch_or_cook(args)
+        || args.iter().any(|arg| arg == "--resolved-provider-policy")
+        || args
+            .iter()
+            .any(|arg| arg.starts_with("--resolved-provider-policy="))
+    {
+        return Ok(args.to_vec());
+    }
+
+    let cli = Cli::try_parse_from(args).map_err(|error| {
+        Error::validation_invalid_argument(
+            "agent-task",
+            "failed to parse agent-task arguments while compiling Lab provider policy",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+    let dispatch: AgentTaskDispatchCommand = match cli.command {
+        Commands::AgentTask(agent_task) => match agent_task.command {
+            AgentTaskCommand::Cook(args) => args.dispatch.into(),
+            _ => return Ok(args.to_vec()),
+        },
+        _ => return Ok(args.to_vec()),
+    };
+    let request = resolve_dispatch_request(dispatch)?;
+    let rotation = defaults::load_config().agent_task.rotation;
+    let policy = ResolvedAgentTaskProviderPolicy {
+        backend: request.backend,
+        selector: request.selector,
+        model: request.model,
+        retry: AgentTaskRetryPolicy {
+            max_attempts: request.core.attempts.max(1),
+            ..AgentTaskRetryPolicy::default()
+        },
+        liveness_timeout_ms: rotation
+            .as_ref()
+            .and_then(|policy| policy.liveness_timeout_ms),
+        rotation,
+    };
+    let encoded = serde_json::to_string(&policy).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize resolved Lab agent-task provider policy".to_string()),
+        )
+    })?;
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    for arg in args {
+        if !inserted && arg == "--" {
+            out.push("--resolved-provider-policy".to_string());
+            out.push(encoded.clone());
+            inserted = true;
+        }
+        out.push(arg.clone());
+    }
+    if !inserted {
+        out.push("--resolved-provider-policy".to_string());
+        out.push(encoded);
     }
     Ok(out)
 }

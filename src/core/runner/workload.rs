@@ -7,6 +7,7 @@ use crate::command_contract::{
     RunnerWorkloadSecrets, RunnerWorkloadState, RunnerWorkloadWorkspaceMappings,
     RUNNER_WORKLOAD_SCHEMA,
 };
+use crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
@@ -141,12 +142,14 @@ pub(crate) fn runner_workload_agent_task_from_command(
         "cook" => run_id.map(|run_id| RunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
             plan_ref: None,
+            resolved_provider_policy: resolved_provider_policy_from_command(args),
             dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Cook,
             lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
         }),
         "dispatch" => run_id.map(|run_id| RunnerWorkloadAgentTask {
             run_id: run_id.to_string(),
             plan_ref: None,
+            resolved_provider_policy: resolved_provider_policy_from_command(args),
             dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::Dispatch,
             lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
         }),
@@ -158,6 +161,7 @@ pub(crate) fn runner_workload_agent_task_from_command(
             Some(RunnerWorkloadAgentTask {
                 run_id: record_run_id,
                 plan_ref: Some(plan_ref),
+                resolved_provider_policy: None,
                 dispatch_kind: RunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
@@ -165,6 +169,13 @@ pub(crate) fn runner_workload_agent_task_from_command(
         }
         _ => None,
     }
+}
+
+fn resolved_provider_policy_from_command(
+    args: &[String],
+) -> Option<ResolvedAgentTaskProviderPolicy> {
+    option_value_after(args, 0, "--resolved-provider-policy")
+        .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
 fn option_value_after(args: &[String], start_index: usize, option: &str) -> Option<String> {
@@ -1408,5 +1419,18 @@ mod tests {
             workload.result_refs.artifacts[0].name.as_deref(),
             Some("trace.zip")
         );
+    }
+
+    #[test]
+    fn legacy_agent_task_workload_decodes_without_provider_policy() {
+        let agent_task: RunnerWorkloadAgentTask = serde_json::from_value(serde_json::json!({
+            "run_id": "legacy-run",
+            "plan_ref": null,
+            "dispatch_kind": "cook",
+            "lifecycle_mirror_policy": "none"
+        }))
+        .expect("legacy workload agent-task contract");
+
+        assert!(agent_task.resolved_provider_policy.is_none());
     }
 }

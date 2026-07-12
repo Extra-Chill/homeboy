@@ -84,6 +84,24 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let client_context = dispatch_client_context(request)?;
     let mut provider_config =
         dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
+    let policy_backend = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .map(|policy| policy.backend.clone())
+        .unwrap_or_else(|| request.backend.clone());
+    let policy_selector = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .and_then(|policy| policy.selector.clone())
+        .or_else(|| request.selector.clone());
+    let policy_model = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .and_then(|policy| policy.model.clone())
+        .or_else(|| request.model.clone());
     let component_contracts = dispatch_component_contracts(&provider_config, &client_context)?;
     // Resolve + materialize the declared runtime dependency graph at known refs
     // and preflight-fail before dispatch when a required runtime dependency is
@@ -132,19 +150,19 @@ pub fn build_dispatch_plan_with_provider_requirements(
             group_key: repo.clone(),
             parent_plan_id: None,
             executor: AgentTaskExecutor {
-                backend: request.backend.clone(),
-                selector: request.selector.clone(),
+                backend: policy_backend.clone(),
+                selector: policy_selector.clone(),
                 runtime_selection: Some(AgentTaskRuntimeSelection {
                     runtime_id: None,
-                    executor_backend: Some(request.backend.clone()),
-                    executor_provider_id: request.selector.clone(),
+                    executor_backend: Some(policy_backend.clone()),
+                    executor_provider_id: policy_selector.clone(),
                     ai_provider_id: config_string(&provider_config, "provider"),
-                    model: request.model.clone(),
+                    model: policy_model.clone(),
                     substrate_ref: None,
                 }),
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
-                model: request.model.clone(),
+                model: policy_model.clone(),
                 config: provider_config.clone(),
             },
             instructions,
@@ -210,14 +228,28 @@ pub fn build_dispatch_plan_with_provider_requirements(
     plan.group_key = repo.clone();
     plan.options.max_concurrency = request.concurrency.max(1);
     plan.options.timeout_ms = request.core.timeout_ms;
-    plan.options.retry = AgentTaskRetryPolicy {
-        max_attempts: request.core.attempts.max(1),
-        ..AgentTaskRetryPolicy::default()
+    plan.options.retry = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .map(|policy| policy.retry.clone())
+        .unwrap_or(AgentTaskRetryPolicy {
+            max_attempts: request.core.attempts.max(1),
+            ..AgentTaskRetryPolicy::default()
+        });
+    // A submitted controller policy is authoritative, including an explicitly
+    // absent rotation. Per-task `metadata.provider_rotation` still overrides it.
+    plan.options.rotation = match &request.core.resolved_provider_policy {
+        Some(policy) => policy.rotation.clone(),
+        None => defaults::load_config().agent_task.rotation,
     };
-    // Global provider rotation policy (`agent_task.rotation` in Homeboy config)
-    // flows into the plan options; per-task `metadata.provider_rotation`
-    // overrides it at dispatch time (#6978).
-    plan.options.rotation = defaults::load_config().agent_task.rotation;
+    if let Some(policy) = &request.core.resolved_provider_policy {
+        for task in &mut plan.tasks {
+            if task.limits.liveness_timeout_ms.is_none() {
+                task.limits.liveness_timeout_ms = policy.liveness_timeout_ms;
+            }
+        }
+    }
     plan.metadata = serde_json::json!({
         "kind": "agent-task-dispatch",
         "repo": repo,
@@ -958,6 +990,149 @@ mod tests {
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook without rotation.".to_string()),
                 repo: Some("sample-plugin".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert!(plan.options.rotation.is_none());
+        });
+    }
+
+    #[test]
+    fn submitted_provider_policy_preserves_controller_execution_policy() {
+        with_isolated_home(|_| {
+            let mut runner_config = defaults::load_config();
+            runner_config.agent_task.rotation = Some(
+                crate::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("runner-fallback".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            defaults::save_config(&runner_config).expect("save runner config");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with controller policy.".to_string()),
+                backend: Some("controller-backend".to_string()),
+                model: Some("controller-model".to_string()),
+                required_capabilities: vec!["runner-capability".to_string()],
+                secret_env: vec!["RUNNER_SECRET".to_string()],
+                core: DispatchCoreInputs {
+                    resolved_provider_policy: Some(
+                        crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                            backend: "controller-backend".to_string(),
+                            selector: Some("controller-selector".to_string()),
+                            model: Some("controller-model".to_string()),
+                            rotation: Some(
+                                crate::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                                    entries: vec![
+                                        crate::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                            backend: Some("controller-fallback".to_string()),
+                                            model: Some("fallback-model".to_string()),
+                                            ..Default::default()
+                                        },
+                                    ],
+                                    max_attempts: Some(2),
+                                    liveness_timeout_ms: Some(45_000),
+                                },
+                            ),
+                            retry: AgentTaskRetryPolicy {
+                                max_attempts: 2,
+                                ..Default::default()
+                            },
+                            liveness_timeout_ms: Some(45_000),
+                        },
+                    ),
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            let task = &plan.tasks[0];
+            assert_eq!(task.executor.backend, "controller-backend");
+            assert_eq!(
+                task.executor.selector.as_deref(),
+                Some("controller-selector")
+            );
+            assert_eq!(task.executor.model.as_deref(), Some("controller-model"));
+            assert_eq!(task.executor.required_capabilities, ["runner-capability"]);
+            assert_eq!(task.executor.secret_env, ["RUNNER_SECRET"]);
+            assert_eq!(task.limits.liveness_timeout_ms, Some(45_000));
+            assert_eq!(plan.options.retry.max_attempts, 2);
+            assert_eq!(
+                plan.options
+                    .rotation
+                    .as_ref()
+                    .expect("controller rotation")
+                    .entries[0]
+                    .backend
+                    .as_deref(),
+                Some("controller-fallback")
+            );
+
+            let runner_catalog = crate::core::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![serde_json::from_value(serde_json::json!({
+                    "id": "controller-selector",
+                    "backend": "controller-backend",
+                    "capabilities": ["runner-capability"],
+                    "runner_readiness": [{
+                        "id": "runner-secrets",
+                        "label": "Runner secrets",
+                        "secret_env": ["RUNNER_LOCAL_SECRET"]
+                    }]
+                }))
+                .expect("runner provider")],
+                ..Default::default()
+            };
+            let mut plan = plan;
+            runner_catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+            assert_eq!(
+                plan.tasks[0].executor.secret_env,
+                ["RUNNER_LOCAL_SECRET", "RUNNER_SECRET"]
+            );
+        });
+    }
+
+    #[test]
+    fn submitted_provider_policy_without_rotation_ignores_runner_rotation() {
+        with_isolated_home(|_| {
+            let mut runner_config = defaults::load_config();
+            runner_config.agent_task.rotation = Some(
+                crate::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                    entries: vec![
+                        crate::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                            backend: Some("runner-fallback".to_string()),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            defaults::save_config(&runner_config).expect("save runner config");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with no rotation.".to_string()),
+                core: DispatchCoreInputs {
+                    resolved_provider_policy: Some(
+                        crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                            backend: "controller-backend".to_string(),
+                            selector: None,
+                            model: None,
+                            rotation: None,
+                            retry: AgentTaskRetryPolicy {
+                                max_attempts: 1,
+                                ..Default::default()
+                            },
+                            liveness_timeout_ms: None,
+                        },
+                    ),
+                    ..DispatchCoreInputs::default()
+                },
                 ..DispatchRequestOverrides::default()
             }))
             .expect("dispatch plan");
@@ -1728,6 +1903,7 @@ mod tests {
                 },
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
+                resolved_provider_policy: overrides.core.resolved_provider_policy,
             },
             backend_selection: None,
         }

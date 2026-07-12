@@ -41,6 +41,7 @@ pub(super) use path_remap::{remap_path_settings_in_args, LabPathRemap};
 pub(super) use provider_config::remap_provider_config_in_args;
 pub(super) use provider_config::{
     inject_agent_task_default_provider_config_in_args,
+    inject_agent_task_resolved_provider_policy_in_args,
     preflight_provider_config_paths_materialized_in_args, provider_config_runtime_manifest,
     remap_provider_config_with_materialization_plan_in_args,
 };

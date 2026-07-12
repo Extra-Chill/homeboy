@@ -4,7 +4,7 @@
 //! typed dispatch request, plan construction, provider preflight, durable
 //! lifecycle transitions, and scheduler orchestration.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::agent_task_dispatch_plan::{
@@ -18,12 +18,30 @@ use crate::core::agent_task_provider::{
     AgentTaskProviderCatalog,
 };
 use crate::core::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskScheduler,
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskProviderRotationPolicy,
+    AgentTaskRetryPolicy, AgentTaskScheduler,
 };
 use crate::core::agent_task_service::{aggregate_exit_code, AgentTaskRunResult};
 use crate::core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
+
+/// Controller-compiled provider execution policy carried across a Lab handoff.
+/// Runner-local configuration may satisfy this policy's capabilities and secrets,
+/// but must not select a different provider policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedAgentTaskProviderPolicy {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    pub retry: AgentTaskRetryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_timeout_ms: Option<u64>,
+}
 
 /// Where the effective agent-task backend selection came from. Surfaced before
 /// dispatch so operators can see whether the backend was an explicit override or
@@ -74,6 +92,8 @@ pub struct DispatchCoreInputs {
     pub queue_only: bool,
     /// Optional provider wall-clock timeout in milliseconds.
     pub timeout_ms: Option<u64>,
+    /// Internal Lab handoff input, compiled on the controller.
+    pub resolved_provider_policy: Option<ResolvedAgentTaskProviderPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,10 +314,13 @@ fn resolve_dispatch_request_with_default_and_config(
     config_default: impl FnOnce() -> Option<String>,
 ) -> Result<AgentTaskDispatchRequest> {
     let config_default = config_default();
-    let (backend, source) = match command.backend {
-        Some(backend) => (backend, BackendSelectionSource::Cli),
-        None => {
-            let resolved = default_backend(command.repo.as_deref())?.ok_or_else(|| {
+    let submitted_policy = command.core.resolved_provider_policy.clone();
+    let (backend, source) = match submitted_policy.as_ref() {
+        Some(policy) => (policy.backend.clone(), BackendSelectionSource::Policy),
+        None => match command.backend.clone() {
+            Some(backend) => (backend, BackendSelectionSource::Cli),
+            None => {
+                let resolved = default_backend(command.repo.as_deref())?.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "backend",
                     "agent-task cook requires --backend because no default backend policy is configured",
@@ -307,17 +330,18 @@ fn resolve_dispatch_request_with_default_and_config(
                     ]),
                 )
             })?;
-            // The policy resolver prefers component/extension defaults over the
-            // Homeboy config default; if the resolved value matches the config
-            // default we attribute it to config, otherwise to higher-priority
-            // component/extension policy.
-            let source = if config_default.as_deref() == Some(resolved.as_str()) {
-                BackendSelectionSource::Config
-            } else {
-                BackendSelectionSource::Policy
-            };
-            (resolved, source)
-        }
+                // The policy resolver prefers component/extension defaults over the
+                // Homeboy config default; if the resolved value matches the config
+                // default we attribute it to config, otherwise to higher-priority
+                // component/extension policy.
+                let source = if config_default.as_deref() == Some(resolved.as_str()) {
+                    BackendSelectionSource::Config
+                } else {
+                    BackendSelectionSource::Policy
+                };
+                (resolved, source)
+            }
+        },
     };
 
     let overrides_default = source == BackendSelectionSource::Cli
@@ -341,8 +365,14 @@ fn resolve_dispatch_request_with_default_and_config(
         repo: command.repo,
         task_url: command.task_url,
         backend,
-        selector: command.selector,
-        model: command.model,
+        selector: submitted_policy
+            .as_ref()
+            .and_then(|policy| policy.selector.clone())
+            .or(command.selector),
+        model: submitted_policy
+            .as_ref()
+            .and_then(|policy| policy.model.clone())
+            .or(command.model),
         required_capabilities: command.required_capabilities,
         secret_env: command.secret_env,
         concurrency: command.concurrency,
