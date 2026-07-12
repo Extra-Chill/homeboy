@@ -249,8 +249,7 @@ mod helpers {
     use super::*;
 
     pub(super) fn read_json_file(path: &Path) -> Option<Value> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+        homeboy::core::config::try_read_json_file(path)
     }
 
     pub(super) fn read_json_artifact(output_dir: &Path, filenames: &[&str]) -> Option<Value> {
@@ -286,16 +285,7 @@ mod helpers {
     }
 
     pub(super) fn read_json_spec_value(spec: &str, context: &str) -> homeboy::core::Result<Value> {
-        let raw = if Path::new(spec).exists() {
-            std::fs::read_to_string(spec).map_err(|e| {
-                homeboy::core::Error::internal_unexpected(format!("Failed to read {}: {}", spec, e))
-            })?
-        } else {
-            homeboy::core::config::read_json_spec_to_string(spec)?
-        };
-        serde_json::from_str(&raw).map_err(|e| {
-            homeboy::core::Error::validation_invalid_json(e, Some(context.to_string()), Some(raw))
-        })
+        homeboy::core::config::read_json_value_spec_with_bare_path(spec, context)
     }
 
     pub(super) fn read_metadata(

@@ -5,6 +5,36 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
 
+pub(crate) fn read_json_file_with<T, E>(
+    path: &Path,
+    map_read_error: impl FnOnce(std::io::Error) -> E,
+    map_parse_error: impl FnOnce(serde_json::Error, String) -> E,
+) -> std::result::Result<T, E>
+where
+    T: DeserializeOwned,
+{
+    let raw = std::fs::read_to_string(path).map_err(map_read_error)?;
+    serde_json::from_str(&raw).map_err(|error| map_parse_error(error, raw))
+}
+
+pub(crate) fn read_optional_json_file_with<T, E>(
+    path: &Path,
+    map_read_error: impl FnOnce(std::io::Error) -> E,
+    map_parse_error: impl FnOnce(serde_json::Error, String) -> E,
+) -> std::result::Result<Option<T>, E>
+where
+    T: DeserializeOwned,
+{
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json_file_with(path, map_read_error, map_parse_error).map(Some)
+}
+
+pub(crate) fn try_read_json_file<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    read_json_file_with(path, |_| (), |_, _| ()).ok()
+}
+
 /// Parse JSON string into typed value.
 pub(crate) fn from_str<T: DeserializeOwned>(s: &str) -> Result<T> {
     serde_json::from_str(s)
@@ -74,6 +104,21 @@ pub fn read_json_spec_to_string(spec: &str) -> Result<String> {
     Ok(spec.to_string())
 }
 
+/// Read a JSON value spec, preserving the report commands' legacy bare-path support.
+pub(crate) fn read_json_value_spec_with_bare_path(
+    spec: &str,
+    context: &str,
+) -> Result<serde_json::Value> {
+    let raw = if Path::new(spec).exists() {
+        std::fs::read_to_string(spec)
+            .map_err(|e| Error::internal_unexpected(format!("Failed to read {}: {}", spec, e)))?
+    } else {
+        read_json_spec_to_string(spec)?
+    };
+    serde_json::from_str(&raw)
+        .map_err(|e| Error::validation_invalid_json(e, Some(context.to_string()), Some(raw)))
+}
+
 /// Detect if input is JSON object (starts with '{').
 pub(crate) fn is_json_input(input: &str) -> bool {
     input.trim_start().starts_with('{')
@@ -115,6 +160,47 @@ pub(crate) fn parse_bulk_ids(json_spec: &str) -> Result<BulkIdsInput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn temp_json_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("homeboy-json-{}-{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn typed_json_reader_preserves_strict_optional_and_lossy_modes() {
+        let path = temp_json_path("reader.json");
+        fs::write(&path, r#"{"value":7}"#).unwrap();
+        let value: serde_json::Value =
+            read_json_file_with(&path, |e| e.to_string(), |e, _| e.to_string()).unwrap();
+        assert_eq!(value["value"], 7);
+
+        fs::write(&path, "not json").unwrap();
+        assert!(read_optional_json_file_with::<serde_json::Value, _>(
+            &path,
+            |e| e.to_string(),
+            |e, _| e.to_string(),
+        )
+        .is_err());
+        assert!(try_read_json_file::<serde_json::Value>(&path).is_none());
+
+        fs::remove_file(&path).unwrap();
+        assert!(read_optional_json_file_with::<serde_json::Value, _>(
+            &path,
+            |e| e.to_string(),
+            |e, _| e.to_string(),
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn json_value_spec_accepts_legacy_bare_path() {
+        let path = temp_json_path("bare-spec.json");
+        fs::write(&path, r#"{"source":"file"}"#).unwrap();
+        let value = read_json_value_spec_with_bare_path(path.to_str().unwrap(), "results").unwrap();
+        fs::remove_file(path).unwrap();
+        assert_eq!(value["source"], "file");
+    }
 
     #[test]
     fn parse_bulk_ids_accepts_json_array() {

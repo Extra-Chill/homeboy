@@ -938,19 +938,22 @@ fn write_json(path: PathBuf, value: &impl Serialize) -> homeboy::core::Result<()
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> homeboy::core::Result<T> {
-    let raw = fs::read_to_string(&path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read observation bundle file {}", path.display())),
-        )
-    })?;
-    serde_json::from_str(&raw).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse observation bundle file {}", path.display())),
-            Some(raw),
-        )
-    })
+    homeboy::core::config::read_json_file_with(
+        &path,
+        |e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("read observation bundle file {}", path.display())),
+            )
+        },
+        |e, raw| {
+            Error::validation_invalid_json(
+                e,
+                Some(format!("parse observation bundle file {}", path.display())),
+                Some(raw),
+            )
+        },
+    )
 }
 
 fn read_optional_json<T: for<'de> Deserialize<'de> + Default>(

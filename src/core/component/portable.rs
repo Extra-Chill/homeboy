@@ -6,26 +6,22 @@ use std::path::{Path, PathBuf};
 /// Read a `homeboy.json` portable config from a repo directory.
 pub(crate) fn read_portable_config(repo_path: &Path) -> Result<Option<Value>> {
     let config_path = repo_path.join("homeboy.json");
-    if !config_path.exists() {
-        return Ok(None);
-    }
-
-    let content = std::fs::read_to_string(&config_path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read {}", config_path.display())),
-        )
-    })?;
-
-    let value: Value = serde_json::from_str(&content).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some("parse homeboy.json".to_string()),
-            Some(content.chars().take(200).collect::<String>()),
-        )
-    })?;
-
-    Ok(Some(value))
+    crate::core::config::read_optional_json_file_with(
+        &config_path,
+        |e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("read {}", config_path.display())),
+            )
+        },
+        |e, content| {
+            Error::validation_invalid_json(
+                e,
+                Some("parse homeboy.json".to_string()),
+                Some(content.chars().take(200).collect::<String>()),
+            )
+        },
+    )
 }
 
 fn explicit_id_hints() -> Vec<String> {

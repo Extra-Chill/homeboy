@@ -1,3 +1,4 @@
+use crate::core::config::read_json_file_with;
 use crate::core::error::{Error, Result};
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -72,19 +73,11 @@ where
             Error::internal_io(e.to_string(), Some(context.into()))
         })?
     {
-        let content = match fs::read_to_string(&entry.path) {
-            Ok(content) => content,
-            Err(err) => {
-                invalid.push(InvalidJsonConfig {
-                    id: entry.id,
-                    path: entry.path,
-                    error: err.to_string(),
-                });
-                continue;
-            }
-        };
-
-        match serde_json::from_str::<T>(&content) {
+        match read_json_file_with::<T, _>(
+            &entry.path,
+            |error| error.to_string(),
+            |error, _| error.to_string(),
+        ) {
             Ok(value) => valid.push(ParsedJsonConfig {
                 id: entry.id,
                 value,
