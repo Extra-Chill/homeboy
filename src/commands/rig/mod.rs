@@ -1357,6 +1357,56 @@ mod tests {
     }
 
     #[test]
+    fn lint_all_reports_static_package_violations_without_live_evaluation() {
+        let temp = tempfile::TempDir::new().expect("package");
+        let rig_dir = temp.path().join("rigs").join("static-only");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "static-only",
+                "requirements": { "executables": [{ "executable": "does-not-exist" }] },
+                "extends": "../../missing-template.json"
+            }"#,
+        )
+        .expect("write rig");
+        fs::write(temp.path().join("broken.json"), "{").expect("write invalid JSON");
+        fs::write(
+            temp.path().join("conflicted.txt"),
+            "<<<<<<< ours\nvalue\n=======\nother\n>>>>>>> theirs\n",
+        )
+        .expect("write conflict");
+
+        let (output, exit_code) = lint(
+            &temp.path().to_string_lossy(),
+            None,
+            true,
+            Some(RigLintFormat::Json),
+        )
+        .expect("rig lint returns a static failure report");
+
+        assert_eq!(exit_code, 1);
+        let json = serde_json::to_value(output).expect("serialize lint output");
+        let steps = json["payload"]["pipeline"]["steps"]
+            .as_array()
+            .expect("lint steps");
+        assert!(steps.iter().any(|step| {
+            step["label"] == "rig package has no unresolved conflict markers"
+                && step["status"] == "fail"
+        }));
+        assert!(steps.iter().any(|step| {
+            step["label"] == "rig package JSON specs parse" && step["status"] == "fail"
+        }));
+        assert!(steps.iter().any(|step| {
+            step["label"] == "rig package template specs materialize" && step["status"] == "fail"
+        }));
+        assert!(
+            steps.iter().all(|step| step["kind"] == "rig-package-lint"),
+            "lint-only must not resolve requirements or execute the check pipeline"
+        );
+    }
+
+    #[test]
     fn up_dry_run_runner_plan_emits_command_only_runner_exec_steps() {
         crate::test_support::with_isolated_home(|home| {
             runners::create(

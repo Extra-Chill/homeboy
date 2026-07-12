@@ -511,6 +511,7 @@ const PROJECT_MUTATING_PATHS: &[&str] = &[
 ];
 const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename", "setup"];
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
+const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -584,6 +585,11 @@ const COMPONENT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "default output is non-mutating; pass --apply to repair or remove artifacts",
     ),
 ];
+const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    RIG_STATIC_LINT_PATHS,
+    CommandSafetySpec::read_only(),
+    "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
+)];
 
 macro_rules! registered_ops_spec {
     (($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path)) => {
@@ -733,15 +739,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             ),
         )
     },
-    command_spec_with_representative_argv(
-        &["homeboy", "rig", "check", "example-rig"],
-        lab_command_spec_with_summary(
-            "rig",
-            CommandJsonFamily::Workspace,
-            "portable Lab offload is available for rig check workflows",
-            RIG_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: RIG_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "rig", "check", "example-rig"],
+            lab_command_spec_with_summary(
+                "rig",
+                CommandJsonFamily::Workspace,
+                "portable Lab offload is available for rig check workflows",
+                RIG_LAB_SUPPORT,
+            ),
+        )
+    },
     command_spec("runner", CommandJsonFamily::Workspace),
     command_spec_with_representative_argv(
         &[
