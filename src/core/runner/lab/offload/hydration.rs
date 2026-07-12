@@ -412,6 +412,37 @@ mod tests {
         assert_eq!(output.schema, HYDRATION_SCHEMA);
     }
 
+    #[test]
+    fn hydration_skips_when_linked_extensions_do_not_provide_dependencies() {
+        crate::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("fixture.json"),
+                r#"{"name":"Fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("extension manifest");
+
+            let project = tempfile::tempdir().expect("project tempdir");
+            std::fs::write(
+                project.path().join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"fixture":{}}}"#,
+            )
+            .expect("component config");
+            let remote = tempfile::tempdir().expect("remote workspace");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "unused-runner",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("no applicable dependency provider skips hydration");
+
+            assert_eq!(output.status, "skipped_no_provider");
+            assert!(output.steps.is_empty());
+        });
+    }
+
     /// The event-emission shape a hydration step records: provider id, command,
     /// duration, exit status, plus the runner job id and event count from the
     /// underlying `exec` job stream.
