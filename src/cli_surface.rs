@@ -1,4 +1,4 @@
-use clap::{Args, Command, CommandFactory, Parser, Subcommand};
+use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -78,6 +78,19 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Commands,
+}
+
+impl Cli {
+    pub fn from_registered_arg_matches(
+        matches: &ArgMatches,
+    ) -> Result<(Self, &'static crate::command_contract::CommandSpec), clap::Error> {
+        let cli = Self::from_arg_matches(matches)?;
+        let spec = matches
+            .subcommand_name()
+            .and_then(crate::command_contract::registered_command)
+            .expect("built-in top-level command should be registered");
+        Ok((cli, spec))
+    }
 }
 
 #[derive(Subcommand)]
@@ -518,51 +531,6 @@ mod entry_command_impls {
                 .iter()
                 .find(|entry| !entry.hidden && entry.matches(first))
                 .is_some_and(|entry| entry.contains_rest(rest))
-        }
-    }
-
-    impl Commands {
-        pub fn top_level_name(&self) -> &'static str {
-            match self {
-                Commands::Activity(_) => "activity",
-                Commands::AgentTask(_) => "agent-task",
-                Commands::Project(_) => "project",
-                Commands::Ssh(_) => "ssh",
-                Commands::Server(_) => "server",
-                Commands::Bench(_) => "bench",
-                Commands::Fuzz(_) => "fuzz",
-                Commands::Trace(_) => "trace",
-                Commands::Observe(_) => "observe",
-                Commands::Db(_) => "db",
-                Commands::Deps(_) => "deps",
-                Commands::File(_) => "file",
-                Commands::Fleet(_) => "fleet",
-                Commands::Logs(_) => "logs",
-                Commands::Triage(_) => "triage",
-                Commands::Deploy(_) => "deploy",
-                Commands::Component(_) => "component",
-                Commands::Config(_) => "config",
-                Commands::Contract(_) => "contract",
-                Commands::Daemon(_) => "daemon",
-                Commands::Extension(_) => "extension",
-                Commands::Status(_) => "status",
-                Commands::Cleanup(_) => "cleanup",
-                Commands::Git(_) => "git",
-                Commands::Release(_) => "release",
-                Commands::Report(_) => "report",
-                Commands::Review(_) => "review",
-                Commands::Refactor(_) => "refactor",
-                Commands::Rig(_) => "rig",
-                Commands::Runner(_) => "runner",
-                Commands::Runtime(_) => "runtime",
-                Commands::Worktree(_) => "worktree",
-                Commands::Tunnel(_) => "tunnel",
-                Commands::Runs(_) => "runs",
-                Commands::SelfCmd(_) => "self",
-                Commands::Stack(_) => "stack",
-                Commands::Api(_) => "api",
-                Commands::Upgrade(_) => "upgrade",
-            }
         }
     }
 }

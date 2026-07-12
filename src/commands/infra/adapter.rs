@@ -135,10 +135,10 @@ pub(crate) fn command_adapter(
 
 pub(crate) fn run_command_output(
     command: Commands,
+    command_name: &'static str,
     global: &GlobalArgs,
     output_file_mode: CommandOutputFileMode,
 ) -> Result<CommandRun, Commands> {
-    let command_name = command.top_level_name();
     let (stdout_result, exit_code) = run_json_output(command, global, output_file_mode)?;
 
     Ok(CommandRun::from_command_stdout_result(
@@ -237,6 +237,7 @@ mod tests {
     fn run_command_output_routes_migrated_json_command() {
         let run = run_command_output(
             parsed_command(&["homeboy", "contract", "manifest"]),
+            "contract",
             &GlobalArgs {},
             CommandOutputFileMode::None,
         )
@@ -290,22 +291,29 @@ mod tests {
     #[test]
     fn migrated_adapter_output_descriptors_match_command_contracts() {
         let commands = [
-            parsed_command(&["homeboy", "fleet", "list"]),
-            parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
-            parsed_command(&["homeboy", "contract", "manifest"]),
+            ("fleet", parsed_command(&["homeboy", "fleet", "list"])),
+            (
+                "observe",
+                parsed_command(&["homeboy", "observe", "demo", "--watch-process", "sleep"]),
+            ),
+            (
+                "contract",
+                parsed_command(&["homeboy", "contract", "manifest"]),
+            ),
         ];
         let output_file_modes = [
             CommandOutputFileMode::None,
             CommandOutputFileMode::GenericEnvelope,
         ];
 
-        for command in commands {
+        for (name, command) in commands {
+            let spec = crate::command_contract::registered_command(name).unwrap();
             for output_file_mode in output_file_modes {
                 let has_output_file = output_file_mode != CommandOutputFileMode::None;
 
                 assert_eq!(
                     output_descriptor(&command, output_file_mode),
-                    Some(command.output_descriptor(has_output_file))
+                    Some(command.output_descriptor(spec, has_output_file))
                 );
             }
         }

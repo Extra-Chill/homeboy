@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -167,18 +167,23 @@ struct CommandAnalysisJobRunner;
 
 impl AnalysisJobRunner for CommandAnalysisJobRunner {
     fn run_analysis_job(&self, argv: Vec<String>) -> homeboy::core::Result<AnalysisJobRunOutput> {
-        let cli = crate::cli_surface::Cli::try_parse_from(argv).map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                "body",
-                error.to_string(),
-                None,
-                Some(vec![
-                    "Use the documented JSON request body contract for this endpoint".to_string(),
-                ]),
-            )
-        })?;
+        let matches = crate::cli_surface::Cli::command()
+            .try_get_matches_from(argv)
+            .map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "body",
+                    error.to_string(),
+                    None,
+                    Some(vec![
+                        "Use the documented JSON request body contract for this endpoint"
+                            .to_string(),
+                    ]),
+                )
+            })?;
+        let (cli, spec) = crate::cli_surface::Cli::from_registered_arg_matches(&matches)
+            .expect("validated arguments should produce a typed CLI");
         let global = crate::commands::GlobalArgs {};
-        let (result, exit_code) = crate::commands::json_output::run(cli.command, &global);
+        let (result, exit_code) = crate::commands::json_output::run(cli.command, spec, &global);
         Ok(AnalysisJobRunOutput {
             exit_code,
             output: result?,

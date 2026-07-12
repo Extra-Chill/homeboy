@@ -15,7 +15,7 @@ use crate::cli_surface::Commands;
 use crate::commands::{adapter, file, logs, report, review, runner, runtime, trace};
 
 use super::lab::apply_lab_contract_to_descriptor;
-use super::spec::registered_command;
+use super::spec::CommandSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResponseMode {
@@ -134,12 +134,16 @@ pub struct CommandResponsePlan {
 }
 
 impl Commands {
-    pub fn descriptor(&self, has_output_file: bool) -> CommandDescriptor {
-        self.output_descriptor(has_output_file)
+    pub fn descriptor(&self, spec: &CommandSpec, has_output_file: bool) -> CommandDescriptor {
+        self.output_descriptor(spec, has_output_file)
             .with_lab_contract(self.lab_contract())
     }
 
-    pub fn output_descriptor(&self, has_output_file: bool) -> CommandOutputDescriptor {
+    pub fn output_descriptor(
+        &self,
+        spec: &CommandSpec,
+        has_output_file: bool,
+    ) -> CommandOutputDescriptor {
         let output_file_mode = if !has_output_file {
             CommandOutputFileMode::None
         } else {
@@ -221,12 +225,12 @@ impl Commands {
             Commands::Fleet(_) | Commands::Observe(_) | Commands::Contract(_) => {
                 unreachable!("adapter-backed command descriptor returned before legacy routing")
             }
-            _ => registered_json_envelope_descriptor(self, output_file_mode),
+            _ => spec.output_descriptor(output_file_mode),
         }
     }
 
-    pub fn response_plan(&self, has_output_file: bool) -> CommandResponsePlan {
-        let descriptor = self.output_descriptor(has_output_file);
+    pub fn response_plan(&self, spec: &CommandSpec, has_output_file: bool) -> CommandResponsePlan {
+        let descriptor = self.output_descriptor(spec, has_output_file);
 
         CommandResponsePlan {
             stdout: match descriptor.response_mode {
@@ -237,12 +241,17 @@ impl Commands {
         }
     }
 
-    pub fn response_mode(&self, has_output_file: bool) -> CommandResponseMode {
-        self.output_descriptor(has_output_file).response_mode
+    pub fn response_mode(&self, spec: &CommandSpec, has_output_file: bool) -> CommandResponseMode {
+        self.output_descriptor(spec, has_output_file).response_mode
     }
 
-    pub fn output_file_mode(&self, has_output_file: bool) -> CommandOutputFileMode {
-        self.output_descriptor(has_output_file).output_file_mode
+    pub fn output_file_mode(
+        &self,
+        spec: &CommandSpec,
+        has_output_file: bool,
+    ) -> CommandOutputFileMode {
+        self.output_descriptor(spec, has_output_file)
+            .output_file_mode
     }
 
     pub fn consumes_output_file_as_command_arg(&self) -> bool {
@@ -283,20 +292,11 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
     }
 }
 
-fn registered_json_envelope_descriptor(
-    command: &Commands,
-    output_file_mode: CommandOutputFileMode,
-) -> CommandOutputDescriptor {
-    registered_command(command.top_level_name())
-        .expect("top-level command should be registered")
-        .output_descriptor(output_file_mode)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli_surface::Cli;
-    use clap::Parser;
+    use clap::{CommandFactory, FromArgMatches};
 
     #[test]
     fn representative_default_output_descriptors_come_from_command_registry() {
@@ -304,12 +304,14 @@ mod tests {
             let Some(argv) = spec.representative_argv else {
                 continue;
             };
-            let cli = Cli::try_parse_from(argv)
+            let matches = Cli::command()
+                .try_get_matches_from(argv)
                 .unwrap_or_else(|error| panic!("failed to parse `{}`: {error}", spec.name));
+            assert_eq!(matches.subcommand_name(), Some(spec.name));
+            let cli = Cli::from_arg_matches(&matches).expect("validated arguments should parse");
 
-            assert_eq!(cli.command.top_level_name(), spec.name);
             assert_eq!(
-                cli.command.output_descriptor(false),
+                cli.command.output_descriptor(spec, false),
                 spec.output_descriptor(CommandOutputFileMode::None),
                 "default output descriptor drifted for `{}`",
                 spec.name

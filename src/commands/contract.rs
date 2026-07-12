@@ -1773,7 +1773,7 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::{current_command_surface, Commands};
+    use crate::cli_surface::current_command_surface;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -1897,17 +1897,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|contract| contract["id"] == HOST_MUTATION_LIFECYCLE_SCHEMA));
-    }
-
-    #[test]
-    fn contract_command_name_is_registered_for_json_dispatch() {
-        let command = Commands::Contract(ContractArgs {
-            command: ContractCommand::Export(ContractExportArgs {
-                dir: PathBuf::from("contracts"),
-            }),
-        });
-
-        assert_eq!(command.top_level_name(), "contract");
     }
 
     #[test]
