@@ -1,4 +1,5 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
@@ -78,8 +79,20 @@ pub fn route_after_parse(
         None
     };
 
+    let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
+        materialize_agent_task_retry_handoff(cli, normalized_args)?
+    } else {
+        None
+    };
+    let normalized_args = retry_handoff
+        .as_ref()
+        .map(|handoff| handoff.args.as_slice())
+        .unwrap_or(normalized_args);
     let observer = lab_dispatch_observer(cli, normalized_args, inferred_runner_id.as_deref());
-    let active_run_id = observer.run_id().map(str::to_string);
+    let active_run_id = observer
+        .run_id()
+        .map(str::to_string)
+        .or_else(|| retry_handoff.as_ref().map(|handoff| handoff.run_id.clone()));
 
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
@@ -128,7 +141,11 @@ pub fn route_after_parse(
         },
         inferred_runner_id.as_deref(),
         observer,
-    )?;
+    )
+    .map_err(|error| match retry_handoff.as_ref() {
+        Some(handoff) => persist_retry_handoff_preacceptance_failure(handoff, error),
+        None => error,
+    })?;
 
     match outcome {
         LabRouteOutcome::RunLocal => {
@@ -166,10 +183,86 @@ fn lab_route_dispatch_timeout(
     if matches!(command, Commands::Trace(_)) {
         return Some(lab_routing::lab_trace_dispatch_timeout());
     }
-    if detach_after_handoff && is_agent_task_fanout_cook_batch_run_plan(command) {
+    if detach_after_handoff && is_detached_agent_task_handoff(command) {
         return Some(lab_routing::lab_trace_dispatch_timeout());
     }
     None
+}
+
+struct AgentTaskRetryHandoff {
+    args: Vec<String>,
+    run_id: String,
+    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+}
+
+/// Retries are controller-owned because the source plan lives in the local
+/// durable lifecycle store. Materialize it before Lab dispatch, then run the
+/// replacement plan remotely under the new durable run id.
+fn materialize_agent_task_retry_handoff(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<AgentTaskRetryHandoff>> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Retry(retry),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+    if !retry.run {
+        return Ok(None);
+    }
+
+    let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
+    let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
+    let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize agent-task retry plan for Lab handoff".to_string()),
+        )
+    })?;
+    let agent_task_index = normalized_args
+        .iter()
+        .position(|arg| arg == "agent-task")
+        .ok_or_else(|| {
+            Error::internal_unexpected("agent-task retry argv was missing agent-task")
+        })?;
+    let mut args = normalized_args[..agent_task_index].to_vec();
+    args.extend([
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        serialized_plan,
+        "--record-run-id".to_string(),
+        record.run_id.clone(),
+    ]);
+
+    Ok(Some(AgentTaskRetryHandoff {
+        args,
+        run_id: record.run_id,
+        plan,
+    }))
+}
+
+fn persist_retry_handoff_preacceptance_failure(
+    handoff: &AgentTaskRetryHandoff,
+    error: Error,
+) -> Error {
+    let recovery = format!(
+        "Fix the Lab preflight failure, then retry with `homeboy agent-task retry {} --run --runner <runner-id> --detach-after-handoff`.",
+        handoff.run_id
+    );
+    if let Err(record_error) = agent_task_lifecycle::record_pre_execution_failure(
+        &handoff.run_id,
+        &handoff.plan,
+        "detached_lab_handoff_preacceptance",
+        &error,
+    ) {
+        return error.with_hint(format!(
+            "{recovery} Homeboy also could not persist the replacement-run failure: {}",
+            record_error.message
+        ));
+    }
+    error.with_hint(recovery)
 }
 
 /// Insert one env pair into the overrides, recording the key as secret when
@@ -501,6 +594,18 @@ fn is_agent_task_fanout_cook_batch_run_plan(command: &Commands) -> bool {
                 ),
         }) if args.run_plan
     )
+}
+
+fn is_detached_agent_task_handoff(command: &Commands) -> bool {
+    is_agent_task_fanout_cook_batch_run_plan(command)
+        || matches!(
+            command,
+            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Retry(
+                    crate::commands::agent_task::RetryArgs { run: true, .. },
+                ),
+            })
+        )
 }
 
 fn run_rig_source_management_on_runner(
@@ -1537,6 +1642,91 @@ mod tests {
             "https://github.com/Extra-Chill/homeboy/issues/7167",
         ]);
         assert_eq!(lab_route_dispatch_timeout(&no_detach.command, false), None);
+    }
+
+    #[test]
+    fn detached_agent_task_retry_uses_bounded_handoff_timeout() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "retry",
+            "failed-run",
+            "--run",
+            "--runner",
+            "homeboy-lab",
+        ]);
+
+        assert_eq!(
+            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
+            Some(lab_routing::lab_trace_dispatch_timeout())
+        );
+    }
+
+    #[test]
+    fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
+        crate::test_support::with_isolated_home(|_| {
+            let source_plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+                "failed-retry-source",
+                Vec::new(),
+            );
+            agent_task_lifecycle::submit_plan(&source_plan, Some("failed-run"))
+                .expect("source run submitted");
+            let source_plan = agent_task_lifecycle::load_plan("failed-run").expect("source plan");
+            let failure = Error::internal_unexpected("provider exited before completion");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "failed-run",
+                &source_plan,
+                "provider_execution",
+                &failure,
+            )
+            .expect("source failure persisted");
+
+            let normalized = [
+                "homeboy",
+                "--detach-after-handoff",
+                "agent-task",
+                "retry",
+                "failed-run",
+                "--run",
+                "--runner",
+                "homeboy-lab",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&normalized);
+            let handoff = materialize_agent_task_retry_handoff(&cli, &normalized)
+                .expect("retry handoff materialized")
+                .expect("retry handoff");
+
+            assert_eq!(handoff.args[2], "agent-task");
+            assert_eq!(handoff.args[3], "run-plan");
+            assert_eq!(handoff.args[4], "--plan");
+            assert_eq!(handoff.args[6], "--record-run-id");
+            assert_eq!(handoff.args[7], handoff.run_id);
+            let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
+            assert_eq!(replacement.metadata["retry_of"], "failed-run");
+
+            let error = persist_retry_handoff_preacceptance_failure(
+                &handoff,
+                Error::internal_unexpected("runner preflight rejected the handoff"),
+            );
+            assert!(error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("agent-task retry")
+                    && hint.message.contains(&handoff.run_id)));
+            let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("failed retry");
+            assert_eq!(
+                replacement.state,
+                homeboy::core::agent_tasks::lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                replacement.metadata["pre_execution_failure"]["phase"],
+                "detached_lab_handoff_preacceptance"
+            );
+        });
     }
 
     #[test]
