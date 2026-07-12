@@ -181,27 +181,7 @@ fn arg_takes_value(arg: &Arg) -> bool {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    mark_explicit_passthrough(normalize_review_audit_baseline(normalize_check_entrypoint(
-        args,
-    )))
-}
-
-fn normalize_check_entrypoint(mut args: Vec<String>) -> Vec<String> {
-    if !matches!(args.get(1).map(String::as_str), Some("check")) {
-        return args;
-    }
-
-    match args.get(2).map(String::as_str) {
-        Some("review") => {
-            args.drain(1..3);
-            args.insert(1, "review".to_string());
-        }
-        Some("audit" | "lint" | "test" | "build") => {
-            args[1] = "review".to_string();
-        }
-        _ => {}
-    }
-    args
+    mark_explicit_passthrough(normalize_review_audit_baseline(args))
 }
 
 fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
@@ -306,78 +286,6 @@ mod normalize_tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn check_gates_normalize_to_existing_review_dispatch_paths() {
-        for gate in ["audit", "lint", "test", "build"] {
-            assert_eq!(
-                normalize(argv(&[
-                    "homeboy",
-                    "check",
-                    gate,
-                    "component",
-                    "--path",
-                    ".",
-                ])),
-                normalize(argv(&[
-                    "homeboy",
-                    "review",
-                    gate,
-                    "component",
-                    "--path",
-                    ".",
-                ])),
-            );
-        }
-
-        assert_eq!(
-            normalize(argv(&[
-                "homeboy",
-                "check",
-                "review",
-                "component",
-                "--changed-since",
-                "origin/main",
-            ])),
-            normalize(argv(&[
-                "homeboy",
-                "review",
-                "component",
-                "--changed-since",
-                "origin/main",
-            ])),
-        );
-    }
-
-    #[test]
-    fn check_parser_reuses_gate_argument_types() {
-        let parsed = Cli::try_parse_from(argv(&[
-            "homeboy",
-            "check",
-            "lint",
-            "component",
-            "--path",
-            ".",
-            "--changed-since",
-            "origin/main",
-        ]))
-        .expect("check lint should parse");
-
-        let Commands::Check(crate::cli_surface::CheckArgs {
-            command: crate::cli_surface::CheckCommand::Lint(args),
-        }) = parsed.command
-        else {
-            panic!("expected check lint command");
-        };
-        assert_eq!(args.comp.component.as_deref(), Some("component"));
-        assert_eq!(args.comp.path.as_deref(), Some("."));
-        assert_eq!(args.changed_since.as_deref(), Some("origin/main"));
-    }
-
-    #[test]
-    fn check_rejects_non_gate_subcommands() {
-        assert!(Cli::try_parse_from(argv(&["homeboy", "check", "bench"])).is_err());
     }
 
     #[test]

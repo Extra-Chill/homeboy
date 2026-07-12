@@ -668,11 +668,6 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             REVIEW_LAB_SUPPORT,
         ),
     ),
-    command_spec_with_output_notes(
-        "check",
-        CommandJsonFamily::Quality,
-        "unified compatibility entrypoint for audit, lint, test, build, and review quality gates",
-    ),
     CommandSpec {
         safety: CommandSafetySpec {
             mutates: true,

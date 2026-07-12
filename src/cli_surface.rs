@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, bench, build, cleanup, component, config, contract, daemon, db,
-    deploy, extension, file, fleet, fuzz, git, lint, logs, observe, project, refactor, release,
-    report, review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace,
-    triage, tunnel, upgrade, worktree,
+    activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db, deploy,
+    extension, file, fleet, fuzz, git, logs, observe, project, refactor, release, report, review,
+    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, trace, triage, tunnel,
+    upgrade, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -140,8 +140,6 @@ pub enum Commands {
     Report(report::ReportArgs),
     /// Run scoped audit + lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
-    /// Run a quality gate through one unified entrypoint
-    Check(CheckArgs),
     /// Structural refactoring (rename terms across codebase)
     Refactor(refactor::RefactorArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
@@ -165,26 +163,6 @@ pub enum Commands {
     Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
-}
-
-#[derive(Args)]
-pub struct CheckArgs {
-    #[command(subcommand)]
-    pub command: CheckCommand,
-}
-
-#[derive(Subcommand)]
-pub enum CheckCommand {
-    /// Audit code conventions and detect architectural drift
-    Audit(review::ReviewAuditArgs),
-    /// Lint a component
-    Lint(lint::LintArgs),
-    /// Run tests for a component
-    Test(test::TestArgs),
-    /// Run a local build quality gate for a component
-    Build(build::BuildArgs),
-    /// Run scoped audit + lint + test against PR-style changes
-    Review(review::ReviewArgs),
 }
 
 #[derive(Args)]
@@ -573,7 +551,6 @@ mod entry_command_impls {
                 Commands::Release(_) => "release",
                 Commands::Report(_) => "report",
                 Commands::Review(_) => "review",
-                Commands::Check(_) => "check",
                 Commands::Refactor(_) => "refactor",
                 Commands::Rig(_) => "rig",
                 Commands::Runner(_) => "runner",
