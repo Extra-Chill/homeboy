@@ -111,6 +111,17 @@ pub enum ReviewCommand {
     Ci(ci::CiArgs),
 }
 
+impl ReviewCommand {
+    pub(crate) fn extension_override_ids(&self) -> Option<&[String]> {
+        match self {
+            Self::Audit(args) => Some(&args.audit.extension_override.extensions),
+            Self::Lint(args) => Some(&args.extension_override.extensions),
+            Self::Test(args) => Some(&args.extension_override.extensions),
+            Self::AuditBaseline(_) | Self::Build(_) | Self::Ci(_) => None,
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct ReviewAuditArgs {
     #[command(flatten)]
