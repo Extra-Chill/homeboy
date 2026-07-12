@@ -117,17 +117,11 @@ impl BenchArgs {
         let mut extension_ids = BTreeSet::new();
         for rig_id in &run.rig {
             let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
-            let workload_extension_ids =
-                rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Bench);
-            for extension_id in &workload_extension_ids {
-                extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
-                    &spec,
-                    rig::RigWorkloadKind::Bench,
-                    extension_id,
-                ));
-            }
-            extension_ids.extend(workload_extension_ids);
-            extension_ids.extend(bench_component_extension_ids(&spec, run.comp.id()));
+            extension_ids.extend(rig::required_extension_ids_for_workload(
+                &spec,
+                rig::RigWorkloadKind::Bench,
+                run.comp.id(),
+            ));
         }
         Ok(extension_ids.into_iter().collect())
     }
@@ -139,38 +133,6 @@ impl BenchArgs {
             Some(BenchCommand::List(_)) => None,
         }
     }
-}
-
-fn bench_component_extension_ids(spec: &RigSpec, explicit_component: Option<&str>) -> Vec<String> {
-    let component_ids = explicit_component
-        .map(|id| vec![id.to_string()])
-        .or_else(|| {
-            spec.bench
-                .as_ref()
-                .map(|bench| {
-                    if bench.components.is_empty() {
-                        bench.default_component.iter().cloned().collect()
-                    } else {
-                        bench.components.clone()
-                    }
-                })
-                .filter(|ids: &Vec<String>| !ids.is_empty())
-        });
-    let Some(component_ids) = component_ids else {
-        return Vec::new();
-    };
-
-    let mut extension_ids = BTreeSet::new();
-    for component_id in component_ids {
-        if let Some(extensions) = spec
-            .components
-            .get(&component_id)
-            .and_then(|component| component.extensions.as_ref())
-        {
-            extension_ids.extend(extensions.keys().cloned());
-        }
-    }
-    extension_ids.into_iter().collect()
 }
 
 #[derive(Subcommand)]
