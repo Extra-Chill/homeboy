@@ -1287,14 +1287,7 @@ impl Commands {
             Commands::Bench(args) => extension_ids.extend(args.lab_required_extension_ids()?),
             Commands::Fuzz(args) => extension_ids.extend(args.lab_required_extension_ids()?),
             Commands::Review(args) => {
-                extension_ids.extend(args.extension_override.extensions.clone());
-                if let Some(overrides) = args
-                    .command
-                    .as_ref()
-                    .and_then(|command| command.extension_override_ids())
-                {
-                    extension_ids.extend(overrides.iter().cloned());
-                }
+                extension_ids.extend(args.effective_extension_override_ids().iter().cloned());
                 extension_ids.extend(review_lab_extension_ids(args)?);
             }
             Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
@@ -1327,11 +1320,6 @@ mod extension_ids {
     pub(crate) fn review_lab_extension_ids(
         args: &crate::commands::review::ReviewArgs,
     ) -> crate::core::Result<Vec<String>> {
-        let extension_overrides = args
-            .command
-            .as_ref()
-            .and_then(|command| command.extension_override_ids())
-            .unwrap_or(&args.extension_override.extensions);
         let resolve_for = |capability: Option<ExtensionCapability>| {
             let component_args = args.effective_component_args();
             execution_context::resolve(&ResolveOptions {
@@ -1341,7 +1329,7 @@ mod extension_ids {
                 settings_overrides: Vec::new(),
                 settings_profile_json_overrides: Vec::new(),
                 settings_json_overrides: Vec::new(),
-                extension_overrides: extension_overrides.to_vec(),
+                extension_overrides: args.effective_extension_override_ids().to_vec(),
             })
         };
 
