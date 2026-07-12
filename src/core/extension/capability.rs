@@ -368,6 +368,33 @@ pub fn resolve_extension_for_capability(
     }
 }
 
+/// Whether a linked extension can provide a capability without requiring one.
+///
+/// Callers that can safely skip an optional capability use this to distinguish
+/// an absent provider from invalid explicit capability ownership.
+pub(crate) fn has_linked_extension_for_capability(
+    component: &Component,
+    capability: ExtensionCapability,
+) -> Result<bool> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(false);
+    };
+    if extensions.is_empty() {
+        return Ok(false);
+    }
+    if explicit_capability_extension(component, capability).is_some() {
+        resolve_extension_for_capability(component, capability)?;
+        return Ok(true);
+    }
+
+    for extension_id in extensions.keys() {
+        if capability.has_manifest_support(&load_extension(extension_id)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn resolve_execution_context(
     component: &Component,
     capability: ExtensionCapability,
