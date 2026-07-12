@@ -5,6 +5,7 @@ use crate::core::error::{Error, Result};
 use crate::core::project::Project;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
+use super::super::orchestration_ref_checkout::resolve_exact_ref;
 use super::super::orchestration_tag_checkout::{deploy_tag_for_version, TagCheckout};
 use super::super::planning::{
     calculate_component_status_with_git_cache, calculate_release_state, ExtensionSkippedComponent,
@@ -114,6 +115,21 @@ pub(super) fn run_dry_run_mode(
                     remote_versions.get(&c.id).cloned(),
                 )
                 .with_source_identity(c, config.head);
+            if let Some(requested_ref) = config.requested_ref.as_deref() {
+                let identity = resolve_exact_ref(c, requested_ref)?;
+                result = result.with_exact_ref_identity(
+                    &identity.requested_ref,
+                    &identity.resolved_sha,
+                    &identity.source,
+                );
+                result.warnings.push(format!(
+                    "source: {}; requested ref: {}; resolved SHA: {}; plan: materialize detached temporary worktree and build exact commit; destination: {}",
+                    identity.source,
+                    identity.requested_ref,
+                    identity.resolved_sha,
+                    result.remote_path.as_deref().unwrap_or("unresolved")
+                ));
+            }
             if let Some(deploy_ref) = planned_deploy_ref(c, config)? {
                 result = result.with_deployed_ref(deploy_ref);
             }
@@ -173,6 +189,10 @@ fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Op
     }
 
     let path = &component.local_path;
+    if let Some(requested_ref) = config.requested_ref.as_deref() {
+        resolve_exact_ref(component, requested_ref)?;
+        return Ok(Some(requested_ref.to_string()));
+    }
     if config.head {
         return Ok(crate::core::engine::command::run_in_optional(
             path,
@@ -230,5 +250,115 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
             "Could not read version tags for '{}': {}",
             component.id, err
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[test]
+    fn exact_ref_dry_run_reports_identity_plan_and_destination_without_mutation() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(repo.path().join("payload.txt"), "reviewed\n").expect("payload");
+        git(repo.path(), &["add", "payload.txt"]);
+        git(repo.path(), &["commit", "-q", "-m", "reviewed"]);
+        git(repo.path(), &["branch", "reviewed"]);
+        let sha = git_output(repo.path(), &["rev-parse", "reviewed"]);
+        let before_status = git_output(repo.path(), &["status", "--porcelain=v1"]);
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: repo.path().to_string_lossy().to_string(),
+            remote_path: "components/fixture".to_string(),
+            build_artifact: Some("build/fixture.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: vec!["fixture".to_string()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: true,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            requested_ref: Some("reviewed".to_string()),
+            tagged: false,
+        };
+
+        let result = run_dry_run_mode(
+            std::slice::from_ref(&component),
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "/srv/site",
+            &config,
+        )
+        .expect("dry-run plan");
+        let evidence = &result.results[0];
+
+        assert_eq!(evidence.status, "planned");
+        assert_eq!(evidence.requested_ref.as_deref(), Some("reviewed"));
+        assert_eq!(evidence.resolved_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(
+            evidence.remote_path.as_deref(),
+            Some("/srv/site/components/fixture")
+        );
+        assert!(evidence.warnings.iter().any(|warning| {
+            warning.contains("materialize detached temporary worktree")
+                && warning.contains("destination: /srv/site/components/fixture")
+        }));
+        assert_eq!(
+            git_output(repo.path(), &["status", "--porcelain=v1"]),
+            before_status
+        );
+        assert_eq!(
+            git_output(repo.path(), &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
     }
 }

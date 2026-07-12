@@ -27,6 +27,9 @@ pub(crate) fn release_artifact_plan(
     if config.head {
         return local_release_artifact_plan("--head deploys the current checkout");
     }
+    if config.requested_ref.is_some() {
+        return local_release_artifact_plan("--ref deploys an exact materialized commit");
+    }
     if config.tagged {
         return local_release_artifact_plan("--tagged forces a local tag build");
     }

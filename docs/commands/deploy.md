@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--check] [--dry-run] [--apply] [--json '<spec>']
+homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--check] [--dry-run] [--apply] [--json '<spec>']
 # If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
 
 # Multi-project deployment
@@ -33,7 +33,7 @@ Options:
   - Shows all components for the project with version comparison status.
   - Combines with `--outdated` or component IDs to filter results.
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
-- `--apply`: confirm real deploys that use dangerous modes such as `--head` or `--force`
+- `--apply`: confirm real deploys that use dangerous modes such as `--head`, `--ref`, or `--force`
 - `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
 - `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. Each project deployment builds independently.
@@ -43,9 +43,14 @@ Options:
 - `--version <version>`: assert the expected local component version before deploying; aborts on mismatch.
 - `--no-pull`: skip the automatic pull before deploy.
 - `--head`: deploy the current branch `HEAD` instead of the latest tag.
+- `--ref <git-ref-or-sha>`: resolve a commit from each component's declared Git repository and deploy that exact immutable tree. The configured checkout's current branch and `HEAD` do not affect resolution.
 - `--tagged`: force tag-based deploy and ignore reusable build artifacts.
 
-Real deploys with `--head` or `--force` require `--apply`. Preview and status commands (`--dry-run` or `--check`) do not require `--apply`.
+Real deploys with `--head`, `--ref`, or `--force` require `--apply`. Preview and status commands (`--dry-run` or `--check`) do not require `--apply`.
+
+`--ref` is an explicit source selector and conflicts with `--head`, `--tagged`, `--version`, `--outdated`, `--behind-upstream`, and `--check`. Without `--ref`, release and `--head` selection behave as before. File sources and `deploy_strategy: "git"` are rejected because those strategies cannot package and upload the selected Git tree.
+
+Homeboy resolves `<git-ref-or-sha>^{commit}` in the repository containing the declared component `local_path`, pins the full commit SHA, and uses a detached temporary worktree for local build and packaging. It never checks out the requested ref in the configured source checkout. A branch or tag must already be available in that declared repository; use an explicit remote-tracking ref when that is the intended source. Missing, non-commit, or ambiguous refs fail before build or remote mutation.
 
 Components can declare `deploy_together` in their component config. When any selected component belongs to a deploy-together group, Homeboy requires the full group in the same deploy plan and fails before build/upload if only part of the group was selected. Use explicit component IDs for the whole group or `--all` for the project.
 
@@ -93,7 +98,10 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
         "has_uncommitted_changes": false,
         "baseline_ref": "v0.9.15"
       },
-      "deployed_ref": "<tag-or-branch>|null"
+      "deployed_ref": "<tag-or-branch>|null",
+      "requested_ref": "<operator-provided-ref>",
+      "resolved_sha": "<full-commit-sha>",
+      "source": "<declared-git-repository>"
     }
   ],
   "summary": { "total": 1, "succeeded": 0, "failed": 0, "skipped": 0 }
@@ -107,6 +115,7 @@ Notes:
 - `artifact_path` is the component build artifact path as configured; it may be relative but must include a filename.
 - Deploy output does not include `build_command`. Builds are resolved from the linked extension, and deploy records only build/deploy exit codes plus the artifact path used.
 - `deployed_ref` is omitted when no tag or branch ref was deployed.
+- `requested_ref`, `resolved_sha`, and `source` are persisted for `--ref` deploy evidence and omitted for other source modes. `build_provenance.built_from_ref` and `build_provenance.built_from_commit` carry the same identity.
 
 Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings).
 
@@ -244,7 +253,10 @@ Use `--dry-run` to see what would be deployed without executing:
 homeboy deploy myproject --outdated --dry-run
 homeboy deploy myproject --behind-upstream --dry-run
 homeboy deploy myproject my-plugin --version 1.2.3 --tagged --dry-run
+homeboy deploy myproject my-plugin --ref origin/reviewed-branch --dry-run
 ```
+
+An exact-ref dry-run resolves the ref without fetching, checking out, creating a worktree, building, or uploading. Each planned result reports the requested ref, resolved SHA, declared source repository, packaging plan, and remote destination.
 
 ## Check Component Status
 

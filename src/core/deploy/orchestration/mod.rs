@@ -9,6 +9,7 @@ use crate::core::release::version;
 use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
+use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components, plan_components};
@@ -104,6 +105,33 @@ pub(super) fn deploy_components(
 
     validate_effective_remote_paths(&components, &project, base_path)?;
 
+    // Resolve first, then materialize immutable detached worktrees for real deploys.
+    // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
+    let exact_ref_checkouts = if !config.dry_run {
+        if let Some(requested_ref) = config.requested_ref.as_deref() {
+            components
+                .iter()
+                .map(|component| ExactRefCheckout::materialize(component, requested_ref))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let exact_ref_identities: HashMap<String, ExactRefIdentity> = exact_ref_checkouts
+        .iter()
+        .map(|checkout| (checkout.component.id.clone(), checkout.identity.clone()))
+        .collect();
+    let components = if exact_ref_checkouts.is_empty() {
+        components
+    } else {
+        exact_ref_checkouts
+            .iter()
+            .map(|checkout| checkout.component.clone())
+            .collect()
+    };
+
     // Gather versions
     let mut local_versions: HashMap<String, String> = components
         .iter()
@@ -140,7 +168,7 @@ pub(super) fn deploy_components(
     }
 
     // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
-    if !config.no_pull && !config.skip_build {
+    if config.requested_ref.is_none() && !config.no_pull && !config.skip_build {
         sync_components(&components)?;
     }
 
@@ -149,17 +177,17 @@ pub(super) fn deploy_components(
         warn_non_default_branch(&components, config)?;
     }
 
-    if !config.force {
+    if config.requested_ref.is_none() && !config.force {
         check_uncommitted_changes(&components)?;
     }
 
     // Check for HEAD-vs-tag gap before the tag checkout.
-    if !config.head && !config.skip_build {
+    if config.requested_ref.is_none() && !config.head && !config.skip_build {
         check_unreleased_commits(&components, config)?;
     }
 
     // Checkout the deploy tag for each component (unless --head or --skip-build).
-    let tag_checkouts = if !config.head && !config.skip_build {
+    let tag_checkouts = if config.requested_ref.is_none() && !config.head && !config.skip_build {
         checkout_deploy_tags(&components, config.expected_version.as_deref())?
     } else {
         Vec::new()
@@ -219,7 +247,10 @@ pub(super) fn deploy_components(
 
         // Record which git ref was deployed. The same label feeds build provenance
         // so `deployed_ref` and `build_provenance.built_from_ref` never disagree.
-        let deployed_ref = if let Some(checkout) = tag_checkouts
+        let exact_ref_identity = exact_ref_identities.get(&component.id);
+        let deployed_ref = if let Some(identity) = exact_ref_identity {
+            Some(identity.requested_ref.clone())
+        } else if let Some(checkout) = tag_checkouts
             .iter()
             .find(|c| c.component_id == component.id)
         {
@@ -239,10 +270,20 @@ pub(super) fn deploy_components(
         if let Some(ref git_ref) = deployed_ref {
             result = result.with_deployed_ref(git_ref.clone());
         }
+        if let Some(identity) = exact_ref_identity {
+            result = result.with_exact_ref_identity(
+                &identity.requested_ref,
+                &identity.resolved_sha,
+                &identity.source,
+            );
+        }
 
         // Attach explicit build provenance to every result, regardless of strategy.
         let mut build_provenance = prepared.build_provenance.clone();
         build_provenance.built_from_ref = deployed_ref;
+        if let Some(identity) = exact_ref_identity {
+            build_provenance.built_from_commit = Some(identity.resolved_sha.clone());
+        }
         result = result.with_build_provenance(build_provenance);
 
         if result.status == "deployed" {
@@ -409,6 +450,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         }
     }

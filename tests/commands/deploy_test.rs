@@ -63,6 +63,71 @@ fn deploy_head_dry_run_does_not_require_apply() {
 }
 
 #[test]
+fn deploy_ref_requires_apply_for_real_deploy() {
+    let result = run(
+        deploy_args(|args| {
+            args.target_id = Some("project-a".to_string());
+            args.component_ids = vec!["component-a".to_string()];
+            args.requested_ref = Some("accepted-commit".to_string());
+        }),
+        &GlobalArgs {},
+    );
+
+    let err = match result {
+        Ok(_) => panic!("--ref real deploy should require --apply"),
+        Err(err) => err,
+    };
+    assert!(err
+        .message
+        .contains("Real deploys with --ref require explicit --apply"));
+}
+
+#[test]
+fn deploy_parser_accepts_exact_ref() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--ref",
+        "release-candidate",
+        "--dry-run",
+    ])
+    .expect("--ref should parse");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert_eq!(args.requested_ref.as_deref(), Some("release-candidate"));
+}
+
+#[test]
+fn deploy_ref_rejects_every_other_source_selector() {
+    for conflicting in [
+        vec!["--head"],
+        vec!["--tagged"],
+        vec!["--version", "1.2.3"],
+        vec!["--outdated"],
+        vec!["--behind-upstream"],
+        vec!["--check"],
+    ] {
+        let mut argv = vec![
+            "homeboy",
+            "deploy",
+            "project-a",
+            "component-a",
+            "--ref",
+            "accepted-commit",
+        ];
+        argv.extend(conflicting.iter().copied());
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "--ref should conflict with {conflicting:?}"
+        );
+    }
+}
+
+#[test]
 fn multi_project_resolves_positional_components() {
     let (components, config) = resolve_multi_args(&deploy_args(|args| {
         args.projects = Some(vec!["project-a".to_string(), "project-b".to_string()]);
@@ -166,6 +231,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         version: None,
         no_pull: false,
         head: false,
+        requested_ref: None,
         tagged: false,
     };
     customize(&mut args);

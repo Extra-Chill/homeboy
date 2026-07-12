@@ -968,6 +968,7 @@ mod tests {
             expected_version: None,
             no_pull: false,
             head: false,
+            requested_ref: None,
             tagged: false,
         }
     }

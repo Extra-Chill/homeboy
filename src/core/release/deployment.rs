@@ -147,6 +147,7 @@ fn release_deployment_config(component_id: &str, expected_version: Option<&str>)
         expected_version: expected_version.map(str::to_string),
         no_pull: false,
         head: false,
+        requested_ref: None,
         tagged: true,
     }
 }
