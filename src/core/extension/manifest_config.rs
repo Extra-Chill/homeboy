@@ -229,6 +229,17 @@ pub struct DepsConfig {
     pub extension_script: Option<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::DepsConfig;
+
+    #[test]
+    fn deps_config_preserves_the_legacy_extension_script_contract() {
+        let config: DepsConfig = serde_json::from_str(r#"{"extension_script":"deps.sh"}"#).unwrap();
+        assert_eq!(config.extension_script.as_deref(), Some("deps.sh"));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
