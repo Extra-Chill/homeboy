@@ -1081,28 +1081,12 @@ fn resolve_list_component_id(
     args: &BenchListArgs,
     rig_spec: Option<&RigSpec>,
 ) -> homeboy::core::Result<String> {
-    if let Some(id) = args.comp.id() {
-        return Ok(id.to_string());
-    }
-
     if let Some(spec) = rig_spec {
-        if let Some(default) = spec
-            .bench
-            .as_ref()
-            .and_then(|bench| matrix::bench_component_ids(bench).into_iter().next())
-        {
-            return Ok(default);
-        }
-
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "bench.default_component",
-            format!(
-                "rig '{}' does not declare bench.default_component; pass a component id or add bench.default_component to the rig spec",
-                spec.id
-            ),
-            None,
-            None,
-        ));
+        return rig::required_component_id_for_workload(
+            spec,
+            rig::RigWorkloadKind::Bench,
+            args.comp.id(),
+        );
     }
 
     args.comp.resolve_id()

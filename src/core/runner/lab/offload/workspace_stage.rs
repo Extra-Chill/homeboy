@@ -731,10 +731,10 @@ impl RunnerCommandPlan {
         route_required_extensions: &[String],
         primary_source_path: &Path,
     ) -> Result<Self> {
-        let rig_extensions = rig_required_extensions_from_primary_rig(args, primary_source_path)?;
+        let rig_extensions = rig_extensions_from_primary_rig(args, primary_source_path, true)?;
         let accepted_settings = rig_accepted_settings_from_primary_rig(args, primary_source_path)?;
         let rig_dispatch_extensions =
-            rig_dispatch_extensions_from_primary_rig(args, primary_source_path)?;
+            rig_extensions_from_primary_rig(args, primary_source_path, false)?;
         let mut required_extensions = std::collections::BTreeSet::new();
         required_extensions.extend(route_required_extensions.iter().cloned());
         required_extensions.extend(rig_extensions);
@@ -755,7 +755,7 @@ fn rig_declared_path_input_extra_workspaces(
     args: &[String],
     primary_source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
-    if rig_workload_command(args) != Some(RigWorkloadCommand::Bench) {
+    if !args.iter().any(|arg| arg == "bench") {
         return Ok(Vec::new());
     }
 
@@ -916,7 +916,7 @@ fn rig_accepted_settings_from_primary_rig(
     args: &[String],
     primary_source_path: &Path,
 ) -> Result<Vec<String>> {
-    if rig_workload_command(args) != Some(RigWorkloadCommand::Bench) {
+    if !args.iter().any(|arg| arg == "bench") {
         return Ok(Vec::new());
     }
 
@@ -938,23 +938,23 @@ fn rig_accepted_settings_from_primary_rig(
     Ok(accepted_settings.into_iter().collect())
 }
 
-fn rig_required_extensions_from_primary_rig(
+fn rig_extensions_from_primary_rig(
     args: &[String],
     primary_source_path: &Path,
+    required: bool,
 ) -> Result<Vec<String>> {
-    let Some(command) = rig_workload_command(args) else {
+    let command = if args.iter().any(|arg| arg == "bench") {
+        rig::RigWorkloadKind::Bench
+    } else if args.iter().any(|arg| arg == "fuzz") {
+        rig::RigWorkloadKind::Fuzz
+    } else {
         return Ok(Vec::new());
     };
-
-    let rig_ids = rig_ids_from_args(args);
-    if rig_ids.is_empty() {
-        return Ok(Vec::new());
-    }
 
     let explicit_component = rig_workload_component_from_args(args, command);
     let explicit_extensions = extension_overrides_from_args(args);
     let mut extension_ids = std::collections::BTreeSet::new();
-    for rig_id in rig_ids {
+    for rig_id in rig_ids_from_args(args) {
         let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
             continue;
         };
@@ -962,77 +962,29 @@ fn rig_required_extensions_from_primary_rig(
             extension_ids.extend(explicit_extensions.iter().cloned());
             continue;
         }
-        extension_ids.extend(rig::required_extension_ids_for_workload(
-            &spec,
-            command.workload_kind(),
-            explicit_component.as_deref(),
-        ));
-    }
-
-    Ok(extension_ids.into_iter().collect())
-}
-
-fn rig_dispatch_extensions_from_primary_rig(
-    args: &[String],
-    primary_source_path: &Path,
-) -> Result<Vec<String>> {
-    let Some(command) = rig_workload_command(args) else {
-        return Ok(Vec::new());
-    };
-
-    let rig_ids = rig_ids_from_args(args);
-    if rig_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let explicit_component = rig_workload_component_from_args(args, command);
-    let explicit_extensions = extension_overrides_from_args(args);
-    let mut extension_ids = std::collections::BTreeSet::new();
-    for rig_id in rig_ids {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, &rig_id)? else {
-            continue;
-        };
-        if !explicit_extensions.is_empty() {
-            extension_ids.extend(explicit_extensions.iter().cloned());
+        if required {
+            extension_ids.extend(rig::required_extension_ids_for_workload(
+                &spec,
+                command,
+                explicit_component.as_deref(),
+            ));
             continue;
         }
-        let workload_extensions = rig::extension_ids_for_workloads(&spec, command.workload_kind());
-        if workload_extensions.len() == 1 {
-            extension_ids.extend(workload_extensions);
-        }
+        let workload_extensions = rig::extension_ids_for_workloads(&spec, command);
+        extension_ids.extend(
+            (workload_extensions.len() == 1)
+                .then_some(workload_extensions)
+                .into_iter()
+                .flatten(),
+        );
         extension_ids.extend(rig::component_extension_ids_for_workload(
             &spec,
-            command.workload_kind(),
+            command,
             explicit_component.as_deref(),
         ));
     }
 
     Ok(extension_ids.into_iter().collect())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RigWorkloadCommand {
-    Bench,
-    Fuzz,
-}
-
-impl RigWorkloadCommand {
-    fn workload_kind(self) -> rig::RigWorkloadKind {
-        match self {
-            Self::Bench => rig::RigWorkloadKind::Bench,
-            Self::Fuzz => rig::RigWorkloadKind::Fuzz,
-        }
-    }
-}
-
-fn rig_workload_command(args: &[String]) -> Option<RigWorkloadCommand> {
-    if args.iter().any(|arg| arg == "bench") {
-        return Some(RigWorkloadCommand::Bench);
-    }
-    if args.iter().any(|arg| arg == "fuzz") {
-        return Some(RigWorkloadCommand::Fuzz);
-    }
-    None
 }
 
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {
@@ -1098,7 +1050,7 @@ fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
 
 fn rig_workload_component_from_args(
     args: &[String],
-    command: RigWorkloadCommand,
+    command: rig::RigWorkloadKind,
 ) -> Option<String> {
     let mut command_seen = false;
     let mut subcommand_seen = false;
@@ -1173,13 +1125,13 @@ fn rig_workload_component_from_args(
         if !command_seen {
             if matches!(
                 (command, arg.as_str()),
-                (RigWorkloadCommand::Bench, "bench") | (RigWorkloadCommand::Fuzz, "fuzz")
+                (rig::RigWorkloadKind::Bench, "bench") | (rig::RigWorkloadKind::Fuzz, "fuzz")
             ) {
                 command_seen = true;
             }
             continue;
         }
-        if matches!(command, RigWorkloadCommand::Fuzz)
+        if matches!(command, rig::RigWorkloadKind::Fuzz)
             && !subcommand_seen
             && matches!(arg.as_str(), "list" | "run" | "plan" | "run-campaign")
         {
@@ -1188,8 +1140,9 @@ fn rig_workload_component_from_args(
         }
         if arg.starts_with('-') {
             let takes_value = match command {
-                RigWorkloadCommand::Bench => flags_with_values.contains(&arg.as_str()),
-                RigWorkloadCommand::Fuzz => fuzz_flags_with_values.contains(&arg.as_str()),
+                rig::RigWorkloadKind::Bench => flags_with_values.contains(&arg.as_str()),
+                rig::RigWorkloadKind::Fuzz => fuzz_flags_with_values.contains(&arg.as_str()),
+                rig::RigWorkloadKind::Trace => false,
             };
             if takes_value {
                 skip_next = true;

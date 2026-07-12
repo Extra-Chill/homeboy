@@ -3,10 +3,51 @@ use std::path::PathBuf;
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
     check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
-    extension_ids_for_workloads, extension_workload_inputs, required_extension_ids_for_workload,
-    runner_capabilities_for_extension, trace_dependencies_for_extension,
-    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
+    extension_ids_for_workloads, extension_workload_inputs, required_component_id_for_workload,
+    required_extension_ids_for_workload, runner_capabilities_for_extension,
+    trace_dependencies_for_extension, workload_path_expansions_for_extension,
+    workloads_for_extension, RigWorkloadKind,
 };
+
+#[test]
+fn workload_component_selection_preserves_command_policy() {
+    let rig_spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "selection",
+        "bench": {
+            "default_component": "bench-default",
+            "components": ["bench-first", "bench-second"]
+        },
+        "fuzz": { "default_component": "fuzz-default" },
+        "trace": { "default_component": "trace-default" }
+    }))
+    .expect("parse rig spec");
+
+    assert_eq!(
+        required_component_id_for_workload(&rig_spec, RigWorkloadKind::Bench, Some("explicit"))
+            .expect("explicit component"),
+        "explicit"
+    );
+    assert_eq!(
+        super::component_ids_for_workload(&rig_spec, RigWorkloadKind::Bench, None),
+        vec!["bench-first", "bench-second"]
+    );
+    assert_eq!(
+        required_component_id_for_workload(&rig_spec, RigWorkloadKind::Fuzz, None)
+            .expect("fuzz default"),
+        "fuzz-default"
+    );
+    assert!(super::component_ids_for_workload(&rig_spec, RigWorkloadKind::Trace, None).is_empty());
+}
+
+#[test]
+fn missing_workload_component_keeps_command_specific_diagnostic() {
+    let rig_spec: RigSpec =
+        serde_json::from_value(serde_json::json!({ "id": "missing" })).expect("parse rig spec");
+
+    let bench_error = required_component_id_for_workload(&rig_spec, RigWorkloadKind::Bench, None)
+        .expect_err("bench component is required");
+    assert!(bench_error.message.contains("bench.default_component"));
+}
 
 #[test]
 fn test_bench_workloads_for_extension_filters_and_expands_paths() {

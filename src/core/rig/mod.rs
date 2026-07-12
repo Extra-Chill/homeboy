@@ -104,9 +104,10 @@ pub use state::{
 };
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,
-    component_extension_ids_for_workload, env_provider_extensions_for_extension_workloads,
-    extension_ids_for_workloads, extension_workload_inputs,
-    invocation_requirements_for_extension_workloads, required_extension_ids_for_workload,
+    component_extension_ids_for_workload, component_ids_for_workload,
+    env_provider_extensions_for_extension_workloads, extension_ids_for_workloads,
+    extension_workload_inputs, invocation_requirements_for_extension_workloads,
+    required_component_id_for_workload, required_extension_ids_for_workload,
     runner_capabilities_for_extension, trace_dependencies_for_extension,
     workload_path_expansions_for_extension, workloads_for_extension, RigExtensionWorkloadInputs,
     RigWorkloadKind, RigWorkloadPathExpansion,

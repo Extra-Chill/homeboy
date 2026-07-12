@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::engine::invocation::InvocationRequirements;
+use crate::core::{Error, Result};
 
 use super::spec::{RigSpec, TraceDependencySpec};
 
@@ -25,6 +26,58 @@ pub struct RigExtensionWorkloadInputs {
     pub workload_paths: Vec<PathBuf>,
     pub env_provider_extensions: Vec<String>,
     pub invocation_requirements: InvocationRequirements,
+}
+
+pub fn component_ids_for_workload(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    explicit_component: Option<&str>,
+) -> Vec<String> {
+    if let Some(component) = explicit_component {
+        return vec![component.to_string()];
+    }
+
+    match kind {
+        RigWorkloadKind::Bench => match rig_spec.bench.as_ref() {
+            Some(bench) if !bench.components.is_empty() => bench.components.clone(),
+            Some(bench) => bench.default_component.iter().cloned().collect(),
+            None => Vec::new(),
+        },
+        RigWorkloadKind::Fuzz => rig_spec
+            .fuzz
+            .iter()
+            .flat_map(|fuzz| fuzz.default_component.iter().cloned())
+            .collect(),
+        RigWorkloadKind::Trace => Vec::new(),
+    }
+}
+
+pub fn required_component_id_for_workload(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    explicit_component: Option<&str>,
+) -> Result<String> {
+    if let Some(component) = component_ids_for_workload(rig_spec, kind, explicit_component)
+        .into_iter()
+        .next()
+    {
+        return Ok(component);
+    }
+
+    let setting = match kind {
+        RigWorkloadKind::Bench => "bench.default_component",
+        RigWorkloadKind::Fuzz => "fuzz.default_component",
+        RigWorkloadKind::Trace => "trace.default_component",
+    };
+    Err(Error::validation_invalid_argument(
+        setting,
+        format!(
+            "rig '{}' does not declare {setting}; pass a component id or add {setting} to the rig spec",
+            rig_spec.id
+        ),
+        None,
+        None,
+    ))
 }
 
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
@@ -65,24 +118,7 @@ pub fn component_extension_ids_for_workload(
     kind: RigWorkloadKind,
     explicit_component: Option<&str>,
 ) -> Vec<String> {
-    let component_ids = explicit_component
-        .map(|id| vec![id.to_string()])
-        .or_else(|| match kind {
-            RigWorkloadKind::Bench => rig_spec.bench.as_ref().map(|bench| {
-                if bench.components.is_empty() {
-                    bench.default_component.iter().cloned().collect()
-                } else {
-                    bench.components.clone()
-                }
-            }),
-            RigWorkloadKind::Fuzz => rig_spec
-                .fuzz
-                .as_ref()
-                .and_then(|fuzz| fuzz.default_component.as_ref())
-                .map(|component| vec![component.clone()]),
-            RigWorkloadKind::Trace => None,
-        })
-        .unwrap_or_default();
+    let component_ids = component_ids_for_workload(rig_spec, kind, explicit_component);
 
     component_ids
         .iter()
