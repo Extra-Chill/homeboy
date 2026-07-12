@@ -194,13 +194,62 @@ pub struct RigSpec {
 pub struct RigLifecycleSpec {
     /// Cleanup intent applied to generated rig resource lifecycle records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup: Option<ResourceCleanupIntent>,
+    pub cleanup: Option<RigCleanupSpec>,
 }
 
 impl RigLifecycleSpec {
     pub fn is_empty(&self) -> bool {
         self.cleanup.is_none()
     }
+}
+
+/// Cleanup ownership declared by a rig lifecycle object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RigCleanupIntent {
+    DryRun,
+    Apply,
+    Pipeline,
+    External,
+}
+
+impl RigCleanupIntent {
+    fn resource_cleanup_intent(self) -> ResourceCleanupIntent {
+        match self {
+            Self::Apply => ResourceCleanupIntent::Apply,
+            Self::DryRun | Self::Pipeline | Self::External => ResourceCleanupIntent::DryRun,
+        }
+    }
+}
+
+/// Rig cleanup configuration. Legacy string values remain supported while the
+/// object form records cleanup ownership and an optional explanatory reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RigCleanupSpec {
+    Legacy(ResourceCleanupIntent),
+    Object(RigCleanupObjectSpec),
+}
+
+impl RigCleanupSpec {
+    pub fn resource_cleanup_intent(&self) -> ResourceCleanupIntent {
+        match self {
+            Self::Legacy(intent) => *intent,
+            Self::Object(spec) => spec
+                .intent
+                .map(RigCleanupIntent::resource_cleanup_intent)
+                .unwrap_or(ResourceCleanupIntent::DryRun),
+        }
+    }
+}
+
+/// Object-form rig cleanup configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RigCleanupObjectSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<RigCleanupIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Rig-level trace defaults.
@@ -1151,7 +1200,13 @@ mod tests {
         )
         .expect("parse rig contract fields");
 
-        assert_eq!(spec.lifecycle.cleanup, Some(ResourceCleanupIntent::Apply));
+        assert_eq!(
+            spec.lifecycle
+                .cleanup
+                .as_ref()
+                .map(RigCleanupSpec::resource_cleanup_intent),
+            Some(ResourceCleanupIntent::Apply)
+        );
         assert_eq!(
             spec.trace.default_component.as_deref(),
             Some("wordpress-develop")
@@ -1169,6 +1224,79 @@ mod tests {
         assert!(json.contains("\"trace\""));
         assert!(json.contains("\"schema\""));
         assert!(json.contains("\"manifest\""));
+    }
+
+    #[test]
+    fn rig_lifecycle_cleanup_round_trips_legacy_string_forms() {
+        for input in [r#""dry_run""#, r#""apply""#] {
+            let spec: RigLifecycleSpec = serde_json::from_str(&format!(r#"{{"cleanup":{input}}}"#))
+                .expect("parse lifecycle");
+
+            assert_eq!(
+                serde_json::to_value(&spec).expect("serialize lifecycle"),
+                serde_json::from_str::<serde_json::Value>(&format!(r#"{{"cleanup":{input}}}"#))
+                    .expect("expected lifecycle JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn rig_lifecycle_cleanup_round_trips_object_forms() {
+        for input in [
+            r#"{"intent":"dry_run"}"#,
+            r#"{"intent":"apply"}"#,
+            r#"{"intent":"pipeline"}"#,
+            r#"{"intent":"external"}"#,
+            r#"{"reason":"pipeline owns cleanup"}"#,
+        ] {
+            let spec: RigLifecycleSpec = serde_json::from_str(&format!(r#"{{"cleanup":{input}}}"#))
+                .expect("parse lifecycle");
+
+            assert_eq!(
+                serde_json::to_value(&spec).expect("serialize lifecycle"),
+                serde_json::from_str::<serde_json::Value>(&format!(r#"{{"cleanup":{input}}}"#))
+                    .expect("expected lifecycle JSON")
+            );
+        }
+    }
+
+    #[test]
+    fn rig_spec_parses_pipeline_owned_cleanup_contract() {
+        let spec: RigSpec = serde_json::from_str(
+            r#"{
+                "id": "studio-runtime",
+                "lifecycle": {
+                    "cleanup": {
+                        "intent": "pipeline",
+                        "reason": "pipeline.down stops the Studio daemon..."
+                    }
+                }
+            }"#,
+        )
+        .expect("parse homeboy-rigs cleanup contract");
+
+        assert_eq!(
+            spec.lifecycle.cleanup,
+            Some(RigCleanupSpec::Object(RigCleanupObjectSpec {
+                intent: Some(RigCleanupIntent::Pipeline),
+                reason: Some("pipeline.down stops the Studio daemon...".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn pipeline_and_external_cleanup_map_to_dry_run_resource_intents() {
+        for intent in [RigCleanupIntent::Pipeline, RigCleanupIntent::External] {
+            let cleanup = RigCleanupSpec::Object(RigCleanupObjectSpec {
+                intent: Some(intent),
+                reason: None,
+            });
+
+            assert_eq!(
+                cleanup.resource_cleanup_intent(),
+                ResourceCleanupIntent::DryRun
+            );
+        }
     }
 }
 
