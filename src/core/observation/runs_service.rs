@@ -336,6 +336,12 @@ mod run_lookup {
     /// observation store converge on the daemon's terminal state without requiring
     /// operators to know and run `runs show <mirror-run-id>` first.
     pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationStore) {
+        for report in crate::core::runners::statuses().unwrap_or_default() {
+            for job in report.stale_runner_jobs {
+                finish_stale_runner_child_run(store, &job);
+            }
+        }
+
         let runs = store
             .list_runs(RunListFilter {
                 status: Some(RunStatus::Running.as_str().to_string()),
@@ -348,6 +354,91 @@ mod run_lookup {
             if crate::core::runners::mirrored_runner_job_identity(&run).is_some() {
                 refresh_mirrored_daemon_evidence_best_effort(&run.id);
             }
+        }
+    }
+
+    fn finish_stale_runner_child_run(
+        store: &ObservationStore,
+        job: &crate::core::runners::RunnerJob,
+    ) {
+        let Some(run_id) = job.durable_run_id.as_deref() else {
+            return;
+        };
+        let Ok(Some(run)) = store.get_run(run_id) else {
+            return;
+        };
+        if run.status != RunStatus::Running.as_str() {
+            return;
+        }
+        let mut metadata = run.metadata_json;
+        if !metadata.is_object() {
+            metadata = serde_json::json!({ "homeboy_original_metadata": metadata });
+        }
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "runner_terminal_evidence".to_string(),
+                serde_json::json!({
+                    "runner_id": job.runner_id,
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "lifecycle_state": job.lifecycle_state,
+                    "stale_reason": job.stale_reason,
+                    "retryable": job.retryable,
+                    "reconciled_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+        let _ = store.finish_run(run_id, RunStatus::Stale, Some(metadata));
+    }
+
+    #[cfg(test)]
+    mod stale_runner_tests {
+        use super::*;
+        use crate::core::api_jobs::{JobClaimMetadata, JobStatus};
+        use crate::core::observation::{NewRunRecord, ObservationStore};
+        use crate::core::runners::{RunnerJob, RunnerLifecycleOwner};
+
+        #[test]
+        fn stale_runner_child_finalizes_matching_running_observation() {
+            crate::test_support::with_isolated_home(|_| {
+                let store = ObservationStore::open_initialized().expect("store");
+                let started = store
+                    .start_run(NewRunRecord::builder("bench").build())
+                    .expect("run");
+                let run_id = started.id;
+                let job = RunnerJob {
+                    runner_id: "homeboy-lab".to_string(),
+                    job_id: "orphaned-child-run-run-1".to_string(),
+                    operation: "child-run".to_string(),
+                    status: JobStatus::Failed,
+                    command: "homeboy bench".to_string(),
+                    cwd: None,
+                    source: "runner-observation".to_string(),
+                    lifecycle_owner: RunnerLifecycleOwner::Controller,
+                    lifecycle: None,
+                    started_at_ms: None,
+                    updated_at_ms: None,
+                    elapsed_ms: None,
+                    heartbeat_age_ms: None,
+                    claim: JobClaimMetadata::default(),
+                    claim_expires_in_ms: None,
+                    durable_run_id: Some(run_id.clone()),
+                    stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
+                    lifecycle_state: Some("stale".to_string()),
+                    retryable: Some(true),
+                    artifact_refs: Vec::new(),
+                };
+
+                finish_stale_runner_child_run(&store, &job);
+
+                let run = store.get_run(&run_id).expect("read").expect("run");
+                assert_eq!(run.status, "stale");
+                assert!(run.finished_at.is_some());
+                assert_eq!(
+                    run.metadata_json["runner_terminal_evidence"]["stale_reason"],
+                    "child_run_running_without_active_runner_job"
+                );
+            });
         }
     }
 }
