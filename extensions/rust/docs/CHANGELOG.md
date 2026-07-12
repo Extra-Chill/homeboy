@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.7] - 2026-07-12
+
+### Fixed
+- Fix #2226: retire Homeboy compat surfaces
+
 ## [1.23.6] - 2026-07-07
 
 ### Changed
