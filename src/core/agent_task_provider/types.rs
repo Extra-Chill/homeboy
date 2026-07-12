@@ -48,7 +48,11 @@ pub struct AgentTaskExecutorProvider {
     pub backend: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub default_backend: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "reject_deprecated_provider_command",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub command: String,
     #[serde(default, alias = "argv", skip_serializing_if = "Vec::is_empty")]
     pub command_argv: Vec<String>,
@@ -112,6 +116,20 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+fn reject_deprecated_provider_command<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let command = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
+    if command.trim().is_empty() {
+        return Ok(command);
+    }
+
+    Err(<D::Error as serde::de::Error>::custom(
+        "agent-task provider string-form 'command' is no longer supported; use invocation.argv or argv instead",
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

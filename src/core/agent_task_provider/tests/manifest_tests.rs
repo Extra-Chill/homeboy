@@ -25,7 +25,7 @@ fn provider_manifest_defaults_core_owned_schema_ids() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "minimal.provider",
         "backend": "minimal",
-        "command": "minimal-provider"
+        "invocation": { "argv": ["minimal-provider"] }
     }))
     .expect("provider manifest");
 
@@ -39,12 +39,11 @@ fn provider_manifest_accepts_typed_command_argv_aliases() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "argv.provider",
         "backend": "argv",
-        "command": "legacy-provider --legacy",
         "argv": ["{{extension_path}}/bin/provider", "--runtime", "{{runtime_path}}"]
     }))
     .expect("provider manifest");
 
-    assert_eq!(provider.command, "legacy-provider --legacy");
+    assert!(provider.command.is_empty());
     assert_eq!(
         provider.command_argv,
         vec![
@@ -60,7 +59,6 @@ fn provider_manifest_accepts_command_invocation_contract() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "invocation.provider",
         "backend": "invocation",
-        "command": "legacy-provider --legacy",
         "invocation": {
             "schema": "homeboy/command-invocation/v1",
             "argv": ["{{runtime_path}}/bin/provider", "--json"],
@@ -87,7 +85,7 @@ fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "path-runtime.agent-task-executor",
         "backend": "path-runtime",
-        "command": "node {{runtime_path}}/scripts/agent/homeboy-path-runtime-agent-task-executor.cjs",
+        "invocation": { "argv": ["node", "{{runtime_path}}/scripts/agent/homeboy-path-runtime-agent-task-executor.cjs"] },
         "runner_readiness": [{
             "id": "path-runtime.executable",
             "label": "PATH runtime executable",
@@ -122,7 +120,7 @@ fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
 }
 
 #[test]
-fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
+fn default_provider_catalog_reads_codex_invocation_argv() {
     crate::test_support::with_isolated_home(|home| {
         let runtime_dir = home.path().join(".config/homeboy/agent-runtimes/codex");
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
@@ -135,7 +133,10 @@ fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
                     "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                     "id": "codex.agent-task-executor",
                     "backend": "codex",
-                    "command": "codex-agent-task-executor --json"
+                    "invocation": {
+                        "schema": crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA,
+                        "argv": ["codex-agent-task-executor", "--json"]
+                    }
                 }]
             })
             .to_string(),
@@ -149,8 +150,8 @@ fn default_provider_catalog_normalizes_codex_command_to_invocation_argv() {
             .find(|provider| provider.id == "codex.agent-task-executor")
             .expect("codex provider discovered");
 
+        assert!(provider.command.is_empty());
         assert!(provider.command_argv.is_empty());
-        assert_eq!(provider.command, "codex-agent-task-executor --json");
         assert_eq!(
             provider.invocation.schema.as_deref(),
             Some(crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA)
@@ -208,7 +209,7 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
 }
 
 #[test]
-fn provider_command_parts_warns_for_legacy_string_command() {
+fn provider_command_parts_uses_argv() {
     let (_request, provider) = request("task-legacy-command", "legacy-provider --flag".to_string());
 
     let (program, args, cwd) = provider_command_parts(&provider).expect("command parts");
@@ -219,11 +220,25 @@ fn provider_command_parts_warns_for_legacy_string_command() {
 }
 
 #[test]
+fn provider_manifest_rejects_deprecated_string_command() {
+    let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
+        "id": "legacy.provider",
+        "backend": "legacy",
+        "command": "legacy-provider --flag"
+    }))
+    .expect_err("string-form command must be rejected");
+
+    assert!(error.to_string().contains(
+        "agent-task provider string-form 'command' is no longer supported; use invocation.argv or argv instead"
+    ));
+}
+
+#[test]
 fn provider_manifest_preserves_unknown_metadata_on_export() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "metadata.provider",
         "backend": "metadata",
-        "command": "metadata-provider",
+        "invocation": { "argv": ["metadata-provider"] },
         "provider_metadata": {
             "runtime": "provider-owned"
         },

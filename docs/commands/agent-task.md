@@ -797,7 +797,9 @@ belong on each `agent_task_executors[]` entry:
   "schema": "homeboy/agent-task-executor-provider/v1",
   "id": "example.default",
   "backend": "example",
-  "command": "example-provider",
+  "invocation": {
+    "argv": ["example-provider"]
+  },
   "request_schema": "homeboy/agent-task-request/v1",
   "outcome_schema": "homeboy/agent-task-outcome/v1",
   "secret_env_requirements": [

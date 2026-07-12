@@ -891,11 +891,7 @@ pub(crate) fn render_provider_command_display(provider: &AgentTaskExecutorProvid
         return render_provider_command_argv(provider).join(" ");
     }
 
-    render_provider_command_string(provider)
-}
-
-fn render_provider_command_string(provider: &AgentTaskExecutorProvider) -> String {
-    render_provider_command_template(&provider.command, provider)
+    String::new()
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
@@ -934,20 +930,6 @@ pub(crate) fn provider_command_parts(
                 .cwd
                 .as_deref()
                 .map(|cwd| PathBuf::from(render_provider_command_template(cwd, provider))),
-        )
-    } else if provider.command_argv.is_empty() {
-        // Legacy string commands retain their historical split behavior for
-        // compatibility. New provider manifests should use command_argv/argv.
-        eprintln!(
-            "Warning: agent task provider '{}' uses deprecated string command; use invocation.argv or argv instead",
-            provider.id
-        );
-        (
-            render_provider_command_string(provider)
-                .split_whitespace()
-                .map(str::to_string)
-                .collect(),
-            None,
         )
     } else {
         (render_provider_command_argv(provider), None)

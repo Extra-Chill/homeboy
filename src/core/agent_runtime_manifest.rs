@@ -778,7 +778,7 @@ mod tests {
             "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
             "id": id,
             "backend": backend,
-            "command": "agent-task-provider",
+            "invocation": { "argv": ["agent-task-provider"] },
             "request_schema": AGENT_TASK_REQUEST_SCHEMA,
             "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
         })
@@ -934,7 +934,7 @@ mod tests {
                         "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                         "id": "standalone-example.default",
                         "backend": "example",
-                        "command": "agent-task-provider",
+                        "invocation": { "argv": ["agent-task-provider"] },
                         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
                         "workspace_materialization": {
@@ -1064,7 +1064,7 @@ mod tests {
                         "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                         "id": "opencode.agent-task-executor",
                         "backend": "opencode",
-                        "command": "node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs",
+                        "invocation": { "argv": ["node", "{{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs"] },
                         "runner_readiness": [{
                             "id": "opencode.executable",
                             "label": "OpenCode executable",
@@ -1315,7 +1315,7 @@ mod tests {
                         "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                         "id": "sample.default",
                         "backend": "sample",
-                        "command": "fresh-extension-executor",
+                        "invocation": { "argv": ["fresh-extension-executor"] },
                         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
                     }],
@@ -1343,7 +1343,10 @@ mod tests {
                 providers[0].extension_id.as_deref(),
                 Some("sample-runtime-extension")
             );
-            assert_eq!(providers[0].command, "fresh-extension-executor");
+            assert_eq!(
+                providers[0].invocation.argv,
+                vec!["fresh-extension-executor"]
+            );
             assert_eq!(
                 providers[0].runtime_path.as_deref(),
                 Some("/extensions/sample-runtime-extension")
