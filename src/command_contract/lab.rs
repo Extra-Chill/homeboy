@@ -73,6 +73,21 @@ pub struct LabCommandRouteContract {
     pub command: LabCommandContract,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<RunnerWorkloadCapability>,
+    pub workload: Option<LabRigWorkloadArguments>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct LabRigWorkloadArguments {
+    pub kind: LabRigWorkloadKind,
+    pub rig_ids: Vec<String>,
+    pub component: Option<String>,
+    pub extension_overrides: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+pub enum LabRigWorkloadKind {
+    Bench,
+    Fuzz,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
@@ -1076,6 +1091,7 @@ impl LabCommandContract {
             command: self,
             required_extensions,
             required_capabilities,
+            workload: None,
         }
     }
 
@@ -1255,7 +1271,13 @@ impl Commands {
             return Ok(None);
         };
         let required_extensions = self.lab_required_extensions()?;
-        Ok(Some(contract.into_route_contract(required_extensions)))
+        let mut route = contract.into_route_contract(required_extensions);
+        route.workload = match self {
+            Commands::Bench(args) => args.lab_rig_workload_arguments(),
+            Commands::Fuzz(args) => args.lab_rig_workload_arguments(),
+            _ => None,
+        };
+        Ok(Some(route))
     }
 
     pub fn supports_lab_runner(&self) -> bool {
@@ -1365,6 +1387,14 @@ mod low_noise_polling_tests {
         Cli::try_parse_from(args)
             .expect("CLI args should parse")
             .command
+    }
+
+    #[test]
+    fn non_workload_command_has_no_workload_arguments() {
+        assert!(parsed_command(&["homeboy", "status"])
+            .lab_route_contract()
+            .expect("route contract")
+            .is_none());
     }
 
     #[test]

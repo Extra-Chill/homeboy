@@ -92,6 +92,32 @@ impl FuzzArgs {
         }
     }
 
+    pub(crate) fn lab_rig_workload_arguments(
+        &self,
+    ) -> Option<crate::command_contract::LabRigWorkloadArguments> {
+        let (rig, component, extensions) = match &self.command {
+            Some(FuzzCommand::List(args)) => (
+                args.rig.as_ref(),
+                args.comp.id(),
+                &args.extension_override.extensions,
+            ),
+            _ => {
+                let args = self.run_args_for_lab_offload()?;
+                (
+                    args.rig.as_ref(),
+                    args.comp.id(),
+                    &args.extension_override.extensions,
+                )
+            }
+        };
+        Some(crate::command_contract::LabRigWorkloadArguments {
+            kind: crate::command_contract::LabRigWorkloadKind::Fuzz,
+            rig_ids: rig.into_iter().cloned().collect(),
+            component: component.map(str::to_string),
+            extension_overrides: extensions.clone(),
+        })
+    }
+
     pub(crate) fn consumes_runner_as_plan_input(&self) -> bool {
         matches!(
             self.command,

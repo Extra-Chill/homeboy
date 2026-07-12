@@ -27,6 +27,25 @@ fn parses_bench_list_rig_flag() {
 }
 
 #[test]
+fn lab_workload_arguments_use_clap_values() {
+    let cli = TestCli::try_parse_from(
+        "bench --iterations 3 component --rig=a,b --rig c --extension=x --extension y"
+            .split_whitespace(),
+    )
+    .expect("bench should parse");
+    let workload = cli.bench.lab_rig_workload_arguments().unwrap();
+    assert_eq!(workload.rig_ids, ["a", "b", "c"]);
+    assert_eq!(workload.component.as_deref(), Some("component"));
+    assert_eq!(workload.extension_overrides, ["x", "y"]);
+
+    let cli = TestCli::try_parse_from("bench --run-id value --rig=r".split_whitespace()).unwrap();
+    assert_eq!(
+        cli.bench.lab_rig_workload_arguments().unwrap().component,
+        None
+    );
+}
+
+#[test]
 fn parses_bench_list_json_flag() {
     let cli = TestCli::try_parse_from(["bench", "list", "--json"])
         .expect("bench list --json should parse");

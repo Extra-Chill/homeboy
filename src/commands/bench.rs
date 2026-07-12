@@ -133,6 +133,18 @@ impl BenchArgs {
             Some(BenchCommand::List(_)) => None,
         }
     }
+
+    pub(crate) fn lab_rig_workload_arguments(
+        &self,
+    ) -> Option<crate::command_contract::LabRigWorkloadArguments> {
+        let run = self.run_args_for_lab_offload()?;
+        Some(crate::command_contract::LabRigWorkloadArguments {
+            kind: crate::command_contract::LabRigWorkloadKind::Bench,
+            rig_ids: run.rig.clone(),
+            component: run.comp.id().map(str::to_string),
+            extension_overrides: run.extension_override.extensions.clone(),
+        })
+    }
 }
 
 #[derive(Subcommand)]

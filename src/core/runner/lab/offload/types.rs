@@ -77,6 +77,7 @@ pub struct LabOffloadCommand {
     pub secret_env_sources: Vec<crate::command_contract::LabSecretEnvSource>,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
+    pub workload: Option<crate::command_contract::LabRigWorkloadArguments>,
     /// Routing-policy flags shared across the Lab command layers
     /// (`default_lab_offload`, `infer_source_path_tools`, `release_gate`,
     /// `requires_extension_parity`).

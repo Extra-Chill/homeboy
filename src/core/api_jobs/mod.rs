@@ -823,6 +823,7 @@ mod tests {
             secret_env_sources: Vec::new(),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
+            workload: None,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
         request.runner_workload = Some(crate::core::runner::workload::build_runner_workload(
