@@ -1,5 +1,4 @@
 use crate::core::component::Component;
-use crate::core::engine::local_files::FileSystem;
 use crate::core::error::{Error, Result};
 use crate::core::git;
 use crate::core::release::changelog;

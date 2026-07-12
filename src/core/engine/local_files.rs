@@ -19,15 +19,6 @@ impl Entry {
     }
 }
 
-/// Trait for file system operations - local or remote
-pub trait FileSystem {
-    fn read(&self, path: &Path) -> Result<String>;
-    fn write(&self, path: &Path, content: &str) -> Result<()>;
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>>;
-    fn delete(&self, path: &Path) -> Result<()>;
-    fn ensure_dir(&self, dir: &Path) -> Result<()>;
-}
-
 /// Local filesystem implementation
 pub struct LocalFs;
 
@@ -35,16 +26,8 @@ impl LocalFs {
     pub fn new() -> Self {
         Self
     }
-}
 
-impl Default for LocalFs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FileSystem for LocalFs {
-    fn read(&self, path: &Path) -> Result<String> {
+    pub fn read(&self, path: &Path) -> Result<String> {
         fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::internal_io(
@@ -57,11 +40,11 @@ impl FileSystem for LocalFs {
         })
     }
 
-    fn write(&self, path: &Path, content: &str) -> Result<()> {
+    pub fn write(&self, path: &Path, content: &str) -> Result<()> {
         write_file_atomic(path, content, "write file")
     }
 
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>> {
+    pub fn list(&self, dir: &Path) -> Result<Vec<Entry>> {
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -79,7 +62,7 @@ impl FileSystem for LocalFs {
         Ok(result)
     }
 
-    fn delete(&self, path: &Path) -> Result<()> {
+    pub fn delete(&self, path: &Path) -> Result<()> {
         if !path.exists() {
             return Err(Error::internal_io(
                 format!("File not found: {}", path.display()),
@@ -91,13 +74,19 @@ impl FileSystem for LocalFs {
             .map_err(|e| Error::internal_io(e.to_string(), Some("delete file".to_string())))
     }
 
-    fn ensure_dir(&self, dir: &Path) -> Result<()> {
+    pub fn ensure_dir(&self, dir: &Path) -> Result<()> {
         if !dir.exists() {
             fs::create_dir_all(dir).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("create directory".to_string()))
             })?;
         }
         Ok(())
+    }
+}
+
+impl Default for LocalFs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

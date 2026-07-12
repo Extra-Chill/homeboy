@@ -21,7 +21,7 @@ pub use types::{
 use crate::core::component::{self, Component, VersionTarget};
 use crate::core::config::{from_str, set_json_pointer, to_string_pretty};
 use crate::core::engine::hooks::{self, HookFailureMode};
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::engine::text;
 use crate::core::error::{Error, Result};
 use crate::core::extension::ExtensionManifest;

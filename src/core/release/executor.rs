@@ -13,7 +13,6 @@
 //! inside each `run_*` function is unchanged; only the plumbing is different.
 
 use crate::core::component::Component;
-use crate::core::engine::local_files::FileSystem;
 use crate::core::engine::validation;
 use crate::core::error::{Error, Result};
 use crate::core::release::{changelog as release_changelog, version};

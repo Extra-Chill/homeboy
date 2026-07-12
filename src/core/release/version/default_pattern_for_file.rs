@@ -2,7 +2,7 @@
 
 use crate::core::component::{self, Component, VersionTarget};
 use crate::core::engine::codebase_scan;
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::engine::text;
 use crate::core::error::{Error, Result};
 use crate::core::extension::load_all_extensions;
