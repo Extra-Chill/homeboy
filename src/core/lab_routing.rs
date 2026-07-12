@@ -9,8 +9,7 @@ use crate::command_contract::{
     LabWorkspaceModePolicy,
 };
 use crate::core::command_execution_plan::{
-    CommandPortability, CommandSourceMaterialization, CommandSourcePolicy, CommandWorkspacePolicy,
-    LabRoutePlan,
+    CommandSourceMaterialization, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
 };
 use crate::core::observation::records::RunEvidenceCommands;
 use crate::core::observation::RunStatus;
@@ -448,47 +447,11 @@ pub fn lab_route_plan_from_contract(contract: LabCommandContract) -> LabRoutePla
 pub fn lab_offload_command_from_route_contract(
     route_contract: LabCommandRouteContract,
 ) -> runners::LabOffloadCommand {
-    let hot_label = route_contract.command.hot_label;
-    let portability = route_contract.command.portability;
-    let secret_env_sources = route_contract.command.secret_env_sources.to_vec();
-    let workload = route_contract.workload.clone();
-    let plan = lab_route_plan_from_route_contract(route_contract);
     runners::LabOffloadCommand {
-        hot_label,
-        portable: matches!(plan.portability, CommandPortability::Portable),
-        unsupported_reason: match portability {
-            LabCommandPortability::Portable => None,
-            LabCommandPortability::LocalOnly(reason) => Some(reason),
-        },
-        source_path_mode: match plan.source_policy {
-            CommandSourcePolicy::ControllerCwdOrExplicitPath
-            | CommandSourcePolicy::MaterializeControllerPath => {
-                runners::LabOffloadSourcePathMode::CwdOrPathFlag
-            }
-            CommandSourcePolicy::RunnerResident => {
-                runners::LabOffloadSourcePathMode::RunnerResident
-            }
-        },
-        workspace_mode_policy: match plan.workspace_policy {
-            CommandWorkspacePolicy::ChangedSinceGitElseSnapshot => {
-                runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
-            }
-            CommandWorkspacePolicy::Git => runners::LabOffloadWorkspaceModePolicy::Git,
-            CommandWorkspacePolicy::GitCheckoutRequired => {
-                runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
-            }
-            CommandWorkspacePolicy::RunnerResident => {
-                runners::LabOffloadWorkspaceModePolicy::RunnerResident
-            }
-            CommandWorkspacePolicy::Snapshot => {
-                runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
-            }
-        },
-        secret_env_sources,
-        required_extensions: plan.required_extensions,
-        required_capabilities: plan.required_capabilities,
-        workload,
-        routing_policy: plan.routing_policy,
+        command: route_contract.command,
+        required_extensions: route_contract.required_extensions,
+        required_capabilities: route_contract.required_capabilities,
+        workload: route_contract.workload,
     }
 }
 
@@ -672,10 +635,10 @@ mod tests {
             vec!["wordpress".to_string(), "playwright".to_string()],
         );
 
+        assert_eq!(command.command, lab_contract());
         assert_eq!(command.hot_label, "trace");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
-        assert_eq!(command.unsupported_reason, None);
         assert_eq!(
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired

@@ -2,7 +2,7 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
+use crate::command_contract::{lab_runner_unsupported_hint, LabCommandPortability};
 use crate::core::{Error, ErrorCode, Result};
 
 use super::daemon_freshness::repair_or_fail;
@@ -103,7 +103,7 @@ fn preflight_lab_runner_availability_with(
 }
 
 pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand) -> Result<()> {
-    if !command.portable || !command.routing_policy.default_lab_offload {
+    if !command.is_portable() || !command.routing_policy.default_lab_offload {
         return Ok(());
     }
     let eligible = default_lab_runner_availability()?;
@@ -476,7 +476,7 @@ pub(super) fn resolve_lab_runner_selection(
     let release_gate_local_hot_allowed =
         crate::core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
     let default_runner = if explicit_runner.is_none()
-        && command.portable
+        && command.is_portable()
         && command.routing_policy.default_lab_offload
     {
         super::resolve_default_lab_runner()?
@@ -506,12 +506,8 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     default_runner: Option<String>,
 ) -> Result<Option<LabRunnerSelection>> {
     if let Some(runner_id) = explicit_runner {
-        if !command.portable {
-            let message = command
-                .unsupported_reason
-                .map_or_else(lab_runner_unsupported_message, |reason| {
-                    format!("--runner is unavailable for this hot command. {reason}")
-                });
+        if let LabCommandPortability::LocalOnly(reason) = command.portability {
+            let message = format!("--runner is unavailable for this hot command. {reason}");
             return Err(Error::validation_invalid_argument(
                 "runner",
                 message,
@@ -548,7 +544,7 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         return Ok(None);
     }
 
-    if force_hot && command.portable && !allow_local_hot {
+    if force_hot && command.is_portable() && !allow_local_hot {
         let Some(runner_id) = default_runner.as_ref() else {
             fail_if_local_bench_denied(command, deny_local_bench)?;
             return Ok(None);
@@ -588,7 +584,7 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         }
     }
 
-    if force_hot || !command.portable {
+    if force_hot || !command.is_portable() {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }

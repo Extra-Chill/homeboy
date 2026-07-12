@@ -468,17 +468,15 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
         )
         .build();
         let command_contract = crate::core::runner::LabOffloadCommand {
-            hot_label: "tunnel preview-client start",
-            portable: true,
-            unsupported_reason: None,
-            source_path_mode: crate::core::runner::LabOffloadSourcePathMode::CwdOrPathFlag,
-            workspace_mode_policy:
-                crate::core::runner::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-            secret_env_sources: Vec::new(),
+            command: crate::command_contract::LabCommandContract::portable(
+                "tunnel preview-client start",
+                None,
+                false,
+                &[],
+            ),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
-            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         };
         let workload = crate::core::runner::workload::build_runner_workload(
             crate::core::runner::workload::RunnerWorkloadBuildInput {
