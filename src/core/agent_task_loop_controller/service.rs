@@ -46,15 +46,15 @@ where
         controller_next_commands(record, &controller_state, relevant_action.as_ref());
     let missing_acceptance_gate_count = acceptance_gates
         .iter()
-        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Missing)
+        .filter(|gate| gate.status == AgentTaskLoopGateStatus::Missing)
         .count();
     let failed_acceptance_gate_count = acceptance_gates
         .iter()
-        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Failed)
+        .filter(|gate| gate.status == AgentTaskLoopGateStatus::Failed)
         .count();
     let pending_acceptance_gate_count = acceptance_gates
         .iter()
-        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Pending)
+        .filter(|gate| gate.status == AgentTaskLoopGateStatus::Pending)
         .count();
 
     for action in record
@@ -729,20 +729,18 @@ fn acceptance_gate_diagnostics(
                 .iter()
                 .rev()
                 .find(|result| result.bundle_id == bundle_id && result.entity_id == entity_id);
-            let status =
-                AgentTaskLoopAcceptanceGateStatus::from(result.map(|result| result.status));
+            let status = AgentTaskLoopGateStatus::from(result.map(|result| result.status));
             let problems = match status {
-                AgentTaskLoopAcceptanceGateStatus::Missing => {
+                AgentTaskLoopGateStatus::Missing => {
                     vec!["acceptance gate has no recorded result".to_string()]
                 }
-                AgentTaskLoopAcceptanceGateStatus::Failed => {
+                AgentTaskLoopGateStatus::Failed => {
                     vec!["acceptance gate recorded a failed result".to_string()]
                 }
-                AgentTaskLoopAcceptanceGateStatus::Pending => {
+                AgentTaskLoopGateStatus::Pending => {
                     vec!["acceptance gate is pending an external/manual result".to_string()]
                 }
-                AgentTaskLoopAcceptanceGateStatus::Satisfied
-                | AgentTaskLoopAcceptanceGateStatus::Warning => Vec::new(),
+                AgentTaskLoopGateStatus::Satisfied => Vec::new(),
             };
 
             AgentTaskLoopAcceptanceGateDiagnostic {

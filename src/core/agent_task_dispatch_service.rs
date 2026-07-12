@@ -18,7 +18,7 @@ use crate::core::agent_task_provider::{
     AgentTaskProviderCatalog,
 };
 use crate::core::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskProviderRotationPolicy,
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
     AgentTaskRetryPolicy, AgentTaskScheduler,
 };
 use crate::core::agent_task_service::{aggregate_exit_code, AgentTaskRunResult};
@@ -165,27 +165,13 @@ where
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
-    let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
-    let run_id = submitted.run_id.clone();
-
-    if request.core.queue_only {
-        return Ok(AgentTaskRunResult {
-            value: dispatch_report(submitted, None, true, backend_selection),
-            exit_code: 0,
-        });
-    }
-
-    lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::new(executor)
-        .with_run_id(run_id.clone())
-        .run(plan.clone());
-    let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
-    let exit_code = aggregate_exit_code(&aggregate);
-
-    Ok(AgentTaskRunResult {
-        value: dispatch_report(record, Some(aggregate), false, backend_selection),
-        exit_code,
-    })
+    run_dispatch_plan(
+        plan,
+        request.run_id.as_deref(),
+        request.core.queue_only,
+        backend_selection,
+        executor,
+    )
 }
 
 pub fn dispatch_with_provider_requirements<E>(
@@ -208,10 +194,32 @@ where
         &plan,
         &AgentTaskProviderCatalog::discover().providers,
     )?;
-    let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
+    run_dispatch_plan(
+        plan,
+        request.run_id.as_deref(),
+        request.core.queue_only,
+        backend_selection,
+        executor,
+    )
+}
+
+/// The only durable dispatch-to-scheduler path. Both provider-catalog entry
+/// points prepare a plan differently, then share lifecycle transitions,
+/// scheduler execution, aggregate persistence, and report construction here.
+fn run_dispatch_plan<E>(
+    plan: AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    queue_only: bool,
+    backend_selection: Option<BackendSelection>,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let submitted = lifecycle::submit_plan(&plan, requested_run_id)?;
     let run_id = submitted.run_id.clone();
 
-    if request.core.queue_only {
+    if queue_only {
         return Ok(AgentTaskRunResult {
             value: dispatch_report(submitted, None, true, backend_selection),
             exit_code: 0,

@@ -121,7 +121,7 @@ fn run_gates_blocks_on_pending_manual_check() {
         assert_eq!(loaded.gate_results.len(), 1);
         assert_eq!(
             loaded.gate_results[0].status,
-            AgentTaskGateBundleStatus::Pending
+            AgentTaskLoopGateStatus::Pending
         );
         assert_eq!(
             loaded.terminal_outcomes[0].status,
@@ -184,7 +184,7 @@ fn run_gates_executes_command_bundle_and_records_result() {
         assert_eq!(loaded.gate_results.len(), 1);
         assert_eq!(
             loaded.gate_results[0].status,
-            AgentTaskGateBundleStatus::Passed
+            AgentTaskLoopGateStatus::Satisfied
         );
     });
 }
@@ -206,7 +206,7 @@ fn command_gate_check_runs_from_configured_cwd() {
 
     let result = run_command_gate_check(&check).expect("command gate executed");
 
-    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.status, AgentTaskLoopGateStatus::Satisfied);
     assert_eq!(result.details["stdout"].as_str(), Some("ok"));
     assert_eq!(result.details["cwd"].as_str(), Some(cwd_path.as_str()));
 }
@@ -225,7 +225,7 @@ fn command_gate_check_caps_stored_stdout_and_records_truncation() {
 
     let result = run_command_gate_check(&check).expect("command gate executed");
 
-    assert_eq!(result.status, AgentTaskGateBundleStatus::Passed);
+    assert_eq!(result.status, AgentTaskLoopGateStatus::Satisfied);
     assert_eq!(result.details["stdout_truncated"].as_bool(), Some(true));
     assert_eq!(
         result.details["stdout_stored_bytes"].as_u64(),

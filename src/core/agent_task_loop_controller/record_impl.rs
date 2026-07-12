@@ -455,7 +455,14 @@ impl AgentTaskLoopControllerRecord {
         entity_id: Option<String>,
         status: AgentTaskPrOwnershipStatusUpdate,
     ) -> AgentTaskPrOwnershipRecord {
-        let state = pr_ownership_state_from_status(&status, request);
+        let previous_retry_count = self
+            .pr_ownerships
+            .iter()
+            .find(|existing| existing.ownership_id == request.ownership_id)
+            .map(|existing| existing.retry_count)
+            .unwrap_or_default();
+        let (state, retry_count) =
+            AgentTaskPrOwnershipState::from_status_update(&status, request, previous_retry_count);
         let record = AgentTaskPrOwnershipRecord {
             ownership_id: request.ownership_id.clone(),
             entity_id: entity_id.clone(),
@@ -469,7 +476,7 @@ impl AgentTaskLoopControllerRecord {
             ci_summary: status.ci_summary.clone(),
             review_decision: status.review_decision.clone(),
             merge_state: status.merge_state.clone(),
-            retry_count: status.retry_count,
+            retry_count,
             max_retries: request.max_retries,
             merge_required: request.merge_required,
             last_checked_at: Some(now_timestamp()),
@@ -730,61 +737,4 @@ impl AgentTaskLoopControllerRecord {
             request,
         });
     }
-}
-
-pub(crate) fn pr_ownership_state_from_status(
-    status: &AgentTaskPrOwnershipStatusUpdate,
-    request: &AgentTaskPrOwnershipRequest,
-) -> AgentTaskPrOwnershipState {
-    if status.missing_pr {
-        return AgentTaskPrOwnershipState::MissingPr;
-    }
-    if status
-        .merge_state
-        .as_deref()
-        .is_some_and(|state| state.eq_ignore_ascii_case("MERGED"))
-    {
-        return AgentTaskPrOwnershipState::Merged;
-    }
-    if status
-        .ci_state
-        .as_deref()
-        .is_some_and(|state| state == "terminal_failed" || state == "stale")
-    {
-        return if status.retry_count >= request.max_retries {
-            AgentTaskPrOwnershipState::RetryLimitReached
-        } else {
-            AgentTaskPrOwnershipState::ChangesRequested
-        };
-    }
-    if status
-        .review_decision
-        .as_deref()
-        .is_some_and(|decision| decision == "CHANGES_REQUESTED")
-    {
-        return if status.retry_count >= request.max_retries {
-            AgentTaskPrOwnershipState::RetryLimitReached
-        } else {
-            AgentTaskPrOwnershipState::ChangesRequested
-        };
-    }
-    if status
-        .ci_state
-        .as_deref()
-        .is_some_and(|state| state == "pending" || state == "no_checks" || state == "tracking")
-    {
-        return AgentTaskPrOwnershipState::WaitingForChecks;
-    }
-    if status
-        .ci_state
-        .as_deref()
-        .is_some_and(|state| state == "terminal_green")
-    {
-        return if request.merge_required {
-            AgentTaskPrOwnershipState::WaitingForMerge
-        } else {
-            AgentTaskPrOwnershipState::GreenReady
-        };
-    }
-    AgentTaskPrOwnershipState::Tracking
 }
