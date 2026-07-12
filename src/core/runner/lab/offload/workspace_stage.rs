@@ -962,17 +962,9 @@ fn rig_required_extensions_from_primary_rig(
             extension_ids.extend(explicit_extensions.iter().cloned());
             continue;
         }
-        for extension_id in rig::extension_ids_for_workloads(&spec, command.workload_kind()) {
-            extension_ids.insert(extension_id.clone());
-            extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
-                &spec,
-                command.workload_kind(),
-                &extension_id,
-            ));
-        }
-        extension_ids.extend(rig_component_extensions_from_workload_command(
+        extension_ids.extend(rig::required_extension_ids_for_workload(
             &spec,
-            command,
+            command.workload_kind(),
             explicit_component.as_deref(),
         ));
     }
@@ -1008,9 +1000,9 @@ fn rig_dispatch_extensions_from_primary_rig(
         if workload_extensions.len() == 1 {
             extension_ids.extend(workload_extensions);
         }
-        extension_ids.extend(rig_component_extensions_from_workload_command(
+        extension_ids.extend(rig::component_extension_ids_for_workload(
             &spec,
-            command,
+            command.workload_kind(),
             explicit_component.as_deref(),
         ));
     }
@@ -1060,42 +1052,6 @@ fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Opt
         Some(discovered.id.as_str()),
     )?;
     Ok(Some(spec))
-}
-
-fn rig_component_extensions_from_workload_command(
-    spec: &rig::RigSpec,
-    command: RigWorkloadCommand,
-    explicit_component: Option<&str>,
-) -> Vec<String> {
-    let component_ids = explicit_component
-        .map(|id| vec![id.to_string()])
-        .or_else(|| match command {
-            RigWorkloadCommand::Bench => spec.bench.as_ref().map(|bench| {
-                if bench.components.is_empty() {
-                    bench.default_component.iter().cloned().collect()
-                } else {
-                    bench.components.clone()
-                }
-            }),
-            RigWorkloadCommand::Fuzz => spec
-                .fuzz
-                .as_ref()
-                .and_then(|fuzz| fuzz.default_component.as_ref())
-                .map(|component| vec![component.clone()]),
-        })
-        .unwrap_or_default();
-
-    let mut extension_ids = std::collections::BTreeSet::new();
-    for component_id in component_ids {
-        if let Some(extensions) = spec
-            .components
-            .get(&component_id)
-            .and_then(|component| component.extensions.as_ref())
-        {
-            extension_ids.extend(extensions.keys().cloned());
-        }
-    }
-    extension_ids.into_iter().collect()
 }
 
 fn rig_ids_from_args(args: &[String]) -> Vec<String> {

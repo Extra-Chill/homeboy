@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -10,7 +9,7 @@ use crate::command_contract::{
     FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL,
 };
 use homeboy::core::fuzz::FuzzGateProfile;
-use homeboy::core::rig::{self, RigSpec};
+use homeboy::core::rig;
 
 #[derive(Args)]
 pub struct FuzzArgs {
@@ -126,39 +125,11 @@ fn lab_required_rig_extension_ids(
         return Ok(Vec::new());
     };
     let spec = rig::load(rig_id)?;
-    let mut extension_ids = BTreeSet::new();
-    let workload_extension_ids =
-        rig::extension_ids_for_workloads(&spec, rig::RigWorkloadKind::Fuzz);
-    for extension_id in &workload_extension_ids {
-        extension_ids.extend(rig::env_provider_extensions_for_extension_workloads(
-            &spec,
-            rig::RigWorkloadKind::Fuzz,
-            extension_id,
-        ));
-    }
-    extension_ids.extend(workload_extension_ids);
-    extension_ids.extend(fuzz_component_extension_ids(&spec, component_id));
-    Ok(extension_ids.into_iter().collect())
-}
-
-fn fuzz_component_extension_ids(spec: &RigSpec, explicit_component: Option<&str>) -> Vec<String> {
-    let component_id = explicit_component.map(str::to_string).or_else(|| {
-        spec.fuzz
-            .as_ref()
-            .and_then(|fuzz| fuzz.default_component.clone())
-    });
-    let Some(component_id) = component_id else {
-        return Vec::new();
-    };
-
-    let mut extension_ids: Vec<String> = spec
-        .components
-        .get(&component_id)
-        .and_then(|component| component.extensions.as_ref())
-        .map(|extensions| extensions.keys().cloned().collect())
-        .unwrap_or_default();
-    extension_ids.sort();
-    extension_ids
+    Ok(rig::required_extension_ids_for_workload(
+        &spec,
+        rig::RigWorkloadKind::Fuzz,
+        component_id,
+    ))
 }
 
 #[derive(Subcommand)]
