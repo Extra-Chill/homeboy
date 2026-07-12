@@ -4,6 +4,157 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.282.0] - 2026-07-12
+
+### Added
+- rig lifecycle cleanup ownership contract
+- deploy components from an exact Git ref
+- use extension notification transports
+- persist run notification routes
+- add unified check command
+
+### Changed
+- remove duplicate Lab portability projection
+- consolidate Lab dispatch projection
+- centralize ops command registrations
+- Return detached retries after durable handoff
+- consolidate Lab extension injection
+- consolidate agent task gate statuses
+- Use active load for runner RSS guarding
+- consolidate Lab path input discovery
+- consolidate Lab workload arguments
+- consolidate workload component selection
+- consolidate rig extension requirements
+- consolidate provider resolution
+- Make runner RSS guard capacity-aware
+- consolidate rig workspace resolution
+- retire string provider command fallback
+- consolidate activity lifecycle status
+- remove legacy bench helper installation
+- stabilize runner status remediation assertions
+- remove filesystem trait
+- consolidate persisted run label matching
+- share git component path arguments
+- consolidate output envelope projection
+- consolidate command output envelopes
+- share remote root normalization
+- consolidate output presentation
+- update dependency plan invocation assertion
+- consolidate output dispatch
+- derive command consumers from registry
+- reuse core path helpers
+- Consolidate test fixture setup
+- consolidate contract validation adapters
+- consolidate typed JSON file readers
+- Consolidate atomic JSON persistence
+- consolidate artifact ref projections
+- simplify command safety metadata
+- centralize configuration command safety
+- centralize command registry routing
+- Remove dead code and dedupe artifact path validation
+- Avoid repeated inventory scans in file path resolution
+- Reconcile detached runner terminal state
+- Centralize review quality routing
+- Revert "Merge pull request #7754 from Extra-Chill/feat/unified-check-entrypoint"
+- Use full source revision for runner extension refresh
+- Propagate runner extension refresh source ref
+- Apply rustfmt
+- Move source sync excludes to declared policy
+- Make runner doctor tool probes manifest-declared
+- Replace staged plugin reconciliation with runtime preflights
+- Improve fanout batch partial recovery
+- Add explicit extension capability ownership
+- Consolidate heavyweight integration tests
+- Project daemon job run refs in activity
+- Delete legacy absence tests
+- Consolidate digest shape tests
+- Remove rustc-proven dead code
+- Keep fuzz doctor lab contract under audit threshold
+- Propagate selected runner Homeboy binary
+- Support Lab routing for fuzz doctor
+- Stabilize PR fleet landing workflow
+- Clarify hot command runner evidence
+- Prefer installed extension revision over stale dev overlay
+- Verify source upgrade installs built binary
+- Warn on same-version source binary drift
+- Make runner doctor remediation actionable
+- Resolve lab runner alias ergonomically
+- Make rig lease resource conflicts actionable
+- Annotate landing PRs with local worktrees
+- Guard rig source management from lab-only execution
+- Guard Lab runner path surfaces
+- Surface active runner jobs in remote runs list
+- Mark invalid DOM CSS diagnostics
+- Improve artifact origin evidence summaries
+- Improve runs artifact listing commands
+- Document PR fleet holding workflow
+- Route adapter execution dispatch
+- Make specialist cleanup paths canonical
+- Route extension show to Lab runners
+- Route adapter JSON dispatch
+- Centralize cleanup inventory metadata
+- Project path materialization remaps
+- Track executor evidence in run resources
+- Consolidate adapter output descriptors
+- Remove dead Lab contract scaffolding
+- Support rig fuzz profiles
+- Use scoped changelog notes for component releases
+- Accept runner flag for artifact fetches
+- Improve package preflight diagnostics
+- Validate release package runtime completeness
+- Materialize repo root for package preflight
+- Persist artifact public access metadata
+- Refuse local destructive fuzz by default
+- Hydrate release dependencies before quality gates
+
+### Fixed
+- export deps execution context helper
+- export Lab deps capability helper
+- retain completed offload evidence
+- preserve daemon job identity across handoff
+- skip unavailable Lab deps providers
+- package exact refs from verified source
+- skip unavailable dependency hydration providers
+- declare static lint package policy
+- preserve changed lint paths in Lab
+- resolve configured hydration assets on runners
+- split runner extension parity phases
+- consume declarative dependency adapters
+- align docs command surface
+- hand off runner-local artifact roots
+- prefer Lab remediation for resource policy
+- repair dead legacy daemon lease
+- resolve hydration entrypoints on runner
+- reconcile stale runner child runs
+- preserve provider policy across Lab offload
+- map configured worktree provider results
+- Fix dev overlay content parity
+- rotate stalled agent-task providers
+- resolve provider-managed cook targets
+- Fix Lab offload observation lifecycle
+- normalize directory deploy permissions
+- resolve remote provider probes locally
+- route agent-task cook to Lab
+- run executor resolution through runner doctor
+- block cook when executor require graph is unresolved on disk
+- Fix runner extension refresh source revision metadata
+- Fix runner dev overlay metadata reconciliation
+- Fix rig spec contract linting
+- Fix dirty runner dev overlay parity
+- Fix runner extension refresh source sync
+- Fix daemon exec path materialization metadata
+- Fix runner dev overlay extension linking
+- Fix runner dev overlay metadata replacement
+- Fix release dependency hydration skip
+- Fix bench rig wrapper diagnostics
+- Fix extension-only dev-sync binary selection
+- Fix source upgrade active binary replacement
+- Fix extension-only runner dev-sync
+- Fix rig fuzz lab extension resolution
+- Fix bench scenario path dedupe
+- Fix artifact CSS capture diagnostics
+- Fix fuzz component script UX
+
 ## [0.281.20] - 2026-07-06
 
 ### Changed
