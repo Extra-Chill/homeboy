@@ -4,6 +4,7 @@ use crate::core::extension;
 use crate::core::output::MergeOutput;
 use crate::core::server::{self, SshClient};
 
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -84,7 +85,73 @@ fn push_setting_key(keys: &mut Vec<String>, value: &str) {
     }
 }
 
-pub(super) fn validate_runner_extension_parity(
+pub(super) fn plan_extension_parity(
+    runner_id: &str,
+    runner: &Runner,
+    cwd: &str,
+    required_extensions: &[String],
+    requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
+) -> Result<ExtensionParityPlan> {
+    let homeboy_path = remote_runner_homeboy_path(runner, "runner extension parity preflight")?;
+    let mut steps = Vec::new();
+    for extension_id in required_extensions {
+        if let Some(step) = plan_runner_extension_parity(
+            runner_id,
+            runner,
+            cwd,
+            homeboy_path,
+            extension_id,
+            requested_setting_keys,
+            accepted_setting_keys,
+        )? {
+            steps.push(step);
+        }
+    }
+
+    Ok(ExtensionParityPlan {
+        runner_id: runner_id.to_string(),
+        homeboy_path: homeboy_path.to_string(),
+        steps,
+    })
+}
+
+pub(super) fn ensure_extension_materialized(plan: &ExtensionParityPlan) -> Result<()> {
+    if plan.steps.is_empty() {
+        return Ok(());
+    }
+
+    record_extension_parity_ensure_trail(plan, "running", None, None)?;
+    let runner = load(&plan.runner_id)?;
+    for step in &plan.steps {
+        let result =
+            materialize_runner_extension(&runner, &plan.homeboy_path, &step.materialization);
+        match result {
+            Ok(provenance) => {
+                if matches!(
+                    step.materialization.source,
+                    RunnerExtensionMaterializationSource::ControllerSnapshot { .. }
+                ) {
+                    record_materialized_extension_overlay(&plan.runner_id, provenance)?;
+                }
+                record_extension_parity_ensure_trail(plan, "running", Some(&step.id), None)?;
+            }
+            Err(err) => {
+                record_extension_parity_ensure_trail(plan, "failed", Some(&step.id), Some(&err))?;
+                return Err(runner_extension_materialization_error(
+                    &plan.runner_id,
+                    &plan.homeboy_path,
+                    &step.id,
+                    err,
+                    step.parity_error.clone(),
+                ));
+            }
+        }
+    }
+    record_extension_parity_ensure_trail(plan, "success", None, None)
+}
+
+pub(super) fn validate_extension_ready(
     runner_id: &str,
     runner: &Runner,
     cwd: &str,
@@ -92,29 +159,45 @@ pub(super) fn validate_runner_extension_parity(
     requested_setting_keys: &[String],
     accepted_setting_keys: &[String],
 ) -> Result<()> {
+    let homeboy_path = remote_runner_homeboy_path(runner, "runner extension parity validation")?;
     for extension_id in required_extensions {
-        validate_runner_extension(
+        validate_runner_extension_ready_state(
             runner_id,
             runner,
             cwd,
+            homeboy_path,
             extension_id,
             requested_setting_keys,
             accepted_setting_keys,
         )?;
     }
-
     Ok(())
 }
 
-fn validate_runner_extension(
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ExtensionParityPlan {
+    runner_id: String,
+    homeboy_path: String,
+    steps: Vec<ExtensionParityPlanStep>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExtensionParityPlanStep {
+    id: String,
+    materialization: RunnerExtensionMaterializationRequest,
+    #[serde(skip)]
+    parity_error: Error,
+}
+
+fn plan_runner_extension_parity(
     runner_id: &str,
     runner: &Runner,
     cwd: &str,
+    homeboy_path: &str,
     extension_id: &str,
     requested_setting_keys: &[String],
     accepted_setting_keys: &[String],
-) -> Result<()> {
-    let homeboy_path = remote_runner_homeboy_path(runner, "runner extension parity preflight")?;
+) -> Result<Option<ExtensionParityPlanStep>> {
     let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
 
     if output.success {
@@ -133,57 +216,28 @@ fn validate_runner_extension(
             extension_id,
             &output.stdout,
         )?;
-        if let Err(err) = validate_runner_extension_revision(
+        return match validate_runner_extension_revision(
             runner_id,
             runner,
             homeboy_path,
             extension_id,
             &output.stdout,
         ) {
-            if !is_stale_runner_extension_parity_error(&err) {
-                return Err(err);
+            Ok(()) => Ok(None),
+            Err(err) if is_stale_runner_extension_parity_error(&err) => {
+                Ok(Some(ExtensionParityPlanStep {
+                    id: extension_id.to_string(),
+                    materialization: runner_extension_materialization_request(
+                        runner_id,
+                        homeboy_path,
+                        extension_id,
+                        err.clone(),
+                    )?,
+                    parity_error: err,
+                }))
             }
-            sync_runner_extension_revision(
-                runner_id,
-                runner,
-                cwd,
-                homeboy_path,
-                extension_id,
-                err,
-            )?;
-            let refreshed = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
-            if refreshed.success {
-                validate_runner_extension_parity_status(
-                    runner_id,
-                    homeboy_path,
-                    extension_id,
-                    &refreshed.stdout,
-                )?;
-                validate_runner_extension_settings(
-                    runner_id,
-                    homeboy_path,
-                    extension_id,
-                    &refreshed.stdout,
-                    requested_setting_keys,
-                    accepted_setting_keys,
-                )?;
-                validate_runner_extension_core_compatibility(
-                    runner_id,
-                    homeboy_path,
-                    extension_id,
-                    &refreshed.stdout,
-                )?;
-                return Ok(());
-            }
-            return Err(missing_runner_extension_error(
-                runner_id,
-                homeboy_path,
-                extension_id,
-                &refreshed.stderr,
-                &refreshed.stdout,
-            ));
-        }
-        return Ok(());
+            Err(err) => Err(err),
+        };
     }
 
     Err(missing_runner_extension_error(
@@ -195,21 +249,44 @@ fn validate_runner_extension(
     ))
 }
 
-/// Runs the full readiness + source-revision parity validation against a single
-/// `extension show` stdout payload. Both the initial preflight and the
-/// post-sync refresh re-check the same two parity invariants against their
-/// respective stdout, so they share this helper.
-fn validate_runner_extension_parity_status(
+fn validate_runner_extension_ready_state(
     runner_id: &str,
+    runner: &Runner,
+    cwd: &str,
     homeboy_path: &str,
     extension_id: &str,
-    remote_stdout: &str,
+    requested_setting_keys: &[String],
+    accepted_setting_keys: &[String],
 ) -> Result<()> {
+    let output = show_runner_extension(runner, cwd, homeboy_path, extension_id)?;
+    if !output.success {
+        return Err(missing_runner_extension_error(
+            runner_id,
+            homeboy_path,
+            extension_id,
+            &output.stderr,
+            &output.stdout,
+        ));
+    }
+    let remote_stdout = &output.stdout;
     validate_runner_extension_ready(runner_id, homeboy_path, extension_id, remote_stdout)?;
-    let runner = super::super::load(runner_id)?;
     validate_runner_extension_revision(
         runner_id,
-        &runner,
+        runner,
+        homeboy_path,
+        extension_id,
+        remote_stdout,
+    )?;
+    validate_runner_extension_settings(
+        runner_id,
+        homeboy_path,
+        extension_id,
+        remote_stdout,
+        requested_setting_keys,
+        accepted_setting_keys,
+    )?;
+    validate_runner_extension_core_compatibility(
+        runner_id,
         homeboy_path,
         extension_id,
         remote_stdout,
@@ -461,14 +538,12 @@ fn missing_runner_extension_error(
     )
 }
 
-fn sync_runner_extension_revision(
+fn runner_extension_materialization_request(
     runner_id: &str,
-    runner: &Runner,
-    _cwd: &str,
     homeboy_path: &str,
     extension_id: &str,
     parity_error: Error,
-) -> Result<()> {
+) -> Result<RunnerExtensionMaterializationRequest> {
     let local_revision = extension::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
@@ -496,31 +571,60 @@ fn sync_runner_extension_revision(
                 git_ref: local_revision.clone(),
             }
         };
-    let records_dev_overlay = matches!(
-        &materialization_source,
-        RunnerExtensionMaterializationSource::ControllerSnapshot { .. }
+    Ok(RunnerExtensionMaterializationRequest {
+        id: extension_id.to_string(),
+        revision: local_revision,
+        source: materialization_source,
+    })
+}
+
+fn record_extension_parity_ensure_trail(
+    plan: &ExtensionParityPlan,
+    status: &str,
+    completed_step: Option<&str>,
+    error: Option<&Error>,
+) -> Result<()> {
+    let mut runner = load(&plan.runner_id)?;
+    let mut resources = runner.resources;
+    let completed_steps = plan
+        .steps
+        .iter()
+        .map(|step| {
+            let step_status = if completed_step == Some(step.id.as_str()) && status == "failed" {
+                "failed"
+            } else if completed_step == Some(step.id.as_str()) || status == "success" {
+                "success"
+            } else {
+                "ready"
+            };
+            serde_json::json!({
+                "id": step.id,
+                "kind": "runner.extension_parity.materialize",
+                "status": step_status,
+                "materialization": step.materialization,
+            })
+        })
+        .collect::<Vec<_>>();
+    resources.insert(
+        "extension_parity".to_string(),
+        serde_json::json!({
+            "schema": "homeboy/runner-extension-parity/v1",
+            "status": status,
+            "steps": completed_steps,
+            "error": error.map(|value| serde_json::json!({
+                "code": value.code.as_str(),
+                "message": value.message,
+                "details": value.details,
+            })),
+        }),
     );
-    let provenance = materialize_runner_extension(
-        runner,
-        homeboy_path,
-        &RunnerExtensionMaterializationRequest {
-            id: extension_id.to_string(),
-            revision: local_revision,
-            source: materialization_source,
-        },
-    )
-    .map_err(|err| {
-        runner_extension_materialization_error(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            err,
-            parity_error,
-        )
-    })?;
-    if records_dev_overlay {
-        record_materialized_extension_overlay(runner_id, provenance)?;
-    }
+    runner.resources = resources;
+    let patch = serde_json::json!({ "resources": runner.resources });
+    let replace_fields = vec!["resources".to_string()];
+    let _updated = matches!(
+        merge(Some(&plan.runner_id), &patch.to_string(), &replace_fields)?,
+        MergeOutput::Single(_)
+    );
     Ok(())
 }
 
@@ -1011,16 +1115,22 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
+        ensure_extension_materialized, plan_extension_parity,
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_runner_extension_core_compatibility,
-        validate_runner_extension_ready, validate_runner_extension_revision,
-        validate_runner_extension_settings,
+        runner_extension_sync_command, validate_extension_ready,
+        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
+        validate_runner_extension_revision, validate_runner_extension_settings,
+        ExtensionParityPlan, ExtensionParityPlanStep,
     };
     use crate::test_support::with_isolated_home;
 
-    use crate::core::runner::{Runner, RunnerKind};
+    use crate::core::error::Error;
+    use crate::core::runner::{
+        Runner, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+        RunnerKind,
+    };
     use std::collections::HashMap;
     use std::fs;
 
@@ -1048,6 +1158,177 @@ mod tests {
             resources,
             policy: Default::default(),
         }
+    }
+
+    #[test]
+    fn extension_parity_plan_describes_materialization_without_mutating_runner_state() {
+        with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("controller source");
+            fs::write(
+                source.path().join("rust.json"),
+                r#"{"name":"rust","version":"1.0.0"}"#,
+            )
+            .expect("source manifest");
+            let extension_dir = home.path().join(".config/homeboy/extensions/rust");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("rust.json"),
+                format!(
+                    r#"{{"name":"rust","version":"1.0.0","source_url":"{}"}}"#,
+                    source.path().display()
+                ),
+            )
+            .expect("extension manifest");
+            fs::write(extension_dir.join(".source-revision"), "abc123\n").expect("revision");
+            let command = home.path().join("extension-show");
+            fs::write(
+                &command,
+                "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"old456\"}}}'\n",
+            )
+            .expect("write command");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+                    .expect("make command executable");
+            }
+            let mut runner = runner_with_overlay("other", "/tmp/other", "unused");
+            runner.settings.homeboy_path = Some(command.display().to_string());
+            let resources_before = runner.resources.clone();
+
+            let plan =
+                plan_extension_parity("homeboy-lab", &runner, "/", &["rust".to_string()], &[], &[])
+                    .expect("plan stale extension");
+
+            assert_eq!(plan.steps.len(), 1);
+            assert_eq!(plan.steps[0].id, "rust");
+            assert!(matches!(
+                plan.steps[0].materialization.source,
+                RunnerExtensionMaterializationSource::ControllerSnapshot { .. }
+            ));
+            assert_eq!(runner.resources, resources_before);
+        });
+    }
+
+    #[test]
+    fn failed_extension_parity_ensure_records_the_planned_step() {
+        with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/runner/ws"}"#,
+                false,
+            )
+            .expect("create runner");
+            let plan = ExtensionParityPlan {
+                runner_id: "homeboy-lab".to_string(),
+                homeboy_path: "/usr/bin/false".to_string(),
+                steps: vec![ExtensionParityPlanStep {
+                    id: "rust".to_string(),
+                    materialization: RunnerExtensionMaterializationRequest {
+                        id: "rust".to_string(),
+                        revision: "abc123".to_string(),
+                        source: RunnerExtensionMaterializationSource::RunnerPath {
+                            path: "/runner/extensions/rust".to_string(),
+                        },
+                    },
+                    parity_error: Error::internal_unexpected("stale extension parity".to_string()),
+                }],
+            };
+
+            ensure_extension_materialized(&plan).expect_err("materialization fails");
+
+            let runner = crate::core::runner::load("homeboy-lab").expect("runner trail");
+            assert_eq!(runner.resources["extension_parity"]["status"], "failed");
+            assert_eq!(
+                runner.resources["extension_parity"]["steps"][0]["id"],
+                "rust"
+            );
+            assert_eq!(
+                runner.resources["extension_parity"]["steps"][0]["status"],
+                "failed"
+            );
+        });
+    }
+
+    #[test]
+    fn extension_parity_ensure_applies_planned_materialization() {
+        with_isolated_home(|home| {
+            let workspace = tempfile::tempdir().expect("runner workspace");
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"homeboy-lab","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let command = home.path().join("extension-install");
+            fs::write(&command, "#!/bin/sh\nexit 0\n").expect("write command");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+                    .expect("make command executable");
+            }
+            let plan = ExtensionParityPlan {
+                runner_id: "homeboy-lab".to_string(),
+                homeboy_path: command.display().to_string(),
+                steps: vec![ExtensionParityPlanStep {
+                    id: "rust".to_string(),
+                    materialization: RunnerExtensionMaterializationRequest {
+                        id: "rust".to_string(),
+                        revision: "abc123".to_string(),
+                        source: RunnerExtensionMaterializationSource::RunnerPath {
+                            path: "/runner/extensions/rust".to_string(),
+                        },
+                    },
+                    parity_error: Error::internal_unexpected("stale extension parity".to_string()),
+                }],
+            };
+
+            ensure_extension_materialized(&plan).expect("apply materialization");
+
+            let runner = crate::core::runner::load("homeboy-lab").expect("runner trail");
+            assert_eq!(runner.resources["extension_parity"]["status"], "success");
+            assert_eq!(
+                runner.resources["extension_parity"]["steps"][0]["status"],
+                "success"
+            );
+        });
+    }
+
+    #[test]
+    fn extension_ready_validation_does_not_mutate_runner_state() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/rust");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(extension_dir.join(".source-revision"), "abc123\n").expect("revision");
+            crate::core::runner::create(
+                r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/runner/ws","resources":{"keep":{"enabled":true}}}"#,
+                false,
+            )
+            .expect("create runner");
+            let command = home.path().join("extension-show");
+            fs::write(
+                &command,
+                "#!/bin/sh\nprintf '%s\\n' '{\"success\":true,\"data\":{\"extension\":{\"id\":\"rust\",\"ready\":true,\"source_revision\":\"abc123\"}}}'\n",
+            )
+            .expect("write command");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&command, fs::Permissions::from_mode(0o755))
+                    .expect("make command executable");
+            }
+            let mut runner = crate::core::runner::load("homeboy-lab").expect("runner");
+            runner.settings.homeboy_path = Some(command.display().to_string());
+            let resources_before = runner.resources.clone();
+
+            validate_extension_ready("homeboy-lab", &runner, "/", &["rust".to_string()], &[], &[])
+                .expect("validate ready extension");
+
+            let after = crate::core::runner::load("homeboy-lab").expect("runner after validation");
+            assert_eq!(after.resources, resources_before);
+        });
     }
 
     #[test]

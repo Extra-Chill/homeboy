@@ -18,14 +18,14 @@ use super::{
     copy_snapshot_to_directory, exec, Runner, RunnerExecOptions, RunnerFileTransfer, RunnerKind,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct RunnerExtensionMaterializationRequest {
     pub(crate) id: String,
     pub(crate) revision: String,
     pub(crate) source: RunnerExtensionMaterializationSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) enum RunnerExtensionMaterializationSource {
     RemoteGit { url: String, git_ref: String },
     ControllerSnapshot { local_path: PathBuf },
@@ -431,7 +431,12 @@ fn runner_path_provenance(
         dirty_fingerprint: None,
         synced_at: chrono::Utc::now().to_rfc3339(),
         dev_overlay: false,
-        lifecycle: dev_extension_lifecycle(runner_id, path, &request.id),
+        lifecycle: installed_extension_lifecycle(
+            runner_id,
+            path,
+            &request.id,
+            "linked_runner_path",
+        ),
         materialization_source: Some(serde_json::json!({
             "kind": "runner_path",
             "path": path,
@@ -456,7 +461,12 @@ fn remote_git_provenance(
         dirty_fingerprint: None,
         synced_at: chrono::Utc::now().to_rfc3339(),
         dev_overlay: false,
-        lifecycle: dev_extension_lifecycle(runner_id, url, &request.id),
+        lifecycle: installed_extension_lifecycle(
+            runner_id,
+            url,
+            &request.id,
+            "remote_git_checkout",
+        ),
         materialization_source: Some(serde_json::json!({
             "kind": "remote_git",
             "url": url,
@@ -552,6 +562,28 @@ pub(crate) fn dev_extension_lifecycle(
             shell_arg(extension_id)
         )),
         status: ResourceLifecycleResourceStatus::Active,
+    }
+}
+
+fn installed_extension_lifecycle(
+    runner_id: &str,
+    source: &str,
+    extension_id: &str,
+    source_kind: &str,
+) -> ResourceLifecycleRecord {
+    ResourceLifecycleRecord {
+        owner: format!("runner.extension.{source_kind}"),
+        run_id: format!("runner-extension-{runner_id}-{extension_id}"),
+        runner_id: Some(runner_id.to_string()),
+        path: source.to_string(),
+        root_bound: None,
+        kind: "runner_installed_extension".to_string(),
+        ttl: None,
+        cleanup_policy: ResourceCleanupPolicy::Preserve,
+        evidence_retention: ResourceEvidenceRetention::Metadata,
+        cleanup_intent: Default::default(),
+        cleanup_command: None,
+        status: ResourceLifecycleResourceStatus::Retained,
     }
 }
 
@@ -710,6 +742,14 @@ mod tests {
             provenance.materialization_source.as_ref().unwrap()["kind"],
             "remote_git"
         );
+        assert_eq!(
+            provenance.lifecycle.owner,
+            "runner.extension.remote_git_checkout"
+        );
+        assert_eq!(
+            provenance.lifecycle.cleanup_policy,
+            ResourceCleanupPolicy::Preserve
+        );
     }
 
     #[test]
@@ -749,6 +789,15 @@ mod tests {
                 "abc123",
                 "--replace"
             ]
+        );
+        let provenance = runner_path_provenance(&runner.id, &request, "/runner/extensions/rust");
+        assert_eq!(
+            provenance.lifecycle.owner,
+            "runner.extension.linked_runner_path"
+        );
+        assert_eq!(
+            provenance.lifecycle.status,
+            ResourceLifecycleResourceStatus::Retained
         );
     }
 
