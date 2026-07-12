@@ -260,6 +260,12 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     let plan = detached_lab_plan(&run_id, &input);
     let mut record = match store::read_record(&run_id) {
         Ok(record) => record,
+        Err(error)
+            if error.code == ErrorCode::InternalJsonError
+                && store::record_lacks_typed_metadata(&run_id)? =>
+        {
+            submit_plan(&plan, Some(&run_id))?
+        }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
             submit_plan(&plan, Some(&run_id))?
         }

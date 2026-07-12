@@ -40,7 +40,13 @@ pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
-    let metadata_json = observation_metadata(record, read_mirrored_aggregate(&record.run_id)?)?;
+    let metadata_json = merge_observation_metadata(
+        store
+            .get_run(&record.run_id)?
+            .map(|run| run.metadata_json)
+            .unwrap_or_else(|| json!({})),
+        observation_metadata(record, read_mirrored_aggregate(&record.run_id)?)?,
+    );
     store.upsert_imported_run(&RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
@@ -106,6 +112,12 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
         .is_some())
 }
 
+pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
+    Ok(ObservationStore::open_initialized()?
+        .get_run(run_id)?
+        .is_some_and(|run| run.metadata_json.get("agent_task_run").is_none()))
+}
+
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     let store = ObservationStore::open_initialized()?;
     let filter = RunListFilter {
@@ -142,6 +154,18 @@ fn observation_metadata(
         "agent_task_run": record_json,
         "agent_task_aggregate": aggregate,
     }))
+}
+
+fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
+    if !existing.is_object() {
+        existing = json!({ "homeboy_original_metadata": existing });
+    }
+    if let (Some(existing), Some(typed)) = (existing.as_object_mut(), typed.as_object()) {
+        for (key, value) in typed {
+            existing.insert(key.clone(), value.clone());
+        }
+    }
+    existing
 }
 
 fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {

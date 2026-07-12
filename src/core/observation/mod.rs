@@ -19,8 +19,8 @@ mod test_findings;
 pub mod timeline;
 
 pub use lifecycle::{
-    finish_run_best_effort, merge_metadata, run_owner_pid, running_status_note, ActiveObservation,
-    ACTIVE_RUN_ID_ENV,
+    finish_run_best_effort, merge_metadata, run_has_active_remote_job, run_owner_pid,
+    running_status_note, ActiveObservation, ACTIVE_RUN_ID_ENV,
 };
 
 pub use loop_inventory_run::persist_loop_inventory_run;
