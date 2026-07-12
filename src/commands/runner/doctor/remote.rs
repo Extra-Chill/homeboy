@@ -183,6 +183,13 @@ pub fn report(
             local_homeboy_version,
             &homeboy,
         ));
+        let catalog = homeboy::core::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        checks.extend(probes::remote_provider_executor_resolution_checks(
+            client,
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        ));
         checks.extend(probes::provider_readiness_checks(
             client,
             &homeboy::core::agent_tasks::provider::provider_runner_readiness_contracts(),

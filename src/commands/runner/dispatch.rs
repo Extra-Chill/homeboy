@@ -123,6 +123,8 @@ pub fn run(
                 path,
                 extensions: required_extensions,
                 required_tools,
+                agent_backend: None,
+                agent_selector: None,
                 scope: scope.into(),
                 repair,
             },

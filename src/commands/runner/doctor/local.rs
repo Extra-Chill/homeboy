@@ -154,6 +154,15 @@ pub fn report(
         "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
     ));
 
+    if options.scope == RunnerDoctorScope::LabOffload {
+        let catalog = homeboy::core::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        checks.extend(probes::local_provider_executor_resolution_checks(
+            catalog.providers(),
+            options.agent_backend.as_deref(),
+            options.agent_selector.as_deref(),
+        ));
+    }
+
     let homeboy_command = homeboy.path.as_deref().unwrap_or("homeboy");
     for extension_id in normalized_extension_ids(&options.extensions) {
         checks.push(extension_parity::local_check(

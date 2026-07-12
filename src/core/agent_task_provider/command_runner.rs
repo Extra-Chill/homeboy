@@ -709,7 +709,7 @@ fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
         "extension_path": provider.extension_path.as_deref(),
     })
 }
-pub(super) fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
+pub(crate) fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
     if let Some(display) = provider.invocation.display.as_deref() {
         return render_provider_command_template(display, provider);
     }
@@ -752,7 +752,7 @@ fn render_provider_invocation_argv(provider: &AgentTaskExecutorProvider) -> Vec<
         .collect()
 }
 
-pub(super) fn provider_command_parts(
+pub(crate) fn provider_command_parts(
     provider: &AgentTaskExecutorProvider,
 ) -> Option<(String, Vec<String>, Option<PathBuf>)> {
     let (argv, cwd) = if !provider.invocation.argv.is_empty() {
@@ -799,10 +799,7 @@ pub(crate) enum ProviderExecutorResolution {
     Skipped { reason: String },
     /// The executor entrypoint failed to load: its require graph does not
     /// resolve on disk (e.g. a shared runtime package was never materialized).
-    Unresolved {
-        command: String,
-        detail: String,
-    },
+    Unresolved { command: String, detail: String },
 }
 
 /// Grace window for the `--provider-contract` dry load. This only parses the
@@ -916,7 +913,9 @@ pub(crate) fn probe_provider_executor_resolves(
             String::from_utf8_lossy(&buffer).trim().to_string()
         })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "executor exited non-zero while loading its module require graph".to_string());
+        .unwrap_or_else(|| {
+            "executor exited non-zero while loading its module require graph".to_string()
+        });
 
     ProviderExecutorResolution::Unresolved {
         command,
@@ -928,11 +927,7 @@ pub(crate) fn probe_provider_executor_resolves(
 /// actionable `MODULE_NOT_FOUND` / require-stack context without dumping an
 /// unbounded trace.
 fn first_stderr_lines(stderr: &str, max: usize) -> String {
-    stderr
-        .lines()
-        .take(max)
-        .collect::<Vec<_>>()
-        .join("\n")
+    stderr.lines().take(max).collect::<Vec<_>>().join("\n")
 }
 
 pub(super) fn provider_command_env(
@@ -1114,8 +1109,7 @@ process.exit(2);
         match probe_provider_executor_resolves(&provider) {
             ProviderExecutorResolution::Unresolved { detail, .. } => {
                 assert!(
-                    detail.contains("MODULE_NOT_FOUND")
-                        || detail.contains("Cannot find module"),
+                    detail.contains("MODULE_NOT_FOUND") || detail.contains("Cannot find module"),
                     "expected module resolution failure in detail, got: {detail}"
                 );
             }

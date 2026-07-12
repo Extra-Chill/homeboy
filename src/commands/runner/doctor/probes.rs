@@ -396,6 +396,213 @@ pub fn provider_readiness_checks(
         .collect()
 }
 
+pub fn local_provider_executor_resolution_checks(
+    providers: &[AgentTaskExecutorProvider],
+    selected_backend: Option<&str>,
+    selected_provider_id: Option<&str>,
+) -> Vec<RunnerCheck> {
+    selected_provider_executor_resolution_providers(
+        providers,
+        selected_backend,
+        selected_provider_id,
+    )
+    .into_iter()
+    .map(local_provider_executor_resolution_check)
+    .collect()
+}
+
+pub fn remote_provider_executor_resolution_checks(
+    client: &SshClient,
+    providers: &[AgentTaskExecutorProvider],
+    selected_backend: Option<&str>,
+    selected_provider_id: Option<&str>,
+) -> Vec<RunnerCheck> {
+    selected_provider_executor_resolution_providers(
+        providers,
+        selected_backend,
+        selected_provider_id,
+    )
+    .into_iter()
+    .map(|provider| remote_provider_executor_resolution_check(client, provider))
+    .collect()
+}
+
+fn selected_provider_executor_resolution_providers<'a>(
+    providers: &'a [AgentTaskExecutorProvider],
+    selected_backend: Option<&str>,
+    selected_provider_id: Option<&str>,
+) -> Vec<&'a AgentTaskExecutorProvider> {
+    providers
+        .iter()
+        .filter(|provider| {
+            selected_backend.is_none_or(|backend| provider.backend == backend)
+                && selected_provider_id.is_none_or(|provider_id| provider.id == provider_id)
+        })
+        .collect()
+}
+
+fn local_provider_executor_resolution_check(provider: &AgentTaskExecutorProvider) -> RunnerCheck {
+    match homeboy::core::agent_tasks::provider::probe_provider_executor_resolves(provider) {
+        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
+            provider_executor_resolution_ok_check(provider, None)
+        }
+        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Skipped { reason } => {
+            provider_executor_resolution_skipped_check(provider, reason)
+        }
+        homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
+            command,
+            detail,
+        } => provider_executor_resolution_error_check(provider, command, detail),
+    }
+}
+
+fn remote_provider_executor_resolution_check(
+    client: &SshClient,
+    provider: &AgentTaskExecutorProvider,
+) -> RunnerCheck {
+    let Some((program, args, cwd)) =
+        crate::core::agent_task_provider::provider_command_parts(provider)
+    else {
+        return provider_executor_resolution_skipped_check(
+            provider,
+            format!("provider '{}' has no resolvable command", provider.id),
+        );
+    };
+
+    let program_name = Path::new(&program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program.as_str());
+    if program_name != "node" && program_name != "nodejs" {
+        return provider_executor_resolution_skipped_check(
+            provider,
+            format!(
+                "provider '{}' executor program '{program_name}' does not implement the --provider-contract dry-load probe",
+                provider.id
+            ),
+        );
+    }
+
+    let command_display =
+        crate::core::agent_task_provider::render_provider_command_display(provider);
+    let shell_command = provider_executor_resolution_remote_shell(&program, &args, cwd.as_deref());
+    let output = client.execute(&shell_command);
+    if output.success {
+        return provider_executor_resolution_ok_check(provider, Some(command_display));
+    }
+
+    let detail = if output.timed_out {
+        "executor resolution probe timed out".to_string()
+    } else {
+        first_stderr_lines(
+            output
+                .stderr
+                .trim()
+                .split_once("__homeboy_probe_status=")
+                .map(|(stderr, _)| stderr.trim())
+                .unwrap_or_else(|| output.stderr.trim()),
+            8,
+        )
+    };
+    provider_executor_resolution_error_check(provider, command_display, detail)
+}
+
+fn provider_executor_resolution_remote_shell(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> String {
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push(common::shell_word(program));
+    argv.extend(args.iter().map(|arg| common::shell_word(arg)));
+    argv.push(common::shell_word("--provider-contract"));
+    let invocation = argv.join(" ");
+    let invocation = if let Some(cwd) = cwd {
+        format!(
+            "cd {} && {invocation}",
+            common::shell_word(&cwd.to_string_lossy())
+        )
+    } else {
+        invocation
+    };
+
+    // Keep the remote SSH command bounded even if an executor ignores the
+    // dry-load flag and waits for input. Stdin is closed and stderr is captured.
+    format!(
+        "tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (sleep 20; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
+    )
+}
+
+fn provider_executor_resolution_ok_check(
+    provider: &AgentTaskExecutorProvider,
+    command: Option<String>,
+) -> RunnerCheck {
+    let mut details = provider_executor_resolution_details(provider);
+    if let Some(command) = command {
+        details.insert("command".to_string(), command);
+    }
+    checks::ok_with_details(
+        format!("agent_task.provider_executor_resolution.{}", provider.id),
+        format!(
+            "Provider `{}` executor require graph resolves on the runner",
+            provider.id
+        ),
+        details,
+    )
+}
+
+fn provider_executor_resolution_skipped_check(
+    provider: &AgentTaskExecutorProvider,
+    reason: String,
+) -> RunnerCheck {
+    let mut details = provider_executor_resolution_details(provider);
+    details.insert("skip_reason".to_string(), reason.clone());
+    checks::ok_with_details(
+        format!("agent_task.provider_executor_resolution.{}", provider.id),
+        format!(
+            "Provider `{}` executor require graph probe was skipped: {reason}",
+            provider.id
+        ),
+        details,
+    )
+}
+
+fn provider_executor_resolution_error_check(
+    provider: &AgentTaskExecutorProvider,
+    command: String,
+    detail: String,
+) -> RunnerCheck {
+    let mut details = provider_executor_resolution_details(provider);
+    details.insert("command".to_string(), command);
+    details.insert("detail".to_string(), detail);
+    checks::error(
+        format!("agent_task.provider_executor_resolution.{}", provider.id),
+        format!(
+            "Provider `{}` is declared but its executor could not load its runtime require graph on the runner",
+            provider.id
+        ),
+        Some("Reinstall the runtime so shared runtime packages are materialized (e.g. `homeboy extension refresh <homeboy-extensions source> --id <extension>`), then rerun doctor".to_string()),
+        details,
+    )
+}
+
+fn provider_executor_resolution_details(
+    provider: &AgentTaskExecutorProvider,
+) -> BTreeMap<String, String> {
+    let mut details = BTreeMap::new();
+    details.insert("provider_id".to_string(), provider.id.clone());
+    details.insert("backend".to_string(), provider.backend.clone());
+    details
+}
+
+fn first_stderr_lines(stderr: &str, max: usize) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return "executor exited non-zero while loading its module require graph".to_string();
+    }
+    trimmed.lines().take(max).collect::<Vec<_>>().join("\n")
+}
+
 /// #3818: report the state of every extension-declared managed runner
 /// source checkout. Surfaces a missing checkout (error) or a checkout that
 /// tracks a different remote than the declared canonical remote (warning)

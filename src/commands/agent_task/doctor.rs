@@ -31,7 +31,15 @@ use super::args::AgentTaskDoctorArgs;
 /// Run the cook readiness repair chain and return a combined verdict.
 pub(crate) fn doctor(args: AgentTaskDoctorArgs) -> CmdResult<Value> {
     let provider_stage = provider_stage(&args);
-    let runner_stage = runner_stage(&args)?;
+    let runner_stage = if provider_stage.ready {
+        runner_stage(&args)?
+    } else {
+        json!({
+            "status": "skipped",
+            "checks": [],
+            "skipped_reason": "provider contract readiness failed before runner checks",
+        })
+    };
 
     let verdict = combine_verdict(&provider_stage, &runner_stage);
     let exit_code = if verdict.ready { 0 } else { 1 };
@@ -100,11 +108,6 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let provider_ready;
     let mapping_value;
 
-    // When a concrete provider is selected, record its executor require-graph
-    // resolution so the verdict reflects on-disk runtime health, not just
-    // declared contract metadata (#7736).
-    let mut executor_resolution_value = Value::Null;
-
     match (selected_backend.as_deref(), backend_match) {
         (None, _) => {
             provider_ready = false;
@@ -118,53 +121,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         }
         (Some(backend), Some((count, selected))) => {
             if let Some(provider) = selected {
-                // Provider contract mapping succeeded. Before calling the cook
-                // ready, verify the selected provider's executor entrypoint
-                // actually loads its module require graph on disk — a stale or
-                // partial runtime install (e.g. a shared runtime package never
-                // materialized) passes contract discovery but crashes every cook
-                // with MODULE_NOT_FOUND (#7736).
-                match homeboy::core::agent_tasks::provider::probe_provider_executor_resolves(provider)
-                {
-                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Resolved => {
-                        provider_ready = true;
-                        executor_resolution_value = json!({ "status": "resolved" });
-                    }
-                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Skipped {
-                        reason,
-                    } => {
-                        // The executor runtime does not implement the dry-load
-                        // probe; fall back to contract readiness (prior
-                        // behavior) rather than inventing a failure.
-                        provider_ready = true;
-                        executor_resolution_value =
-                            json!({ "status": "skipped", "reason": reason });
-                    }
-                    homeboy::core::agent_tasks::provider::ProviderExecutorResolution::Unresolved {
-                        command,
-                        detail,
-                    } => {
-                        provider_ready = false;
-                        executor_resolution_value = json!({
-                            "status": "unresolved",
-                            "command": command,
-                            "detail": detail,
-                        });
-                        blocker = Some(json!({
-                            "stage": "provider_contracts",
-                            "code": "executor_require_graph_unresolved",
-                            "message": format!(
-                                "Provider `{}` (backend `{backend}`) is declared but its executor could not load its runtime require graph on disk",
-                                provider.id
-                            ),
-                            "remediation": "Reinstall the runtime so shared runtime packages are materialized (e.g. `homeboy extension refresh <homeboy-extensions source> --id <extension>`), then rerun doctor",
-                            "details": {
-                                "command": command,
-                                "detail": detail,
-                            },
-                        }));
-                    }
-                }
+                provider_ready = true;
                 mapping_value = json!({
                     "selected_backend": backend,
                     "selector": args.selector,
@@ -216,7 +173,6 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         "providers": providers,
         "diagnostics": executor.diagnostics(),
         "backend_mapping": mapping_value,
-        "executor_resolution": executor_resolution_value,
         "secret_env": secret_env,
     });
 
@@ -239,6 +195,8 @@ fn runner_stage(args: &AgentTaskDoctorArgs) -> homeboy::core::Result<Value> {
             path: args.path.clone(),
             extensions: args.extensions.clone(),
             required_tools: args.required_tools.clone(),
+            agent_backend: args.backend.clone(),
+            agent_selector: args.selector.clone(),
             scope: RunnerDoctorScope::LabOffload,
             repair: args.repair,
         },
@@ -313,9 +271,15 @@ fn first_runner_error(runner: &Value) -> Option<Value> {
         .iter()
         .find(|check| check.get("status").and_then(Value::as_str) == Some(error_label))
         .map(|check| {
+            let check_id = check.get("id").and_then(Value::as_str).unwrap_or_default();
+            let code = if check_id.starts_with("agent_task.provider_executor_resolution.") {
+                json!("executor_require_graph_unresolved")
+            } else {
+                check.get("id").cloned().unwrap_or(Value::Null)
+            };
             json!({
                 "stage": "runner_readiness",
-                "code": check.get("id").cloned().unwrap_or(Value::Null),
+                "code": code,
                 "message": check.get("message").cloned().unwrap_or(Value::Null),
                 "remediation": check.get("remediation").cloned().unwrap_or(Value::Null),
                 "details": check.get("details").cloned().unwrap_or(Value::Null),
