@@ -157,6 +157,7 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
         peak_rss_bytes: Some(25_320_000_000),
         sample_count: 93,
         child_process_count_peak: Some(69),
+        resource_guard: None,
         guard_violation: Some(RunnerResourceGuardViolation {
             reason: "rss_limit_exceeded".to_string(),
             message: "runner job resource guard stopped process tree".to_string(),
