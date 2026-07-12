@@ -386,6 +386,13 @@ fn validate_runner_workload_result_refs(workload: &RunnerWorkload) -> Result<()>
         }
     }
 
+    if workload.workspace_mappings.mapping_ref != workload.result_refs.workspace_mapping_ref {
+        return Err(workload_error(
+            "runner_workload.result_refs.workspace_mapping_ref",
+            "runner workload workspace mapping references do not match".to_string(),
+        ));
+    }
+
     if workload
         .result_refs
         .artifacts
@@ -744,6 +751,11 @@ mod tests {
                 "{}",
                 case.name
             );
+            assert_eq!(
+                workload.result_refs.workspace_mapping_ref, workload.workspace_mappings.mapping_ref,
+                "{}",
+                case.name
+            );
         }
     }
 
@@ -957,6 +969,42 @@ mod tests {
         )
         .expect_err("drifted command label must fail");
         assert_eq!(err.details["field"], "runner_workload.kind.command_label");
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_workspace_mapping_reference_drift() {
+        let plan = plan();
+        let command = command();
+        let mut workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: Some("path_materialization_plan"),
+            proof_id: None,
+        });
+        workload.result_refs.workspace_mapping_ref = Some("workspace_mapping".to_string());
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &SecretEnvPlan::default(),
+            true,
+        )
+        .expect_err("drifted workspace mapping reference must fail");
+        assert_eq!(
+            err.details["field"],
+            "runner_workload.result_refs.workspace_mapping_ref"
+        );
     }
 
     #[test]

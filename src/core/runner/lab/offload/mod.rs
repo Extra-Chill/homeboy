@@ -150,5 +150,4 @@ pub(crate) use overhead::*;
 pub(crate) use path_materialization::*;
 pub(crate) use resident::*;
 pub(crate) use telemetry::*;
-pub(crate) use types::LabExecutionContext;
 pub(crate) use workspace_stage::*;

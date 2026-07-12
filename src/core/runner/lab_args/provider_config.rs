@@ -138,20 +138,12 @@ pub(in crate::core::runner) fn remap_provider_config_with_materialization_plan_i
     args: &[String],
     plan: &PathMaterializationPlan,
 ) -> Result<Vec<String>> {
-    let mappings = provider_config_path_remaps_from_materialization_plan(plan);
-    remap_provider_config_in_args(args, &mappings)
-}
-
-fn provider_config_path_remaps_from_materialization_plan(
-    plan: &PathMaterializationPlan,
-) -> Vec<LabPathRemap> {
-    plan.path_remaps()
+    let mappings = plan
+        .path_remaps()
         .into_iter()
-        .map(|remap| LabPathRemap {
-            local: remap.local_path,
-            remote: remap.remote_path,
-        })
-        .collect()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    remap_provider_config_in_args(args, &mappings)
 }
 
 pub(in crate::core::runner) fn inject_agent_task_default_provider_config_in_args(

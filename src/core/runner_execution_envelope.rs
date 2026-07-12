@@ -331,6 +331,10 @@ impl PathMaterializationPlan {
             .collect()
     }
 
+    pub fn mapping_ref(&self) -> Option<&'static str> {
+        (!self.entries.is_empty()).then_some("path_materialization_plan")
+    }
+
     pub fn projection(&self) -> PathMaterializationPlanProjection {
         PathMaterializationPlanProjection {
             schema: self.schema.clone(),

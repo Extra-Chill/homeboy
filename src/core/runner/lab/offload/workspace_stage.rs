@@ -361,10 +361,14 @@ fn prepare_lab_offload_workspace_stage_inner(
     // to their synced remote locations, using every local->remote pair recorded
     // during workspace sync. Without this the remote sandbox cannot resolve the
     // workspace or runtime components a hand-authored cook config references.
-    let path_remaps = path_remaps_from_workspace_mapping(
+    let provider_config_materialization_plan = workspace_path_materialization_plan(
         &workspace_mapping,
-        Some(source_path),
-        Some(&remote_cwd),
+        PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+        lab_path_materialization_mode(contract, sync_mode),
+    );
+    let path_remaps = path_remaps_from_materialization_plan(
+        &provider_config_materialization_plan,
+        Some((source_path, &remote_cwd)),
     );
     preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
@@ -372,8 +376,6 @@ fn prepare_lab_offload_workspace_stage_inner(
         &offload_args,
         &remote_cwd,
     );
-    let provider_config_materialization_plan =
-        provider_config_path_materialization_plan(contract, sync_mode, &workspace_mapping);
     let remapped_args = remap_provider_config_with_materialization_plan_in_args(
         &remapped_args,
         &provider_config_materialization_plan,
@@ -393,10 +395,37 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
-    let path_remaps = path_remaps_from_workspace_mapping(
+    let late_path_input_workspaces = lab_path_input_extra_workspaces(
+        &remapped_args,
+        contract.workload.as_ref(),
+        Path::new(&synced.local_path),
+    )?;
+    let late_synced_path_settings = sync_extra_lab_workspaces(
+        runner_id,
+        &synced.local_path,
+        late_path_input_workspaces,
+        &mut workspace_mapping,
+    )?;
+    if !late_synced_path_settings.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_late_path_settings", "lab.sync_late_path_settings")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", late_synced_path_settings.len())
+                        .json("workspaces", &late_synced_path_settings),
+                )
+                .build(),
+        );
+    }
+    let path_materialization_plan = workspace_path_materialization_plan(
         &workspace_mapping,
-        Some(source_path),
-        Some(&remote_cwd),
+        PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+        sync_mode.label(),
+    );
+    let path_remaps = path_remaps_from_materialization_plan(
+        &path_materialization_plan,
+        Some((source_path, &remote_cwd)),
     );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
@@ -429,9 +458,6 @@ fn prepare_lab_offload_workspace_stage_inner(
             .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
-    let path_materialization_plan =
-        lab_execution_path_materialization_plan(sync_mode, &workspace_mapping);
-
     Ok(LabOffloadWorkspaceStage {
         plan,
         sync_mode,
@@ -456,20 +482,39 @@ fn prepare_lab_offload_workspace_stage_inner(
     })
 }
 
-pub(crate) fn lab_execution_path_materialization_plan(
-    sync_mode: RunnerWorkspaceSyncMode,
+pub(crate) fn workspace_path_materialization_plan(
     workspace_mapping: &[LabWorkspaceMappingEntry],
+    owner: &str,
+    materialization_mode: impl Into<String>,
 ) -> PathMaterializationPlan {
+    let materialization_mode = materialization_mode.into();
     PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
         PathMaterializationEntry::new(
             entry.role(),
-            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            owner,
             Some(entry.local_path().to_string()),
             entry.remote_path(),
-            sync_mode.label(),
+            &materialization_mode,
             PATH_MATERIALIZATION_STATUS_MATERIALIZED,
         )
     }))
+}
+
+pub(crate) fn path_remaps_from_materialization_plan(
+    plan: &PathMaterializationPlan,
+    primary_fallback: Option<(&Path, &str)>,
+) -> Vec<LabPathRemap> {
+    let mut remaps: Vec<LabPathRemap> = plan.path_remaps().into_iter().map(Into::into).collect();
+    if let Some((local, remote)) = primary_fallback {
+        let local = local.display().to_string();
+        if !local.trim().is_empty() && !remaps.iter().any(|remap| remap.local == local) {
+            remaps.push(LabPathRemap {
+                local,
+                remote: remote.to_string(),
+            });
+        }
+    }
+    remaps
 }
 
 fn preflight_agent_task_secret_env_before_workspace_stage(
@@ -563,51 +608,6 @@ pub(crate) fn validate_lab_source_snapshot_handoff(
                 .collect(),
         ),
     ))
-}
-
-pub(crate) fn path_remaps_from_workspace_mapping(
-    workspace_mapping: &[LabWorkspaceMappingEntry],
-    primary_source_path: Option<&Path>,
-    primary_remote_path: Option<&str>,
-) -> Vec<LabPathRemap> {
-    let mut remaps = workspace_mapping
-        .iter()
-        .map(|entry| LabPathRemap {
-            local: entry.local_path().to_string(),
-            remote: entry.remote_path().to_string(),
-        })
-        .collect::<Vec<_>>();
-
-    if let (Some(source_path), Some(remote_path)) = (primary_source_path, primary_remote_path) {
-        let source_path = source_path.display().to_string();
-        if !source_path.trim().is_empty() && !remaps.iter().any(|remap| remap.local == source_path)
-        {
-            remaps.push(LabPathRemap {
-                local: source_path,
-                remote: remote_path.to_string(),
-            });
-        }
-    }
-
-    remaps
-}
-
-fn provider_config_path_materialization_plan(
-    contract: &LabOffloadCommand,
-    sync_mode: RunnerWorkspaceSyncMode,
-    workspace_mapping: &[LabWorkspaceMappingEntry],
-) -> PathMaterializationPlan {
-    let materialization_mode = lab_path_materialization_mode(contract, sync_mode);
-    PathMaterializationPlan::new(workspace_mapping.iter().map(|entry| {
-        PathMaterializationEntry::new(
-            entry.role(),
-            PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-            Some(entry.local_path().to_string()),
-            entry.remote_path(),
-            materialization_mode.clone(),
-            PATH_MATERIALIZATION_STATUS_MATERIALIZED,
-        )
-    }))
 }
 
 fn lab_path_materialization_mode(
@@ -1515,10 +1515,14 @@ mod tests {
         let remote_workspace = "/home/chubes/Developer/_lab_workspaces/static-site-importer";
         let synced = test_synced_workspace(canonical_synced_source, remote_workspace);
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
-        let path_remaps = path_remaps_from_workspace_mapping(
+        let plan = workspace_path_materialization_plan(
             &workspace_mapping,
-            Some(requested_source),
-            Some(remote_workspace),
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            RunnerWorkspaceSyncMode::Snapshot.label(),
+        );
+        let path_remaps = path_remaps_from_materialization_plan(
+            &plan,
+            Some((requested_source, remote_workspace)),
         );
         let args = vec![
             "homeboy".to_string(),
@@ -1766,10 +1770,10 @@ mod tests {
             workload: None,
         };
 
-        let plan = provider_config_path_materialization_plan(
-            &contract,
-            RunnerWorkspaceSyncMode::Git,
+        let plan = workspace_path_materialization_plan(
             &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+            lab_path_materialization_mode(&contract, RunnerWorkspaceSyncMode::Git),
         );
 
         assert_eq!(plan.entries.len(), 1);
@@ -1787,16 +1791,17 @@ mod tests {
     }
 
     #[test]
-    fn lab_execution_path_materialization_plan_projects_standard_workspace_mappings() {
+    fn workspace_path_materialization_plan_projects_standard_workspace_mappings() {
         let synced = test_synced_workspace(
             "/controller/workspaces/homeboy",
             "/runner/workspaces/homeboy",
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
 
-        let plan = lab_execution_path_materialization_plan(
-            RunnerWorkspaceSyncMode::Snapshot,
+        let plan = workspace_path_materialization_plan(
             &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            RunnerWorkspaceSyncMode::Snapshot.label(),
         );
 
         assert_eq!(plan.entries.len(), 1);
