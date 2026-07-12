@@ -18,6 +18,7 @@
 use serde::Serialize;
 
 use crate::core::deps;
+use crate::core::engine::shell;
 use crate::core::{Error, Result};
 
 use super::*;
@@ -94,6 +95,7 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
 
     let mut steps = Vec::new();
     for plan_step in plan {
+        let command = runner_hydration_command(&plan_step.invocation)?;
         let started = std::time::Instant::now();
         let (output, exit_code) = exec(
             runner_id,
@@ -101,13 +103,13 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
             // Homeboy-routed command, so dispatch it raw exactly as produced.
             // Hydration is a workspace-setup sub-step of the agent-task offload,
             // so do not mirror it as a standalone controller-side run record.
-            RunnerExecOptions::raw_command(plan_step.command.clone())
+            RunnerExecOptions::raw_command(command.clone())
                 .with_cwd(remote_path)
                 .without_evidence_mirror(),
         )?;
         let step = LabWorkspaceHydrationStep {
             provider_id: plan_step.provider_id.clone(),
-            command: plan_step.command.clone(),
+            command,
             duration_ms: started.elapsed().as_millis() as u64,
             exit_code,
             stdout: output.stdout,
@@ -127,6 +129,69 @@ pub(crate) fn hydrate_lab_workspace_dependencies(
         workspace: remote_path.to_string(),
         steps,
     })
+}
+
+/// Convert the controller-created declaration into runner-owned argv. Extension
+/// entrypoints are deliberately resolved by the runner shell from its HOME,
+/// never from the controller's absolute extension installation path.
+fn runner_hydration_command(invocation: &deps::DependencyInstallInvocation) -> Result<Vec<String>> {
+    match invocation {
+        deps::DependencyInstallInvocation::Argv { argv } => Ok(argv.clone()),
+        deps::DependencyInstallInvocation::ExtensionEntrypoint {
+            extension_id,
+            entrypoint,
+            argv,
+            entrypoint_index,
+        } => {
+            if *entrypoint_index > argv.len() {
+                return Err(Error::validation_invalid_argument(
+                    "lab_workspace_dependency_hydration",
+                    "extension dependency invocation has an invalid entrypoint position",
+                    None,
+                    None,
+                ));
+            }
+            if std::path::Path::new(entrypoint)
+                .components()
+                .any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir | std::path::Component::RootDir
+                    )
+                })
+            {
+                return Err(Error::validation_invalid_argument(
+                    "lab_workspace_dependency_hydration",
+                    "extension dependency entrypoint must be a relative path inside its extension",
+                    Some(entrypoint.clone()),
+                    None,
+                ));
+            }
+            let resolved_argv = argv
+                .iter()
+                .enumerate()
+                .flat_map(|(index, value)| {
+                    let mut value = vec![shell::quote_arg(value)];
+                    if index == *entrypoint_index {
+                        value.insert(0, "\"$entrypoint\"".to_string());
+                    }
+                    value
+                })
+                .chain((*entrypoint_index == argv.len()).then(|| "\"$entrypoint\"".to_string()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let command = format!(
+                "extension_root=\"${{HOME}}/.config/homeboy/extensions/\"{}; entrypoint=\"$extension_root\"/{}; if test ! -f \"$entrypoint\"; then printf '%s\\n' {} >&2; exit 127; fi; exec {}",
+                shell::quote_arg(extension_id),
+                shell::quote_arg(entrypoint),
+                shell::quote_arg(&format!(
+                    "Lab dependency hydration requires runner-local extension `{extension_id}` entrypoint `{entrypoint}`. Install or refresh that extension on the runner."
+                )),
+                resolved_argv,
+            );
+            Ok(vec!["sh".to_string(), "-c".to_string(), command])
+        }
+    }
 }
 
 /// Build the pre-executor failure for a hydration step that exited non-zero.
@@ -510,6 +575,112 @@ mod tests {
                     .expect("hydration marker"),
                 "hydrated\n"
             );
+        });
+    }
+
+    #[test]
+    fn hydration_resolves_extension_entrypoint_from_runner_home() {
+        crate::test_support::with_isolated_home(|controller_home| {
+            let runner_home = tempfile::tempdir().expect("runner home");
+            let extension_id = "fixture-runtime";
+            let entrypoint = "scripts/install.sh";
+            let runner_script = runner_home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id)
+                .join(entrypoint);
+            std::fs::create_dir_all(runner_script.parent().expect("script parent"))
+                .expect("runner extension directory");
+            std::fs::write(
+                &runner_script,
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" > hydrated-by-runner-extension.txt\n",
+            )
+            .expect("runner extension script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut mode = std::fs::metadata(&runner_script)
+                    .expect("script metadata")
+                    .permissions();
+                mode.set_mode(0o755);
+                std::fs::set_permissions(&runner_script, mode).expect("chmod script");
+            }
+            crate::core::runner::create(
+                &serde_json::json!({
+                    "id": "lab-local",
+                    "kind": "local",
+                    "env": { "HOME": runner_home.path() },
+                })
+                .to_string(),
+                false,
+            )
+            .expect("create local runner");
+            let workspace = tempfile::tempdir().expect("workspace");
+            let invocation = deps::DependencyInstallInvocation::ExtensionEntrypoint {
+                extension_id: extension_id.to_string(),
+                entrypoint: entrypoint.to_string(),
+                argv: vec!["sh".to_string(), "install".to_string()],
+                entrypoint_index: 1,
+            };
+
+            let command = runner_hydration_command(&invocation).expect("runner command");
+            assert!(!command
+                .join(" ")
+                .contains(&controller_home.path().display().to_string()));
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions::raw_command(command)
+                    .with_cwd(&workspace.path().display().to_string())
+                    .without_evidence_mirror(),
+            )
+            .expect("runner executes extension entrypoint");
+
+            assert_eq!(exit_code, 0, "{}", output.stderr);
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("hydrated-by-runner-extension.txt"))
+                    .expect("runner extension marker"),
+                "install\n"
+            );
+        });
+    }
+
+    #[test]
+    fn hydration_missing_runner_extension_entrypoint_fails_actionably() {
+        crate::test_support::with_isolated_home(|_controller_home| {
+            let runner_home = tempfile::tempdir().expect("runner home");
+            crate::core::runner::create(
+                &serde_json::json!({
+                    "id": "lab-local",
+                    "kind": "local",
+                    "env": { "HOME": runner_home.path() },
+                })
+                .to_string(),
+                false,
+            )
+            .expect("create local runner");
+            let workspace = tempfile::tempdir().expect("workspace");
+            let invocation = deps::DependencyInstallInvocation::ExtensionEntrypoint {
+                extension_id: "missing-runtime".to_string(),
+                entrypoint: "scripts/install.sh".to_string(),
+                argv: vec!["sh".to_string(), "install".to_string()],
+                entrypoint_index: 1,
+            };
+            let command = runner_hydration_command(&invocation).expect("runner command");
+            let (output, exit_code) = exec(
+                "lab-local",
+                RunnerExecOptions::raw_command(command)
+                    .with_cwd(&workspace.path().display().to_string())
+                    .without_evidence_mirror(),
+            )
+            .expect("runner executes command");
+
+            assert_eq!(exit_code, 127);
+            assert!(output
+                .stderr
+                .contains("runner-local extension `missing-runtime`"));
+            assert!(output
+                .stderr
+                .contains("Install or refresh that extension on the runner"));
         });
     }
 
