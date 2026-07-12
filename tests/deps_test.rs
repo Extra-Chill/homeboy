@@ -1,5 +1,5 @@
 use homeboy::core::component::{Component, ComponentScriptsConfig, DependencyStackEdge};
-use homeboy::core::deps::{self, DependencyUpdateOptions};
+use homeboy::core::deps::{self, DependencyInstallInvocation, DependencyUpdateOptions};
 use std::fs;
 use tempfile::tempdir;
 
@@ -121,17 +121,20 @@ printf '%s\n' "$@" >> adapter-args.txt
     );
 
     let plan = deps::dependency_install_plan(root).unwrap();
+    let install_command = vec![adapter.display().to_string(), "install".to_string()];
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].provider_id, "fixture-adapter");
     assert_eq!(
-        plan[0].command,
-        vec![adapter.display().to_string(), "install".to_string()]
+        plan[0].invocation,
+        DependencyInstallInvocation::Argv {
+            argv: install_command.clone()
+        }
     );
 
     let install = deps::install(Some("fixture"), Some(&root_path)).unwrap();
     assert_eq!(install.package_manager, "fixture-adapter");
     assert_eq!(install.installs.len(), 1);
-    assert_eq!(install.installs[0].command, plan[0].command);
+    assert_eq!(install.installs[0].command, install_command);
 
     let update = deps::update(
         Some("fixture"),
