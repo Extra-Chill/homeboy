@@ -582,6 +582,9 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
     args: &[String],
     preferred: Option<&str>,
 ) -> Option<(Vec<String>, String)> {
+    if let Some((_, run_id)) = agent_task_run_plan_recording_args(args) {
+        return Some((args.to_vec(), run_id));
+    }
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
     let action_index = invocation.child_index_matching(&["cook", "dispatch"])?;
 
@@ -1247,6 +1250,25 @@ mod tests {
 
         // An explicit --run-id always wins over the preferred isolation token.
         assert_eq!(run_id, "explicit-run");
+        assert_eq!(out, args);
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_with_uses_materialized_run_plan_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@/runner/retry-plan.json".to_string(),
+            "--record-run-id".to_string(),
+            "retry-run".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, None)
+            .expect("materialized run-plan has a durable run id");
+
+        assert_eq!(run_id, "retry-run");
         assert_eq!(out, args);
     }
 
