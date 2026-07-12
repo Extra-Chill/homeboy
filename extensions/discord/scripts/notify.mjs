@@ -102,10 +102,9 @@ function validate(args, env) {
   const parsedRoute = route === undefined ? undefined : parseRoute(route);
   if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
 
-  const channelId = value(env.DISCORD_CHANNEL_ID);
-  let threadId = value(env.DISCORD_THREAD_ID);
+  const operationsChannelId = value(env.DISCORD_OPERATIONS_CHANNEL_ID);
   if (botToken) {
-    const resolved = resolveBotDestination(parsedRoute, channelId, threadId);
+    const resolved = resolveBotDestination(parsedRoute, operationsChannelId);
     if (resolved.error) return { ok: false, error: resolved.error };
     const apiBase = value(env.DISCORD_API_BASE_URL) || 'https://discord.com/api/v10';
     let url;
@@ -118,10 +117,8 @@ function validate(args, env) {
     return { ok: true, mode: 'bot', ...resolved, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' } };
   }
 
-  if (channelId) return { ok: false, error: 'Webhook mode does not use DISCORD_CHANNEL_ID.' };
+  if (operationsChannelId) return { ok: false, error: 'Webhook mode does not use DISCORD_OPERATIONS_CHANNEL_ID.' };
   if (parsedRoute?.kind === 'channel') return { ok: false, error: 'A channel route requires DISCORD_BOT_TOKEN; webhook delivery can only target its configured webhook channel or a thread.' };
-  if (parsedRoute?.kind === 'thread') threadId = parsedRoute.id;
-  if (threadId && !isSnowflake(threadId)) return { ok: false, error: 'DISCORD_THREAD_ID must be a Discord snowflake.' };
   let url;
   try {
     url = new URL(webhookUrl);
@@ -130,27 +127,22 @@ function validate(args, env) {
   }
   if (!isHttp(url)) return { ok: false, error: 'DISCORD_WEBHOOK_URL must be an HTTP(S) URL.' };
   url.searchParams.set('wait', 'true');
-  if (threadId) url.searchParams.set('thread_id', threadId);
+  if (parsedRoute?.kind === 'thread') url.searchParams.set('thread_id', parsedRoute.id);
   return {
     ok: true,
     mode: 'webhook',
-    route_kind: parsedRoute?.kind || (threadId ? 'legacy' : 'fallback'),
-    destination: parsedRoute ? 'dynamic_thread' : (threadId ? 'legacy_thread' : 'webhook_default'),
+    route_kind: parsedRoute?.kind || 'webhook',
+    destination: parsedRoute ? 'dynamic_thread' : 'webhook_default',
     url,
     headers: { 'content-type': 'application/json' },
   };
 }
 
-function resolveBotDestination(route, channelId, threadId) {
+function resolveBotDestination(route, operationsChannelId) {
   if (route) return { id: route.id, route_kind: route.kind, destination: `dynamic_${route.kind}` };
-  if (Boolean(channelId) === Boolean(threadId)) {
-    return { error: 'Bot mode without --route requires exactly one destination: DISCORD_CHANNEL_ID or DISCORD_THREAD_ID.' };
-  }
-  const id = threadId || channelId;
-  if (!isSnowflake(id)) return { error: `${threadId ? 'DISCORD_THREAD_ID' : 'DISCORD_CHANNEL_ID'} must be a Discord snowflake.` };
-  return threadId
-    ? { id, route_kind: 'legacy', destination: 'legacy_thread' }
-    : { id, route_kind: 'fallback', destination: 'fallback_channel' };
+  if (!operationsChannelId) return { error: 'Bot mode without --route requires DISCORD_OPERATIONS_CHANNEL_ID.' };
+  if (!isSnowflake(operationsChannelId)) return { error: 'DISCORD_OPERATIONS_CHANNEL_ID must be a Discord snowflake.' };
+  return { id: operationsChannelId, route_kind: 'operations', destination: 'operations_channel' };
 }
 
 function parseRoute(route) {

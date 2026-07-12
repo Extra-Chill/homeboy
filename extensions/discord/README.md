@@ -2,7 +2,7 @@
 
 `discord` is an outbound-only Homeboy notification transport. It posts a run-completion message through Discord's REST API but does not own inbound interactions, buttons, or an orchestration lifecycle. Homeboy's durable run/daemon lifecycle remains authoritative.
 
-Requires Homeboy `>=0.281.20`, which provides `HOMEBOY_NOTIFY_COMMAND` and `runs watch --notify`.
+Requires a Homeboy version with typed notification transport registry support.
 
 ## Setup
 
@@ -11,33 +11,26 @@ Install the extension and select exactly one authentication mode. Keep credentia
 ```sh
 homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id discord
 
-# Bot REST delivery to a channel.
+# Bot REST delivery. This optional channel is used only for route-less operations
+# notifications; a run-scoped route always takes precedence.
 export DISCORD_BOT_TOKEN='...'
-export DISCORD_CHANNEL_ID='123456789012345678'
+export DISCORD_OPERATIONS_CHANNEL_ID='123456789012345678'
 
-# Legacy single-thread bot delivery. Do not also set DISCORD_CHANNEL_ID.
-# This is not the default for concurrently orchestrated runs.
-export DISCORD_THREAD_ID='123456789012345678'
-
-# Or webhook delivery. DISCORD_THREAD_ID is optional for webhook thread routing.
+# Or webhook delivery to its configured default channel.
 export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
 ```
 
-Set `HOMEBOY_NOTIFY_COMMAND` to the installed helper. Placeholders are expanded by Homeboy as separate argv values, so titles and bodies containing spaces are supported.
-
-```sh
-export HOMEBOY_NOTIFY_COMMAND='node ~/.config/homeboy/extensions/discord/scripts/notify.mjs --run-id {run_id} --status {status} --title {title} --body {body} --route={route}'
-```
+Homeboy discovers the `discord.run-completion` transport from this extension's
+manifest. Select it as the notification transport in Homeboy configuration or
+with the corresponding CLI option; Homeboy invokes the typed command with each
+run's caller context.
 
 ## Usage
 
-Notify after a watched run settles:
-
-```sh
-homeboy runs watch run-123 --notify
-```
-
-A Homeboy daemon uses the same `HOMEBOY_NOTIFY_COMMAND` completion-notification seam. For a Discord-originated run, create it with the current thread route before detaching. The route is non-secret and versioned: `discord:v1:thread:<guild-id>:<thread-id>` (or `discord:v1:channel:<guild-id>:<channel-id>`). Homeboy persists that opaque route with the run; when the detached daemon sees its terminal event, this transport posts to that route.
+A Discord-originated run must carry its non-secret, versioned route when it is
+created: `discord:v1:thread:<guild-id>:<thread-id>` or
+`discord:v1:channel:<guild-id>:<channel-id>`. Homeboy persists that opaque
+route with the run, so concurrent detached runs deliver independently.
 
 ```sh
 homeboy --notification-transport discord.run-completion \
@@ -66,6 +59,11 @@ node ~/.config/homeboy/extensions/discord/scripts/notify.mjs \
 
 Discord content is bounded to 2,000 characters. The helper retries a Discord `429` at most twice, using the service's `retry_after` value capped at five seconds. Authentication and destination/input rejections are reported as typed `auth_error` or `input_error` results; credentials, webhook URLs, and destination IDs are never included in diagnostics. Result evidence exposes only a route kind and a safe destination classification.
 
-`DISCORD_CHANNEL_ID` is an optional fallback operations channel only when a run has no route. An explicit route always wins. `DISCORD_THREAD_ID` remains supported for legacy single-thread mode; use run-scoped routes for orchestration. Bot tokens remain service-level authentication and never appear in routes.
+`DISCORD_OPERATIONS_CHANNEL_ID` is an optional bot-mode operations fallback only
+when a run has no route. Without a route or this explicit fallback, bot delivery
+fails closed. Webhooks use their configured default channel without a route, or
+an explicit dynamic thread route; webhook delivery never reads ambient thread
+configuration. Bot tokens remain service-level authentication and never appear
+in routes.
 
 `DISCORD_API_BASE_URL` is an optional HTTP(S) API base override for deterministic local testing only. Production bot delivery defaults to `https://discord.com/api/v10`.
