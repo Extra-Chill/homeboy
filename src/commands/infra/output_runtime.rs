@@ -137,17 +137,18 @@ impl<'a> OutputService<'a> {
 
 pub fn run_command(
     command: Commands,
+    spec: &'static crate::command_contract::CommandSpec,
     global: &GlobalArgs,
     requested_output_file: Option<&str>,
 ) -> i32 {
     let output_file = command_runtime_output_file(&command, requested_output_file);
-    let plan = command.response_plan(output_file.is_some());
+    let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
     match crate::commands::raw_output::prepare_command_run(command, global, plan.stdout) {
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
-            let run = run_json(*command, global, plan.output_file, output_file);
+            let run = run_json(*command, spec, global, plan.output_file, output_file);
             output_service.emit_run(run, plan.output_file)
         }
         crate::commands::raw_output::CommandRunPreparation::Raw(run) => {
@@ -202,6 +203,7 @@ pub fn command_runtime_output_file<'a>(
 
 pub fn run_json(
     command: Commands,
+    spec: &crate::command_contract::CommandSpec,
     global: &GlobalArgs,
     mode: CommandOutputFileMode,
     output_file: Option<&str>,
@@ -221,7 +223,7 @@ pub fn run_json(
             }
         }
         (_, command) => {
-            crate::commands::json_output::run_command_output(command, global, output_file)
+            crate::commands::json_output::run_command_output(command, spec, global, output_file)
         }
     }
 }

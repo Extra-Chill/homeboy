@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
+use clap::{ArgMatches, Command, CommandFactory};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
@@ -164,8 +164,8 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
-        let mut cli = match Cli::from_arg_matches(&matches) {
-            Ok(cli) => cli,
+        let (mut cli, command_spec) = match Cli::from_registered_arg_matches(&matches) {
+            Ok(parsed) => parsed,
             Err(err) => err.exit(),
         };
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
@@ -209,8 +209,12 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        let exit_code =
-            commands::output_runtime::run_command(cli.command, &global, output_file.as_deref());
+        let exit_code = commands::output_runtime::run_command(
+            cli.command,
+            command_spec,
+            &global,
+            output_file.as_deref(),
+        );
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
     }
 
@@ -1233,7 +1237,7 @@ mod tests {
             Some("/tmp/controller-result.json")
         );
 
-        let cli = Cli::from_arg_matches(&matches).expect("typed cli");
+        let (cli, _) = Cli::from_registered_arg_matches(&matches).expect("typed cli");
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
     }
 }

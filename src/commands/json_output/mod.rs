@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::{registered_command, CommandDispatchFamily};
+use crate::command_contract::{CommandDispatchFamily, CommandSpec};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, CommandRun};
@@ -14,22 +14,26 @@ mod workspace;
 type JsonRun = (homeboy::core::Result<Value>, i32);
 
 /// Dispatch a command to its handler and map the structured result to JSON.
-pub fn run(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
+pub fn run(
+    command: Commands,
+    spec: &CommandSpec,
+    global: &GlobalArgs,
+) -> (homeboy::core::Result<Value>, i32) {
     crate::commands::utils::tty::status("homeboy is working...");
 
-    dispatch(command, global)
+    dispatch(command, spec, global)
 }
 
 pub fn run_command_output(
     command: Commands,
+    spec: &CommandSpec,
     global: &GlobalArgs,
     output_file: Option<&str>,
 ) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
-    let command_name = command.top_level_name();
-
     let run = match adapter::run_command_output(
         command,
+        spec.name,
         global,
         crate::command_contract::CommandOutputFileMode::None,
     ) {
@@ -39,7 +43,7 @@ pub fn run_command_output(
                 let run_from_spec_output_ref =
                     agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
                 let summary_kind = agent_task_summary_kind_for_output(&args);
-                let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
+                let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), spec, global);
                 let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
                     if let Some(output_file) = run_from_spec_output_ref {
                         return render_controller_run_from_spec_output_ref(
@@ -61,7 +65,7 @@ pub fn run_command_output(
             }
             Commands::Runner(args) => runner::run_command_output(args, global),
             Commands::Activity(args) => {
-                let (stdout_result, exit_code) = dispatch(Commands::Activity(args), global);
+                let (stdout_result, exit_code) = dispatch(Commands::Activity(args), spec, global);
                 let summary_stdout = stdout_result
                     .as_ref()
                     .ok()
@@ -76,7 +80,7 @@ pub fn run_command_output(
             }
             Commands::Bench(args) => {
                 let summarize = bench_summary_eligible(&args);
-                let (stdout_result, exit_code) = dispatch(Commands::Bench(args), global);
+                let (stdout_result, exit_code) = dispatch(Commands::Bench(args), spec, global);
                 let summary_stdout = summarize
                     .then(|| {
                         stdout_result
@@ -95,7 +99,7 @@ pub fn run_command_output(
             }
             Commands::Cleanup(args) => {
                 let summarize = cleanup_summary_eligible(&args);
-                let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), global);
+                let (stdout_result, exit_code) = dispatch(Commands::Cleanup(args), spec, global);
                 let summary_stdout = summarize
                     .then(|| {
                         stdout_result
@@ -116,7 +120,7 @@ pub fn run_command_output(
                 let summarize_show = runs_show_summary_eligible(&args);
                 let summarize_dossier = runs_dossier_summary_eligible(&args);
                 let summarize_proof = runs_proof_summary_eligible(&args);
-                let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
+                let (stdout_result, exit_code) = dispatch(Commands::Runs(args), spec, global);
                 let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
                     if let Some(rendered) =
                         super::runs_summary::render_runs_field_selection(payload)
@@ -141,13 +145,13 @@ pub fn run_command_output(
                 )
             }
             command => {
-                let (stdout_result, exit_code) = dispatch(command, global);
+                let (stdout_result, exit_code) = dispatch(command, spec, global);
                 CommandRun::from_stdout_result(stdout_result, exit_code)
             }
         },
     };
 
-    run.with_command(command_name)
+    run.with_command(spec.name)
 }
 
 fn agent_task_controller_run_from_spec_output_ref_eligible<'a>(
@@ -310,7 +314,11 @@ fn agent_task_summary_kind_for_output_mode(
     }
 }
 
-fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
+fn dispatch(
+    command: Commands,
+    spec: &CommandSpec,
+    global: &GlobalArgs,
+) -> (homeboy::core::Result<Value>, i32) {
     let command = match adapter::run_json_output(
         command,
         global,
@@ -320,7 +328,7 @@ fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Va
         Err(command) => command,
     };
 
-    match dispatch_family(&command) {
+    match spec.dispatch_family() {
         CommandDispatchFamily::Quality => quality::dispatch(command, global),
         CommandDispatchFamily::Workspace => workspace::dispatch(command, global),
         CommandDispatchFamily::Ops => ops::dispatch(command, global),
@@ -328,12 +336,6 @@ fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Va
             unsupported_raw_command("List command uses raw output mode")
         }
     }
-}
-
-fn dispatch_family(command: &Commands) -> CommandDispatchFamily {
-    registered_command(command.top_level_name())
-        .map(|spec| spec.dispatch_family())
-        .expect("top-level command should be registered")
 }
 
 fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
@@ -361,6 +363,7 @@ mod tests {
                     crate::commands::manifest::ManifestArgs {},
                 ),
             }),
+            crate::command_contract::registered_command("contract").unwrap(),
             &GlobalArgs {},
         );
 
@@ -380,7 +383,11 @@ mod tests {
             })
         };
 
-        let (dispatch_stdout, dispatch_exit_code) = dispatch(command(), &GlobalArgs {});
+        let (dispatch_stdout, dispatch_exit_code) = dispatch(
+            command(),
+            crate::command_contract::registered_command("contract").unwrap(),
+            &GlobalArgs {},
+        );
         let (adapter_stdout, adapter_exit_code) = adapter::run_json_output(
             command(),
             &GlobalArgs {},
@@ -522,26 +529,5 @@ mod tests {
             agent_task_controller_run_from_spec_output_ref_eligible(&args, None),
             None
         );
-    }
-
-    #[test]
-    fn json_dispatch_family_comes_from_command_registry() {
-        use clap::Parser;
-
-        for spec in crate::command_contract::COMMAND_SPECS {
-            let Some(argv) = spec.representative_argv else {
-                continue;
-            };
-            let cli = crate::cli_surface::Cli::try_parse_from(argv)
-                .unwrap_or_else(|error| panic!("failed to parse `{}`: {error}", spec.name));
-
-            assert_eq!(cli.command.top_level_name(), spec.name);
-            assert_eq!(
-                dispatch_family(&cli.command),
-                spec.dispatch_family(),
-                "JSON dispatch family drifted for `{}`",
-                spec.name
-            );
-        }
     }
 }
