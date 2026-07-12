@@ -175,6 +175,20 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         CommandNextAction::new("review run", review_command).with_kind(CommandNextActionKind::Show),
     );
 
+    if value
+        .pointer("/metadata/stale_running")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        metadata.next_actions.push(
+            CommandNextAction::new(
+                "reconcile stale run",
+                "homeboy agent-task active --reconcile".to_string(),
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
     attach_actionable_metadata(value, metadata);
 }
 
@@ -954,6 +968,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "risk_flags": risk_flags,
         "execution_location": execution_location(record),
         "queue_visibility": queue_visibility(record),
+        "liveness": liveness_summary(record),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
 
@@ -984,6 +999,35 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         }
     }
     summary
+}
+
+fn liveness_summary(record: &Value) -> Value {
+    let metadata = record.get("metadata").unwrap_or(&Value::Null);
+    let provider_handle_count = record
+        .get("provider_handles")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let stale = metadata
+        .get("stale_running")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    json!({
+        "status": if stale { "stale" } else { "active" },
+        "heartbeat_last_seen_at": record.pointer("/lifecycle/heartbeat/last_seen_at"),
+        "runner_job_status": metadata.get("runner_job_status"),
+        "runner_job_last_seen_at": metadata.get("runner_job_last_seen_at"),
+        "provider_boundary": {
+            "status": if provider_handle_count == 0 { "absent" } else { "recorded" },
+            "provider_handle_count": provider_handle_count,
+        },
+        "stale_reason": metadata.get("stale_running_reason"),
+        "next_action": if stale {
+            "homeboy agent-task active --reconcile"
+        } else {
+            "homeboy agent-task status <run-id> --full"
+        },
+    })
 }
 
 fn execution_location(record: &Value) -> Value {
@@ -1562,6 +1606,27 @@ mod tests {
             "agent-task-run-2",
         );
         assert_eq!(remote["execution_location"], "runner:homeboy-lab");
+
+        let stale = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-ghost",
+                "state": "running",
+                "tasks": [],
+                "provider_handles": [],
+                "lifecycle": { "heartbeat": { "last_seen_at": "2026-07-12T23:28:28Z" } },
+                "metadata": {
+                    "stale_running": true,
+                    "stale_running_reason": "runner_job_unverified_after_daemon_restart"
+                }
+            }),
+            "agent-task-ghost",
+        );
+        assert_eq!(stale["liveness"]["status"], "stale");
+        assert_eq!(stale["liveness"]["provider_boundary"]["status"], "absent");
+        assert_eq!(
+            stale["liveness"]["next_action"],
+            "homeboy agent-task active --reconcile"
+        );
     }
 
     #[test]

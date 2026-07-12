@@ -121,9 +121,17 @@ impl AgentTaskRunRecord {
         } else {
             "missing_runner_pid"
         };
+        let provider_handle_count = self.provider_handles.len();
         let metadata = self.ensure_metadata_object();
         metadata.insert("stale_running".to_string(), json!(true));
         metadata.insert("stale_running_reason".to_string(), json!(reason));
+        metadata.insert(
+            "provider_boundary".to_string(),
+            json!({
+                "status": if provider_handle_count == 0 { "absent" } else { "recorded" },
+                "provider_handle_count": provider_handle_count,
+            }),
+        );
         metadata.insert("retryable".to_string(), json!(true));
     }
 
