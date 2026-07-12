@@ -311,19 +311,21 @@ fn inject_lab_changed_files(
     command: &Commands,
     normalized_args: &[String],
 ) -> homeboy::core::Result<Option<Vec<String>>> {
-    let Some((component_id, path_override, changed_since, changed_only)) =
-        changed_scope_request(command)
-    else {
+    let Commands::Review(args) = command else {
+        return Ok(None);
+    };
+    let Some(component_args) = args.lab_changed_scope_component_args() else {
         return Ok(None);
     };
     if has_lab_changed_files_json(normalized_args) {
         return Ok(None);
     }
-    if changed_since.is_some() || !changed_only {
-        return Ok(None);
-    }
 
-    let source_path = resolve_changed_scope_source_path(component_id, path_override)?;
+    let target = component::resolve_target(TargetSpec::new(
+        component_args.component.as_deref(),
+        component_args.path.as_deref(),
+    ))?;
+    let source_path = target.source_path.to_string_lossy();
     let changed_files = git::get_dirty_files(&source_path)?;
     let payload = serde_json::to_string(&changed_files).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
@@ -343,55 +345,10 @@ fn inject_lab_changed_files(
     Ok(Some(rewritten))
 }
 
-type ChangedScopeRequest<'a> = (
-    Option<&'a String>,
-    Option<&'a String>,
-    Option<&'a str>,
-    bool,
-);
-
-fn changed_scope_request(command: &Commands) -> Option<ChangedScopeRequest<'_>> {
-    match command {
-        Commands::Review(args) => match &args.command {
-            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => Some((
-                lint_args.comp.component.as_ref(),
-                lint_args.comp.path.as_ref(),
-                lint_args.changed_since.as_deref(),
-                lint_args.changed_only,
-            )),
-            Some(crate::commands::review::ReviewCommand::Test(test_args)) => Some((
-                test_args.comp.component.as_ref(),
-                test_args.comp.path.as_ref(),
-                test_args.changed_since.as_deref(),
-                false,
-            )),
-            None => Some((
-                args.comp.component.as_ref(),
-                args.comp.path.as_ref(),
-                args.changed_since.as_deref(),
-                args.changed_only,
-            )),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn has_lab_changed_files_json(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg == "--lab-changed-files-json" || arg.starts_with("--lab-changed-files-json=")
     })
-}
-
-fn resolve_changed_scope_source_path(
-    component_id: Option<&String>,
-    path_override: Option<&String>,
-) -> homeboy::core::Result<String> {
-    let target = component::resolve_target(TargetSpec::new(
-        component_id.map(String::as_str),
-        path_override.map(String::as_str),
-    ))?;
-    Ok(target.source_path.to_string_lossy().to_string())
 }
 
 /// Build the Lab dispatch observer for the parsed command. Only `trace`
@@ -947,21 +904,13 @@ fn rewrite_ad_hoc_lab_workspace_to_path(
         return None;
     }
 
-    let needs_path = match command {
-        Commands::Review(args) => match &args.command {
-            Some(crate::commands::review::ReviewCommand::Audit(audit_args)) => {
-                audit_args.audit.comp.component.is_none() && audit_args.audit.comp.path.is_none()
-            }
-            Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => {
-                lint_args.comp.component.is_none() && lint_args.comp.path.is_none()
-            }
-            Some(crate::commands::review::ReviewCommand::Test(test_args)) => {
-                test_args.comp.component.is_none() && test_args.comp.path.is_none()
-            }
-            _ => false,
-        },
-        _ => false,
-    };
+    let needs_path = matches!(
+        command,
+        Commands::Review(args)
+            if args.nested_component_args().is_some_and(|component| {
+                component.component.is_none() && component.path.is_none()
+            })
+    );
     if !needs_path {
         return None;
     }
@@ -1251,7 +1200,6 @@ mod tests {
             panic!("expected review command");
         };
 
-        assert_eq!(args.lab_label(), "review lint");
         assert_eq!(
             args.effective_component_args().component.as_deref(),
             Some("data-machine")
@@ -1355,6 +1303,7 @@ mod tests {
 
     #[test]
     fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         crate::test_support::with_isolated_home(|home| {
             runners::create(
                 r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
@@ -2803,17 +2752,6 @@ mod tests {
         ];
 
         assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
-    }
-
-    #[test]
-    fn changed_scope_source_path_uses_shared_target_resolution() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().to_string_lossy().to_string();
-
-        let source_path = resolve_changed_scope_source_path(None, Some(&path))
-            .expect("path override should resolve through TargetSpec");
-
-        assert_eq!(source_path, path);
     }
 
     #[test]

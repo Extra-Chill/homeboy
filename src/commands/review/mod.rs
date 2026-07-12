@@ -111,6 +111,19 @@ pub enum ReviewCommand {
     Ci(ci::CiArgs),
 }
 
+impl ReviewCommand {
+    fn lab_label(&self) -> &'static str {
+        match self {
+            Self::Audit(_) => "review audit",
+            Self::AuditBaseline(_) => "review audit-baseline",
+            Self::Lint(_) => "review lint",
+            Self::Test(_) => "review test",
+            Self::Build(_) => "review build",
+            Self::Ci(_) => "review ci",
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct ReviewAuditArgs {
     #[command(flatten)]
@@ -120,6 +133,38 @@ pub struct ReviewAuditArgs {
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
+    pub(crate) fn nested_component_args(&self) -> Option<&PositionalComponentArgs> {
+        match self.command.as_ref()? {
+            ReviewCommand::Audit(args) => Some(&args.audit.comp),
+            ReviewCommand::Lint(args) => Some(&args.comp),
+            ReviewCommand::Test(args) => Some(&args.comp),
+            ReviewCommand::AuditBaseline(_) | ReviewCommand::Build(_) | ReviewCommand::Ci(_) => {
+                None
+            }
+        }
+    }
+
+    pub(crate) fn effective_extension_override_ids(&self) -> &[String] {
+        match self.command.as_ref() {
+            Some(ReviewCommand::Audit(args)) => &args.audit.extension_override.extensions,
+            Some(ReviewCommand::Lint(args)) => &args.extension_override.extensions,
+            Some(ReviewCommand::Test(args)) => &args.extension_override.extensions,
+            _ => &self.extension_override.extensions,
+        }
+    }
+
+    pub(crate) fn lab_changed_scope_component_args(&self) -> Option<&PositionalComponentArgs> {
+        match self.command.as_ref() {
+            Some(ReviewCommand::Lint(args))
+                if args.changed_only && args.changed_since.is_none() =>
+            {
+                Some(&args.comp)
+            }
+            None if self.changed_only && self.changed_since.is_none() => Some(&self.comp),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if let Some(command) = &self.command {
             return match command {
@@ -136,7 +181,7 @@ impl ReviewArgs {
                 ReviewCommand::AuditBaseline(_)
                 | ReviewCommand::Build(_)
                 | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
-                    self.lab_label(),
+                    command.lab_label(),
                     "this nested review subcommand has no portable Lab contract",
                 )),
             };
@@ -151,25 +196,8 @@ impl ReviewArgs {
         }
     }
 
-    pub(crate) fn lab_label(&self) -> &'static str {
-        match self.command.as_ref() {
-            Some(ReviewCommand::Audit(_)) => "review audit",
-            Some(ReviewCommand::Lint(_)) => "review lint",
-            Some(ReviewCommand::Test(_)) => "review test",
-            Some(ReviewCommand::Build(_)) => "review build",
-            Some(ReviewCommand::Ci(_)) => "review ci",
-            Some(ReviewCommand::AuditBaseline(_)) => "review audit-baseline",
-            None => REVIEW_LAB_LABEL,
-        }
-    }
-
-    pub(crate) fn effective_component_args(&self) -> PositionalComponentArgs {
-        match self.command.as_ref() {
-            Some(ReviewCommand::Audit(args)) => args.audit.comp.clone(),
-            Some(ReviewCommand::Lint(args)) => args.comp.clone(),
-            Some(ReviewCommand::Test(args)) => args.comp.clone(),
-            _ => self.comp.clone(),
-        }
+    pub(crate) fn effective_component_args(&self) -> &PositionalComponentArgs {
+        self.nested_component_args().unwrap_or(&self.comp)
     }
 }
 
@@ -622,7 +650,7 @@ fn build_audit_args(
     review_context: &ReviewExecutionContext,
 ) -> audit::AuditArgs {
     audit::AuditArgs {
-        comp: args.effective_component_args(),
+        comp: args.effective_component_args().clone(),
         extension_override: args.extension_override.clone(),
         conventions: false,
         only: Vec::new(),
@@ -650,7 +678,7 @@ fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionCon
 
 fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
     lint::LintArgs {
-        comp: args.effective_component_args(),
+        comp: args.effective_component_args().clone(),
         summary: args.summary,
         file: None,
         glob: None,
@@ -675,7 +703,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
 
 fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> test::TestArgs {
     test::TestArgs {
-        comp: args.effective_component_args(),
+        comp: args.effective_component_args().clone(),
         extension_override: args.extension_override.clone(),
         skip_lint: true,
         coverage: false,
