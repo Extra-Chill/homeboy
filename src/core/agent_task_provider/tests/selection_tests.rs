@@ -316,7 +316,7 @@ fn provider_manifest_parses_role_aliases() {
         "id": "custom.provider",
         "backend": "custom",
         "default_backend": true,
-        "command": "custom-agent-task",
+        "invocation": { "argv": ["custom-agent-task"] },
         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
         "role_aliases": {
@@ -467,7 +467,7 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
         "schema": "homeboy/agent-task-executor-provider/v1",
         "id": "custom.provider",
         "backend": "custom",
-        "command": "custom-agent-task",
+        "invocation": { "argv": ["custom-agent-task"] },
         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
         "runner_readiness": [{
@@ -636,7 +636,7 @@ fn default_backend_ignores_provider_manifest_default_backend() {
                     "id": "runtime.provider",
                     "backend": "runtime-default",
                     "default_backend": true,
-                    "command": "runtime-provider",
+                    "invocation": { "argv": ["runtime-provider"] },
                     "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                     "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
                 }]

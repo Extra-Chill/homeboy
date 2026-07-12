@@ -64,7 +64,9 @@
       "schema": "homeboy/agent-task-executor-provider/v1",
       "id": "sample-runtime.default",
       "backend": "sample-runtime",
-      "command": "sample-runtime-agent-task-provider",
+      "invocation": {
+        "argv": ["sample-runtime-agent-task-provider"]
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1"
     }

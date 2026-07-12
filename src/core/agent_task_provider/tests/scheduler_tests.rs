@@ -272,7 +272,10 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
     let mut fallback = primary.clone();
     fallback.id = "fallback.provider".to_string();
     fallback.backend = "fallback".to_string();
-    fallback.command = fallback_command;
+    fallback.command_argv = fallback_command
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     let scheduler =
         AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
             primary, fallback,

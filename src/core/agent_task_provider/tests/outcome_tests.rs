@@ -66,7 +66,7 @@ fn discovers_agent_task_providers_from_agent_runtime_manifests() {
                     "schema": "homeboy/agent-task-executor-provider/v1",
                     "id": "custom.runtime.executor",
                     "backend": "custom",
-                    "command": "node {{runtime_path}}/runner.cjs",
+                    "invocation": { "argv": ["node", "{{runtime_path}}/runner.cjs"] },
                     "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                     "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
                 }]
