@@ -37,30 +37,6 @@ pub fn prepare_command_run(
     }
 }
 
-pub fn run_and_print(
-    command: Commands,
-    global: &GlobalArgs,
-    mode: CommandRawOutputMode,
-) -> RawExecution {
-    if let CommandRawOutputMode::InteractivePassthrough = mode {
-        return validate_interactive_tty(command);
-    }
-
-    let raw_run =
-        run(command, global, mode).expect("markdown and plain-text modes should return raw output");
-
-    RawExecution::Handled(match raw_run.raw_stdout.expect("raw mode has raw stdout") {
-        Ok(content) => {
-            print!("{}", content);
-            raw_run.exit_code
-        }
-        Err(err) => {
-            output::print_result::<serde_json::Value>(Err(err)).ok();
-            1
-        }
-    })
-}
-
 pub fn run(
     command: Commands,
     global: &GlobalArgs,

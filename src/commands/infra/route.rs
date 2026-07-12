@@ -140,23 +140,7 @@ pub fn route_after_parse(
             }
             Ok(None)
         }
-        LabRouteOutcome::InFlight(output) => {
-            if !output.stderr.is_empty() {
-                eprint!("{}", output.stderr);
-            }
-            if let Some(path) = output_file {
-                write_offloaded_stdout(
-                    path,
-                    output
-                        .output_file_content
-                        .as_deref()
-                        .unwrap_or(&output.stdout),
-                )?;
-            }
-            print!("{}", output.stdout);
-            Ok(Some(output.exit_code))
-        }
-        LabRouteOutcome::Offloaded(output) => {
+        LabRouteOutcome::InFlight(output) | LabRouteOutcome::Offloaded(output) => {
             if !output.stderr.is_empty() {
                 eprint!("{}", output.stderr);
             }

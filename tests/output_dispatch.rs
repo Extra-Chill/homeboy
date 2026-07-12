@@ -16,10 +16,10 @@ fn adapter_backed_contract_preserves_stdout_and_output_file_envelopes() {
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stderr.is_empty());
 
+    let output_file_bytes = std::fs::read(&output_path).expect("manifest output file");
+    assert_eq!(output.stdout, output_file_bytes);
     let stdout: Value = serde_json::from_slice(&output.stdout).expect("stdout JSON");
-    let output_file: Value =
-        serde_json::from_slice(&std::fs::read(&output_path).expect("manifest output file"))
-            .expect("output file JSON");
+    let output_file: Value = serde_json::from_slice(&output_file_bytes).expect("output file JSON");
     assert_eq!(stdout, output_file);
     assert_eq!(stdout["success"], true);
     assert_eq!(stdout["data"]["command"], "contract.manifest");
