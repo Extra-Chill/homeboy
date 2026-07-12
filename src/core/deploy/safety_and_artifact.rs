@@ -115,6 +115,11 @@ pub(super) fn deploy_artifact(
         if !result.success {
             return Ok(result);
         }
+
+        // Directory artifacts bypass the extraction branch below, so normalize
+        // them here instead of preserving the build user's ownership and modes.
+        log_status!("deploy", "Fixing file permissions");
+        permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
     } else {
         // Validate: archive artifacts require an extract command
         let is_archive = local_path
@@ -532,6 +537,42 @@ mod tests {
     fn test_deploy_via_git_keeps_framework_safety_policy_external() {
         assert!(DANGEROUS_PATH_SUFFIXES.contains(&"/vendor"));
         assert!(!DANGEROUS_PATH_SUFFIXES.contains(&"/wp-content/plugins"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_directory_artifact_normalizes_group_write_and_setgid() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("plugins").join("sample-plugin");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::create_dir_all(target.parent().expect("target parent")).expect("target parent dir");
+        fs::write(source.join("plugin.php"), "<?php").expect("source file");
+        fs::set_permissions(source.join("plugin.php"), fs::Permissions::from_mode(0o644))
+            .expect("source permissions");
+
+        let result = deploy_artifact(
+            &local_client(),
+            &source,
+            target.to_str().expect("target path"),
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        assert!(result.success, "{}", result.error.unwrap_or_default());
+        let file_mode = fs::metadata(target.join("plugin.php"))
+            .expect("target file")
+            .permissions()
+            .mode();
+        let dir_mode = fs::metadata(&target)
+            .expect("target dir")
+            .permissions()
+            .mode();
+        assert_ne!(0, file_mode & 0o020, "deployed file should be group-writable");
+        assert_ne!(0, dir_mode & 0o020, "deployed dir should be group-writable");
+        assert_ne!(0, dir_mode & 0o2000, "deployed dir should inherit its group");
     }
 
     #[test]

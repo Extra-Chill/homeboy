@@ -140,7 +140,26 @@ fn fix_deployed_ownership(
             chown_output.exit_code,
             chown_output.stderr
         );
-        // Don't fail the deploy - chown is best-effort
+
+        // An unprivileged deploy user cannot change the owner, but can often
+        // apply the target parent's group. Preserve multi-writer access even
+        // when the best-effort owner normalization is unavailable.
+        if let Some((_, group)) = owner.rsplit_once(':') {
+            let chgrp_cmd = format!(
+                "chgrp -R {} {} 2>/dev/null",
+                shell::quote_arg(group),
+                quoted_path
+            );
+            let chgrp_output = ssh_client.execute(&chgrp_cmd);
+            if !chgrp_output.success {
+                log_status!(
+                    "deploy",
+                    "Warning: chgrp failed (exit {}): {}",
+                    chgrp_output.exit_code,
+                    chgrp_output.stderr
+                );
+            }
+        }
     }
 }
 
