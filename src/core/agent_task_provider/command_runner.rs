@@ -5,6 +5,9 @@ use super::runner_readiness::{
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
 use crate::core::agent_task_executor_evidence::link_latest_executor_evidence;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
@@ -288,37 +291,116 @@ pub(super) fn run_provider_command_once(
         }
     };
 
+    let stdout_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let last_progress: Arc<AtomicU64> = Arc::new(AtomicU64::new(now_unix_ms()));
+
+    let stdout_reader = child.stdout.take().map(|stdout| {
+        spawn_output_reader(
+            stdout,
+            Arc::clone(&stdout_buffer),
+            Arc::clone(&last_progress),
+        )
+    });
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        spawn_output_reader(
+            stderr,
+            Arc::clone(&stderr_buffer),
+            Arc::clone(&last_progress),
+        )
+    });
+
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = std::io::Write::write_all(&mut stdin, &input);
+        let _ = Write::write_all(&mut stdin, &input);
     }
 
-    let output = {
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => break child.wait_with_output(),
-                Ok(None) if started.elapsed() >= process_timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return failure_outcome(
-                        request,
-                        AgentTaskOutcomeStatus::Timeout,
-                        AgentTaskFailureClassification::Timeout,
-                        "agent_task.provider_timeout",
-                        format!(
-                            "provider '{}' exceeded timeout_ms={}",
-                            provider.id, requested_timeout_ms
-                        ),
-                        json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
-                    );
+    let started = Instant::now();
+    let liveness_timeout = request
+        .limits
+        .liveness_timeout_ms
+        .map(Duration::from_millis);
+    let liveness_timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break false,
+            Ok(None) => {
+                let elapsed = started.elapsed();
+                if elapsed >= process_timeout {
+                    break false;
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(error) => break Err(error),
+                if let Some(liveness) = liveness_timeout {
+                    let progress_age = Duration::from_millis(
+                        now_unix_ms().saturating_sub(last_progress.load(Ordering::SeqCst)),
+                    );
+                    if progress_age >= liveness {
+                        break true;
+                    }
+                    // Wake up at the earlier of process timeout and liveness deadline.
+                    let remaining_liveness = liveness.saturating_sub(progress_age);
+                    let sleep_for = remaining_liveness
+                        .min(process_timeout - elapsed)
+                        .min(Duration::from_millis(50));
+                    if sleep_for > Duration::ZERO {
+                        std::thread::sleep(sleep_for);
+                    }
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
+            Err(_) => break false,
         }
     };
 
-    let Ok(output) = output else {
+    let (status, killed_for_liveness) = if liveness_timed_out {
+        let _ = child.kill();
+        let _ = child.wait();
+        (None, true)
+    } else {
+        // Child exited on its own or hit the wall-clock timeout. If it hit the
+        // wall-clock timeout, try_wait would still return Ok(None) and the loop
+        // above would break only when elapsed >= process_timeout; kill it.
+        if started.elapsed() >= process_timeout {
+            let _ = child.kill();
+        }
+        match child.wait() {
+            Ok(status) => (Some(status), false),
+            Err(_) => (None, false),
+        }
+    };
+
+    if let Some(handle) = stdout_reader {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_reader {
+        let _ = handle.join();
+    }
+
+    let stdout_bytes = stdout_buffer.lock().expect("stdout buffer").clone();
+    let stderr_bytes = stderr_buffer.lock().expect("stderr buffer").clone();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+
+    if killed_for_liveness {
+        let (status, classification, message) =
+            classify_stall_or_rate_limit(&stdout, &stderr, &provider.id, requested_timeout_ms);
+        return failure_outcome(
+            request,
+            status,
+            classification,
+            "agent_task.provider_liveness_timeout",
+            message,
+            json!({
+                "provider": provider.id,
+                "command": command,
+                "timeout_ms": requested_timeout_ms,
+                "process_timeout_ms": process_timeout.as_millis(),
+                "liveness_timeout_ms": request.limits.liveness_timeout_ms,
+                "stdout_bytes": stdout_bytes.len(),
+                "stderr_bytes": stderr_bytes.len(),
+            }),
+        );
+    }
+
+    let Some(status) = status else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -329,8 +411,19 @@ pub(super) fn run_provider_command_once(
         );
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if started.elapsed() >= process_timeout {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Timeout,
+            AgentTaskFailureClassification::Timeout,
+            "agent_task.provider_timeout",
+            format!(
+                "provider '{}' exceeded timeout_ms={}",
+                provider.id, requested_timeout_ms
+            ),
+            json!({ "provider": provider.id, "command": command, "timeout_ms": requested_timeout_ms, "process_timeout_ms": process_timeout.as_millis() }),
+        );
+    }
     if stdout.is_empty() {
         return failure_outcome(
             request,

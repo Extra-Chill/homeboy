@@ -90,14 +90,20 @@ where
         } else {
             Vec::new()
         };
+        let plan_rotation = plan.options.rotation.clone();
         let mut queued: VecDeque<ScheduledTask> = plan
             .tasks
             .drain(..)
-            .map(|request| ScheduledTask {
-                request,
-                attempt: 1,
-                rotation_index: 0,
-                rotation_attempts: Vec::new(),
+            .map(|mut request| {
+                if let Some(policy) = plan_rotation.as_ref() {
+                    AgentTaskScheduleSupport::apply_rotation_policy_limits(&mut request, policy);
+                }
+                ScheduledTask {
+                    request,
+                    attempt: 1,
+                    rotation_index: 0,
+                    rotation_attempts: Vec::new(),
+                }
             })
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
@@ -444,7 +450,11 @@ where
                             );
                             let entry = &policy.entries[running_task.rotation_index];
                             let mut request = running_task.request;
-                            AgentTaskScheduleSupport::apply_rotation_entry(&mut request, entry);
+                            AgentTaskScheduleSupport::apply_rotation_entry(
+                                &mut request,
+                                entry,
+                                policy,
+                            );
                             request.parent_plan_id = Some(plan.plan_id.clone());
                             let next_attempt = result.attempt + 1;
                             events.push(event(
