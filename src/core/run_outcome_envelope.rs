@@ -182,82 +182,91 @@ pub struct RunOutcomeHandoffRef {
 }
 
 fn job_artifact_metadata_ref(run_id: &str, artifact: JobArtifactMetadata) -> ArtifactRef {
-    let id = artifact.id.clone();
-    let role = artifact
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("role"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    let semantic_key = artifact
-        .metadata
-        .as_ref()
-        .and_then(|metadata| {
-            metadata
-                .get("semantic_key")
-                .or_else(|| metadata.get("semanticKey"))
-        })
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    ArtifactRef {
-        schema: ARTIFACT_REF_SCHEMA.to_string(),
-        id: id.clone(),
-        run_id: run_id.to_string(),
-        kind: artifact
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("kind"))
-            .and_then(Value::as_str)
-            .unwrap_or("artifact")
-            .to_string(),
-        artifact_type: artifact_type(artifact.path.as_deref(), artifact.url.as_deref()),
-        path: artifact.path.unwrap_or_else(|| artifact_uri(run_id, &id)),
-        url: artifact.url,
-        public_url: None,
-        role,
-        semantic_key,
-    }
+    let metadata = artifact.metadata.as_ref();
+    project_artifact_ref(
+        run_id,
+        ArtifactProjection {
+            id: artifact.id,
+            kind: metadata_string(metadata, "kind"),
+            path: artifact.path,
+            url: artifact.url,
+            role: metadata_string(metadata, "role"),
+            semantic_key: metadata_string(metadata, "semantic_key")
+                .or_else(|| metadata_string(metadata, "semanticKey")),
+        },
+    )
 }
 
 fn runner_artifact_ref(run_id: &str, artifact: RunnerArtifactRef) -> ArtifactRef {
-    let id = artifact.artifact_id.clone();
-    ArtifactRef {
-        schema: ARTIFACT_REF_SCHEMA.to_string(),
-        id: id.clone(),
-        run_id: run_id.to_string(),
-        kind: artifact
-            .name
-            .clone()
-            .unwrap_or_else(|| "artifact".to_string()),
-        artifact_type: artifact_type(artifact.path.as_deref(), artifact.url.as_deref()),
-        path: artifact.path.unwrap_or_else(|| artifact_uri(run_id, &id)),
-        url: artifact.url,
-        public_url: None,
-        role: None,
-        semantic_key: artifact.name,
-    }
+    project_artifact_ref(
+        run_id,
+        ArtifactProjection::from_named(
+            artifact.artifact_id,
+            artifact.name,
+            artifact.path,
+            artifact.url,
+        ),
+    )
 }
 
 fn runner_execution_artifact_ref(
     run_id: &str,
     artifact: RunnerExecutionArtifactRef,
 ) -> ArtifactRef {
-    let id = artifact.id.clone();
+    project_artifact_ref(
+        run_id,
+        ArtifactProjection::from_named(artifact.id, artifact.name, artifact.path, artifact.url),
+    )
+}
+
+struct ArtifactProjection {
+    id: String,
+    kind: Option<String>,
+    path: Option<String>,
+    url: Option<String>,
+    role: Option<String>,
+    semantic_key: Option<String>,
+}
+
+impl ArtifactProjection {
+    fn from_named(
+        id: String,
+        name: Option<String>,
+        path: Option<String>,
+        url: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            kind: name.clone(),
+            path,
+            url,
+            role: None,
+            semantic_key: name,
+        }
+    }
+}
+
+fn project_artifact_ref(run_id: &str, artifact: ArtifactProjection) -> ArtifactRef {
+    let artifact_type = artifact_type(artifact.path.as_deref(), artifact.url.as_deref());
+    let path = artifact
+        .path
+        .unwrap_or_else(|| artifact_uri(run_id, &artifact.id));
     ArtifactRef {
         schema: ARTIFACT_REF_SCHEMA.to_string(),
-        id: id.clone(),
+        id: artifact.id,
         run_id: run_id.to_string(),
-        kind: artifact
-            .name
-            .clone()
-            .unwrap_or_else(|| "artifact".to_string()),
-        artifact_type: artifact_type(artifact.path.as_deref(), artifact.url.as_deref()),
-        path: artifact.path.unwrap_or_else(|| artifact_uri(run_id, &id)),
+        kind: artifact.kind.unwrap_or_else(|| "artifact".to_string()),
+        artifact_type,
+        path,
         url: artifact.url,
         public_url: None,
-        role: None,
-        semantic_key: artifact.name,
+        role: artifact.role,
+        semantic_key: artifact.semantic_key,
     }
+}
+
+fn metadata_string(metadata: Option<&Value>, key: &str) -> Option<String> {
+    metadata?.get(key)?.as_str().map(ToString::to_string)
 }
 
 fn runner_execution_record_run_id(record: &RunnerExecutionRecord) -> String {
@@ -384,5 +393,72 @@ mod tests {
         assert!(value.get("transport").is_none());
         assert!(value.get("materialized_paths").is_none());
         assert!(value.get("next_actions").is_none());
+    }
+
+    #[test]
+    fn artifact_projection_serialized_output_snapshot_preserves_source_semantics() {
+        let job_snake = job_artifact_metadata_ref(
+            "run-1",
+            job_artifact(
+                "job-snake",
+                Some(json!({
+                    "kind": "report",
+                    "role": "summary",
+                    "semantic_key": "snake-wins",
+                    "semanticKey": "camel-loses"
+                })),
+            ),
+        );
+        let job_camel = job_artifact_metadata_ref(
+            "run-1",
+            job_artifact("job-camel", Some(json!({ "semanticKey": "camel" }))),
+        );
+        let runner = runner_artifact_ref(
+            "run-1",
+            RunnerArtifactRef {
+                artifact_id: "runner".to_string(),
+                name: Some("runner-name".to_string()),
+                path: Some("artifacts/runner.json".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                transport: None,
+            },
+        );
+        let execution = runner_execution_artifact_ref(
+            "run-1",
+            RunnerExecutionArtifactRef {
+                id: "execution".to_string(),
+                name: None,
+                path: None,
+                url: Some("https://example.test/execution.json".to_string()),
+            },
+        );
+
+        assert_eq!(
+            serde_json::to_string(&vec![job_snake, job_camel, runner, execution])
+                .expect("artifact projection json"),
+            concat!(
+                r#"[{"schema":"homeboy/artifact-ref/v1","id":"job-snake","run_id":"run-1","kind":"report","type":"reference","path":"homeboy://run/run-1/artifact/job-snake","role":"summary","semantic_key":"snake-wins"},"#,
+                r#"{"schema":"homeboy/artifact-ref/v1","id":"job-camel","run_id":"run-1","kind":"artifact","type":"reference","path":"homeboy://run/run-1/artifact/job-camel","semantic_key":"camel"},"#,
+                r#"{"schema":"homeboy/artifact-ref/v1","id":"runner","run_id":"run-1","kind":"runner-name","type":"file","path":"artifacts/runner.json","semantic_key":"runner-name"},"#,
+                r#"{"schema":"homeboy/artifact-ref/v1","id":"execution","run_id":"run-1","kind":"artifact","type":"file","path":"homeboy://run/run-1/artifact/execution","url":"https://example.test/execution.json"}]"#,
+            )
+        );
+    }
+
+    fn job_artifact(id: &str, metadata: Option<Value>) -> JobArtifactMetadata {
+        JobArtifactMetadata {
+            id: id.to_string(),
+            name: None,
+            path: None,
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            content_base64: None,
+            metadata,
+        }
     }
 }
