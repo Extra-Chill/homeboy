@@ -124,48 +124,14 @@ fn prepare_lab_offload_workspace_stage_inner(
         &runner,
         &offload_args,
     )?;
-    let (offload_args, workspace_ref_resolutions) =
-        resolve_path_setting_workspace_refs_in_args(&offload_args)?;
-    let mut extra_workspaces = lab_extra_workspaces(source_path)?;
-    // Sync any controller-local directories referenced by --provider-config
-    // (runtime components, provider plugins, extra mount sources) so the cook
-    // config's paths resolve on the runner after remapping.
-    extra_workspaces.extend(provider_config_extra_workspaces(
+    let materialization_planner = PathMaterializationPlanner::plan(
         &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_plan_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_fanout_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
-        &offload_args,
-        source_path,
-    )?);
-    extra_workspaces.extend(workspace_ref_extra_workspaces(
-        &workspace_ref_resolutions,
-        source_path,
-    )?);
-    extra_workspaces.extend(lab_path_input_extra_workspaces(
-        &offload_args,
-        contract.workload.as_ref(),
-        source_path,
-    )?);
-    extra_workspaces.extend(runtime_refresh_source_extra_workspaces(
-        &offload_args,
+        contract,
         source_path,
         request.allow_dirty_lab_workspace,
-    )?);
-    extra_workspaces.extend(extension_source_extra_workspaces(
-        &offload_args,
-        source_path,
-        request.allow_dirty_lab_workspace,
-    )?);
-    extra_workspaces.extend(rig_component_path_env_extra_workspaces(source_path)?);
+    )?;
+    let offload_args = materialization_planner.args;
+    let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
     // token the git-mode remote path is keyed only on (source path, HEAD), so a
     // later unrelated run at the same HEAD reuses the earlier run's checkout and
@@ -425,29 +391,6 @@ fn prepare_lab_offload_workspace_stage_inner(
             &mut workspace_mapping,
             Some(synced_entry.entry),
             synced_entry.step_id,
-        );
-    }
-    let late_path_input_workspaces = lab_path_input_extra_workspaces(
-        &remapped_args,
-        contract.workload.as_ref(),
-        Path::new(&synced.local_path),
-    )?;
-    let late_synced_path_settings = sync_extra_lab_workspaces(
-        runner_id,
-        &synced.local_path,
-        late_path_input_workspaces,
-        &mut workspace_mapping,
-    )?;
-    if !late_synced_path_settings.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_late_path_settings", "lab.sync_late_path_settings")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", late_synced_path_settings.len())
-                        .json("workspaces", &late_synced_path_settings),
-                )
-                .build(),
         );
     }
     let path_remaps = path_remaps_from_workspace_mapping(
@@ -782,71 +725,6 @@ impl RunnerCommandPlan {
             accepted_settings: accepted_settings.into_iter().collect(),
         })
     }
-}
-
-fn rig_declared_path_input_extra_workspaces(
-    args: &[String],
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
-    primary_source_path: &Path,
-) -> Result<Vec<ExtraLabWorkspace>> {
-    if !workload.is_some_and(|workload| {
-        matches!(
-            workload.kind,
-            crate::command_contract::LabRigWorkloadKind::Bench
-        )
-    }) {
-        return Ok(Vec::new());
-    }
-
-    let path_inputs = rig_path_inputs_from_primary_rig(workload, primary_source_path)?;
-    if path_inputs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    path_values_extra_workspaces(
-        declared_path_input_values(args, &path_inputs),
-        primary_source_path,
-        "rig_path_input",
-    )
-}
-
-fn lab_path_input_extra_workspaces(
-    args: &[String],
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
-    primary_source_path: &Path,
-) -> Result<Vec<ExtraLabWorkspace>> {
-    let mut workspaces = path_values_extra_workspaces(
-        path_setting_values(args),
-        primary_source_path,
-        "path_setting",
-    )?;
-    workspaces.extend(rig_declared_path_input_extra_workspaces(
-        args,
-        workload,
-        primary_source_path,
-    )?);
-    Ok(workspaces)
-}
-
-fn rig_path_inputs_from_primary_rig(
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
-    primary_source_path: &Path,
-) -> Result<Vec<String>> {
-    let Some(workload) = workload else {
-        return Ok(Vec::new());
-    };
-
-    let mut path_inputs = std::collections::BTreeSet::new();
-    for rig_id in &workload.rig_ids {
-        let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
-            continue;
-        };
-        if let Some(bench) = spec.bench.as_ref() {
-            path_inputs.extend(bench.path_inputs.iter().cloned());
-        }
-    }
-
-    Ok(path_inputs.into_iter().collect())
 }
 
 fn load_primary_rig_spec(primary_source_path: &Path, rig_id: &str) -> Result<Option<rig::RigSpec>> {

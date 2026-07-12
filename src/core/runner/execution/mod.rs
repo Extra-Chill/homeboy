@@ -15,6 +15,7 @@ use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
+use crate::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use crate::core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
     PathMaterializationPlan, RunnerExecutionArtifactRef, RunnerExecutionNextAction,
@@ -478,7 +479,44 @@ fn runner_execution_next_actions(runner_id: &str, job_id: &str) -> Vec<RunnerExe
                 "--follow".to_string(),
             ],
         },
+        RunnerExecutionNextAction {
+            label: "runner_job_cancel".to_string(),
+            command: vec![
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "job".to_string(),
+                "cancel".to_string(),
+                runner_id.to_string(),
+                job_id.to_string(),
+            ],
+        },
     ]
+}
+
+fn persist_runner_execution_transition(
+    record: &RunnerExecutionRecord,
+    cwd: &str,
+    command: &[String],
+) -> Result<()> {
+    let store = ObservationStore::open_initialized()?;
+    let run = store.start_run(
+        NewRunRecord::builder("runner_execution")
+            .command(crate::core::redaction::redact_argv_display(command))
+            .optional_cwd_path(Some(std::path::Path::new(cwd)))
+            .metadata(serde_json::json!({
+                "runner_execution_record": record,
+            }))
+            .build(),
+    )?;
+    if record.status != "planned" && record.status != "running" {
+        let status = if record.status == "succeeded" {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        };
+        store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

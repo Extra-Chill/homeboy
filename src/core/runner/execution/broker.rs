@@ -41,6 +41,22 @@ pub(super) fn exec_via_reverse_broker(
     let source_snapshot = source_snapshot_override.unwrap_or_else(|| {
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref())
     });
+    persist_runner_execution_transition(
+        &RunnerExecutionRecord::planned(
+            format!("runner-exec:{}:reverse_broker", runner.id),
+            runner.id.clone(),
+            "reverse_broker",
+        )
+        .with_path_materialization_plan(path_materialization_plan.clone())
+        .with_orchestration_provenance(orchestration_target_provenance(
+            runner,
+            None,
+            Some(&source_snapshot),
+            &[],
+        )),
+        &cwd,
+        &command,
+    )?;
     let redaction_env = env.clone();
     let redaction_secret_env_names = secret_env_names.clone();
     let request = RemoteRunnerJobRequest {
@@ -93,6 +109,23 @@ pub(super) fn exec_via_reverse_broker(
             Some("parse reverse broker job".to_string()),
         )
     })?;
+    persist_runner_execution_transition(
+        &RunnerExecutionRecord::in_flight(job.id.to_string(), runner.id.clone(), "reverse_broker")
+            .with_job_id(job.id.to_string())
+            .with_path_materialization_plan(path_materialization_plan.clone())
+            .with_orchestration_provenance(orchestration_target_provenance(
+                runner,
+                None,
+                Some(&source_snapshot),
+                &[],
+            ))
+            .with_next_actions(runner_execution_next_actions(
+                &runner.id,
+                &job.id.to_string(),
+            )),
+        &cwd,
+        &command,
+    )?;
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
         .flatten();
@@ -224,6 +257,7 @@ pub(super) fn exec_via_reverse_broker(
         &artifacts,
         Some(&runner_result),
     );
+    persist_runner_execution_transition(&execution_record, &cwd, &command)?;
 
     Ok((
         RunnerExecOutput {

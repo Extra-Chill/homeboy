@@ -1237,19 +1237,20 @@ mod tests {
         run_git(root, &["branch", "target"]);
 
         std::fs::remove_file(component_path.join("target-marker.txt")).expect("remove target");
-        std::fs::write(component_path.join("stale-marker.txt"), "stale\n")
-            .expect("stale marker");
+        std::fs::write(component_path.join("stale-marker.txt"), "stale\n").expect("stale marker");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-q", "-m", "stale"]);
 
         let stale_artifact = component_path.join("dist/plugin.zip");
-        std::fs::create_dir_all(stale_artifact.parent().expect("artifact parent"))
-            .expect("dist");
+        std::fs::create_dir_all(stale_artifact.parent().expect("artifact parent")).expect("dist");
         let stale_file = std::fs::File::create(&stale_artifact).expect("stale artifact");
         let mut stale_zip = zip::ZipWriter::new(stale_file);
         use std::io::Write;
         stale_zip
-            .start_file("plugin/stale-marker.txt", zip::write::FileOptions::default())
+            .start_file(
+                "plugin/stale-marker.txt",
+                zip::write::FileOptions::default(),
+            )
             .expect("stale entry");
         stale_zip.write_all(b"stale\n").expect("stale bytes");
         stale_zip.finish().expect("finish stale zip");
@@ -1261,8 +1262,8 @@ mod tests {
             extract_command: Some("unzip -o {{artifact}}".to_string()),
             ..Component::default()
         };
-        let checkout = ExactRefCheckout::materialize(&component, "target")
-            .expect("materialize target ref");
+        let checkout =
+            ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
         checkout.verify().expect("verify target ref");
         let mut config = base_deploy_config();
         config.requested_ref = Some("target".to_string());
@@ -1277,13 +1278,15 @@ mod tests {
         )
         .expect("prepare exact-ref artifact");
 
-        let file = std::fs::File::open(
-            prepared[0].artifact_path.as_ref().expect("artifact path"),
-        )
-        .expect("open artifact");
+        let file = std::fs::File::open(prepared[0].artifact_path.as_ref().expect("artifact path"))
+            .expect("open artifact");
         let mut archive = zip::ZipArchive::new(file).expect("read artifact");
-        assert!(archive.by_name("plugin/packages/plugin/target-marker.txt").is_ok());
-        assert!(archive.by_name("plugin/packages/plugin/stale-marker.txt").is_err());
+        assert!(archive
+            .by_name("plugin/packages/plugin/target-marker.txt")
+            .is_ok());
+        assert!(archive
+            .by_name("plugin/packages/plugin/stale-marker.txt")
+            .is_err());
     }
 
     fn deployed_result(id: &str) -> ComponentDeployResult {

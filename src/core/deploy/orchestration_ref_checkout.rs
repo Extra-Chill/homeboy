@@ -84,7 +84,11 @@ impl ExactRefCheckout {
         let mut materialized = component.clone();
         materialized.local_path = materialized_path.to_string_lossy().to_string();
         materialized.build_artifact = component.build_artifact.as_deref().map(|artifact| {
-            rebase_source_path(artifact, Path::new(&component.local_path), &materialized_path)
+            rebase_source_path(
+                artifact,
+                Path::new(&component.local_path),
+                &materialized_path,
+            )
         });
         Ok(Self {
             component: materialized,
@@ -134,7 +138,12 @@ fn rebase_source_path(value: &str, original_root: &Path, materialized_root: &Pat
     }
 
     path.strip_prefix(original_root)
-        .map(|relative| materialized_root.join(relative).to_string_lossy().to_string())
+        .map(|relative| {
+            materialized_root
+                .join(relative)
+                .to_string_lossy()
+                .to_string()
+        })
         .unwrap_or_else(|_| value.to_string())
 }
 

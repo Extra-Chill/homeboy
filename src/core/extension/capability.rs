@@ -1,7 +1,6 @@
 use crate::core::component::Component;
 use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, ErrorCode, Result};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::manifest::ExtensionManifest;
@@ -306,7 +305,10 @@ pub fn resolve_extension_for_capability(
         None if component
             .extensions
             .as_ref()
-            .is_none_or(|extensions| extensions.is_empty()) => Err(no_extensions_error(component)),
+            .is_none_or(|extensions| extensions.is_empty()) =>
+        {
+            Err(no_extensions_error(component))
+        }
         None => Err(capability_missing_error(component, capability)),
     }
 }

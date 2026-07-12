@@ -507,6 +507,11 @@ pub struct AgentRuntimeManifestConfig {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_task_executors: Vec<serde_json::Value>,
+    /// JSON field selectors in provider configuration payloads whose values are
+    /// controller paths requiring Lab materialization. Selectors use dotted
+    /// object keys and `[]`/`*` for array or map values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_path_fields: Vec<String>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
