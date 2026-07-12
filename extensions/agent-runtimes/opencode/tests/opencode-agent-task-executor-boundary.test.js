@@ -125,6 +125,7 @@ process.exit(0);
 			},
 		},
 		instructions: 'Prove the OpenCode provider boundary without leaking secrets.',
+		artifacts_path: path.join(root, 'default-artifacts'),
 	};
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
@@ -149,6 +150,18 @@ process.exit(0);
 
 	const modelWorkspace = path.join(root, 'model-workspace');
 	fs.mkdirSync(modelWorkspace, { recursive: true });
+	spawnSync('git', ['init'], { cwd: modelWorkspace, encoding: 'utf8' });
+	spawnSync('git', ['commit', '--allow-empty', '-m', 'initial'], {
+		cwd: modelWorkspace,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: 'Homeboy Test',
+			GIT_AUTHOR_EMAIL: 'homeboy@example.test',
+			GIT_COMMITTER_NAME: 'Homeboy Test',
+			GIT_COMMITTER_EMAIL: 'homeboy@example.test',
+		},
+	});
 	const realModelWorkspace = fs.realpathSync(modelWorkspace);
 	const modelCliPath = path.join(root, 'mock-opencode-model.cjs');
 	fs.writeFileSync(modelCliPath, `#!/usr/bin/env node
@@ -220,10 +233,14 @@ process.exit(0);
 
 	const artifactCliPath = path.join(root, 'mock-opencode-artifact.cjs');
 	fs.writeFileSync(artifactCliPath, `#!/usr/bin/env node
-const fs = require('node:fs');
-fs.writeFileSync('README.md', 'after\\n');
-process.stdout.write('transcript output ' + process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN);
-process.exit(0);
+	const fs = require('node:fs');
+	const { spawnSync } = require('node:child_process');
+	fs.writeFileSync('README.md', 'after\\n');
+	spawnSync('git', ['add', 'README.md']);
+	fs.writeFileSync('NEW.md', 'untracked\\n');
+	process.stdout.write('transcript output ' + process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN);
+	process.stderr.write('provider stderr output');
+	process.exit(0);
 `);
 	const artifactResult = await executeOpenCodeAgentTask({
 		...request,
@@ -240,10 +257,14 @@ process.exit(0);
 		},
 	}, { env: fixtureEnv });
 	assert.equal(artifactResult.status, 'succeeded');
-	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stdout', 'patch', 'transcript']);
-	assert.match(fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8'), /after/);
+	assert.deepEqual(artifactResult.artifacts.map((artifact) => artifact.name).sort(), ['agent_result', 'opencode-runtime-stderr', 'opencode-runtime-stdout', 'patch', 'transcript']);
+	const editingPatch = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'patch').path, 'utf8');
+	assert.match(editingPatch, /after/);
+	assert.match(editingPatch, /NEW\.md/);
+	assert.match(editingPatch, /untracked/);
 	const transcript = fs.readFileSync(artifactResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8');
 	assert.match(transcript, /transcript output/);
+	assert.match(transcript, /provider stderr output/);
 	assert.equal(transcript.includes('refresh-token-must-not-leak'), false);
 	assert.match(transcript, /\[redacted\]/);
 	assert.equal(artifactResult.artifacts.some((artifact) => artifact.name === 'opencode-runtime-stdout'), true);
@@ -301,6 +322,35 @@ process.exit(0);
 	assert.equal(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'transcript').path, 'utf8'), '');
 	const quietAgentResult = JSON.parse(fs.readFileSync(quietResult.artifacts.find((artifact) => artifact.name === 'agent_result').path, 'utf8'));
 	assert.deepEqual(quietAgentResult.artifacts, { patch: false, transcript: false });
+	assert.equal(quietAgentResult.status, 'succeeded');
+
+	const blockedArtifactPath = path.join(root, 'artifact-root-is-a-file');
+	fs.mkdirSync(blockedArtifactPath);
+	const captureFailureCliPath = path.join(root, 'mock-opencode-break-artifact-root.cjs');
+	fs.writeFileSync(captureFailureCliPath, `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.rmSync(${JSON.stringify(blockedArtifactPath)}, { recursive: true, force: true });
+fs.writeFileSync(${JSON.stringify(blockedArtifactPath)}, 'not a directory');
+process.exit(0);
+`);
+	const captureFailureResult = await executeOpenCodeAgentTask({
+		...request,
+		task_id: 'opencode-artifact-capture-failure',
+		workspace_path: quietWorkspace,
+		artifacts_path: blockedArtifactPath,
+		expected_artifacts: ['patch', 'transcript', 'agent_result'],
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [captureFailureCliPath],
+			},
+		},
+	}, { env: fixtureEnv });
+	assert.equal(captureFailureResult.status, 'provider_error');
+	assert.equal(captureFailureResult.failure_code, 'agent_task.opencode_artifact_capture_failed');
+	assert.equal(captureFailureResult.metadata.artifact_capture_errors.length, 3);
+	assert.equal(captureFailureResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.artifact_capture_failed'), true);
 
 	const deniedWorkspace = path.join(root, 'denied-workspace');
 	const deniedArtifactDir = path.join(root, 'denied-artifacts');
@@ -422,6 +472,7 @@ setTimeout(() => {}, 10000);
 		...request,
 		task_id: 'opencode-implicit-artifact-dir',
 		workspace_path: quietWorkspace,
+		artifacts_path: undefined,
 		expected_artifacts: ['patch', 'transcript', 'agent_result'],
 		executor: {
 			...request.executor,
@@ -442,6 +493,7 @@ setTimeout(() => {}, 10000);
 	const workspaceRootResult = await executeOpenCodeAgentTask({
 		...request,
 		task_id: 'opencode-workspace-root-artifact-dir',
+		artifacts_path: undefined,
 		workspace: {
 			mode: 'existing',
 			root: quietWorkspace,

@@ -473,24 +473,27 @@ function collectOpenCodeArtifacts(context = {}) {
 	const request = context.request || {};
 	const artifactDir = resolveArtifactDir(context);
 	if (!artifactDir) {
-		return {};
+		return artifactCaptureFailure('OpenCode artifact directory could not be resolved.');
 	}
 
-	const requirements = uniqueDeclaredArtifactRequirements(request);
-	if (requirements.length === 0) {
-		return {};
-	}
+	const requirements = canonicalArtifactRequirements(request);
 
 	const artifacts = [];
 	const evidence_refs = [];
+	const captureErrors = [];
 	const addArtifact = (requirement, filename, content, fallbackKind) => {
 		if (content === undefined || content === null) {
 			return;
 		}
 		const artifactContent = String(content);
 		const filePath = path.join(artifactDir, filename);
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, artifactContent);
+		try {
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, artifactContent);
+		} catch (error) {
+			captureErrors.push({ artifact: requirement.name, message: error.message });
+			return;
+		}
 		const artifact = {
 			id: requirement.name,
 			name: requirement.name,
@@ -506,12 +509,17 @@ function collectOpenCodeArtifacts(context = {}) {
 	const stdout = redactKnownSecrets(String(spawnResult.stdout || ''), context.spawnExtra?.env);
 	const stderr = redactKnownSecrets(String(spawnResult.stderr || ''), context.spawnExtra?.env);
 	const transcript = [stdout, stderr].filter(Boolean).join('\n');
-	const patch = gitDiff(context.cwd);
+	const patchCapture = gitDiff(context.cwd);
+	if (patchCapture.error) {
+		captureErrors.push({ artifact: 'patch', message: patchCapture.error });
+	}
+	const patch = patchCapture.content;
 	const policyDenial = detectOpenCodePolicyDenial(context);
+	const resultStatus = policyDenial ? 'failed' : (spawnResult.status === 0 ? 'succeeded' : 'failed');
 	const resultEnvelope = JSON.stringify({
 		schema: 'homeboy/opencode-agent-result/v1',
 		task_id: request.task_id,
-		status: policyDenial ? 'failed' : 'succeeded',
+		status: resultStatus,
 		...(policyDenial ? {
 			failure_classification: 'policy_denied',
 			failure_code: 'agent_task.opencode_policy_denied',
@@ -537,7 +545,13 @@ function collectOpenCodeArtifacts(context = {}) {
 		}
 	}
 
-	return { artifacts, evidence_refs };
+	return captureErrors.length === 0
+		? { artifacts, evidence_refs }
+		: { artifacts, evidence_refs, artifact_capture_errors: captureErrors };
+}
+
+function artifactCaptureFailure(message) {
+	return { artifacts: [], evidence_refs: [], artifact_capture_errors: [{ artifact: 'artifact_root', message }] };
 }
 
 function collectOpenCodeRuntimeLogs(context = {}) {
@@ -589,13 +603,54 @@ function sessionMetadata(context = {}) {
 
 function gitDiff(cwd) {
 	if (!cwd) {
-		return '';
+		return { content: '', error: 'OpenCode workspace path was not available for patch capture.' };
 	}
-	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary'], { cwd, encoding: 'utf8' });
+	const result = spawnSync('git', ['diff', '--no-ext-diff', '--binary', 'HEAD'], { cwd, encoding: 'utf8' });
 	if (result.status !== 0 || result.error) {
-		return '';
+		return { content: '', error: result.error?.message || String(result.stderr || 'git diff failed').trim() };
 	}
-	return String(result.stdout || '');
+	let content = String(result.stdout || '');
+	const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, encoding: 'utf8' });
+	if (untracked.status !== 0 || untracked.error) {
+		return { content, error: untracked.error?.message || String(untracked.stderr || 'git ls-files failed').trim() };
+	}
+	for (const relativePath of String(untracked.stdout || '').split('\0').filter(Boolean)) {
+		const untrackedDiff = spawnSync('git', ['diff', '--no-ext-diff', '--binary', '--no-index', '--', '/dev/null', relativePath], { cwd, encoding: 'utf8' });
+		if (![0, 1].includes(untrackedDiff.status) || untrackedDiff.error) {
+			return { content, error: untrackedDiff.error?.message || String(untrackedDiff.stderr || `failed to capture untracked file ${relativePath}`).trim() };
+		}
+		content += String(untrackedDiff.stdout || '');
+	}
+	return { content, error: null };
+}
+
+function canonicalArtifactRequirements(request = {}) {
+	const canonical = [
+		{ name: 'patch', kind: 'git-diff', required: true },
+		{ name: 'transcript', kind: 'agent-runtime-transcript', required: true },
+		{ name: 'agent_result', kind: 'json', required: true },
+	];
+	const declared = uniqueDeclaredArtifactRequirements(request);
+	return [...canonical, ...declared].filter((requirement, index, all) => (
+		all.findIndex((candidate) => candidate.name === requirement.name) === index
+	));
+}
+
+function withArtifactCaptureFailure(terminal = {}) {
+	const errors = arrayValue(terminal.artifact_capture_errors);
+	if (errors.length === 0) {
+		return terminal;
+	}
+	const message = `OpenCode artifact capture failed: ${errors.map((error) => `${error.artifact}: ${error.message}`).join('; ')}`;
+	return {
+		...terminal,
+		status: 'provider_error',
+		failure_classification: 'provider',
+		failure_code: 'agent_task.opencode_artifact_capture_failed',
+		summary: message,
+		diagnostics: [...arrayValue(terminal.diagnostics), { class: 'opencode.artifact_capture_failed', classification: 'provider', message, data: { errors } }],
+		metadata: { ...(terminal.metadata || {}), artifact_capture_errors: errors },
+	};
 }
 
 function uniqueDeclaredArtifactRequirements(request = {}) {
@@ -728,7 +783,7 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const terminal = spawnResult.status === 0 ? opencodeSuccessOutcome(context) : opencodeFailureOutcome(context);
+	const terminal = withArtifactCaptureFailure(spawnResult.status === 0 ? opencodeSuccessOutcome(context) : opencodeFailureOutcome(context));
 	return outcome(request, { ...terminal, ...mergeEvidence(terminal, runtimeLogs) });
 }
 
