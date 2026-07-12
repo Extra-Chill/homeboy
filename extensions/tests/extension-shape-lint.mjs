@@ -5,6 +5,7 @@ import path from 'node:path';
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 
 const extensionIds = new Set([
+  'discord',
   'go',
   'managed-preview',
   'nodejs',
