@@ -1,5 +1,4 @@
 use crate::core::component::{discover_from_portable, portable::read_portable_config, Component};
-use crate::core::engine::local_files::FileSystem;
 use crate::core::error::{Error, Result};
 use crate::core::extension;
 use crate::core::project;

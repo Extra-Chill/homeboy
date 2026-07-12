@@ -1,5 +1,5 @@
 use crate::core::engine::identifier;
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::engine::text::levenshtein;
 use crate::core::error::Error;
 use crate::core::output::{

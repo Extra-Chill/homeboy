@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::core::agent_runtime_manifest::AgentRuntimeManifest;
 use crate::core::config;
 use crate::core::engine::identifier;
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::error::{Error, Result};
 use crate::core::{git, paths};
 

@@ -1,6 +1,6 @@
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::config::{self, ConfigEntity};
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::error::{Error, Result};
 use crate::core::output::{CreateOutput, MergeOutput, RemoveResult};
 use crate::core::paths;

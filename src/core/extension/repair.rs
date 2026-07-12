@@ -1,6 +1,6 @@
 use crate::core::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
 use crate::core::config::{self, from_str};
-use crate::core::engine::local_files::{self, FileSystem};
+use crate::core::engine::local_files;
 use crate::core::error::{Error, Result};
 use crate::core::git;
 use crate::core::paths;
