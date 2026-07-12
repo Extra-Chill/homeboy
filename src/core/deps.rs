@@ -561,4 +561,35 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn dependency_install_plan_skips_linked_extensions_without_deps_support() {
+        crate::test_support::with_isolated_home(|home| {
+            let project = tempfile::tempdir().expect("project tempdir");
+            let extension_id = "fixture-non-deps";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{"name":"Fixture non-deps","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                project.path().join("homeboy.json"),
+                format!(
+                    r#"{{"id":"fixture","local_path":"{}","extensions":{{"{extension_id}":{{}}}}}}"#,
+                    project.path().display()
+                ),
+            )
+            .expect("component manifest");
+
+            let plan = dependency_install_plan(project.path())
+                .expect("unrelated linked extensions do not require dependency hydration");
+
+            assert!(plan.is_empty());
+        });
+    }
 }

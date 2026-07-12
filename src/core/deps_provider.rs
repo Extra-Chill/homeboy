@@ -231,12 +231,12 @@ pub(crate) fn resolve_dependency_providers_optional(
         .map(|extensions| !extensions.is_empty())
         .unwrap_or(false)
     {
-        match extension::resolve_execution_context(component, ExtensionCapability::Deps) {
-            Ok(context) => providers.push(DependencyProvider::Extension(Box::new(
+        if let Some(context) =
+            extension::resolve_execution_context_if_available(component, ExtensionCapability::Deps)?
+        {
+            providers.push(DependencyProvider::Extension(Box::new(
                 ExtensionDependencyProvider { context },
-            ))),
-            Err(err) if providers.is_empty() => return Err(err),
-            Err(_) => {}
+            )));
         }
     }
 
