@@ -1071,6 +1071,10 @@ pub(super) fn apply_lab_contract_to_descriptor(
 }
 
 impl LabCommandContract {
+    pub const fn is_portable(self) -> bool {
+        matches!(self.portability, LabCommandPortability::Portable)
+    }
+
     pub(crate) fn into_route_contract(
         self,
         required_extensions: Vec<String>,

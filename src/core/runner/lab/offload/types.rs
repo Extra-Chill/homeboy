@@ -70,8 +70,6 @@ pub struct LabJobOverrides {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabOffloadCommand {
     pub command: crate::command_contract::LabCommandContract,
-    pub portable: bool,
-    pub unsupported_reason: Option<&'static str>,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
     pub workload: Option<crate::command_contract::LabRigWorkloadArguments>,

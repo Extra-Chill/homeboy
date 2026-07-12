@@ -447,14 +447,8 @@ pub fn lab_route_plan_from_contract(contract: LabCommandContract) -> LabRoutePla
 pub fn lab_offload_command_from_route_contract(
     route_contract: LabCommandRouteContract,
 ) -> runners::LabOffloadCommand {
-    let portability = route_contract.command.portability;
     runners::LabOffloadCommand {
         command: route_contract.command,
-        portable: matches!(portability, LabCommandPortability::Portable),
-        unsupported_reason: match portability {
-            LabCommandPortability::Portable => None,
-            LabCommandPortability::LocalOnly(reason) => Some(reason),
-        },
         required_extensions: route_contract.required_extensions,
         required_capabilities: route_contract.required_capabilities,
         workload: route_contract.workload,
@@ -643,9 +637,8 @@ mod tests {
 
         assert_eq!(command.command, lab_contract());
         assert_eq!(command.hot_label, "trace");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
-        assert_eq!(command.unsupported_reason, None);
         assert_eq!(
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired

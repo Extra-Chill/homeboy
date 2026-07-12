@@ -1441,8 +1441,6 @@ fn daemon_exec_derives_implicit_command_secret_names_before_workload_validation(
             false,
             &[],
         ),
-        portable: true,
-        unsupported_reason: None,
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,

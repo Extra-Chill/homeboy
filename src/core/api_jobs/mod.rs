@@ -820,8 +820,6 @@ mod tests {
                 false,
                 &[],
             ),
-            portable: true,
-            unsupported_reason: None,
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,

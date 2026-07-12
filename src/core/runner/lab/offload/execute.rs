@@ -63,17 +63,14 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         });
     };
 
-    if !contract.portable {
+    if let crate::command_contract::LabCommandPortability::LocalOnly(reason) = contract.portability
+    {
         if let Some(runner_id) = request.explicit_runner {
-            let message = contract.unsupported_reason.map_or_else(
-                || lab_runner_support_summary().unsupported_message,
-                |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
+            let message = format!(
+                "--runner is unavailable for this local-only resource-pressure command. {reason}"
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
-        let reason = contract
-            .unsupported_reason
-            .unwrap_or("command is local-only");
         if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(reason, None));
         }

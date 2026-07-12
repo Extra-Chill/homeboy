@@ -474,8 +474,6 @@ fn worker_local_workload_validation_uses_implicit_command_secret_names() {
                 false,
                 &[],
             ),
-            portable: true,
-            unsupported_reason: None,
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,

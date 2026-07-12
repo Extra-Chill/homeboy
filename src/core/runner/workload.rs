@@ -603,8 +603,6 @@ mod tests {
                 true,
                 &[],
             ),
-            portable: true,
-            unsupported_reason: None,
             required_extensions: vec!["browser".to_string()],
             required_capabilities: vec![RunnerWorkloadCapability {
                 name: "playwright".to_string(),

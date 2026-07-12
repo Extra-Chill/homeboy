@@ -1086,7 +1086,7 @@ fn strip_component_target_args(
 mod tests {
     use super::*;
     use clap::Parser;
-    use homeboy::command_contract::lab_runner_supports_contract_label;
+    use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
     use std::fs;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -1228,8 +1228,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "review lint");
-        assert!(command.portable);
-        assert!(command.unsupported_reason.is_none());
+        assert!(command.is_portable());
     }
 
     #[test]
@@ -1278,8 +1277,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "review lint");
-        assert!(command.portable);
-        assert!(command.unsupported_reason.is_none());
+        assert!(command.is_portable());
     }
 
     #[test]
@@ -1331,8 +1329,7 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "review test");
-        assert!(command.portable);
-        assert!(command.unsupported_reason.is_none());
+        assert!(command.is_portable());
     }
 
     #[test]
@@ -1977,7 +1974,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "rig check");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
         assert!(!command.routing_policy.infer_source_path_tools);
         assert!(cli.command.supports_lab_runner());
@@ -2018,7 +2015,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "rig check");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
         assert!(!command.routing_policy.infer_source_path_tools);
     }
@@ -2030,8 +2027,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "review lint");
-        assert!(command.portable);
-        assert!(command.unsupported_reason.is_none());
+        assert!(command.is_portable());
         assert!(command.routing_policy.requires_extension_parity);
     }
 
@@ -2049,9 +2045,8 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "extension update");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
-        assert!(command.unsupported_reason.is_none());
         assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.routing_policy.infer_source_path_tools);
@@ -2076,9 +2071,8 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "extension refresh");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
-        assert!(command.unsupported_reason.is_none());
         assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.routing_policy.infer_source_path_tools);
@@ -2117,9 +2111,8 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "extension show");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
-        assert!(command.unsupported_reason.is_none());
         assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
         assert!(!command.routing_policy.infer_source_path_tools);
@@ -2150,7 +2143,7 @@ mod tests {
         assert!(local_policy.deny_local_execution());
         assert_eq!(command.hot_label, "fuzz doctor");
         assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
         assert!(command.routing_policy.requires_extension_parity);
         assert!(command.routing_policy.read_only_polling);
@@ -2372,7 +2365,7 @@ mod tests {
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert!(lab_runner_supports_contract_label(command.hot_label));
-            assert!(command.portable);
+            assert!(command.is_portable());
             assert!(command.routing_policy.default_lab_offload);
         }
     }
@@ -2391,7 +2384,7 @@ mod tests {
             "cargo test --locked",
         ]);
         let automatic_command = lab_offload_command(&automatic.command).unwrap().unwrap();
-        assert!(automatic_command.portable);
+        assert!(automatic_command.is_portable());
         assert!(automatic_command.routing_policy.default_lab_offload);
 
         let explicit = Cli::parse_from([
@@ -2409,7 +2402,7 @@ mod tests {
         ]);
         let explicit_command = lab_offload_command(&explicit.command).unwrap().unwrap();
         assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
-        assert!(explicit_command.portable);
+        assert!(explicit_command.is_portable());
 
         let lab_only = Cli::parse_from([
             "homeboy",
@@ -2428,12 +2421,10 @@ mod tests {
             lab_only.allow_local_fallback,
             lab_only.lab_only,
         );
-        assert!(
-            lab_offload_command(&lab_only.command)
-                .unwrap()
-                .unwrap()
-                .portable
-        );
+        assert!(lab_offload_command(&lab_only.command)
+            .unwrap()
+            .unwrap()
+            .is_portable());
         assert!(local_policy.deny_local_execution());
     }
 
@@ -2451,7 +2442,7 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(lab_runner_supports_contract_label(command.hot_label));
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
         assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
@@ -2486,7 +2477,7 @@ mod tests {
             command.hot_label,
             "agent-task controller from-spec --resume/run-from-spec/materialize"
         );
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
         assert!(!command.routing_policy.requires_extension_parity);
         assert_eq!(
@@ -2536,7 +2527,7 @@ mod tests {
                 command.hot_label,
                 "agent-task controller from-spec --resume/run-from-spec/materialize"
             );
-            assert!(command.portable);
+            assert!(command.is_portable());
             assert!(command.routing_policy.default_lab_offload);
             assert!(command.routing_policy.infer_source_path_tools);
             assert!(!command.routing_policy.requires_extension_parity);
@@ -2604,7 +2595,7 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(local_policy.deny_local_execution());
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
         assert!(command.routing_policy.requires_extension_parity);
     }
@@ -2638,7 +2629,7 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(local_policy.deny_local_execution());
         assert_eq!(command.hot_label, "agent-task fanout cook-batch");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
         assert!(command.routing_policy.requires_extension_parity);
     }
@@ -2671,7 +2662,7 @@ mod tests {
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert_eq!(command.hot_label, "agent-task fanout status/artifacts");
-            assert!(command.portable);
+            assert!(command.is_portable());
             assert!(!command.routing_policy.default_lab_offload);
             assert_eq!(
                 command.source_path_mode,
@@ -2707,7 +2698,7 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "tunnel service start");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
         assert_eq!(
             command.source_path_mode,
@@ -2740,7 +2731,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "tunnel preview-consumer run");
-        assert!(command.portable);
+        assert!(command.is_portable());
         assert!(!command.routing_policy.default_lab_offload);
     }
 
@@ -2751,8 +2742,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "review audit");
-        assert!(command.portable);
-        assert_eq!(command.unsupported_reason, None);
+        assert!(command.is_portable());
         assert!(command.routing_policy.requires_extension_parity);
     }
 
@@ -2763,8 +2753,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "review audit");
-        assert!(command.portable);
-        assert_eq!(command.unsupported_reason, None);
+        assert!(command.is_portable());
         assert!(command.routing_policy.requires_extension_parity);
     }
 
@@ -2775,8 +2764,10 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(command.hot_label, "rig up");
-        assert!(!command.portable);
-        assert!(command.unsupported_reason.is_some());
+        assert!(matches!(
+            command.portability,
+            LabCommandPortability::LocalOnly(_)
+        ));
         assert!(!command.routing_policy.requires_extension_parity);
     }
 

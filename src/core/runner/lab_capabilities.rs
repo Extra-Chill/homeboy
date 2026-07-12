@@ -7,7 +7,7 @@ pub(super) fn lab_runner_capability_contract(
     source_path: &Path,
     command_prefix_required_tools: &[RunnerRequiredTool],
 ) -> Option<LabRunnerCapabilityContract> {
-    if !command.portable {
+    if !command.is_portable() {
         return None;
     }
 
