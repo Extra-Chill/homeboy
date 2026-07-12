@@ -789,11 +789,74 @@ pub(super) fn agent_task_provider_runtime_component_extra_workspaces(
     Ok(workspaces)
 }
 
-pub(super) fn path_setting_extra_workspaces(
-    args: &[String],
-    source_path: &Path,
-) -> Result<Vec<ExtraLabWorkspace>> {
-    path_values_extra_workspaces(path_setting_values(args), source_path, "path_setting")
+pub(super) fn declared_path_input_values(args: &[String], path_inputs: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    for input in path_inputs {
+        values.extend(if input.starts_with("--") {
+            values_for_declared_path_flag(args, input)
+        } else {
+            values_for_declared_setting_path(args, input)
+        });
+    }
+    values
+}
+
+fn values_for_declared_path_flag(args: &[String], flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            if let Some(value) = iter.peek() {
+                values.push((*value).to_string());
+            }
+        } else if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
+fn values_for_declared_setting_path(args: &[String], setting_path: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        let (raw, json) = if arg == "--setting" || arg == "--setting-json" {
+            let json = arg == "--setting-json";
+            let Some(raw) = iter.next() else { continue };
+            (raw.as_str(), json)
+        } else if let Some(raw) = arg.strip_prefix("--setting=") {
+            (raw, false)
+        } else if let Some(raw) = arg.strip_prefix("--setting-json=") {
+            (raw, true)
+        } else {
+            continue;
+        };
+        let Some((key, value)) = raw.split_once('=') else {
+            continue;
+        };
+        if key == setting_path {
+            values.push(value.to_string());
+        } else if json {
+            let Some(suffix) = setting_path
+                .strip_prefix(key)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+            else {
+                continue;
+            };
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+                if let Some(current) = suffix
+                    .split('.')
+                    .try_fold(&parsed, |current, segment| current.get(segment))
+                {
+                    collect_path_setting_json_values(current, &mut values);
+                }
+            }
+        }
+    }
+    values
 }
 
 pub(super) fn path_values_extra_workspaces(
@@ -1275,7 +1338,7 @@ fn fanout_workspace_candidate_path(value: &str, source_path: &Path) -> Option<Pa
         .filter(|path| path.is_dir())
 }
 
-fn path_setting_values(args: &[String]) -> Vec<String> {
+pub(super) fn path_setting_values(args: &[String]) -> Vec<String> {
     let mut values = Vec::new();
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -1537,9 +1600,10 @@ mod provider_config_candidate_paths_tests {
 
     use super::{
         agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
-        extension_source_extra_workspaces, path_setting_extra_workspaces, path_setting_values,
-        preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
-        provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
+        declared_path_input_values, extension_source_extra_workspaces, path_setting_values,
+        path_values_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+        provider_config_candidate_paths, provider_config_extra_workspaces,
+        resolve_path_setting_workspace_refs_in_args,
         rig_component_path_env_extra_workspaces_from_entries,
         runtime_refresh_source_extra_workspaces, workspace_mapping_entries_for_git_dependency,
         workspace_ref_extra_workspaces, ExtraLabWorkspace,
@@ -2056,7 +2120,9 @@ mod provider_config_candidate_paths_tests {
             format!("tool_bin={}", tool_bin.display()),
         ];
 
-        let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
+        let workspaces =
+            path_values_extra_workspaces(path_setting_values(&args), &source, "path_setting")
+                .expect("workspaces");
 
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].role, "path_setting");
@@ -2103,11 +2169,44 @@ mod provider_config_candidate_paths_tests {
             ),
         ];
 
-        let workspaces = path_setting_extra_workspaces(&args, &source).expect("workspaces");
+        let workspaces =
+            path_values_extra_workspaces(path_setting_values(&args), &source, "path_setting")
+                .expect("workspaces");
 
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].role, "path_setting");
         assert_eq!(workspaces[0].path, transformer_root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn declared_path_inputs_preserve_early_late_alias_and_json_subpaths() {
+        let inputs = vec![
+            "bench_env.fixtures.roots".to_string(),
+            "--fixture-root".to_string(),
+        ];
+        let args = |alias: &str| {
+            vec![
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--setting-json".to_string(),
+                format!(r#"bench_env={{"fixtures":{{"roots":["{alias}/one","{alias}/two"]}}}}"#),
+                "--".to_string(),
+                "--fixture-root".to_string(),
+                format!("{alias}/passthrough"),
+            ]
+        };
+
+        let early = declared_path_input_values(&args("/controller/workspace"), &inputs);
+        let late = declared_path_input_values(&args("/runner/workspace"), &inputs);
+
+        assert_eq!(early.len(), 3);
+        assert_eq!(
+            late,
+            early
+                .iter()
+                .map(|value| value.replace("/controller/workspace", "/runner/workspace"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
