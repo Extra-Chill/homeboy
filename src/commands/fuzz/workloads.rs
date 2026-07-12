@@ -91,28 +91,12 @@ pub(super) fn resolve_component_id(
     comp: &PositionalComponentArgs,
     rig_spec: Option<&RigSpec>,
 ) -> homeboy::core::Result<String> {
-    if let Some(id) = comp.id() {
-        return Ok(id.to_string());
-    }
-
     if let Some(spec) = rig_spec {
-        if let Some(default) = spec
-            .fuzz
-            .as_ref()
-            .and_then(|fuzz| fuzz.default_component.as_deref())
-        {
-            return Ok(default.to_string());
-        }
-
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "fuzz.default_component",
-            format!(
-                "rig '{}' does not declare fuzz.default_component; pass a component id or add fuzz.default_component to the rig spec",
-                spec.id
-            ),
-            None,
-            None,
-        ));
+        return rig::required_component_id_for_workload(
+            spec,
+            rig::RigWorkloadKind::Fuzz,
+            comp.id(),
+        );
     }
 
     comp.resolve_id()
