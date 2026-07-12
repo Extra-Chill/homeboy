@@ -432,6 +432,16 @@ const fn guarded_safety(dangerous_flags: &'static [&'static str]) -> CommandSafe
     }
 }
 
+const fn guarded_mutating_safety(dangerous_flags: &'static [&'static str]) -> CommandSafetySpec {
+    CommandSafetySpec {
+        mutates: true,
+        operator: false,
+        dry_run_flag: None,
+        risk_exemption: None,
+        dangerous_flags,
+    }
+}
+
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
@@ -482,6 +492,25 @@ const SERVER_OPERATOR_PATHS: &[&str] = &[
     "key use",
     "key unset",
 ];
+const CONFIG_MUTATING_PATHS: &[&str] = &["set", "remove", "reset"];
+const PROJECT_MUTATING_PATHS: &[&str] = &[
+    "create",
+    "set",
+    "remove",
+    "rename",
+    "delete",
+    "init",
+    "components set",
+    "components attach-path",
+    "components remove",
+    "components clear",
+    "pin add",
+    "pin remove",
+    "pin rename",
+    "pin update",
+];
+const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename", "setup"];
+const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -539,6 +568,22 @@ const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_withou
     SERVER_OPERATOR_PATHS,
     operator_safety(None, &[]),
 )];
+const CONFIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
+    CONFIG_MUTATING_PATHS,
+    mutating_safety(),
+)];
+const PROJECT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
+    PROJECT_MUTATING_PATHS,
+    mutating_safety(),
+)];
+const COMPONENT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety_without_notes(COMPONENT_MUTATING_PATHS, mutating_safety()),
+    paths_safety(
+        COMPONENT_GUARDED_PATHS,
+        guarded_mutating_safety(&["--apply"]),
+        "default output is non-mutating; pass --apply to repair or remove artifacts",
+    ),
+];
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -556,7 +601,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             AGENT_TASK_LAB_SUPPORT,
         ),
     ),
-    command_spec("project", CommandJsonFamily::Workspace),
+    CommandSpec {
+        subcommand_safety: PROJECT_SUBCOMMAND_SAFETY,
+        ..command_spec("project", CommandJsonFamily::Workspace)
+    },
     command_spec("ssh", CommandJsonFamily::Ops),
     CommandSpec {
         subcommand_safety: SERVER_SUBCOMMAND_SAFETY,
@@ -621,8 +669,14 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Ops,
         operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS),
     ),
-    command_spec("component", CommandJsonFamily::Workspace),
-    command_spec("config", CommandJsonFamily::Workspace),
+    CommandSpec {
+        subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY,
+        ..command_spec("component", CommandJsonFamily::Workspace)
+    },
+    CommandSpec {
+        subcommand_safety: CONFIG_SUBCOMMAND_SAFETY,
+        ..command_spec("config", CommandJsonFamily::Workspace)
+    },
     command_spec_with_output_notes(
         "contract",
         CommandJsonFamily::Workspace,
