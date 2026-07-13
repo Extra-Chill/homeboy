@@ -86,11 +86,11 @@ For runner, static HTML, and matrix workflows, publish stdout and generated file
 When an evidence command depends on a fixture file that only exists on the controller filesystem, run it intentionally on the controller instead of letting automatic Lab routing move the command to a runner:
 
 ```bash
-homeboy --force-hot --allow-local-hot --output homeboy-results/fixture.json \
+homeboy --placement local --output homeboy-results/fixture.json \
   <hot-command> --fixture /absolute/path/to/local.fixture
 ```
 
-Use this for one-off local fixture proof where the fixture is not committed, not synced as a declared path input, and not materialized by the command's Lab contract. The JSON evidence records `resource_policy.runner_selection.reason`; expect `force_hot_local` for intentional local fixture runs, `default_lab_runner` for automatic Lab routing, and `local_no_default_runner` when no default Lab runner was selected.
+Use this for one-off local fixture proof where the fixture is not committed, not synced as a declared path input, and not materialized by the command's Lab contract. The JSON evidence records `resource_policy.runner_selection.reason`; expect `placement_local_override` for intentional local fixture runs, `default_lab_runner` for automatic Lab routing, and `local_no_default_runner` when no default Lab runner was selected.
 
 For repeatable PR evidence, prefer committing the fixture or declaring the path input so Lab can materialize it generically. Use `--runner <id>` only when the fixture path is portable to that runner or the command contract materializes it.
 

@@ -71,7 +71,7 @@ pub struct HomeboyConfig {
     /// Release-gate routing safety policy.
     ///
     /// Controls whether release-gate hot commands (lint/test/audit) may be
-    /// bypassed to local execution via `--force-hot --allow-local-hot` or a
+    /// bypassed to local execution through explicit placement or a
     /// stale-runner local fallback when a default Lab runner is configured.
     /// See issues #4603 / #4605.
     #[serde(default)]

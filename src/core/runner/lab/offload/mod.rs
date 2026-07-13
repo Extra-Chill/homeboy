@@ -35,8 +35,8 @@ mod tests;
 // Public API surface.
 pub use execute::execute_lab_offload;
 pub use types::{
-    LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand, LabOffloadOutcome,
-    LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
+    LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
+    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
 };
 
 // Shared external imports, re-exported so submodules can pull them via

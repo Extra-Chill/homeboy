@@ -282,7 +282,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
             .to_string(),
         vec!["Install Playwright and browser binaries on the runner.".to_string()],
         false,
-        false,
+        crate::cli_surface::Placement::Auto,
         &overhead,
     );
 
@@ -325,7 +325,7 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
             .to_string(),
         Vec::new(),
         true,
-        false,
+        crate::cli_surface::Placement::Auto,
         &overhead,
     )
     .expect("explicit fallback opt-in should allow local run");
@@ -364,8 +364,8 @@ fn plan_records_skipped_auto_offload() {
         command: Some(portable_lab_command("test")),
         normalized_args: &["homeboy".to_string(), "test".to_string()],
         explicit_runner: None,
-        force_hot: true,
-        local_policy: LabLocalExecutionPolicy::from_flags(true, false, false),
+        placement: crate::cli_surface::Placement::Local,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,
@@ -380,7 +380,7 @@ fn plan_records_skipped_auto_offload() {
     .expect("outcome");
 
     let LabOffloadOutcome::RunLocal { plan, metadata, .. } = outcome else {
-        panic!("force-hot should run locally");
+        panic!("local placement should run locally");
     };
     assert_eq!(plan.kind, PlanKind::LabOffload);
     assert_eq!(plan.steps[0].id, "lab.select_runner");
@@ -389,13 +389,13 @@ fn plan_records_skipped_auto_offload() {
 }
 
 #[test]
-fn lab_only_refuses_local_execution_without_lab_contract() {
+fn lab_placement_refuses_local_execution_without_lab_contract() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: None,
         normalized_args: &["homeboy".to_string(), "status".to_string()],
         explicit_runner: None,
-        force_hot: false,
-        local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+        placement: crate::cli_surface::Placement::Lab,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,
@@ -409,14 +409,14 @@ fn lab_only_refuses_local_execution_without_lab_contract() {
     });
 
     let Err(err) = outcome else {
-        panic!("lab-only should refuse local execution");
+        panic!("Lab placement should refuse local execution");
     };
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("Lab-only execution refused"));
+    assert!(err.message.contains("Lab placement refused"));
 }
 
 #[test]
-fn lab_only_refuses_local_only_rig_install_with_actionable_boundary() {
+fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
     let reason = crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: Some(local_only_lab_command(reason)),
@@ -427,8 +427,8 @@ fn lab_only_refuses_local_only_rig_install_with_actionable_boundary() {
             "./rig-package".to_string(),
         ],
         explicit_runner: None,
-        force_hot: false,
-        local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+        placement: crate::cli_surface::Placement::Lab,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,
@@ -442,7 +442,7 @@ fn lab_only_refuses_local_only_rig_install_with_actionable_boundary() {
     });
 
     let Err(err) = outcome else {
-        panic!("rig install --lab-only should fail before local execution");
+        panic!("rig install with Lab placement should fail before local execution");
     };
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert!(err.message.contains("rig install"));
@@ -462,8 +462,8 @@ fn build_runner_error_gives_managed_runner_replacement() {
             "homeboy".to_string(),
         ],
         explicit_runner: Some("homeboy-lab"),
-        force_hot: false,
-        local_policy: LabLocalExecutionPolicy::default(),
+        placement: crate::cli_surface::Placement::Auto,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,
@@ -497,7 +497,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
 }
 
 #[test]
-fn build_lab_only_error_gives_managed_runner_replacement() {
+fn build_lab_placement_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: None,
         normalized_args: &[
@@ -506,8 +506,8 @@ fn build_lab_only_error_gives_managed_runner_replacement() {
             "homeboy".to_string(),
         ],
         explicit_runner: None,
-        force_hot: false,
-        local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+        placement: crate::cli_surface::Placement::Lab,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,
@@ -521,7 +521,7 @@ fn build_lab_only_error_gives_managed_runner_replacement() {
     });
 
     let Err(err) = outcome else {
-        panic!("build --lab-only should fail before local execution");
+        panic!("build with Lab placement should fail before local execution");
     };
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert!(err
@@ -552,8 +552,8 @@ fn unsupported_runner_error_guides_tunnel_service_inspection() {
             "wpcom-ai-manual-held".to_string(),
         ],
         explicit_runner: Some("homeboy-lab"),
-        force_hot: false,
-        local_policy: LabLocalExecutionPolicy::default(),
+        placement: crate::cli_surface::Placement::Auto,
+        allow_local_fallback: false,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
         capture_patch: false,

@@ -19,8 +19,7 @@ These are provided by clap:
 - `--version` / `-V`: print version and exit
 - `--help` / `-h`: print help and exit
 - `--output <PATH>`: write the structured JSON envelope to a file in addition to stdout
-- `--force-hot`: suppress resource policy warnings for intentionally hot commands
-- `--allow-local-hot`: allow `--force-hot` portable Lab commands to run locally when a default Lab runner exists
+- `--placement <auto|local|lab>`: select automatic placement, intentional controller execution, or required Lab execution
 - `--artifact-root <DIR>`: copy persisted run artifacts to a specific directory
 - `--runner <RUNNER_ID>`: route commands with portable Lab offload support to a connected Homeboy Lab runner
 - `--allow-local-fallback`: permit a selected Lab runner to fall back to local execution after offload preflight fails
@@ -40,8 +39,9 @@ hot commands fail fast unless the work is routed through Lab/runner-hosted
 execution or the caller explicitly accepts local pressure. For portable hot
 commands with a default Lab runner, including controller spec materialization
 commands, Homeboy auto-selects the default runner when `--runner` is omitted.
-`--force-hot` does not implicitly keep execution local; add `--allow-local-hot`
-only when local controller-machine execution is intentional.
+Use `--placement local` only when controller-machine execution is intentional;
+use `--placement lab` when local fallback is unacceptable. Removed placement
+flags are rejected with a migration error; Homeboy provides no legacy support.
 
 Not every hot command is offloadable. Lab offload only applies to commands with
 a portable runner contract; local-only hot commands keep running locally and

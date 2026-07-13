@@ -259,7 +259,7 @@ fn required_git_checkout_preflight_rejects_dirty_checkout() {
         .is_some_and(|hint| hint.contains("Commit or stash"))));
     assert!(!tried.iter().any(|hint| hint
         .as_str()
-        .is_some_and(|hint| hint.contains("--force-hot"))));
+        .is_some_and(|hint| hint.contains("--placement local"))));
 }
 
 #[test]

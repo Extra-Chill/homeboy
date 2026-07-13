@@ -96,8 +96,6 @@ fn release_gate_component_not_found_adds_runner_registry_repair_hint() {
         "homeboy runner exec homeboy-lab -- homeboy component create --local-path /home/lab/Developer/frontend-agent-chat"
     ));
     assert!(stderr.contains("homeboy runner exec homeboy-lab -- homeboy component list"));
-    assert!(!stderr.contains("--force-hot"));
-    assert!(!stderr.contains("--allow-local-hot"));
 }
 
 #[test]

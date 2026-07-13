@@ -912,7 +912,6 @@ mod tests {
             command,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--rig".to_string(),
                 "fixture-matrix".to_string(),
@@ -951,7 +950,6 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--extension".to_string(),
                 "wordpress".to_string(),
@@ -1007,7 +1005,6 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy-patched".to_string(),
-                "--force-hot".to_string(),
                 "fuzz".to_string(),
                 "run".to_string(),
                 "--rig".to_string(),
@@ -1063,7 +1060,6 @@ mod tests {
                 command,
                 vec![
                     "/runner/bin/homeboy".to_string(),
-                    "--force-hot".to_string(),
                     "bench".to_string(),
                     "--extension".to_string(),
                     "wordpress".to_string(),
@@ -1144,7 +1140,6 @@ mod tests {
                 command,
                 vec![
                     "/runner/bin/homeboy".to_string(),
-                    "--force-hot".to_string(),
                     "bench".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
@@ -1237,7 +1232,6 @@ mod tests {
                 command,
                 vec![
                     "/runner/bin/homeboy".to_string(),
-                    "--force-hot".to_string(),
                     "bench".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
@@ -1324,7 +1318,6 @@ mod tests {
                 command,
                 vec![
                     "/runner/bin/homeboy".to_string(),
-                    "--force-hot".to_string(),
                     "fuzz".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
@@ -1397,7 +1390,6 @@ mod tests {
                 command,
                 vec![
                     "/runner/bin/homeboy".to_string(),
-                    "--force-hot".to_string(),
                     "fuzz".to_string(),
                     "--extension".to_string(),
                     "nodejs".to_string(),
@@ -1437,7 +1429,6 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--extension".to_string(),
                 "wordpress".to_string(),
@@ -1479,7 +1470,6 @@ mod tests {
             command,
             vec![
                 "/runner/bin/homeboy",
-                "--force-hot",
                 "agent-task",
                 "cook",
                 "--to-worktree",
@@ -1633,7 +1623,6 @@ mod tests {
             command,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--setting".to_string(),
                 "bench_env.CONFIG_DIR=/runner/workspaces/toolkit/config/matrix".to_string(),
@@ -1667,7 +1656,8 @@ mod tests {
             requested_source.display().to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
             "--rig".to_string(),
             "static-site-importer-fixture-matrix".to_string(),
             "--".to_string(),
@@ -1689,7 +1679,6 @@ mod tests {
             command,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "static-site-importer".to_string(),
                 "--path".to_string(),
@@ -1838,7 +1827,6 @@ mod tests {
             command,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "static-site-importer".to_string(),
                 "--rig".to_string(),
@@ -1873,7 +1861,6 @@ mod tests {
             command,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "static-site-importer".to_string(),
                 "--shared-state".to_string(),
@@ -2122,8 +2109,8 @@ mod tests {
                 command: None,
                 normalized_args: &args,
                 explicit_runner: Some("lab-controller-bundle-stage"),
-                force_hot: false,
-                local_policy: LabLocalExecutionPolicy::from_flags(false, false, false),
+                placement: crate::cli_surface::Placement::Auto,
+                allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
                 capture_patch: false,

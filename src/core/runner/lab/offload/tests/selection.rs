@@ -1,14 +1,29 @@
 use super::*;
-use crate::core::runner::set_runner_lab_handoff_active_for_test;
+
+fn select(
+    command: &LabOffloadCommand,
+    explicit_runner: Option<&str>,
+    placement: crate::cli_surface::Placement,
+    deny_local_bench: bool,
+    release_gate_local_allowed: bool,
+    default_runner: Option<String>,
+) -> Result<Option<LabRunnerSelection>> {
+    resolve_lab_runner_selection_from_placement(
+        command,
+        explicit_runner,
+        placement,
+        deny_local_bench,
+        release_gate_local_allowed,
+        default_runner,
+    )
+}
 
 #[test]
-fn lab_runner_selection_keeps_explicit_runner_precedence() {
-    let command = portable_lab_command("test");
-    let selection = resolve_lab_runner_selection_from_default(
-        &command,
+fn explicit_runner_has_precedence_over_placement() {
+    let selection = select(
+        &portable_lab_command("test"),
         Some("lab-explicit"),
-        false,
-        false,
+        crate::cli_surface::Placement::Local,
         false,
         false,
         Some("lab-default".to_string()),
@@ -21,32 +36,11 @@ fn lab_runner_selection_keeps_explicit_runner_precedence() {
 }
 
 #[test]
-fn lab_runner_selection_force_hot_keeps_explicit_runner_precedence() {
-    let command = portable_lab_command("test");
-    let selection = resolve_lab_runner_selection_from_default(
-        &command,
-        Some("lab-explicit"),
-        true,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection")
-    .expect("explicit runner selected");
-
-    assert_eq!(selection.runner_id, "lab-explicit");
-    assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
-}
-
-#[test]
-fn lab_runner_selection_uses_default_for_supported_commands() {
-    let command = portable_lab_command("test");
-    let selection = resolve_lab_runner_selection_from_default(
-        &command,
+fn auto_uses_the_ready_default_runner_for_supported_commands() {
+    let selection = select(
+        &portable_lab_command("test"),
         None,
-        false,
-        false,
+        crate::cli_surface::Placement::Auto,
         false,
         false,
         Some("lab-default".to_string()),
@@ -59,350 +53,134 @@ fn lab_runner_selection_uses_default_for_supported_commands() {
 }
 
 #[test]
-fn lab_runner_availability_error_reports_busy_selected_runner() {
-    let selected = RunnerAvailability {
-        runner_id: "lab-busy".to_string(),
-        connected: true,
-        accepts_jobs: false,
-        active_job_count: 2,
-        capacity: Some(2),
-        reasons: vec!["capacity_reached".to_string()],
-    };
-
-    let err = lab_runner_availability_error("bench", Some(&selected), vec![selected.clone()]);
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("lab-busy"));
-    assert_eq!(err.details["field"], "runner");
-    assert_eq!(err.details["id"], "lab-busy");
-    assert_eq!(
-        err.details["runner_availability"]["selected"],
-        serde_json::json!(selected)
-    );
-    assert_eq!(
-        err.details["runner_availability"]["reasons"],
-        serde_json::json!(["capacity_reached"])
-    );
-    assert!(err.details["tried"].as_array().is_some_and(|tried| tried
-        .iter()
-        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("--runner")))));
+fn local_placement_skips_default_runner_selection() {
+    assert!(select(
+        &portable_lab_command("test"),
+        None,
+        crate::cli_surface::Placement::Local,
+        false,
+        false,
+        Some("lab-default".to_string()),
+    )
+    .expect("selection")
+    .is_none());
 }
 
 #[test]
-fn lab_runner_availability_error_reports_no_available_runner_json_shape() {
-    let eligible = vec![
-        RunnerAvailability {
-            runner_id: "lab-a".to_string(),
-            connected: true,
-            accepts_jobs: false,
-            active_job_count: 1,
-            capacity: Some(1),
-            reasons: vec!["capacity_reached".to_string()],
-        },
-        RunnerAvailability {
-            runner_id: "lab-b".to_string(),
-            connected: true,
-            accepts_jobs: false,
-            active_job_count: 1,
-            capacity: None,
-            reasons: vec!["capacity_unknown".to_string()],
-        },
-    ];
+fn lab_placement_requires_a_portable_command_and_runner() {
+    let error = select(
+        &portable_lab_command("test"),
+        None,
+        crate::cli_surface::Placement::Lab,
+        false,
+        false,
+        None,
+    )
+    .expect_err("Lab placement must fail closed without a runner");
 
-    let err = lab_runner_availability_error("test", None, eligible.clone());
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error.message.contains("--placement lab requires"));
+}
 
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
+#[test]
+fn local_placement_obeys_bench_and_release_gates() {
+    let bench_error = select(
+        &portable_lab_command("bench"),
+        None,
+        crate::cli_surface::Placement::Local,
+        true,
+        false,
+        None,
+    )
+    .expect_err("bench policy blocks local placement");
+    assert!(bench_error.message.contains("/bench/local_execution"));
+
+    let release_error = select(
+        &release_gate_lab_command("lint"),
+        None,
+        crate::cli_surface::Placement::Local,
+        false,
+        false,
+        Some("lab-default".to_string()),
+    )
+    .expect_err("release gate blocks local placement");
+    assert!(release_error.message.contains("Release gate `lint`"));
+}
+
+#[test]
+fn release_gate_can_explicitly_allow_local_placement() {
+    assert!(select(
+        &release_gate_lab_command("test"),
+        None,
+        crate::cli_surface::Placement::Local,
+        false,
+        true,
+        Some("lab-default".to_string()),
+    )
+    .expect("selection")
+    .is_none());
+}
+
+#[test]
+fn busy_default_runner_allows_normal_auto_work_to_stay_local() {
+    let command = portable_lab_command("test");
+    assert!(select(
+        &command,
+        None,
+        crate::cli_surface::Placement::Auto,
+        false,
+        false,
+        None,
+    )
+    .expect("no available default runner leaves ordinary auto work local")
+    .is_none());
+
+    let busy = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+    assert!(fail_if_no_default_runner_accepts_jobs_with(&command, vec![busy]).is_ok());
+}
+
+#[test]
+fn busy_default_runner_fails_closed_for_release_gate() {
+    let busy = RunnerAvailability::from_status_parts(
+        "homeboy-lab",
+        true,
+        false,
+        1,
+        &RunnerActiveJobState::Available,
+        Some(1),
+    );
+
+    let err = fail_if_no_default_runner_accepts_jobs_with(
+        &release_gate_lab_command("review"),
+        vec![busy],
+    )
+    .expect_err("release gates must not become local when Lab is full");
+
     assert!(err.message.contains("none can accept jobs"));
-    assert_eq!(err.details["field"], "runner");
-    assert!(err.details["id"].is_null());
-    assert!(err.details["runner_availability"]["selected"].is_null());
     assert_eq!(
-        err.details["runner_availability"]["eligible"],
-        serde_json::json!(eligible)
-    );
-    assert_eq!(
-        err.details["runner_availability"]["reasons"],
-        serde_json::json!(["capacity_reached", "capacity_unknown"])
+        err.details["runner_availability"]["reasons"][0],
+        "capacity_reached"
     );
 }
 
 #[test]
-fn lab_runner_selection_ignores_default_when_auto_offload_is_disabled() {
-    let mut command = portable_lab_command("extension update");
-    command.routing_policy.default_lab_offload = false;
-
-    let selection = resolve_lab_runner_selection_from_default(
-        &command,
+fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
+    let error = select(
+        &portable_lab_command("test"),
         None,
+        crate::cli_surface::Placement::Lab,
         false,
         false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection");
-
-    assert!(selection.is_none());
-}
-
-#[test]
-fn lab_runner_selection_honors_explicit_runner_when_auto_offload_is_disabled() {
-    let mut command = portable_lab_command("extension update");
-    command.routing_policy.default_lab_offload = false;
-
-    let selection = resolve_lab_runner_selection_from_default(
-        &command,
-        Some("lab-explicit"),
-        false,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection")
-    .expect("explicit runner selected");
-
-    assert_eq!(selection.runner_id, "lab-explicit");
-    assert_eq!(selection.source, LabRunnerSelectionSource::Explicit);
-}
-
-#[test]
-fn lab_runner_selection_runs_locally_without_default_runner() {
-    let command = portable_lab_command("test");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command, None, false, false, false, false, None
-    )
-    .expect("selection")
-    .is_none());
-}
-
-#[test]
-fn lab_runner_selection_force_hot_refuses_local_when_default_runner_exists() {
-    let command = portable_lab_command("test");
-
-    let err = resolve_lab_runner_selection_from_default(
-        &command,
         None,
-        true,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
     )
-    .expect_err("force-hot should require explicit local override");
+    .expect_err("explicit Lab placement fails closed");
 
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err
-        .message
-        .contains("--force-hot would run portable hot command"));
-    assert!(err.message.contains("lab-default"));
-    let tried = err.details["tried"].as_array().expect("tried");
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("--allow-local-hot"))));
-}
-
-#[test]
-fn lab_runner_selection_force_hot_runs_locally_without_default_runner() {
-    let command = portable_lab_command("test");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command, None, true, false, false, false, None
-    )
-    .expect("selection")
-    .is_none());
-}
-
-#[test]
-fn lab_runner_selection_rejects_allow_local_hot_without_force_hot() {
-    let command = portable_lab_command("rig check");
-
-    let err = resolve_lab_runner_selection_from_default(
-        &command,
-        None,
-        false,
-        true,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect_err("allow-local-hot alone must not silently auto-offload");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("--allow-local-hot only permits"));
-    assert!(err.message.contains("--force-hot"));
-    assert!(err.message.contains("automatic Lab offload"));
-    let tried = err.details["tried"].as_array().expect("tried");
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("--force-hot --allow-local-hot"))));
-}
-
-#[test]
-fn lab_runner_selection_allow_local_hot_overrides_default_runner_gate() {
-    let command = portable_lab_command("test");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command,
-        None,
-        true,
-        true,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection")
-    .is_none());
-}
-
-#[test]
-fn lab_runner_selection_does_not_reoffload_runner_handoffs() {
-    set_runner_lab_handoff_active_for_test(true);
-
-    let agent_task = resolve_lab_runner_selection_from_default(
-        &portable_lab_command("agent-task cook"),
-        None,
-        false,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    );
-    let release_gate = resolve_lab_runner_selection_from_default(
-        &release_gate_lab_command("release-gate"),
-        None,
-        false,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    );
-
-    set_runner_lab_handoff_active_for_test(false);
-
-    assert!(
-        agent_task.expect("agent task selection").is_none(),
-        "agent task stays on the accepting runner"
-    );
-    assert!(
-        release_gate.expect("release gate selection").is_none(),
-        "release gate stays on the accepting runner"
-    );
-}
-
-#[test]
-fn lab_runner_selection_explains_hot_commands_that_stay_local() {
-    let err = resolve_lab_runner_selection_from_default(
-        &local_only_lab_command("current single-workspace Lab snapshot cannot safely mirror"),
-        Some("lab-explicit"),
-        false,
-        false,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect_err("rig up rejects explicit runner");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("single-workspace Lab snapshot"));
-}
-
-#[test]
-fn lab_runner_selection_denies_local_bench_when_host_policy_requires_lab() {
-    let command = portable_lab_command("bench");
-
-    let err =
-        resolve_lab_runner_selection_from_default(&command, None, true, true, true, false, None)
-            .expect_err("bench local execution should be denied by config policy");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("/bench/local_execution"));
-    assert!(err.message.contains("denied"));
-    let tried = err.details["tried"].as_array().expect("tried");
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("--runner <runner-id>"))));
-}
-
-#[test]
-fn release_gate_force_hot_allow_local_hot_fails_closed_with_default_runner() {
-    // #4605: --force-hot --allow-local-hot must not silently bypass Lab
-    // routing for a release gate when a default runner is configured.
-    let command = release_gate_lab_command("lint");
-
-    let err = resolve_lab_runner_selection_from_default(
-        &command,
-        None,
-        true,
-        true,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect_err("release gate force-local bypass must fail closed");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("Release gate `lint`"));
-    assert!(err.message.contains("--force-hot --allow-local-hot"));
-    assert!(err.message.contains("lab-default"));
-    assert!(err.message.contains("/release_gate/local_hot"));
-    let tried = err.details["tried"].as_array().expect("tried");
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("/release_gate/local_hot"))));
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("HOMEBOY_RELEASE_GATE_LOCAL_HOT"))));
-}
-
-#[test]
-fn release_gate_force_hot_allow_local_hot_allowed_by_policy() {
-    // When the operator opts in via /release_gate/local_hot=allowed, the
-    // bypass runs locally and is recorded (None selection → local run).
-    let command = release_gate_lab_command("test");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command,
-        None,
-        true,
-        true,
-        false,
-        true,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection")
-    .is_none());
-}
-
-#[test]
-fn release_gate_force_hot_allow_local_hot_runs_local_without_default_runner() {
-    // No default runner configured → nothing to route to, so the gate runs
-    // locally even under fail_closed.
-    let command = release_gate_lab_command("audit");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command, None, true, true, false, false, None
-    )
-    .expect("selection")
-    .is_none());
-}
-
-#[test]
-fn non_release_gate_command_keeps_allow_local_hot_bypass() {
-    // Non-gate portable commands (e.g. agent-task) keep the existing
-    // --force-hot --allow-local-hot bypass behavior.
-    let command = portable_lab_command("agent-task cook/run-plan");
-
-    assert!(resolve_lab_runner_selection_from_default(
-        &command,
-        None,
-        true,
-        true,
-        false,
-        false,
-        Some("lab-default".to_string()),
-    )
-    .expect("selection")
-    .is_none());
+    assert!(error.message.contains("--placement lab requires"));
 }

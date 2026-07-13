@@ -156,6 +156,141 @@ mod lab_source_path_tests {
     }
 }
 
+mod migrated_legacy_lab_arg_tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    #[test]
+    fn rewrite_strips_controller_routing_and_output_flags() {
+        let input = args(&[
+            "homeboy",
+            "audit",
+            "--path",
+            "/Users/user/Developer/project",
+            "--runner",
+            "lab",
+            "--placement",
+            "lab",
+            "--json-summary",
+            "--output",
+            "/tmp/local.json",
+        ]);
+
+        assert_eq!(
+            rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[], None),
+            args(&[
+                "homeboy",
+                "audit",
+                "--path",
+                "/home/user/Developer/project",
+                "--json-summary"
+            ])
+        );
+    }
+
+    #[test]
+    fn rewrite_maps_structured_output_to_runner_path() {
+        let input = args(&[
+            "homeboy",
+            "agent-task",
+            "controller",
+            "run-from-spec",
+            "loop.json",
+            "--output",
+            "/tmp/local.json",
+        ]);
+        assert_eq!(
+            rewrite_lab_offload_args(
+                &input,
+                "/runner/project",
+                &[],
+                Some("/runner/project/output.json")
+            ),
+            args(&[
+                "homeboy",
+                "agent-task",
+                "controller",
+                "run-from-spec",
+                "loop.json",
+                "--output",
+                "/runner/project/output.json"
+            ])
+        );
+    }
+
+    #[test]
+    fn rewrite_remaps_passthrough_paths_and_removes_internal_sentinel() {
+        let input = args(&[
+            "homeboy",
+            "bench",
+            "--path",
+            "/Users/user/project",
+            "--",
+            EXPLICIT_PASSTHROUGH_SENTINEL,
+            "--fixture-path",
+            "/Users/user/project/fixture.json",
+        ]);
+        let mappings = vec![LabPathRemap {
+            local: "/Users/user/project".to_string(),
+            remote: "/runner/project".to_string(),
+        }];
+
+        assert_eq!(
+            rewrite_lab_offload_args(&input, "/runner/project", &mappings, None),
+            args(&[
+                "homeboy",
+                "bench",
+                "--path",
+                "/runner/project",
+                "--",
+                "--fixture-path",
+                "/runner/project/fixture.json"
+            ])
+        );
+    }
+
+    #[test]
+    fn rewrite_normalizes_changed_files_to_repo_relative_paths() {
+        let input = args(&[
+            "homeboy",
+            "review",
+            "lint",
+            "--lab-changed-files-json",
+            "[\"/Users/user/project/src/lib.rs\"]",
+        ]);
+        let mappings = vec![LabPathRemap {
+            local: "/Users/user/project".to_string(),
+            remote: "/runner/project".to_string(),
+        }];
+        let rewritten = rewrite_lab_offload_args(&input, "/runner/project", &mappings, None);
+
+        assert_eq!(
+            rewritten.last().map(String::as_str),
+            Some("[\"src/lib.rs\"]")
+        );
+    }
+
+    #[test]
+    fn runner_resident_rewrite_strips_controller_artifact_and_placement_flags() {
+        let input = args(&[
+            "homeboy",
+            "agent-task",
+            "status",
+            "run-123",
+            "--artifact-root",
+            "/tmp/local",
+            "--placement=lab",
+        ]);
+        assert_eq!(
+            rewrite_runner_resident_lab_offload_args(&input, None),
+            args(&["homeboy", "agent-task", "status", "run-123"])
+        );
+    }
+}
+
 mod runner_resident_tests {
     use super::*;
 
@@ -179,7 +314,6 @@ mod runner_resident_tests {
             rewrite_runner_resident_lab_offload_args(&args, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "tunnel".to_string(),
                 "service".to_string(),
                 "start".to_string(),
@@ -221,7 +355,6 @@ mod runner_resident_tests {
             rewritten,
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "tunnel".to_string(),
                 "service".to_string(),
                 "expose".to_string(),
@@ -1786,7 +1919,8 @@ mod lab_args_rewrite_tests {
             "review".to_string(),
             "lint".to_string(),
             "data-machine".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
         ];
@@ -1795,7 +1929,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/runner/data-machine", &[], None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "review".to_string(),
                 "lint".to_string(),
                 "data-machine".to_string(),
@@ -1820,7 +1953,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[], None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "agent-task".to_string(),
                 "dispatch".to_string(),
                 "--cwd=/home/user/Developer/wp-site-generator".to_string(),
@@ -1847,7 +1979,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--path".to_string(),
                 "/runner/repo/packages/component".to_string(),
@@ -1874,7 +2005,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "runtime".to_string(),
                 "refresh".to_string(),
                 "opencode".to_string(),
@@ -1904,7 +2034,8 @@ mod lab_args_rewrite_tests {
             "nodejs".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
         ];
         let mappings = vec![LabPathRemap {
             local: local_source,
@@ -1915,7 +2046,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, remote_source, &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "extension".to_string(),
                 "refresh".to_string(),
                 remote_source.to_string(),
@@ -1948,7 +2078,8 @@ mod lab_args_rewrite_tests {
             "operator-ref".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
         ];
         let mappings = vec![LabPathRemap {
             local: local_source,
@@ -1959,7 +2090,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, remote_source, &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "extension".to_string(),
                 "refresh".to_string(),
                 remote_source.to_string(),
@@ -1993,7 +2123,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "bench".to_string(),
                 "--path=/runner/repo/packages/component".to_string(),
             ]
@@ -2026,7 +2155,6 @@ mod lab_args_rewrite_tests {
             ),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "agent-task".to_string(),
                 "controller".to_string(),
                 "materialize".to_string(),
@@ -2055,7 +2183,6 @@ mod lab_args_rewrite_tests {
             rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings, None),
             vec![
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "report".to_string(),
                 "/home/user/_lab_workspaces/project/.ci/report.json".to_string(),
                 "--config=/home/user/_lab_workspaces/project/.ci/config.json".to_string(),

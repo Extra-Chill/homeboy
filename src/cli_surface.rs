@@ -1,4 +1,6 @@
-use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{
+    ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -12,6 +14,22 @@ use crate::commands::{
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
+
+/// The requested execution location. This is normalized once at the CLI
+/// boundary and is the only placement input used by routing code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[value(rename_all = "lower")]
+pub enum Placement {
+    Auto,
+    Local,
+    Lab,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "homeboy")]
@@ -43,18 +61,10 @@ pub struct Cli {
     )]
     pub notification_route: Option<String>,
 
-    /// Suppress resource policy warnings for intentionally hot commands.
-    #[arg(long, global = true)]
-    pub force_hot: bool,
-
-    /// Permit --force-hot portable Lab commands to stay local even when a default Lab runner exists.
-    /// This flag does not disable automatic Lab offload unless --force-hot is also set.
-    #[arg(long, global = true)]
-    pub allow_local_hot: bool,
-
-    /// Require Lab routing and fail instead of executing locally.
-    #[arg(long, visible_alias = "no-local-execution", global = true)]
-    pub lab_only: bool,
+    /// Select where eligible work executes. `auto` uses the command contract,
+    /// controller pressure, and ready Lab capacity.
+    #[arg(long, global = true, value_enum, default_value_t = Placement::Auto)]
+    pub placement: Placement,
 
     /// Return after a runner daemon accepts the job instead of waiting for remote completion.
     #[arg(long, global = true)]
@@ -1058,6 +1068,63 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.skip_deps_hydration);
+    }
+
+    #[test]
+    fn legacy_placement_flags_are_rejected() {
+        for flag in [
+            format!("--{}-{}", "force", "hot"),
+            format!("--{}-{}", "allow-local", "hot"),
+            format!("--{}-{}", "lab", "only"),
+            format!("--{}-{}", "no-local", "execution"),
+        ] {
+            let result = Cli::try_parse_from(["homeboy", flag.as_str(), "bench", "example"]);
+            let Err(error) = result else {
+                panic!("legacy placement flag must be unknown");
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
+    fn registered_parse_path_accepts_placement_in_every_global_position() {
+        for args in [
+            ["homeboy", "--placement=local", "bench", "example"].as_slice(),
+            ["homeboy", "bench", "--placement", "lab", "example"].as_slice(),
+        ] {
+            let matches = Cli::command()
+                .try_get_matches_from(args)
+                .expect("registered command parses placement");
+            let (cli, _) = Cli::from_registered_arg_matches(&matches)
+                .expect("registered parse path accepts placement");
+            assert_ne!(cli.placement, Placement::Auto);
+        }
+    }
+
+    #[test]
+    fn placement_does_not_consume_passthrough_arguments() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "exec",
+            "lab",
+            "--",
+            "tool",
+            "--placement",
+            "local",
+        ])
+        .expect("passthrough placement is owned by the child command");
+        assert_eq!(cli.placement, Placement::Auto);
+    }
+
+    #[test]
+    fn placement_is_visible() {
+        let command = Cli::command();
+        let placement = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "placement")
+            .expect("placement argument");
+        assert!(!placement.is_hide_set());
     }
 
     #[test]

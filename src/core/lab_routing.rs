@@ -29,8 +29,8 @@ pub struct LabRoutingRequest<'a> {
     pub command: Option<runners::LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub force_hot: bool,
-    pub local_policy: runners::LabLocalExecutionPolicy,
+    pub placement: crate::cli_surface::Placement,
+    pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
     pub capture_patch: bool,
@@ -58,8 +58,8 @@ pub(crate) fn route_lab_offload(
         command: request.command,
         normalized_args: request.normalized_args,
         explicit_runner: request.explicit_runner,
-        force_hot: request.force_hot,
-        local_policy: request.local_policy,
+        placement: request.placement,
+        allow_local_fallback: request.allow_local_fallback,
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         skip_deps_hydration: request.skip_deps_hydration,
         capture_patch: request.capture_patch,
@@ -512,8 +512,8 @@ fn execute_lab_offload_with_timeout(
     let command = request.command;
     let normalized_args = request.normalized_args.to_vec();
     let explicit_runner = request.explicit_runner.map(str::to_string);
-    let force_hot = request.force_hot;
-    let local_policy = request.local_policy;
+    let placement = request.placement;
+    let allow_local_fallback = request.allow_local_fallback;
     let allow_dirty_lab_workspace = request.allow_dirty_lab_workspace;
     let skip_deps_hydration = request.skip_deps_hydration;
     let capture_patch = request.capture_patch;
@@ -531,8 +531,8 @@ fn execute_lab_offload_with_timeout(
             command,
             normalized_args: &normalized_args,
             explicit_runner: explicit_runner.as_deref(),
-            force_hot,
-            local_policy,
+            placement,
+            allow_local_fallback,
             allow_dirty_lab_workspace,
             skip_deps_hydration,
             capture_patch,
@@ -716,8 +716,8 @@ mod tests {
             command: None,
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
-            force_hot: false,
-            local_policy: runners::LabLocalExecutionPolicy::default(),
+            placement: crate::cli_surface::Placement::Auto,
+            allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
             capture_patch: false,
@@ -1017,8 +1017,8 @@ mod tests {
                 command: None,
                 normalized_args: &["homeboy".to_string(), "status".to_string()],
                 explicit_runner: None,
-                force_hot: false,
-                local_policy: runners::LabLocalExecutionPolicy::default(),
+                placement: crate::cli_surface::Placement::Auto,
+                allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
                 capture_patch: false,

@@ -66,7 +66,8 @@ fn run_stable_plan(args: FuzzStablePlanArgs) -> Result<FuzzStablePlanOutput> {
                 "homeboy".to_string(),
                 "fuzz".to_string(),
                 "run".to_string(),
-                "--lab-only".to_string(),
+                "--placement".to_string(),
+                "lab".to_string(),
                 "--rig".to_string(),
                 rig_id.clone(),
                 "--workload".to_string(),
@@ -204,7 +205,8 @@ fn with_lab_options(parts: Vec<&str>, args: &FuzzStablePlanArgs) -> Vec<String> 
         command.push("--component".to_string());
         command.push(component.clone());
     }
-    command.push("--lab-only".to_string());
+    command.push("--placement".to_string());
+    command.push("lab".to_string());
     if let Some(runner) = &args.runner {
         command.push("--runner".to_string());
         command.push(runner.clone());
@@ -374,7 +376,8 @@ mod tests {
                 "homeboy",
                 "fuzz",
                 "run",
-                "--lab-only",
+                "--placement",
+                "lab",
                 "--rig",
                 "demo-rig",
                 "--workload",
@@ -412,7 +415,8 @@ mod tests {
                 "3",
                 "--component",
                 "component-a",
-                "--lab-only",
+                "--placement",
+                "lab",
                 "--runner",
                 "lab",
             ]

@@ -100,10 +100,6 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
-    let has_force_hot = args
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| arg == "--force-hot");
     let preserve_runner_arg = is_extension_dev_run(args);
     while let Some(arg) = iter.next() {
         if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
@@ -171,7 +167,11 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
             }
             continue;
         }
-        if arg == "--lab-only" || arg == "--no-local-execution" {
+        if arg == "--placement" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--placement=") {
             continue;
         }
         if arg == "--output" {
@@ -213,9 +213,6 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     if let Some(revision) = extension_refresh_revision {
         stripped.push("--ref".to_string());
         stripped.push(revision);
-    }
-    if !has_force_hot {
-        stripped.insert(1, "--force-hot".to_string());
     }
     stripped
 }
@@ -315,10 +312,6 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
-    let has_force_hot = args
-        .iter()
-        .take_while(|arg| arg.as_str() != "--")
-        .any(|arg| arg == "--force-hot");
     while let Some(arg) = iter.next() {
         if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
             continue;
@@ -339,7 +332,11 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
         if arg.starts_with("--runner=") {
             continue;
         }
-        if arg == "--lab-only" || arg == "--no-local-execution" {
+        if arg == "--placement" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--placement=") {
             continue;
         }
         if arg == "--output" {
@@ -374,9 +371,6 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
     }
     if is_service_expose && !already_runner_local {
         stripped.push("--runner-local".to_string());
-    }
-    if !has_force_hot {
-        stripped.insert(1, "--force-hot".to_string());
     }
     stripped
 }

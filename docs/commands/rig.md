@@ -79,7 +79,7 @@ Runs the `up` pipeline. Mutating rig commands acquire a resource lease first whe
 
 `rig up` also participates in resource-policy warnings. If the machine is
 already warm or hot, Homeboy warns on stderr before adding more load. The warning
-is advisory only; use global `--force-hot` when the extra pressure is expected.
+is advisory only; use global `--placement local` when the extra pressure is expected.
 `rig up` is intentionally local-only for Lab offload: the pipeline can manage local
 services, leases, ports, and declared filesystem paths that are not portable
 through the current single-workspace runner snapshot.
@@ -165,7 +165,7 @@ homeboy rig install https://github.com/example-org/homeboy-rigs.git//packages --
 
 Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`. If the selected package also contains `stacks/*.json`, those stack specs are installed alongside the rig. Existing stack specs with different content are treated as user-owned config and are left in place instead of being overwritten.
 
-Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID or an existing stack spec with different content. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--force-hot` remains a separate global resource-policy flag and does not control install replacement behavior.
+Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID or an existing stack spec with different content. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--placement local` remains a separate global resource-policy choice and does not control install replacement behavior.
 
 Git sources may include a Terraform-style `repo.git//subpath` selector. Homeboy clones the package root, records source metadata, and discovers rigs from the selected subpath. Local package sources are linked in place and are updated outside Homeboy.
 

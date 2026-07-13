@@ -662,7 +662,7 @@ pub(crate) fn stale_runner_homeboy_error(
     tried.extend([
         format!("Reconnect runner `{runner_id}` before retrying Lab offload: {refresh}"),
         format!("If the runner binary itself is stale, refresh or select a clean runner binary with `{}`.", runner_homeboy_align_to_controller_command(runner_id)),
-        "Use --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and run locally.".to_string(),
+        "Use --placement local only if you intentionally want to bypass Lab offload and run locally.".to_string(),
     ]);
     Error::validation_invalid_argument(
         "runner",

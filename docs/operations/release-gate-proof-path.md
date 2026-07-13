@@ -7,7 +7,7 @@ Lab/offload policy, and never requires local-hot bypass flags.
 The problem it solves: when the normally installed Homeboy gate fails early (stale
 runner binary, missing secrets, a resource-policy refusal), the fallback is not
 obvious, and the fastest-looking option — a local `cargo`/source invocation or a
-`--force-hot` rerun — is **not** acceptable proof. This page makes the boundary
+`--placement local` rerun — is **not** acceptable proof. This page makes the boundary
 explicit.
 
 ## TL;DR
@@ -16,8 +16,8 @@ explicit.
   — the audit → lint → test umbrella, run through normal routing.
 - **Routing:** let automatic Lab routing handle it, or pass `--runner <id>`
   explicitly. Never run the gate locally on a warm/hot machine.
-- **`--force-hot` / `--allow-local-hot` are debugging aids, not proof.** A gate
-  result produced with either flag is not release-gate evidence.
+- **`--placement local` is a debugging aid, not proof.** A gate result produced
+  with a local placement override is not release-gate evidence.
 - **If the installed Homeboy is stale or missing secrets, repair the routing**
   (refresh the runner binary, sync the workspace, fix secrets) — do **not** fall
   back to a local-hot or source run.
@@ -69,7 +69,7 @@ non-interactive shell and points you at Lab offload. Honor that routing:
   runner, dispatch the gate from that runner-side checkout through `runner exec`
   instead of forcing a controller-local run. `runner exec` marks the job as
   runner-hosted, so the gate passes the non-interactive resource preflight
-  **without** `--force-hot`:
+  **without** a public placement override:
 
   ```bash
   homeboy runner exec homeboy-lab \
@@ -83,19 +83,14 @@ for setup and smoke evidence.
 
 ## Local-hot bypass is a debugging aid, not proof
 
-Homeboy exposes two local-hot bypass flags:
-
-- `--force-hot` — suppress the resource-policy warning and run the command
-  locally anyway.
-- `--allow-local-hot` — allow a local-hot rerun of a command that has no portable
-  Lab offload contract.
+Homeboy exposes `--placement local` for intentional controller execution.
 
 These exist so a human can debug source changes quickly on their own machine.
 **They are not acceptable as release-gate proof:**
 
-- A gate run produced with `--force-hot`/`--allow-local-hot` records
-  `resource_policy.force_hot: true` in its observation metadata — it is explicitly
-  marked as a bypassed local run, not a routed gate result.
+- A gate run produced with `--placement local` records
+  `resource_policy.local_override: true` in its observation metadata — it is explicitly
+  marked as a local run, not a routed gate result.
 - Running the gate from a source build (`cargo run -- ...`) or any non-installed
   invocation tests the source under your hands, not the routed binary the gate
   contract expects. Use it for iteration; do not present it as proof.
@@ -136,7 +131,7 @@ use that routed result as the proof.
 
 - Produce proof with `homeboy review --changed-since=<base>` through normal/Lab
   routing.
-- Never use `--force-hot` or `--allow-local-hot` to manufacture a gate result.
+- Never use `--placement local` to manufacture a gate result.
 - Never present a `cargo run`/source invocation as release-gate proof.
 - Repair stale runners and missing secrets; do not fall back to local execution.
 

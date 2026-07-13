@@ -696,7 +696,7 @@ fn dirty_git_sync_without_changed_since_reports_supported_remediation() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(hint_text.contains("Commit or stash"));
-    assert!(hint_text.contains("--force-hot"));
+    assert!(hint_text.contains("--placement local"));
     assert!(hint_text.contains("homeboy runner workspace sync <runner-id>"));
 }
 
@@ -722,6 +722,6 @@ fn dirty_changed_since_git_sync_explains_snapshot_is_unavailable() {
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(hint_text.contains("--force-hot"));
+    assert!(hint_text.contains("--placement local"));
     assert!(hint_text.contains("Omit --changed-since"));
 }

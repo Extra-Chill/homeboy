@@ -24,6 +24,18 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
+    if request.placement == crate::cli_surface::Placement::Auto
+        && crate::commands::utils::resource_policy::is_managed_runner_placement_context()
+    {
+        return Ok(LabOffloadOutcome::RunLocal {
+            plan: disabled_select_runner_plan(
+                base_lab_plan(request.command.as_ref()),
+                "runner placement already resolved",
+            ),
+            metadata: None,
+            messages: Vec::new(),
+        });
+    }
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
             "runner",
@@ -37,7 +49,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
-    let Some(contract) = request.command.clone() else {
+    let Some(mut contract) = request.command.clone() else {
         if let Some(runner_id) = request.explicit_runner {
             if is_build_command(request.normalized_args) {
                 return Err(unsupported_build_lab_error("runner", Some(runner_id)));
@@ -47,9 +59,9 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 lab_runner_support_summary().unsupported_message,
             ));
         }
-        if request.local_policy.deny_local_execution() {
+        if request.placement == crate::cli_surface::Placement::Lab {
             if is_build_command(request.normalized_args) {
-                return Err(unsupported_build_lab_error("lab_only", None));
+                return Err(unsupported_build_lab_error("placement_lab", None));
             }
             return Err(local_execution_denied_error(
                 "command has no Lab contract",
@@ -71,15 +83,28 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
-        if request.local_policy.deny_local_execution() {
+        if request.placement == crate::cli_surface::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         plan = disabled_select_runner_plan(plan, reason);
         return Ok(skipped_automatic_run_local(plan, reason));
     }
 
+    // Commands that explicitly prefer Lab retain that contract regardless of
+    // controller pressure. Other portable workspace commands use the single
+    // preflight snapshot captured by CliRuntime: cold controllers stay local,
+    // while warm/hot controllers may use an eligible default Lab runner.
+    if !contract.routing_policy.default_lab_offload
+        && request.placement == crate::cli_surface::Placement::Auto
+        && contract.source_path_mode != crate::command_contract::LabSourcePathMode::RunnerResident
+        && crate::commands::utils::resource_policy::captured_context()
+            .is_some_and(|context| context.severity != "ok")
+    {
+        contract.routing_policy.default_lab_offload = true;
+    }
+
     if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
-        if request.local_policy.deny_local_execution() {
+        if request.placement == crate::cli_surface::Placement::Lab {
             return Err(local_execution_denied_error(
                 "automatic Lab offload disabled",
                 None,
@@ -104,21 +129,15 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     let mut overhead = LabOffloadOverhead::start();
 
     let selection_timer = overhead.phase(LabOffloadPhase::Selection);
-    let selection = resolve_lab_runner_selection(
-        &contract,
-        request.explicit_runner,
-        request.force_hot,
-        request.local_policy.allow_local_hot(),
-    )?;
+    let selection =
+        resolve_lab_runner_selection(&contract, request.explicit_runner, request.placement)?;
     selection_timer.finish();
     let Some(selection) = selection else {
-        if !request.force_hot {
+        if request.placement == crate::cli_surface::Placement::Auto {
             fail_if_no_default_runner_accepts_jobs(&contract)?;
         }
-        let reason = if request.force_hot && request.local_policy.allow_local_hot() {
-            "force_hot_local_override"
-        } else if request.force_hot {
-            "force_hot"
+        let reason = if request.placement == crate::cli_surface::Placement::Local {
+            "placement_local_override"
         } else {
             "no_default_runner"
         };
@@ -132,7 +151,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
-        if request.local_policy.deny_local_execution() {
+        if request.placement == crate::cli_surface::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         // No runner was selected: record the skip reason as the fallback so the
@@ -167,7 +186,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         {
             " Release-gate local-hot fallback is disabled by `/release_gate/local_hot: fail_closed`; repair the runner instead of bypassing Lab routing."
         } else {
-            " Pass `--force-hot --allow-local-hot` to run it locally instead."
+            " Pass `--placement local` to run it locally instead."
         };
         let auto_offload_signal = format!(
             "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine.{local_hot_hint}",
@@ -195,7 +214,42 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     prepare_timer.finish();
     match preparation {
         LabRunnerPreparation::Ready => {
-            preflight_lab_runner_availability(&contract, &selection)?;
+            if let Err(error) = preflight_lab_runner_availability(&contract, &selection) {
+                if contract.routing_policy.release_gate
+                    && matches!(selection.source, LabRunnerSelectionSource::Default)
+                    && !release_gate_local_hot_allowed
+                {
+                    return Err(release_gate_local_hot_denied_error(
+                        format!(
+                            "Release gate `{}` selected default Lab runner `{}` but it cannot accept jobs ({}); `/release_gate/local_hot` is `fail_closed`, so the gate will not silently fall back to local execution",
+                            contract.hot_label, selection.runner_id, error.message
+                        ),
+                        "release_gate",
+                    ));
+                }
+                if request.placement == crate::cli_surface::Placement::Auto
+                    && matches!(selection.source, LabRunnerSelectionSource::Default)
+                {
+                    let reason = format!("runner_unavailable: {}", error.message);
+                    overhead.set_fallback_reason(&reason);
+                    let mut metadata = lab_offload_metadata(
+                        &plan,
+                        selection.source.metadata_value(),
+                        Some(&selection.runner_id),
+                        Some(selection.mode.metadata_value()),
+                        "fallback",
+                        None,
+                        Some(&reason),
+                    );
+                    attach_lab_offload_overhead(&mut metadata, &overhead);
+                    return Ok(LabOffloadOutcome::RunLocal {
+                        metadata: Some(metadata),
+                        plan,
+                        messages: vec![format!("Lab offload: {reason}; running locally.")],
+                    });
+                }
+                return Err(error);
+            }
             plan = with_step(
                 plan,
                 PlanStep::ready("lab.connect_runner", "lab.connect_runner").build(),
@@ -232,13 +286,13 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     "release_gate",
                 ));
             }
-            if request.local_policy.deny_local_execution() {
+            if request.placement == crate::cli_surface::Placement::Lab {
                 return Err(local_execution_denied_error(
                     &reason,
                     Some(&selection.runner_id),
                 ));
             }
-            if !request.local_policy.allow_local_fallback() {
+            if !request.allow_local_fallback {
                 return Err(selected_runner_fallback_error(
                     &selection,
                     "Lab offload selected a runner but could not prepare it for remote execution",

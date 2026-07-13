@@ -36,7 +36,7 @@ Output is deterministic and matches each command's per-stage output.
 
 `homeboy review --changed-since=<base>` is the **canonical release-gate proof
 command** for agents. Run it through normal/Lab routing — never with
-`--force-hot`/`--allow-local-hot` or a source/`cargo` invocation, which are
+`--placement local` or a source/`cargo` invocation, which are
 debugging aids, not proof. See
 [Release-gate proof: canonical non-local command path](../operations/release-gate-proof-path.md).
 

@@ -484,15 +484,7 @@ fn dispatch_workload_command_args(command: &[String]) -> &[String] {
         Some(binary) if is_homeboy_binary(binary) => &command[1..],
         _ => command,
     };
-    strip_leading_dispatch_flags(args)
-}
-
-fn strip_leading_dispatch_flags(args: &[String]) -> &[String] {
-    let mut index = 0;
-    while matches!(args.get(index).map(String::as_str), Some("--force-hot")) {
-        index += 1;
-    }
-    &args[index..]
+    args
 }
 
 fn is_homeboy_binary(binary: &str) -> bool {
@@ -722,13 +714,7 @@ mod tests {
         let cases = [
             Case {
                 name: "review lint component",
-                argv: vec![
-                    "/srv/homeboy/bin/homeboy",
-                    "--force-hot",
-                    "review",
-                    "lint",
-                    "homeboy",
-                ],
+                argv: vec!["/srv/homeboy/bin/homeboy", "review", "lint", "homeboy"],
                 expected_label: "review lint",
                 expected_family: RunnerWorkloadCommandFamily::Quality,
             },
@@ -736,7 +722,6 @@ mod tests {
                 name: "agent-task cook",
                 argv: vec![
                     "/srv/homeboy/bin/homeboy",
-                    "--force-hot",
                     "agent-task",
                     "cook",
                     "--to-worktree",
@@ -754,7 +739,6 @@ mod tests {
                 name: "plain offloaded command",
                 argv: vec![
                     "/srv/homeboy/bin/homeboy",
-                    "--force-hot",
                     "extension",
                     "update",
                     "wordpress",
@@ -766,7 +750,6 @@ mod tests {
                 name: "runtime refresh target positional",
                 argv: vec![
                     "/srv/homeboy/bin/homeboy",
-                    "--force-hot",
                     "runtime",
                     "refresh",
                     "wp-codebox",
@@ -782,13 +765,7 @@ mod tests {
             },
             Case {
                 name: "resident-path command",
-                argv: vec![
-                    "/srv/homeboy/bin/homeboy",
-                    "--force-hot",
-                    "agent-task",
-                    "status",
-                    "run-1",
-                ],
+                argv: vec!["/srv/homeboy/bin/homeboy", "agent-task", "status", "run-1"],
                 expected_label:
                     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest",
                 expected_family: RunnerWorkloadCommandFamily::AgentTask,
@@ -1066,7 +1043,6 @@ mod tests {
         let command = command();
         let dispatched_command = [
             "homeboy",
-            "--force-hot",
             "runtime",
             "refresh",
             "wp-codebox",
@@ -1212,11 +1188,7 @@ mod tests {
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &[
-                "/srv/homeboy/bin/homeboy".to_string(),
-                "--force-hot".to_string(),
-                "trace".to_string(),
-            ],
+            &["/srv/homeboy/bin/homeboy".to_string(), "trace".to_string()],
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
@@ -1318,7 +1290,6 @@ mod tests {
             Some("/srv/homeboy/work"),
             &[
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "agent-task".to_string(),
                 "fanout".to_string(),
                 "cook-batch".to_string(),

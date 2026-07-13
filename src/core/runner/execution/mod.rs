@@ -5,7 +5,6 @@
 //! thresholds. The public/in-crate surface is preserved via the re-exports
 //! below so callers continue to reference `runner::execution::<item>`.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -40,32 +39,13 @@ pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_
 /// in flight and uncancelled (#6891).
 pub(crate) const RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_CANCEL_ON_WAIT_TIMEOUT";
 pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
-/// Internal, per-command marker that prevents an accepted Lab handoff from
-/// selecting another Lab runner on the runner host.
-pub(crate) const RUNNER_LAB_HANDOFF_ENV: &str = "HOMEBOY_RUNNER_LAB_HANDOFF";
+/// Private process marker added only while RunnerExecOptions crosses a remote
+/// runner boundary. It is intentionally absent from CLI parsing and argv.
+pub(crate) const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLVED";
 pub(crate) const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
 
-thread_local! {
-    static RUNNER_LAB_HANDOFF_ACTIVE: Cell<bool> = const { Cell::new(false) };
-}
-
-pub(crate) fn consume_runner_lab_handoff_control_env() {
-    let handoff = std::env::var(RUNNER_LAB_HANDOFF_ENV).ok();
-    std::env::remove_var(RUNNER_LAB_HANDOFF_ENV);
-    RUNNER_LAB_HANDOFF_ACTIVE.with(|state| state.set(handoff.as_deref() == Some("1")));
-}
-
-pub(crate) fn runner_lab_handoff_active() -> bool {
-    RUNNER_LAB_HANDOFF_ACTIVE.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn set_runner_lab_handoff_active_for_test(active: bool) {
-    RUNNER_LAB_HANDOFF_ACTIVE.with(|state| state.set(active));
-}
-
 pub(crate) fn is_internal_control_env(name: &str) -> bool {
-    name == RUNNER_LAB_HANDOFF_ENV
+    name == RUNNER_PLACEMENT_RESOLVED_ENV
 }
 
 mod broker;
