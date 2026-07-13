@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
+    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessOrphanReconciliationResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
@@ -37,6 +37,14 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly reconcile a lease-less orphan job store after no-owner proof
+    ReconcileLeaselessOrphans {
+        /// Confirm the daemon control plane was lost and the store may be terminalized
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -92,6 +100,7 @@ pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
     AdoptOrphan(DaemonOrphanAdoptionResult),
+    ReconcileLeaselessOrphans(DaemonLeaselessOrphanReconciliationResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -124,6 +133,9 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
             DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
             0,
+        )),
+        DaemonCommand::ReconcileLeaselessOrphans { confirm_control_plane_lost, addr } => Ok((
+            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphan_store(confirm_control_plane_lost, &addr)?), 0
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),

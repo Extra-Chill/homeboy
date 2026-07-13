@@ -205,6 +205,8 @@ pub(super) fn connect(
     broker_url: Option<String>,
     adopt_orphan_lease: Option<String>,
     confirm_pid_dead: bool,
+    reconcile_leaseless_orphans: bool,
+    confirm_control_plane_lost: bool,
 ) -> CmdResult<RunnerOutput> {
     if adopt_orphan_lease.is_some() && !confirm_pid_dead {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -212,6 +214,22 @@ pub(super) fn connect(
             "--adopt-orphan-lease requires --confirm-pid-dead",
             None,
             Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
+        ));
+    }
+    if reconcile_leaseless_orphans && !confirm_control_plane_lost {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "confirm_control_plane_lost",
+            "--reconcile-leaseless-orphans requires --confirm-control-plane-lost",
+            None,
+            None,
+        ));
+    }
+    if reconcile_leaseless_orphans && adopt_orphan_lease.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "lease-less reconciliation and exact-lease adoption are mutually exclusive",
+            None,
+            None,
         ));
     }
     if reverse && adopt_orphan_lease.is_some() {
@@ -237,7 +255,11 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        runner::connect_with_orphan_adoption(id, adopt_orphan_lease.as_deref())?
+        if reconcile_leaseless_orphans {
+            runner::connect_with_leaseless_orphan_reconciliation(id)?
+        } else {
+            runner::connect_with_orphan_adoption(id, adopt_orphan_lease.as_deref())?
+        }
     };
     Ok((
         RunnerOutput {

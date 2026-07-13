@@ -220,6 +220,14 @@ pub(super) enum RunnerCommand {
         /// Confirm the recorded PID for --adopt-orphan-lease is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+
+        /// Explicitly reconcile a lease-less orphan store before connecting
+        #[arg(long)]
+        reconcile_leaseless_orphans: bool,
+
+        /// Confirm the runner daemon control plane was lost for lease-less reconciliation
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
     },
     /// Show persisted runner tunnel status
     Status {

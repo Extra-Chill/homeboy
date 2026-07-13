@@ -166,6 +166,52 @@ pub fn connect_with_orphan_adoption(
     ))
 }
 
+/// Reconnect through the explicit lease-less recovery command, then persist the
+/// replacement daemon session using the ordinary connection transaction.
+pub fn connect_with_leaseless_orphan_reconciliation(
+    runner_id: &str,
+) -> Result<(RunnerConnectReport, i32)> {
+    let runner = load(runner_id)?;
+    let Some((_server_id, _server, client)) = resolve_ssh_runner(&runner)? else {
+        return connect(runner_id);
+    };
+    let homeboy = remote_runner_homeboy_path(&runner, "runner lease-less orphan reconciliation")?;
+    let command = format!(
+        "{} daemon reconcile-leaseless-orphans --confirm-control-plane-lost --addr 127.0.0.1:0",
+        shell::quote_arg(homeboy)
+    );
+    let output = client.execute(&command);
+    if !output.success {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            format!(
+                "remote lease-less orphan reconciliation failed: {}",
+                command_failure_message("remote daemon reconciliation failed", &output)
+            ),
+            None,
+            None,
+        ));
+    }
+    let envelope =
+        parse_json_from_mixed_stdout::<CliEnvelope>(&output.stdout).map_err(|error| {
+            Error::internal_unexpected(format!(
+                "remote lease-less orphan reconciliation returned invalid JSON: {error}"
+            ))
+        })?;
+    if !envelope.success {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            format!(
+                "remote lease-less orphan reconciliation failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ),
+            None,
+            None,
+        ));
+    }
+    connect(runner_id)
+}
+
 pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
     if options.runner_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(

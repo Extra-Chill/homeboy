@@ -16,8 +16,9 @@ use crate::core::process::pid_is_running;
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonOrphanAdoptionResult,
-    DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    read_status, repair_legacy_lease_for_start, stop_unlocked,
+    DaemonLeaselessOrphanReconciliationResult, DaemonOrphanAdoptionResult, DaemonStaleReasonCode,
+    DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -104,6 +105,120 @@ pub fn adopt_orphaned_lease(
         retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
     })
+}
+
+/// Reconcile a durable store with no lease only when the operator explicitly
+/// confirms control-plane loss and independent host probes find no owner.
+pub fn reconcile_leaseless_orphan_store(
+    confirm_control_plane_lost: bool,
+    addr: &str,
+) -> Result<DaemonLeaselessOrphanReconciliationResult> {
+    if !confirm_control_plane_lost {
+        return Err(Error::validation_invalid_argument("confirm_control_plane_lost", "lease-less orphan reconciliation requires --confirm-control-plane-lost", None, Some(vec!["Inspect the configured runner host and retry only after confirming its daemon control plane is gone.".to_string()])));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    reconcile_leaseless_orphan_store_with_operations(
+        read_status,
+        probe_no_daemon_owner,
+        || {
+            let jobs = crate::core::paths::daemon_jobs_file()?;
+            let snapshot = jobs.with_file_name(format!(
+                "jobs.lease-less-orphan-snapshot-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::copy(&jobs, &snapshot).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("snapshot {}", jobs.display())),
+                )
+            })?;
+            let store = super::JobStore::open_without_reconciliation(jobs)?;
+            let affected = store.reconcile_leaseless_orphan_jobs()?;
+            Ok((snapshot, affected))
+        },
+        || start_background_unlocked(addr),
+    )
+}
+
+fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, Start>(
+    status: Status,
+    probe: Probe,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonLeaselessOrphanReconciliationResult>
+where
+    Status: FnOnce() -> Result<super::DaemonStatus>,
+    Probe: FnOnce() -> Result<Vec<String>>,
+    Reconcile: FnOnce() -> Result<(PathBuf, Vec<uuid::Uuid>)>,
+    Start: FnOnce() -> Result<DaemonStartResult>,
+{
+    let status = status()?;
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
+        || status.freshness.active_jobs == 0
+    {
+        return Err(Error::validation_invalid_argument(
+            "job_store",
+            "lease-less reconciliation requires lease_missing with active jobs",
+            None,
+            None,
+        ));
+    }
+    let no_owner_proof = probe()?;
+    let (snapshot_path, affected) = reconcile()?;
+    let replacement = start()?;
+    Ok(DaemonLeaselessOrphanReconciliationResult {
+        snapshot_path: snapshot_path.display().to_string(), affected_job_ids: affected.iter().map(ToString::to_string).collect(), affected_job_count: affected.len(), no_owner_proof,
+        retry_guidance: "Inspect retained job events, then retry eligible work through its original command or workflow.".to_string(), replacement,
+    })
+}
+
+fn probe_no_daemon_owner() -> Result<Vec<String>> {
+    let process = Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("probe daemon processes".to_string()))
+        })?;
+    if !process.status.success() {
+        return Err(Error::internal_unexpected(
+            "daemon process probe was ambiguous",
+        ));
+    }
+    if String::from_utf8_lossy(&process.stdout)
+        .lines()
+        .any(|line| line.contains("homeboy") && line.contains("daemon serve"))
+    {
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            "refusing lease-less reconciliation: a Homeboy daemon process is live",
+            None,
+            None,
+        ));
+    }
+    let listener = Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-c", "homeboy"])
+        .output()
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("probe daemon listeners".to_string()))
+        })?;
+    if listener.status.code() != Some(1) && !listener.status.success() {
+        return Err(Error::internal_unexpected(
+            "daemon listener probe was ambiguous",
+        ));
+    }
+    if listener.status.success() && !listener.stdout.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            "refusing lease-less reconciliation: a Homeboy daemon listener is live",
+            None,
+            None,
+        ));
+    }
+    Ok(vec![
+        "process probe found no `homeboy daemon serve` process".to_string(),
+        "listener probe found no Homeboy TCP listener".to_string(),
+    ])
 }
 
 fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {

@@ -324,6 +324,8 @@ plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 ```sh
 homeboy runner connect <runner-id>
 homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead
+homeboy runner connect <runner-id> --reconcile-leaseless-orphans --confirm-control-plane-lost
+homeboy daemon reconcile-leaseless-orphans --confirm-control-plane-lost
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
@@ -341,6 +343,14 @@ terminalizing jobs from that dead control plane with retry guidance, starts one
 replacement daemon, and then records the fresh local session. Ordinary `runner
 connect` never infers that orphan ownership; live, ambiguous, and lease-mismatched
 daemon records remain protected.
+
+When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
+and unavailable recovery evidence, run the explicit daemon reconciliation on the
+configured runner host. It acquires the daemon lifecycle lock, requires the
+affirmative confirmation flag, independently checks for a `homeboy daemon serve`
+process and Homeboy TCP listener, snapshots `jobs.json`, retains all job events
+and result evidence, terminalizes only lease-less active jobs, and starts one
+replacement daemon. Live or ambiguous probes abort without changing the store.
 
 Reverse runner connections record the runner-initiated session substrate and use
 the controller daemon as the broker. A reverse runner can register itself with

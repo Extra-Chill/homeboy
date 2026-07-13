@@ -37,7 +37,7 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    start_background, ArtifactFetchOutcome,
+    reconcile_leaseless_orphan_store, start_background, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -149,6 +149,16 @@ pub struct DaemonOrphanAdoptionResult {
     pub adopted_lease_id: String,
     pub dead_pid: u32,
     pub active_jobs_terminalized: usize,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonLeaselessOrphanReconciliationResult {
+    pub snapshot_path: String,
+    pub affected_job_ids: Vec<String>,
+    pub affected_job_count: usize,
+    pub no_owner_proof: Vec<String>,
     pub retry_guidance: String,
     pub replacement: DaemonStartResult,
 }
