@@ -177,6 +177,7 @@ pub(super) fn exec_via_reverse_broker(
                 &source_snapshot,
                 &require_paths,
                 persisted_run_id.as_deref(),
+                None,
                 err,
             )
         })?;

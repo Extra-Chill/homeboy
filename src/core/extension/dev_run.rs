@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::command_contract::{
-    RunnerExecutionProjection, RunnerWorkload, RunnerWorkloadAssignment,
+    RunnerExecutionProjection, RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment,
     RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
     RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
     RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
@@ -501,8 +501,27 @@ fn extension_dev_run_execution_outcome(
     runner_workload: &RunnerWorkload,
     output: &RunnerExecOutput,
 ) -> ExtensionDevRunExecutionOutcome {
+    let mut runner_workload = runner_workload.clone();
+    runner_workload.result_refs.job_id = output.job_id.clone();
+    runner_workload.result_refs.mirror_run_id = output.mirror_run_id.clone();
+    runner_workload.result_refs.artifacts = output
+        .execution_record
+        .as_ref()
+        .map(|record| {
+            record
+                .artifact_refs
+                .iter()
+                .map(|artifact| RunnerWorkloadArtifactRef {
+                    id: artifact.id.clone(),
+                    name: artifact.name.clone(),
+                    path: artifact.path.clone(),
+                    url: artifact.url.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     ExtensionDevRunExecutionOutcome {
-        runner_workload: runner_workload.clone(),
+        runner_workload,
         execution_record: output
             .execution_record
             .as_ref()
@@ -789,6 +808,26 @@ mod tests {
                 .command_outcome
                 .as_ref()
                 .expect("command outcome")
+                .runner_workload
+                .result_refs
+                .job_id,
+            Some("job-homeboy-extension-run-demo".to_string())
+        );
+        assert_eq!(
+            output
+                .command_outcome
+                .as_ref()
+                .expect("command outcome")
+                .runner_workload
+                .result_refs
+                .mirror_run_id,
+            Some("run-homeboy-extension-run-demo".to_string())
+        );
+        assert_eq!(
+            output
+                .command_outcome
+                .as_ref()
+                .expect("command outcome")
                 .execution_record
                 .as_ref()
                 .expect("command execution projection")
@@ -918,8 +957,9 @@ mod tests {
     }
 
     fn exec_output(runner_id: &str, command: Vec<String>, exit_code: i32) -> RunnerExecOutput {
+        let execution_id = command.join("-");
         let execution_record = Some(RunnerExecutionRecord::terminal(
-            format!("exec-{runner_id}-{}", command.join("-")),
+            format!("exec-{runner_id}-{execution_id}"),
             runner_id,
             "local",
             exit_code,
@@ -938,9 +978,9 @@ mod tests {
             source_snapshot: None,
             job: None,
             runner_job: None,
-            job_id: None,
+            job_id: Some(format!("job-{execution_id}")),
             job_events: None,
-            mirror_run_id: None,
+            mirror_run_id: Some(format!("run-{execution_id}")),
             patch: None,
             mutation_artifacts: None,
             artifacts: Vec::new(),

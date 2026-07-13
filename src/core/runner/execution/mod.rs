@@ -831,6 +831,10 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.detach_after_handoff,
                 options.mirror_evidence,
                 options.print_handoff,
+                connected
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.homeboy_build_identity.clone()),
             )
         }
         RunnerTransport::ReverseBroker(handle) => {

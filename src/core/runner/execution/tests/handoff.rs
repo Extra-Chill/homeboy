@@ -389,6 +389,7 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
             &SourceSnapshot::existing_remote("lab", "/srv/homeboy/project", Some("/srv/homeboy")),
             &[],
             Some(&run_id),
+            None,
             Error::internal_unexpected("daemon returned no active job for the accepted id"),
         );
 
@@ -422,6 +423,26 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
                 && record.metadata_json["runner_execution_record"]["status"] == "failed"
         }));
     });
+}
+
+#[test]
+fn daemon_identity_transition_reports_a_restarted_control_plane() {
+    let transition = super::super::daemon::daemon_identity_transition(
+        Some("homeboy 0.283.1+95ce06c58b95"),
+        Some("homeboy 0.283.1+a5b333e9f905"),
+    )
+    .expect("daemon identities changed");
+
+    assert_eq!(transition["status"], "changed");
+    assert_eq!(
+        transition["accepted_daemon_build_identity"],
+        "homeboy 0.283.1+95ce06c58b95"
+    );
+    assert_eq!(
+        transition["observed_daemon_build_identity"],
+        "homeboy 0.283.1+a5b333e9f905"
+    );
+    assert!(super::super::daemon::daemon_identity_transition(Some("same"), Some("same")).is_none());
 }
 
 #[test]
@@ -994,6 +1015,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
         false,
         true,
         true,
+        None,
     )
     .expect_err("daemon exec failure");
 
@@ -1241,6 +1263,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         false,
         true,
         true,
+        None,
     )
     .expect_err("daemon exec failure");
 

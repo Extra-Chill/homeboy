@@ -903,6 +903,9 @@ fn is_command_local_runner_option(command: &Commands) -> bool {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
             command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
         }) => true,
+        // This command coordinates its own sync and runner executions. Routing
+        // the coordinator itself would make its child executions re-enter Lab.
+        Commands::Extension(args) => args.owns_runner_execution(),
         Commands::Fuzz(args) => args.consumes_runner_as_plan_input(),
         _ => false,
     }
@@ -2179,6 +2182,32 @@ mod tests {
 
         let outcome = route_after_parse(&cli, &normalized, None)
             .expect("extension update without --runner should not offload");
+
+        assert_eq!(outcome, None);
+        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
+    }
+
+    #[test]
+    fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "dev-run".to_string(),
+            "wordpress".to_string(),
+            "--source".to_string(),
+            "/tmp/wordpress".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "show".to_string(),
+            "wordpress".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("dev-run should execute its own runner lifecycle");
 
         assert_eq!(outcome, None);
         assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
