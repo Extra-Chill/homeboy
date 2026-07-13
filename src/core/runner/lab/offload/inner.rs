@@ -871,6 +871,7 @@ pub(crate) fn run_lab_offload_inner(
     let pre_acceptance_run_id = ensure_agent_task_lifecycle_identity_with(
         request.normalized_args,
         run_isolation_token.as_deref(),
+        None,
     )
     .map(|(_, run_id)| run_id);
     let provider_rotation =
@@ -1062,6 +1063,7 @@ pub(crate) fn run_lab_offload_inner(
         &command_prefix.argv,
         Some(&runner_workspace_root),
         run_isolation_token,
+        pre_acceptance_run_id.as_deref(),
     ) {
         Ok(stage) => stage,
         Err(error) => {
