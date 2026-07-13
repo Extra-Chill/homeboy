@@ -328,6 +328,8 @@ fn daemon_freshness_report(
         ownership_evidence: None,
         adoption_command: None,
         binary_hash: None,
+        daemon_version: daemon_version_from_body(&body).map(str::to_string),
+        daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
         runtime_paths: None,
         active_jobs: 0,
         repair_plan: Vec::new(),

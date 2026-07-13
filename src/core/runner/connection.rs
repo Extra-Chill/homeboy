@@ -132,13 +132,18 @@ pub fn connect_with_recovery(
         ));
     };
 
+    let expected_version = daemon.version.clone().unwrap_or(version.clone());
+    let expected_identity = daemon
+        .build_identity
+        .clone()
+        .unwrap_or(identity.display.clone());
     let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
         &client,
         homeboy,
         daemon,
-        &version,
-        &identity.display,
+        &expected_version,
+        &expected_identity,
         runner_id,
         &session_path,
     ) {
@@ -485,9 +490,12 @@ fn remote_daemon_recovery_freshness(
         Err(error) => return Some(unavailable_recovery_freshness(error.message)),
     };
     match remote_daemon_status(&client, homeboy) {
-        Ok(status) => Some(remote_daemon_recovery_freshness_from_status(
-            runner_id, &status,
-        )),
+        Ok(mut status) => {
+            remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+            Some(remote_daemon_recovery_freshness_from_status(
+                runner_id, &status,
+            ))
+        }
         Err(error) => Some(unavailable_recovery_freshness(error)),
     }
 }
@@ -1093,6 +1101,8 @@ mod remote_daemon {
         pub(super) address: String,
         pub(super) pid: Option<u32>,
         pub(super) lease_id: Option<String>,
+        pub(super) version: Option<String>,
+        pub(super) build_identity: Option<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -1104,6 +1114,7 @@ mod remote_daemon {
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
         pub(super) state_identity: Option<String>,
+        pub(super) endpoint_probe_error: Option<String>,
     }
 
     pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -1116,7 +1127,7 @@ mod remote_daemon {
         let proven_dead = status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
             && lease_id.is_some()
             && pid.is_some();
-        let ownership_evidence = if proven_dead {
+        let mut ownership_evidence = if proven_dead {
             Some(format!(
                 "remote daemon status over SSH proved PID {} is dead for lease `{}`",
                 pid.expect("proven dead PID"),
@@ -1125,6 +1136,12 @@ mod remote_daemon {
         } else {
             Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
         };
+        if let Some(error) = &status.endpoint_probe_error {
+            ownership_evidence = Some(format!(
+                "{}; reachable endpoint identity probe failed: {error}",
+                ownership_evidence.unwrap_or_default()
+            ));
+        }
         let adoption_command = proven_dead.then(|| {
             format!(
                 "homeboy runner connect {} --adopt-orphan-lease {} --confirm-pid-dead",
@@ -1146,6 +1163,8 @@ mod remote_daemon {
             ownership_evidence,
             adoption_command,
             binary_hash: None,
+            daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
+            daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
             runtime_paths: None,
             active_jobs: status.active_jobs,
             repair_plan: Vec::new(),
@@ -1168,6 +1187,8 @@ mod remote_daemon {
             )),
             adoption_command: None,
             binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 0,
             repair_plan: Vec::new(),
@@ -1188,7 +1209,8 @@ mod remote_daemon {
         missing_lease_state_identity: Option<&str>,
         runner_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
-        let status = remote_daemon_status(client, homeboy)?;
+        let mut status = remote_daemon_status(client, homeboy)?;
+        probe_remote_daemon_endpoint(client, &mut status);
         persist_runner_lease_evidence(runner_id, &status).map_err(|error| error.message)?;
         if let Some(lease_id) = orphan_lease_id {
             if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
@@ -1235,7 +1257,11 @@ mod remote_daemon {
                 status.state_identity.as_deref().unwrap_or("<unavailable>"),
             ));
         }
-        match remote_daemon_connect_action(previous_session, &status)? {
+        match remote_daemon_connect_action_with_controller_identity(
+            previous_session,
+            &status,
+            &crate::core::build_identity::current().display,
+        )? {
             RemoteDaemonConnectAction::Reattach => {
                 return status.daemon.ok_or_else(|| {
                     "remote daemon reattach selected without a daemon lease".to_string()
@@ -1247,9 +1273,22 @@ mod remote_daemon {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn remote_daemon_connect_action(
         previous_session: Option<&RunnerSession>,
         status: &RemoteDaemonStatus,
+    ) -> std::result::Result<RemoteDaemonConnectAction, String> {
+        remote_daemon_connect_action_with_controller_identity(
+            previous_session,
+            status,
+            &crate::core::build_identity::current().display,
+        )
+    }
+
+    pub(super) fn remote_daemon_connect_action_with_controller_identity(
+        previous_session: Option<&RunnerSession>,
+        status: &RemoteDaemonStatus,
+        controller_identity: &str,
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
         let healthy = status.fresh && status.reachable;
         if status.active_jobs > 0 && !healthy {
@@ -1297,6 +1336,25 @@ mod remote_daemon {
         };
 
         if healthy {
+            if previous_session.is_none() && status.active_jobs > 0 {
+                let daemon = status.daemon.as_ref().expect("healthy daemon exists");
+                let daemon_identity = daemon.build_identity.as_deref().ok_or_else(|| format!(
+                    "remote daemon has {} active job(s) but its reachable endpoint did not provide a build identity; refusing reattachment or replacement",
+                    status.active_jobs
+                ))?;
+                let daemon_version = daemon.version.as_deref().ok_or_else(|| format!(
+                    "remote daemon has {} active job(s) but its reachable endpoint did not provide a version; refusing reattachment or replacement",
+                    status.active_jobs
+                ))?;
+                if daemon_identity.trim() != controller_identity.trim() {
+                    return Err(format!(
+                        "remote daemon has {} active job(s) under reachable lease `{}` (PID {}) but build identity `{daemon_identity}` / version `{daemon_version}` does not match this controller `{controller_identity}`; refusing replacement. Run a controller pinned to `{daemon_identity}` and retry `homeboy runner connect <runner-id>` to reattach this exact lease.",
+                        status.active_jobs,
+                        daemon.lease_id.as_deref().unwrap_or("unavailable"),
+                        daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+                    ));
+                }
+            }
             if let Some(session) = previous_session.filter(|session| {
                 session.mode == RunnerTunnelMode::DirectSsh
                     && session.role == RunnerSessionRole::Controller
@@ -1375,6 +1433,7 @@ mod remote_daemon {
                     .get("state_identity")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                endpoint_probe_error: None,
             });
         }
         let Some(state) = data.get("state") else {
@@ -1395,6 +1454,7 @@ mod remote_daemon {
                     .get("state_identity")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                endpoint_probe_error: None,
             });
         };
         Ok(RemoteDaemonStatus {
@@ -1411,7 +1471,67 @@ mod remote_daemon {
                 .get("state_identity")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            endpoint_probe_error: None,
         })
+    }
+
+    pub(super) fn probe_remote_daemon_endpoint(
+        client: &SshClient,
+        status: &mut RemoteDaemonStatus,
+    ) {
+        if !status.reachable {
+            return;
+        }
+        let Some(daemon) = status.daemon.as_mut() else {
+            return;
+        };
+        if parse_loopback_daemon_addr(&daemon.address).is_err() {
+            status.endpoint_probe_error = Some(
+                "remote daemon status reported a non-loopback endpoint; refusing identity probe"
+                    .to_string(),
+            );
+            return;
+        }
+        let command = format!(
+            "curl --fail --silent --show-error --max-time 2 {}/version",
+            shell::quote_arg(&format!("http://{}", daemon.address))
+        );
+        let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+        if !output.success {
+            status.endpoint_probe_error = Some(command_failure_message(
+                "remote daemon endpoint identity probe failed",
+                &output,
+            ));
+            return;
+        }
+        let body: Value = match parse_json_from_mixed_stdout(&output.stdout) {
+            Ok(body) => body,
+            Err(error) => {
+                status.endpoint_probe_error = Some(format!(
+                    "remote daemon endpoint identity probe returned invalid JSON: {error}"
+                ));
+                return;
+            }
+        };
+        daemon.version = body
+            .get("version")
+            .and_then(Value::as_str)
+            .or_else(|| body.pointer("/data/version").and_then(Value::as_str))
+            .map(str::to_string);
+        daemon.build_identity = body
+            .pointer("/build_identity/display")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                body.pointer("/data/build_identity/display")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string);
+        if daemon.version.is_none() || daemon.build_identity.is_none() {
+            status.endpoint_probe_error = Some(
+                "remote daemon endpoint identity probe did not return both version and build identity"
+                    .to_string(),
+            );
+        }
     }
 
     fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {
@@ -1429,6 +1549,8 @@ mod remote_daemon {
                 .get("lease_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            version: None,
+            build_identity: None,
         }
     }
 
@@ -1483,6 +1605,8 @@ mod remote_daemon {
                 .get("lease_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            version: None,
+            build_identity: None,
         })
     }
 
@@ -1545,6 +1669,8 @@ mod remote_daemon {
                 .get("lease_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            version: None,
+            build_identity: None,
         })
     }
 
@@ -2166,6 +2292,7 @@ mod tests {
             reachable: false,
             active_jobs: 1,
             state_identity: Some("sha256:inspected-state".to_string()),
+            endpoint_probe_error: None,
         };
 
         let error = remote_daemon_connect_action(None, &status)
@@ -2254,6 +2381,7 @@ mod tests {
             reachable: false,
             active_jobs: 0,
             state_identity: None,
+            endpoint_probe_error: None,
         };
 
         assert_eq!(
@@ -2273,6 +2401,7 @@ mod tests {
             reachable: false,
             active_jobs: 0,
             state_identity: None,
+            endpoint_probe_error: None,
         };
 
         assert_eq!(
@@ -2914,6 +3043,8 @@ mod tests {
                 address: "127.0.0.1:49152".to_string(),
                 pid: Some(pid),
                 lease_id: Some(lease_id.to_string()),
+                version: None,
+                build_identity: None,
             }),
             stale_reason: (!fresh).then(|| "daemon is stale".to_string()),
             stale_reason_code,
@@ -2921,6 +3052,64 @@ mod tests {
             reachable,
             active_jobs,
             state_identity: None,
+            endpoint_probe_error: None,
         }
+    }
+
+    #[test]
+    fn sessionless_active_daemon_reattaches_only_with_matching_endpoint_identity() {
+        let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
+        let daemon = status.daemon.as_mut().expect("daemon");
+        daemon.version = Some("0.284.0".to_string());
+        daemon.build_identity = Some("homeboy 0.284.0+live".to_string());
+
+        assert_eq!(
+            remote_daemon_connect_action_with_controller_identity(
+                None,
+                &status,
+                "homeboy 0.284.0+live"
+            )
+            .expect("matching controller reattaches"),
+            RemoteDaemonConnectAction::Reattach
+        );
+
+        let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+        assert_eq!(recovery.daemon_version.as_deref(), Some("0.284.0"));
+        assert_eq!(
+            recovery.daemon_build_identity.as_deref(),
+            Some("homeboy 0.284.0+live")
+        );
+    }
+
+    #[test]
+    fn sessionless_active_daemon_prescribes_matching_pinned_controller_on_identity_mismatch() {
+        let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
+        let daemon = status.daemon.as_mut().expect("daemon");
+        daemon.version = Some("0.284.0".to_string());
+        daemon.build_identity = Some("homeboy 0.284.0+live".to_string());
+
+        let error = remote_daemon_connect_action_with_controller_identity(
+            None,
+            &status,
+            "homeboy 0.284.0+other",
+        )
+        .expect_err("mismatched controller must not replace an active daemon");
+
+        assert!(error.contains("Run a controller pinned to `homeboy 0.284.0+live`"));
+        assert!(error.contains("refusing replacement"));
+    }
+
+    #[test]
+    fn sessionless_active_daemon_fails_closed_when_endpoint_identity_is_ambiguous() {
+        let status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
+
+        let error = remote_daemon_connect_action_with_controller_identity(
+            None,
+            &status,
+            "homeboy 0.284.0+live",
+        )
+        .expect_err("missing endpoint identity must not authorize reattachment");
+
+        assert!(error.contains("did not provide a build identity"));
     }
 }
