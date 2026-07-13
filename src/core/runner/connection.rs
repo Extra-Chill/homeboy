@@ -1038,13 +1038,10 @@ mod remote_daemon {
         status: &RemoteDaemonStatus,
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
         let healthy = status.fresh && status.reachable;
-        if status.active_jobs > 0
-            && !healthy
-            && !remote_daemon_pid_dead_with_owned_lease(previous_session, status)
-        {
+        if status.active_jobs > 0 && !healthy {
             return Err(format!(
-                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement",
-                status.active_jobs, status.fresh, status.reachable, status.stale_reason
+                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement. Inspect `homeboy daemon status` and recover only the exact dead lease with `homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead`",
+                status.active_jobs, status.fresh, status.reachable, status.stale_reason,
             ));
         }
 
@@ -1079,35 +1076,6 @@ mod remote_daemon {
         }
 
         Ok(RemoteDaemonConnectAction::Start)
-    }
-
-    fn remote_daemon_pid_dead_with_owned_lease(
-        previous_session: Option<&RunnerSession>,
-        status: &RemoteDaemonStatus,
-    ) -> bool {
-        if status.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
-            return false;
-        }
-        let Some(daemon) = status.daemon.as_ref() else {
-            return false;
-        };
-        let Some(lease_id) = daemon.lease_id.as_deref() else {
-            return false;
-        };
-        let Some(session) = previous_session.filter(|session| {
-            session.mode == RunnerTunnelMode::DirectSsh
-                && session.role == RunnerSessionRole::Controller
-        }) else {
-            return false;
-        };
-
-        match session.remote_daemon_lease_id.as_deref() {
-            Some(expected_lease) => expected_lease == lease_id,
-            None => {
-                session.remote_daemon_pid == daemon.pid
-                    && session.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
-            }
-        }
     }
 
     pub(super) fn remote_daemon_status(
@@ -1635,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn proven_dead_daemon_with_active_jobs_and_matching_lease_routes_to_startup_reconciliation() {
+    fn recorded_dead_daemon_with_active_jobs_refuses_implicit_replacement() {
         let session = direct_ssh_session("lease-dead");
         let status = remote_daemon_status_for_test_with_reason(
             false,
@@ -1646,10 +1614,11 @@ mod tests {
             Some(DaemonStaleReasonCode::PidDead),
         );
 
-        assert_eq!(
-            remote_daemon_connect_action(Some(&session), &status).expect("ensure start"),
-            RemoteDaemonConnectAction::Start
-        );
+        let err = remote_daemon_connect_action(Some(&session), &status)
+            .expect_err("require explicit orphan adoption");
+
+        assert!(err.contains("refusing implicit replacement"));
+        assert!(err.contains("--adopt-orphan-lease"));
     }
 
     #[test]
