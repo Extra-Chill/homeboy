@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.12] - 2026-07-13
+
+### Fixed
+- use published CI action majors
+
 ## [2.8.11] - 2026-07-13
 
 ### Fixed
