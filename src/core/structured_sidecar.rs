@@ -44,7 +44,7 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         path: run_dir::files::TEST_FAILURES,
         producer: Some("test"),
         shape: StructuredSidecarShape::Array,
-        required_fields: &["message"],
+        required_fields: &[],
     },
     StructuredSidecarSchema {
         key: "bench.results",
@@ -253,9 +253,15 @@ mod tests {
 
     #[test]
     fn rejects_missing_required_array_fields() {
-        let err = validate_payload("test.failures", &json!([{ "test_id": "demo" }]))
-            .expect_err("test failure message is required");
+        let err = validate_payload("lint.findings", &json!([{ "rule": "demo" }]))
+            .expect_err("lint finding message is required");
 
         assert!(err.to_string().contains("message"));
+    }
+
+    #[test]
+    fn accepts_test_failures_without_optional_fields() {
+        validate_payload("test.failures", &json!([{ "test_id": "demo" }]))
+            .expect("test failures may omit fields supplied by heterogeneous runners");
     }
 }
