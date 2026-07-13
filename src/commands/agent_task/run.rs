@@ -2,6 +2,8 @@
 //! resume, and retry.
 
 use serde_json::Value;
+use std::path::Path;
+use std::process::Command;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -47,6 +49,15 @@ where
         ));
     }
 
+    // Capture the exact workspace state before dispatch. The provider may
+    // commit and leave a clean tree, so resolving this after it runs would
+    // silently widen the promotion range.
+    let source_worktree_path = agent_task_service::source_worktree_path(
+        args.dispatch.cwd.clone(),
+        args.dispatch.workspace.clone(),
+    );
+    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
+
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
@@ -75,10 +86,6 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
-    let source_worktree_path = agent_task_service::source_worktree_path(
-        args.dispatch.cwd.clone(),
-        args.dispatch.workspace.clone(),
-    );
     let result = agent_task_service::run_cook(
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
@@ -90,6 +97,7 @@ where
             max_attempts: args.max_attempts,
             no_finalize: args.no_finalize,
             base: args.base,
+            task_base_sha,
             head: args.head,
             title,
             commit_message,
@@ -108,6 +116,18 @@ where
         serde_json::to_value(result.value).unwrap_or(Value::Null),
         result.exit_code,
     ))
+}
+
+fn git_head_sha(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn default_loop_title(args: &AgentTaskCookArgs) -> String {

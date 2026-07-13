@@ -20,6 +20,11 @@ pub struct AgentTaskPromotionOptions {
     pub source_worktree_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Immutable task workspace base captured before provider dispatch. This is
+    /// required when recovering agent-created commits so promotion never picks
+    /// up commits that were already present in a reused workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_base_sha: Option<String>,
     pub to_worktree: String,
     pub task_id: Option<String>,
     pub artifact_id: Option<String>,

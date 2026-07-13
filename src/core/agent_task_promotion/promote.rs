@@ -71,10 +71,39 @@ pub(crate) fn promote_with_provider(
     validate_artifact_content(&artifact, &patch)?;
     if patch.trim().is_empty() {
         if let Some(committed_patch) = committed_changes_patch(&options)? {
-            let gates = run_promotion_gates(&options, provider, &committed_patch.worktree_path)?;
+            let normalized_patch = normalize_promotion_patch(
+                &std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(format!(
+                            "read committed changes promotion patch {}",
+                            committed_patch.patch_path.display()
+                        )),
+                    )
+                })?,
+                &options.to_worktree,
+            )?;
+            let mut command_evidence = Vec::new();
+            let applied_worktree_path = if options.dry_run {
+                None
+            } else {
+                let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
+                    schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+                    to_workspace: options.to_worktree.clone(),
+                    patch_path: committed_patch.patch_path.display().to_string(),
+                    changed_files: normalized_patch.changed_files.clone(),
+                })?;
+                command_evidence.extend(target.command_evidence);
+                Some(target.path)
+            };
+            let gates = if let Some(path) = applied_worktree_path.as_deref() {
+                run_promotion_gates(&options, provider, path)?
+            } else {
+                PromotionGateRun::without_gates(options.dry_run)
+            };
             let target = AgentTaskPromotionTarget::from_worktree(
                 options.to_worktree.clone(),
-                Some(&committed_patch.worktree_path),
+                applied_worktree_path.as_deref(),
             );
             let operator_notification = promotion_notification(gates.status, &target);
 
@@ -90,17 +119,19 @@ pub(crate) fn promote_with_provider(
                     path: committed_patch.patch_path.display().to_string(),
                     sha256: Some(committed_patch.sha256),
                 },
-                changed_files: committed_patch.changed_files,
-                command_evidence: Vec::new(),
+                changed_files: normalized_patch.changed_files,
+                command_evidence,
                 deterministic_gates: gates.deterministic_gates,
                 gate_results: gates.gate_results,
                 provenance: json!({
                     "source_schema": outcome.schema,
                     "artifact_metadata": artifact.metadata,
-                    "worktree_path": committed_patch.worktree_path,
+                    "worktree_path": applied_worktree_path,
                     "dependencies_materialized": gates.dependencies_materialized,
                     "change_source": "local_commits",
                     "base_ref": committed_patch.base_ref,
+                    "commit_range": committed_patch.commit_range,
+                    "commits": committed_patch.commits,
                 }),
                 operator_notification,
             });
@@ -285,6 +316,8 @@ struct CommittedChangesPatch {
     patch_path: PathBuf,
     sha256: String,
     changed_files: Vec<String>,
+    commit_range: String,
+    commits: Vec<Value>,
 }
 
 fn committed_changes_patch(
@@ -296,8 +329,11 @@ fn committed_changes_patch(
     if !worktree_path.is_dir() {
         return Ok(None);
     }
-    let Some(base_ref) =
-        resolve_committed_changes_base(worktree_path, options.base_ref.as_deref())?
+    let Some(base_ref) = resolve_committed_changes_base(
+        worktree_path,
+        options.task_base_sha.as_deref(),
+        options.base_ref.as_deref(),
+    )?
     else {
         return Ok(None);
     };
@@ -319,6 +355,11 @@ fn committed_changes_patch(
     if patch.trim().is_empty() {
         return Ok(None);
     }
+    let commit_range = format!("{base_ref}..HEAD");
+    let commits = committed_change_evidence(worktree_path, &commit_range)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
     let mut hasher = Sha256::new();
     hasher.update(patch.as_bytes());
     let sha256 = format!("{:x}", hasher.finalize());
@@ -338,6 +379,8 @@ fn committed_changes_patch(
         patch_path,
         sha256,
         changed_files,
+        commit_range,
+        commits,
     }))
 }
 
@@ -361,7 +404,32 @@ fn committed_changes_patch_path(
     Ok(dir.join(format!("committed-changes-{sha256}.patch")))
 }
 
-fn resolve_committed_changes_base(cwd: &Path, requested: Option<&str>) -> Result<Option<String>> {
+fn resolve_committed_changes_base(
+    cwd: &Path,
+    task_base_sha: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(base) = task_base_sha.filter(|value| !value.trim().is_empty()) {
+        let base = git_output(
+            cwd,
+            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+        )?;
+        let is_ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", base.trim(), "HEAD"])
+            .current_dir(cwd)
+            .status()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?
+            .success();
+        if !is_ancestor {
+            return Err(Error::validation_invalid_argument(
+                "task_base_sha",
+                "recorded task base is not an ancestor of the source workspace HEAD; refusing to promote unrelated or pre-existing commits",
+                Some(base.trim().to_string()),
+                None,
+            ));
+        }
+        return Ok(Some(base.trim().to_string()));
+    }
     let mut candidates = Vec::new();
     if let Some(requested) = requested.filter(|value| !value.trim().is_empty()) {
         candidates.push(requested.to_string());
@@ -382,6 +450,25 @@ fn resolve_committed_changes_base(cwd: &Path, requested: Option<&str>) -> Result
         }
     }
     Ok(None)
+}
+
+fn committed_change_evidence(cwd: &Path, range: &str) -> Result<Vec<Value>> {
+    let output = git_output(
+        cwd,
+        &["log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%s", range],
+    )?;
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            Some(json!({
+                "sha": fields.next()?,
+                "author_name": fields.next()?,
+                "author_email": fields.next()?,
+                "subject": fields.next()?,
+            }))
+        })
+        .collect())
 }
 
 fn git_lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
