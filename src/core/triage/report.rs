@@ -35,6 +35,7 @@ pub fn run(target: super::TriageTarget, options: TriageOptions) -> Result<Triage
     let global_priority_labels = defaults::load_config().triage.priority_labels;
     let mut components = Vec::new();
     let mut unresolved = Vec::new();
+    eprintln!("triage: resolving {} component references", refs.len());
     let (resolved, unresolved_refs) =
         resolve_and_dedupe_refs_with_parent_resolver(refs, github_parent_repo);
     unresolved.extend(unresolved_refs);
@@ -108,23 +109,35 @@ pub(super) fn run_batched<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R 
 
 pub(super) fn resolve_and_dedupe_refs_with_parent_resolver(
     refs: Vec<ComponentRef>,
-    parent_resolver: impl Fn(&GitHubRepo) -> std::result::Result<Option<GitHubRepo>, String>,
+    parent_resolver: impl Fn(&GitHubRepo) -> std::result::Result<Option<GitHubRepo>, String> + Sync,
 ) -> (Vec<(ComponentRef, ResolvedRepo)>, Vec<TriageUnresolved>) {
-    let mut by_source = BTreeMap::<String, std::result::Result<ResolvedRepo, String>>::new();
-    let mut resolved: BTreeMap<String, (ComponentRef, ResolvedRepo)> = BTreeMap::new();
-    let mut unresolved = Vec::new();
+    let mut by_source = BTreeMap::<String, Vec<ComponentRef>>::new();
     for component_ref in refs {
         let source_key = component_ref
             .triage_remote_url
             .clone()
             .or(component_ref.remote_url.clone())
             .unwrap_or_else(|| component_ref.local_path.clone());
-        let repo = by_source
-            .entry(source_key)
-            .or_insert_with(|| resolve_repo_with_parent_resolver(&component_ref, &parent_resolver))
-            .clone();
+        by_source.entry(source_key).or_default().push(component_ref);
+    }
+    let groups = by_source.into_values().collect::<Vec<_>>();
+    let outcomes = run_batched(&groups, |group| {
+        (
+            group.clone(),
+            resolve_repo_with_parent_resolver(&group[0], &parent_resolver),
+        )
+    });
+    let mut resolved: BTreeMap<String, (ComponentRef, ResolvedRepo)> = BTreeMap::new();
+    let mut unresolved = Vec::new();
+    for (component_refs, repo) in outcomes {
         match repo {
             Ok(repo) => {
+                let mut refs = component_refs.into_iter();
+                let mut component_ref = refs.next().expect("source group is non-empty");
+                for duplicate in refs {
+                    component_ref.sources.extend(duplicate.sources);
+                    component_ref.usage.extend(duplicate.usage);
+                }
                 let key = format!(
                     "{}/{}",
                     repo.repo.owner.to_lowercase(),
@@ -137,12 +150,14 @@ pub(super) fn resolve_and_dedupe_refs_with_parent_resolver(
                     resolved.insert(key, (component_ref, repo));
                 }
             }
-            Err(reason) => unresolved.push(TriageUnresolved {
-                component_id: component_ref.component_id,
-                local_path: component_ref.local_path,
-                reason,
-                sources: component_ref.sources.into_iter().collect(),
-            }),
+            Err(reason) => unresolved.extend(component_refs.into_iter().map(|component_ref| {
+                TriageUnresolved {
+                    component_id: component_ref.component_id,
+                    local_path: component_ref.local_path,
+                    reason: reason.clone(),
+                    sources: component_ref.sources.into_iter().collect(),
+                }
+            })),
         }
     }
     (resolved.into_values().collect(), unresolved)

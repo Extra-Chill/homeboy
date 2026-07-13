@@ -10,10 +10,15 @@ use crate::core::engine::command::{
     DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 
+const GH_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) fn ensure_gh_ready() -> std::result::Result<(), String> {
     let version = run_gh_command(&["--version".to_string()]);
     if version.is_err() {
-        return Err("gh CLI not found on PATH or did not respond within 30s".to_string());
+        return Err(format!(
+            "gh CLI not found on PATH or did not respond within {}s",
+            GH_TIMEOUT.as_secs()
+        ));
     }
     if let Err(error) = run_gh_command(&[
         "auth".to_string(),
@@ -33,7 +38,7 @@ pub(crate) fn run_gh(args: &[String]) -> std::result::Result<String, String> {
 fn run_gh_command(args: &[String]) -> std::result::Result<String, String> {
     let output = run_command_with_timeout(
         Command::new("gh").args(args.iter().map(|s| s.as_str())),
-        Duration::from_secs(30),
+        GH_TIMEOUT,
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
