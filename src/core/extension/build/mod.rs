@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::artifact_inputs::{self, ResolvedArtifactInput};
 use crate::core::component::{self, Component};
@@ -15,6 +16,9 @@ use crate::core::extension::{
 use crate::core::output::{BulkResult, BulkResultBuilder};
 use crate::core::paths;
 use crate::core::server::execute_local_command_in_dir;
+
+const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BUILD_TIMEOUT_ENV: &str = "HOMEBOY_BUILD_TIMEOUT_SECS";
 
 mod artifact;
 
@@ -501,8 +505,15 @@ fn execute_build_component(
     // Execute via ExtensionRunner — uses the full exec context protocol (settings,
     // project info, context version) instead of the minimal env var set.
     let run_dir = RunDir::create()?;
+    let build_timeout = build_timeout();
+    log_status!(
+        "build",
+        "phase=build component={} timeout={}s; streaming build output",
+        comp.id,
+        build_timeout.as_secs()
+    );
     let runner_output = if let ResolvedBuildCommand::ComponentScript { .. } = &resolved {
-        crate::core::extension::component_script::run_component_scripts_with_run_dir(
+        crate::core::extension::component_script::run_component_scripts_with_run_dir_and_timeout(
             comp,
             extension::ExtensionCapability::Build,
             &validated_path,
@@ -510,6 +521,7 @@ fn execute_build_component(
             true,
             &build_env(changed_since, changed_scope.as_ref()),
             &[],
+            Some(build_timeout),
         )?
         .into()
     } else if let Some(context) = build_context {
@@ -518,6 +530,7 @@ fn execute_build_component(
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
+            .timeout(Some(build_timeout))
             // Legacy env var for backward compat with existing build scripts
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
@@ -532,6 +545,7 @@ fn execute_build_component(
             .working_dir(&local_path_str)
             .command_override(build_cmd.clone())
             .with_run_dir(&run_dir)
+            .timeout(Some(build_timeout))
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
             runner = runner.env(&key, &value);
@@ -560,6 +574,18 @@ fn execute_build_component(
         },
         runner_output.exit_code,
     ))
+}
+
+fn build_timeout() -> Duration {
+    build_timeout_from(std::env::var(BUILD_TIMEOUT_ENV).ok().as_deref())
+}
+
+fn build_timeout_from(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT)
 }
 
 fn resolve_changed_scope(
@@ -813,6 +839,18 @@ fn run_pre_build_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_timeout_preserves_long_default_and_accepts_override() {
+        assert_eq!(build_timeout_from(None), Duration::from_secs(30 * 60));
+        assert_eq!(build_timeout_from(Some("7200")), Duration::from_secs(7200));
+        assert_eq!(build_timeout_from(Some("0")), Duration::from_secs(30 * 60));
+        assert_eq!(
+            build_timeout_from(Some("invalid")),
+            Duration::from_secs(30 * 60)
+        );
+    }
+
     #[test]
     fn is_json_input_detects_json() {
         assert!(is_json_input(r#"{"componentIds": ["a"]}"#));

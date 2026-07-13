@@ -367,7 +367,7 @@ fn terminal_child_projection_rejects_mismatched_persisted_run_identity() {
 }
 
 #[test]
-fn terminal_projection_rolls_back_aggregate_when_controller_persistence_fails() {
+fn terminal_projection_keeps_prior_commit_when_interrupted_before_commit() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         let mut record = record_detached_lab_run(DetachedLabRunRecord {
@@ -394,6 +394,61 @@ fn terminal_projection_rolls_back_aggregate_when_controller_persistence_fails() 
 }
 
 #[test]
+fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retry_is_idempotent() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        store::interrupt_after_terminal_commit_for_test();
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect_err("interruption after the committed envelope is surfaced");
+
+        assert_eq!(
+            store::read_record("agent-task-disconnected-child")
+                .expect("committed controller projection")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
+        let (status_record, log, artifacts) = std::thread::scope(|scope| {
+            let status_reader = scope.spawn(|| status("agent-task-disconnected-child"));
+            let log_reader = scope.spawn(|| logs("agent-task-disconnected-child"));
+            let artifact_reader = scope.spawn(|| artifacts("agent-task-disconnected-child"));
+            (
+                status_reader
+                    .join()
+                    .expect("status reader")
+                    .expect("committed status"),
+                log_reader
+                    .join()
+                    .expect("log reader")
+                    .expect("committed log"),
+                artifact_reader
+                    .join()
+                    .expect("artifact reader")
+                    .expect("committed artifacts"),
+            )
+        });
+        assert_eq!(status_record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
+        assert!(artifacts.artifacts.is_empty());
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
+        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert!(store::aggregate_path(&record.run_id)
+            .expect("aggregate path")
+            .exists());
+    });
+}
+
+#[test]
 fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -405,9 +460,18 @@ fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
             remote_command: &command,
         })
         .expect("running proxy");
+        let before = record.clone();
         let terminal = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
         reconcile_runner_job_snapshot(&mut record, &terminal).expect("terminal reconciliation");
         let terminal_record = record.clone();
+
+        store::write_record(&before).expect("stale running writer is ignored");
+        assert_eq!(
+            status(&record.run_id)
+                .expect("terminal state remains committed")
+                .state,
+            AgentTaskRunState::Succeeded
+        );
 
         let mut running = terminal.clone();
         running.job.status = crate::core::api_jobs::JobStatus::Running;

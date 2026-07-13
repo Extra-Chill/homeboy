@@ -17,6 +17,8 @@ use crate::core::{paths, Error, ErrorCode, Result};
 
 #[cfg(test)]
 static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     let path = run_dir(run_id)?.join("plan.json");
@@ -31,13 +33,14 @@ pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
 pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
     let path = run_dir(run_id)?.join("aggregate.json");
     write_json(&path, aggregate)?;
-    mirror_aggregate(run_id, aggregate)?;
     Ok(path)
 }
 
 pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    read_json(&aggregate_path(run_id)?)
-        .or_else(|error| read_mirrored_aggregate(run_id)?.ok_or(error))
+    match read_mirrored_aggregate(run_id)? {
+        Some(aggregate) => Ok(aggregate),
+        None => read_json(&aggregate_path(run_id)?),
+    }
 }
 
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
@@ -45,36 +48,25 @@ pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
-    #[cfg(test)]
-    if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
-        return Err(Error::internal_io(
-            "injected lifecycle record persistence failure",
-            Some(record.run_id.clone()),
-        ));
-    }
     write_record_with_aggregate(record, read_mirrored_aggregate(&record.run_id)?)
 }
 
-/// Persist an aggregate and its controller projection as one recoverable unit.
-/// If the controller write fails, restore the previously visible aggregate so
-/// status, logs, and artifacts continue to describe the same lifecycle state.
+/// Commit the controller projection and child aggregate in one observation row.
+/// The JSON aggregate is a post-commit cache: readers use the committed row, so
+/// interruption before or after cache persistence exposes a complete state.
 pub(super) fn write_aggregate_and_record(
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<PathBuf> {
-    let previous = read_aggregate(&record.run_id).ok();
-    let path = match write_aggregate(&record.run_id, aggregate) {
-        Ok(path) => path,
-        Err(error) => {
-            restore_aggregate(&record.run_id, previous.as_ref())?;
-            return Err(error);
-        }
-    };
-    if let Err(error) = write_record(record) {
-        restore_aggregate(&record.run_id, previous.as_ref())?;
-        return Err(error);
+    write_record_with_aggregate(record, Some(aggregate.clone()))?;
+    #[cfg(test)]
+    if INTERRUPT_AFTER_TERMINAL_COMMIT.swap(false, Ordering::SeqCst) {
+        return Err(Error::internal_io(
+            "injected interruption after terminal lifecycle commit",
+            Some(record.run_id.clone()),
+        ));
     }
-    Ok(path)
+    write_aggregate(&record.run_id, aggregate)
 }
 
 #[cfg(test)]
@@ -82,25 +74,22 @@ pub(super) fn fail_next_record_write_for_test() {
     FAIL_NEXT_RECORD_WRITE.store(true, Ordering::SeqCst);
 }
 
-fn restore_aggregate(run_id: &str, aggregate: Option<&AgentTaskAggregate>) -> Result<()> {
-    let path = aggregate_path(run_id)?;
-    match aggregate {
-        Some(aggregate) => {
-            write_json(&path, aggregate)?;
-        }
-        None if path.exists() => fs::remove_file(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })?,
-        None => {}
-    }
-    let record = read_record(run_id)?;
-    write_record_with_aggregate(&record, aggregate.cloned())
+#[cfg(test)]
+pub(super) fn interrupt_after_terminal_commit_for_test() {
+    INTERRUPT_AFTER_TERMINAL_COMMIT.store(true, Ordering::SeqCst);
 }
 
 fn write_record_with_aggregate(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
+        return Err(Error::internal_io(
+            "injected lifecycle record persistence failure",
+            Some(record.run_id.clone()),
+        ));
+    }
     let store = ObservationStore::open_initialized()?;
     let metadata_json = merge_observation_metadata(
         store
@@ -109,7 +98,7 @@ fn write_record_with_aggregate(
             .unwrap_or_else(|| json!({})),
         observation_metadata(record, aggregate)?,
     );
-    store.upsert_imported_run(&RunRecord {
+    store.upsert_imported_run_preserving_terminal(&RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
         component_id: plan_id_component(record),
@@ -246,30 +235,6 @@ fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             error.to_string(),
             Some(format!("parse agent-task run {}", run.id)),
         )
-    })
-}
-
-fn mirror_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<()> {
-    let record = match read_record(run_id) {
-        Ok(record) => record,
-        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let store = ObservationStore::open_initialized()?;
-    let metadata_json = observation_metadata(&record, Some(aggregate.clone()))?;
-    store.upsert_imported_run(&RunRecord {
-        id: record.run_id.clone(),
-        kind: "agent-task".to_string(),
-        component_id: plan_id_component(&record),
-        started_at: record.submitted_at.clone(),
-        finished_at: terminal_finished_at(&record),
-        status: run_status(record.state).to_string(),
-        command: Some("homeboy agent-task".to_string()),
-        cwd: None,
-        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        git_sha: None,
-        rig_id: None,
-        metadata_json,
     })
 }
 

@@ -357,6 +357,11 @@ pub(crate) fn prepare_daemon_local_process(
     runner.env = runner_env.clone();
     env = runner_env;
     env.extend(request_env.clone());
+    // Daemon jobs already execute in the runner namespace. Nested Homeboy
+    // commands must stay local instead of treating the controller's runner
+    // configuration as another Lab offload target.
+    env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+    env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,
         &secret_env_plan,

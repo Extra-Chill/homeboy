@@ -235,6 +235,47 @@ fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
 }
 
 #[test]
+fn daemon_worker_marks_nested_cook_as_runner_hosted() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut runner = local_runner(workspace.display().to_string());
+        runner.id = "homeboy-lab".to_string();
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("prepare daemon worker process");
+
+        assert_eq!(
+            plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            plan.env.get(RUNNER_ID_ENV).map(String::as_str),
+            Some("homeboy-lab")
+        );
+    });
+}
+
+#[test]
 fn runner_prep_drops_undeclared_sensitive_env() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
