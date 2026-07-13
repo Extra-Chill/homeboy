@@ -16,7 +16,8 @@ use crate::command_contract::{
 };
 use crate::core::agent_task::AgentTaskEvidenceRef;
 use crate::core::agent_task_lifecycle::{
-    record_runner_job_identity, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
+    cook_attempt_run_id, record_runner_job_identity, AgentTaskArtifactRef, AgentTaskRunRecord,
+    AgentTaskRunState,
 };
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::core::agent_tasks::provider::{
@@ -618,6 +619,33 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
         .insert_after(action_index, ["--run-id".to_string(), run_id.clone()])
         .into_args();
     Some((out, run_id))
+}
+
+/// Give a portable cook one first-attempt id before it crosses the Lab
+/// boundary. The cook id remains part of the command's public contract, while
+/// this id is the lifecycle record owned by the controller, daemon, and runner.
+pub(super) fn ensure_agent_task_lifecycle_identity_with(
+    args: &[String],
+    preferred: Option<&str>,
+) -> Option<(Vec<String>, String)> {
+    let (args, run_id) = ensure_agent_task_dispatch_run_id_with(args, preferred)?;
+    let invocation = CommandInvocation::for_subcommand(&args, "agent-task")?;
+    let action_index = invocation.child_index_matching(&["cook"])?;
+    let existing_attempt_run_id = invocation
+        .option_value_after(action_index, "--attempt-run-id")
+        .map(str::to_string);
+    if let Some(attempt_run_id) = existing_attempt_run_id {
+        return Some((args, attempt_run_id));
+    }
+
+    let attempt_run_id = cook_attempt_run_id(&run_id, 1);
+    let args = ArgEditor::new(&args)
+        .insert_after(
+            action_index,
+            ["--attempt-run-id".to_string(), attempt_run_id.clone()],
+        )
+        .into_args();
+    Some((args, attempt_run_id))
 }
 
 /// Resolves the stable per-run isolation token for an agent-task cook offload:
@@ -1363,6 +1391,26 @@ mod tests {
         // An explicit --run-id always wins over the preferred isolation token.
         assert_eq!(run_id, "explicit-run");
         assert_eq!(out, args);
+    }
+
+    #[test]
+    fn lab_cook_uses_one_first_attempt_identity_across_the_handoff() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            "cook-7970".to_string(),
+        ];
+
+        let (out, lifecycle_run_id) =
+            ensure_agent_task_lifecycle_identity_with(&args, None).expect("cook identity");
+
+        assert_eq!(out[3], "--attempt-run-id");
+        assert_eq!(out[4], lifecycle_run_id);
+        assert_eq!(out[5], "--run-id");
+        assert_eq!(out[6], "cook-7970");
+        assert!(lifecycle_run_id.starts_with("cook-7970-attempt-1-"));
     }
 
     #[test]

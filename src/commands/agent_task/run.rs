@@ -93,7 +93,11 @@ where
     }
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
-        dispatch_args.run_id = Some(agent_task_lifecycle::cook_attempt_run_id(cook_id, 1));
+        dispatch_args.run_id = Some(
+            args.attempt_run_id
+                .clone()
+                .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
+        );
     }
     dispatch_args.core.queue_only = false;
     let (dispatch_value, _dispatch_exit) =
