@@ -1212,6 +1212,11 @@ validate_wp_codebox_phpunit_recipe_profile() {
     return 0
 }
 
+WP_CODEBOX_PHPUNIT_AUTOLOAD_FILE="/wp-codebox-vendor/autoload.php"
+if [ "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" = "project" ]; then
+    WP_CODEBOX_PHPUNIT_AUTOLOAD_FILE=""
+fi
+
 jq -n \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
     --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
@@ -1226,6 +1231,7 @@ jq -n \
     --argjson preloadFiles "$WP_CODEBOX_PHPUNIT_PRELOAD_FILES_JSON" \
     --arg bootstrapMode "$WP_CODEBOX_PHPUNIT_BOOTSTRAP_MODE" \
     --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
+    --arg autoloadFile "$WP_CODEBOX_PHPUNIT_AUTOLOAD_FILE" \
     --arg phpunitTestRoot "$WP_CODEBOX_PHPUNIT_TEST_ROOT" \
     --arg phpunitConfig "$WP_CODEBOX_PHPUNIT_CONFIG" \
     --arg phpunitCwd "$WP_CODEBOX_PHPUNIT_CWD" \
@@ -1245,7 +1251,7 @@ jq -n \
         preloadFiles: $preloadFiles,
         bootstrapMode: $bootstrapMode,
         projectBootstrap: $projectBootstrap,
-        autoloadFile: "/wp-codebox-vendor/autoload.php",
+        autoloadFile: $autoloadFile,
         testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
         dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),
         multisite: (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then true else false end)

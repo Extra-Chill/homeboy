@@ -70,12 +70,13 @@ assert_recipe_args() {
     local expected_project_bootstrap="$2"
     local expected_filter="$3"
     local expected_test_file="$4"
+    local expected_autoload="$5"
 
-    node - "$CAPTURED_RECIPE" "$expected_mode" "$expected_project_bootstrap" "$expected_filter" "$expected_test_file" <<'NODE'
+    node - "$CAPTURED_RECIPE" "$expected_mode" "$expected_project_bootstrap" "$expected_filter" "$expected_test_file" "$expected_autoload" <<'NODE'
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const [, , recipePath, expectedMode, expectedProjectBootstrap, expectedFilter, expectedTestFile] = process.argv;
+const [, , recipePath, expectedMode, expectedProjectBootstrap, expectedFilter, expectedTestFile, expectedAutoload] = process.argv;
 const recipe = JSON.parse(fs.readFileSync(recipePath, 'utf8'));
 const args = recipe.workflow.steps[0].args;
 
@@ -83,16 +84,24 @@ assert(args.includes(`bootstrap-mode=${expectedMode}`), args.join('\n'));
 assert(args.includes(`project-bootstrap=${expectedProjectBootstrap}`), args.join('\n'));
 assert(args.includes(`test-file=${expectedTestFile}`), args.join('\n'));
 assert(args.includes(`phpunit-args-json=["--filter","${expectedFilter}"]`), args.join('\n'));
+
+const harnessAutoload = 'autoload-file=/wp-codebox-vendor/autoload.php';
+if (expectedAutoload === 'harness') {
+    assert(args.includes(harnessAutoload), `expected harness autoload in ${expectedMode} mode: ${args.join('\n')}`);
+} else {
+    assert(!args.includes(harnessAutoload), `expected harness autoload to be cleared in ${expectedMode} mode: ${args.join('\n')}`);
+    assert(args.includes('autoload-file='), `expected cleared autoload-file in ${expectedMode} mode: ${args.join('\n')}`);
+}
 NODE
 }
 
 run_case '{}' --filter FixtureBootstrapModeTest::test_auto tests/FixtureBootstrapModeTest.php
-assert_recipe_args project tests/legacy/bootstrap.php FixtureBootstrapModeTest::test_auto tests/FixtureBootstrapModeTest.php
+assert_recipe_args project tests/legacy/bootstrap.php FixtureBootstrapModeTest::test_auto FixtureBootstrapModeTest.php cleared
 
 run_case '{"wp_codebox_phpunit_bootstrap_mode":"managed"}' --filter FixtureBootstrapModeTest::test_managed tests/FixtureBootstrapModeTest.php
-assert_recipe_args managed '' FixtureBootstrapModeTest::test_managed tests/FixtureBootstrapModeTest.php
+assert_recipe_args managed '' FixtureBootstrapModeTest::test_managed FixtureBootstrapModeTest.php harness
 
 run_case '{"wp_codebox_phpunit_bootstrap_mode":"project","wp_codebox_phpunit_project_bootstrap":"tests/legacy/bootstrap.php"}' --filter FixtureBootstrapModeTest::test_project tests/FixtureBootstrapModeTest.php
-assert_recipe_args project tests/legacy/bootstrap.php FixtureBootstrapModeTest::test_project tests/FixtureBootstrapModeTest.php
+assert_recipe_args project tests/legacy/bootstrap.php FixtureBootstrapModeTest::test_project FixtureBootstrapModeTest.php cleared
 
 echo "WP Codebox project bootstrap mode smoke passed"
