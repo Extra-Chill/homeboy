@@ -50,7 +50,7 @@ Real deploys with `--head`, `--ref`, or `--force` require `--apply`. Preview and
 
 `--ref` is an explicit source selector and conflicts with `--head`, `--tagged`, `--version`, `--outdated`, `--behind-upstream`, and `--check`. Without `--ref`, release and `--head` selection behave as before. File sources and `deploy_strategy: "git"` are rejected because those strategies cannot package and upload the selected Git tree.
 
-Homeboy resolves `<git-ref-or-sha>^{commit}` in the repository containing the declared component `local_path`, pins the full commit SHA, and uses a detached temporary worktree for local build and packaging. It never checks out the requested ref in the configured source checkout. A branch or tag must already be available in that declared repository; use an explicit remote-tracking ref when that is the intended source. Missing, non-commit, or ambiguous refs fail before build or remote mutation.
+Homeboy resolves `<git-ref-or-sha>^{commit}` in the repository containing the declared component `local_path`. If that checkout lacks the object, it fetches only the requested SHA or a single matching named ref through the checkout's configured Git remote, using the existing Git transport and credential policy. It pins the full commit SHA and uses a detached temporary worktree for local build and packaging without changing the configured checkout's branch, index, or worktree. Missing, non-commit, ambiguous, and unauthenticated refs fail before build or remote mutation. A dry run may add the resolved object to the local Git object database but does not build, deploy, or create a worktree.
 
 Components can declare `deploy_together` in their component config. When any selected component belongs to a deploy-together group, Homeboy requires the full group in the same deploy plan and fails before build/upload if only part of the group was selected. Use explicit component IDs for the whole group or `--all` for the project.
 
@@ -101,7 +101,8 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
       "deployed_ref": "<tag-or-branch>|null",
       "requested_ref": "<operator-provided-ref>",
       "resolved_sha": "<full-commit-sha>",
-      "source": "<declared-git-repository>"
+      "source": "<declared-git-repository-or-configured-remote>",
+      "resolution_mode": "local|remote_sha|remote_named_ref"
     }
   ],
   "summary": { "total": 1, "succeeded": 0, "failed": 0, "skipped": 0 }
@@ -115,7 +116,7 @@ Notes:
 - `artifact_path` is the component build artifact path as configured; it may be relative but must include a filename.
 - Deploy output does not include `build_command`. Builds are resolved from the linked extension, and deploy records only build/deploy exit codes plus the artifact path used.
 - `deployed_ref` is omitted when no tag or branch ref was deployed.
-- `requested_ref`, `resolved_sha`, and `source` are persisted for `--ref` deploy evidence and omitted for other source modes. `build_provenance.built_from_ref` and `build_provenance.built_from_commit` carry the same identity.
+- `requested_ref`, `resolved_sha`, `source`, and `resolution_mode` are persisted for `--ref` deploy evidence and omitted for other source modes. `build_provenance.built_from_ref` and `build_provenance.built_from_commit` carry the same identity.
 
 Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings).
 
@@ -256,7 +257,7 @@ homeboy deploy myproject my-plugin --version 1.2.3 --tagged --dry-run
 homeboy deploy myproject my-plugin --ref origin/reviewed-branch --dry-run
 ```
 
-An exact-ref dry-run resolves the ref without fetching, checking out, creating a worktree, building, or uploading. Each planned result reports the requested ref, resolved SHA, declared source repository, packaging plan, and remote destination.
+An exact-ref dry-run resolves the ref without checking out, creating a worktree, building, or uploading. When the configured checkout lacks the requested object, it may fetch that object through the declared remote. Each planned result reports the requested ref, resolved SHA, source, resolution mode, packaging plan, and remote destination.
 
 ## Check Component Status
 

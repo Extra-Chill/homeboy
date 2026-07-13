@@ -9,6 +9,7 @@ pub(super) struct ExactRefIdentity {
     pub requested_ref: String,
     pub resolved_sha: String,
     pub source: String,
+    pub resolution_mode: String,
 }
 
 pub(super) struct ExactRefCheckout {
@@ -24,18 +25,19 @@ pub(super) fn resolve_exact_ref(
 ) -> Result<ExactRefIdentity> {
     validate_component_source(component)?;
     let source_root = source_root(component)?;
-    let resolved_sha = resolve_commit(&source_root, requested_ref, &component.id)?;
+    let resolution = resolve_commit(&source_root, requested_ref, &component.id)?;
     Ok(ExactRefIdentity {
         requested_ref: requested_ref.to_string(),
-        resolved_sha,
-        source: source_root.to_string_lossy().to_string(),
+        resolved_sha: resolution.sha,
+        source: resolution.source,
+        resolution_mode: resolution.mode,
     })
 }
 
 impl ExactRefCheckout {
     pub(super) fn materialize(component: &Component, requested_ref: &str) -> Result<Self> {
         let identity = resolve_exact_ref(component, requested_ref)?;
-        let source_root = PathBuf::from(&identity.source);
+        let source_root = source_root(component)?;
         let component_prefix = git::get_component_path_prefix(&component.local_path);
         let parent = std::env::temp_dir().join("homeboy-deploy-ref");
         std::fs::create_dir_all(&parent).map_err(|err| {
@@ -197,7 +199,17 @@ fn source_root(component: &Component) -> Result<PathBuf> {
         })
 }
 
-fn resolve_commit(source_root: &Path, requested_ref: &str, component_id: &str) -> Result<String> {
+struct ResolvedCommit {
+    sha: String,
+    source: String,
+    mode: String,
+}
+
+fn resolve_commit(
+    source_root: &Path,
+    requested_ref: &str,
+    component_id: &str,
+) -> Result<ResolvedCommit> {
     if requested_ref.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "ref",
@@ -207,25 +219,150 @@ fn resolve_commit(source_root: &Path, requested_ref: &str, component_id: &str) -
         ));
     }
     let commit_ref = format!("{requested_ref}^{{commit}}");
-    git::run_git(
+    if let Ok(sha) = git::run_git(
         source_root,
         &["rev-parse", "--verify", &commit_ref],
         "resolve exact deploy ref",
+    ) {
+        return Ok(ResolvedCommit {
+            sha: sha.trim().to_string(),
+            source: source_root.to_string_lossy().to_string(),
+            mode: "local".to_string(),
+        });
+    }
+
+    resolve_remote_commit(source_root, requested_ref, component_id)
+}
+
+fn resolve_remote_commit(
+    source_root: &Path,
+    requested_ref: &str,
+    component_id: &str,
+) -> Result<ResolvedCommit> {
+    let remote = git::resolve_default_remote(source_root);
+    if git::remote_url(source_root, &remote).is_none() {
+        return Err(unresolvable_ref(requested_ref, source_root, component_id));
+    }
+
+    if is_full_sha(requested_ref) {
+        if git::run_git(
+            source_root,
+            &["fetch", "--no-tags", &remote, requested_ref],
+            "fetch exact deploy SHA",
+        )
+        .is_ok()
+        {
+            let fetched = git::run_git(
+                source_root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{requested_ref}^{{commit}}"),
+                ],
+                "verify fetched exact deploy SHA",
+            )
+            .map_err(|_| unresolvable_ref(requested_ref, source_root, component_id))?
+            .trim()
+            .to_string();
+            if fetched.eq_ignore_ascii_case(requested_ref) {
+                return Ok(ResolvedCommit {
+                    sha: fetched,
+                    source: format!("remote:{remote}"),
+                    mode: "remote_sha".to_string(),
+                });
+            }
+            return Err(unresolvable_ref(requested_ref, source_root, component_id));
+        }
+    }
+
+    let remote_ref = resolve_named_remote_ref(source_root, &remote, requested_ref, component_id)?;
+    git::run_git(
+        source_root,
+        &["fetch", "--no-tags", &remote, &remote_ref],
+        "fetch named exact deploy ref",
     )
-    .map(|sha| sha.trim().to_string())
-    .map_err(|_| {
-        Error::validation_invalid_argument(
+    .map_err(|_| remote_transport_error(&remote, component_id))?;
+    let sha = git::run_git(
+        source_root,
+        &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+        "verify fetched named exact deploy ref",
+    )
+    .map_err(|_| unresolvable_ref(requested_ref, source_root, component_id))?
+    .trim()
+    .to_string();
+    Ok(ResolvedCommit {
+        sha,
+        source: format!("remote:{remote}"),
+        mode: "remote_named_ref".to_string(),
+    })
+}
+
+fn resolve_named_remote_ref(
+    source_root: &Path,
+    remote: &str,
+    requested_ref: &str,
+    component_id: &str,
+) -> Result<String> {
+    let output = git::run_git(
+        source_root,
+        &["ls-remote", "--refs", remote, requested_ref],
+        "query named exact deploy ref",
+    )
+    .map_err(|_| remote_transport_error(remote, component_id))?;
+    let candidates: Vec<&str> = output
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|reference| remote_ref_matches(reference, requested_ref))
+        .collect();
+    match candidates.as_slice() {
+        [reference] => Ok((*reference).to_string()),
+        [] => Err(unresolvable_ref(requested_ref, source_root, component_id)),
+        _ => Err(Error::validation_invalid_argument(
             "ref",
             format!(
-                "Cannot resolve --ref '{}' to an unambiguous commit in declared repository '{}' for component '{}'",
-                requested_ref,
-                source_root.display(),
-                component_id
+                "Cannot resolve --ref '{}' unambiguously from declared Git remote '{}' for component '{}'",
+                requested_ref, remote, component_id
             ),
             None,
             None,
-        )
-    })
+        )),
+    }
+}
+
+fn remote_ref_matches(reference: &str, requested_ref: &str) -> bool {
+    reference == requested_ref
+        || reference == format!("refs/heads/{requested_ref}")
+        || reference == format!("refs/tags/{requested_ref}")
+}
+
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn unresolvable_ref(requested_ref: &str, source_root: &Path, component_id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "ref",
+        format!(
+            "Cannot resolve --ref '{}' to an unambiguous commit in declared repository '{}' for component '{}'",
+            requested_ref,
+            source_root.display(),
+            component_id
+        ),
+        None,
+        None,
+    )
+}
+
+fn remote_transport_error(remote: &str, component_id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "ref",
+        format!(
+            "Unable to query declared Git remote '{}' for component '{}'. Check the remote URL and configured Git authentication.",
+            remote, component_id
+        ),
+        None,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -323,6 +460,57 @@ mod tests {
     }
 
     #[test]
+    fn stale_checkout_fetches_exact_sha_and_named_ref_without_changing_head_or_index() {
+        let fixture = remote_fixture();
+        let sha_checkout = stale_clone(&fixture);
+        let sha_component = fixture_component(&sha_checkout);
+        let sha_head = git_output(&sha_checkout, &["rev-parse", "HEAD"]);
+        let sha_index = git_output(&sha_checkout, &["write-tree"]);
+
+        let sha_identity = resolve_exact_ref(&sha_component, &fixture.target_sha)
+            .expect("fetch exact SHA from remote");
+        assert_eq!(sha_identity.resolved_sha, fixture.target_sha);
+        assert_eq!(sha_identity.source, "remote:origin");
+        assert_eq!(sha_identity.resolution_mode, "remote_sha");
+        assert_eq!(git_output(&sha_checkout, &["rev-parse", "HEAD"]), sha_head);
+        assert_eq!(git_output(&sha_checkout, &["write-tree"]), sha_index);
+
+        let named_checkout = stale_clone(&fixture);
+        let named_component = fixture_component(&named_checkout);
+        let named_head = git_output(&named_checkout, &["rev-parse", "HEAD"]);
+        let named_index = git_output(&named_checkout, &["write-tree"]);
+        let checkout = ExactRefCheckout::materialize(&named_component, "accepted")
+            .expect("fetch and materialize named remote ref");
+        assert_eq!(checkout.identity.resolved_sha, fixture.target_sha);
+        assert_eq!(checkout.identity.resolution_mode, "remote_named_ref");
+        assert_eq!(
+            git_output(&named_checkout, &["rev-parse", "HEAD"]),
+            named_head
+        );
+        assert_eq!(git_output(&named_checkout, &["write-tree"]), named_index);
+    }
+
+    #[test]
+    fn missing_remote_ref_and_transport_failure_are_actionable() {
+        let fixture = remote_fixture();
+        let checkout = stale_clone(&fixture);
+        let component = fixture_component(&checkout);
+        let missing = resolve_exact_ref(&component, "missing-ref").expect_err("missing ref");
+        assert!(missing
+            .message
+            .contains("Cannot resolve --ref 'missing-ref'"));
+
+        git(
+            &checkout,
+            &["remote", "set-url", "origin", "/missing/remote.git"],
+        );
+        let transport =
+            resolve_exact_ref(&component, "also-missing").expect_err("transport failure");
+        assert!(transport.message.contains("configured Git authentication"));
+        assert!(transport.message.contains("remote 'origin'"));
+    }
+
+    #[test]
     fn materialized_ref_verification_rejects_a_different_checkout_head() {
         let repo = fixture_repo();
         let component = fixture_component(repo.path());
@@ -390,6 +578,95 @@ mod tests {
             build_artifact: Some("build/fixture.zip".to_string()),
             ..Component::default()
         }
+    }
+
+    struct RemoteFixture {
+        _root: tempfile::TempDir,
+        remote: PathBuf,
+        target_sha: String,
+    }
+
+    fn remote_fixture() -> RemoteFixture {
+        let root = tempfile::tempdir().expect("fixture root");
+        let remote = root.path().join("remote.git");
+        let seed = root.path().join("seed");
+        git(
+            root.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["config", "user.name", "Homeboy Test"]);
+        git(&seed, &["config", "user.email", "homeboy@example.test"]);
+        std::fs::write(seed.join("payload.txt"), "stale\n").expect("stale payload");
+        git(&seed, &["add", "payload.txt"]);
+        commit(&seed, "stale");
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let stale_clone = root.path().join("stale-template");
+        git(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                stale_clone.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(seed.join("payload.txt"), "accepted\n").expect("accepted payload");
+        git(&seed, &["add", "payload.txt"]);
+        commit(&seed, "accepted");
+        let target_sha = git_output(&seed, &["rev-parse", "HEAD"]);
+        git(&seed, &["branch", "accepted"]);
+        git(&seed, &["push", "-q", "origin", "main", "accepted"]);
+        RemoteFixture {
+            _root: root,
+            remote,
+            target_sha,
+        }
+    }
+
+    fn stale_clone(fixture: &RemoteFixture) -> PathBuf {
+        let checkout = fixture
+            .remote
+            .parent()
+            .expect("fixture parent")
+            .join(uuid::Uuid::new_v4().to_string());
+        let stale_template = fixture
+            .remote
+            .parent()
+            .expect("fixture parent")
+            .join("stale-template");
+        git(
+            fixture.remote.parent().expect("fixture parent"),
+            &[
+                "clone",
+                "-q",
+                stale_template.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git(
+            &checkout,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                fixture.remote.to_str().unwrap(),
+            ],
+        );
+        checkout
     }
 
     fn commit(path: &Path, message: &str) {

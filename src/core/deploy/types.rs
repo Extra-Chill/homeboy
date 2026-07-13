@@ -328,6 +328,9 @@ pub struct ComponentDeployResult {
     /// Declared repository used to resolve the requested ref.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Whether exact-ref identity came from the checkout or its configured remote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_mode: Option<String>,
     /// Explicit build provenance: source/ref, whether a fresh build ran, and the
     /// identity of the artifact that shipped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -363,6 +366,7 @@ impl ComponentDeployResult {
             requested_ref: None,
             resolved_sha: None,
             source: None,
+            resolution_mode: None,
             build_provenance: None,
         }
     }
@@ -457,10 +461,12 @@ impl ComponentDeployResult {
         requested_ref: &str,
         resolved_sha: &str,
         source: &str,
+        resolution_mode: &str,
     ) -> Self {
         self.requested_ref = Some(requested_ref.to_string());
         self.resolved_sha = Some(resolved_sha.to_string());
         self.source = Some(source.to_string());
+        self.resolution_mode = Some(resolution_mode.to_string());
         self.deployed_ref = Some(requested_ref.to_string());
         self.git_head = Some(resolved_sha.to_string());
         self.local_path = Some(source.to_string());
@@ -791,6 +797,7 @@ mod tests {
             "origin/reviewed",
             "0123456789abcdef0123456789abcdef01234567",
             "/repos/component",
+            "local",
         );
         let evidence = serde_json::to_value(result).expect("serialize deploy evidence");
 
@@ -800,6 +807,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(evidence["source"], "/repos/component");
+        assert_eq!(evidence["resolution_mode"], "local");
         assert_eq!(evidence["deployed_ref"], "origin/reviewed");
         assert_eq!(
             evidence["git_head"],
