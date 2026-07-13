@@ -228,6 +228,13 @@ pub(super) enum RunnerCommand {
         /// Confirm the missing-lease state was inspected and its endpoint is unreachable
         #[arg(long)]
         confirm_lease_missing: bool,
+        /// Explicitly reconcile a lease-less orphan store before connecting
+        #[arg(long)]
+        reconcile_leaseless_orphans: bool,
+
+        /// Confirm the runner daemon control plane was lost for lease-less reconciliation
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
     },
     /// Show persisted runner tunnel status
     Status {

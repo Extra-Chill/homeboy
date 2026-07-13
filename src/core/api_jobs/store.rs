@@ -386,117 +386,93 @@ impl JobStore {
         Ok(diagnostics)
     }
 
-    /// Explicitly terminalize legacy unowned jobs only after a missing-lease
-    /// recovery has pinned the exact state and durable queue snapshot.
-    pub fn reconcile_missing_daemon_lease_jobs(
-        &self,
-        state_identity: &str,
-    ) -> Result<DaemonMissingLeaseJobDiagnostics> {
-        let mut diagnostics = DaemonMissingLeaseJobDiagnostics::default();
-        let now = timestamp_ms();
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        for stored in inner.jobs.values() {
-            if matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-                && stored.job.daemon_lease_id.is_some()
-            {
-                diagnostics.owned_job_ids.push(stored.job.id);
-            }
-        }
-        diagnostics.owned_job_ids.sort();
-        if !diagnostics.owned_job_ids.is_empty() {
+    /// Explicitly terminalize an unowned store after the daemon lifecycle has
+    /// independently established that no daemon can still own it.
+    pub fn reconcile_leaseless_orphan_jobs(&self) -> Result<Vec<Uuid>> {
+        let mut job_ids: Vec<Uuid> = self
+            .inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .jobs
+            .values()
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .map(|stored| stored.job.id)
+            .collect();
+        job_ids.sort();
+        if let Some(job) = job_ids
+            .iter()
+            .find_map(|id| self.get(*id).ok())
+            .filter(|job| job.daemon_lease_id.is_some())
+        {
             return Err(Error::validation_invalid_argument(
-                "state-identity",
+                "job_store",
                 format!(
-                    "refusing missing-lease recovery: active jobs still name daemon lease(s): {}",
-                    diagnostics
-                        .owned_job_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "refusing lease-less reconciliation: active job {} has daemon lease evidence",
+                    job.id
                 ),
-                Some(state_identity.to_string()),
                 None,
             ));
         }
 
-        for stored in inner.jobs.values_mut() {
-            if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
-                continue;
-            }
-            diagnostics.terminalized_job_ids.push(stored.job.id);
-            if let Some(request) = stored.remote_runner.as_ref().map(|remote| &remote.request) {
-                let durable_run_id = request
-                    .lifecycle
-                    .as_ref()
-                    .and_then(|lifecycle| lifecycle.durable_run_id.clone())
-                    .or_else(|| {
-                        request
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.get("durable_run_id"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .or_else(|| {
-                        request
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.get("run_id"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    });
-                if let Some(durable_run_id) = durable_run_id {
-                    diagnostics.durable_run_ids.push(durable_run_id);
-                }
-            }
-            let reason = "daemon lease metadata was missing after control-plane loss".to_string();
-            stored.job.status = JobStatus::Failed;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = Some(reason.clone());
-            let classification = stale_after_restart_classification(stored);
-            for (kind, message, data) in [
-                (
-                    JobEventKind::Error,
-                    reason,
-                    serde_json::json!({
-                        "reason": "missing_daemon_lease",
-                        "classification": classification,
-                        "state_identity": state_identity,
-                        "retryable": true,
-                    }),
-                ),
-                (
-                    JobEventKind::Status,
-                    "job marked failed after missing daemon lease".to_string(),
-                    serde_json::json!({
-                        "status": JobStatus::Failed,
-                        "reason": "missing_daemon_lease",
-                        "state_identity": state_identity,
-                        "retryable": true,
-                    }),
-                ),
-            ] {
+        let now = timestamp_ms();
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        for job_id in &job_ids {
+            let stored = inner.jobs.get_mut(job_id).expect("diagnosed job exists");
+            if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
+                stored.job.status = status;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = None;
                 let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                stored.events.push(JobEvent {
-                    sequence,
-                    job_id: stored.job.id,
-                    kind,
-                    timestamp_ms: now,
-                    message: Some(message),
-                    data: Some(data),
-                });
+                stored.events.push(JobEvent { sequence, job_id: *job_id, kind: JobEventKind::Status, timestamp_ms: now, message: Some("job terminal status recovered from retained result after lease-less control-plane loss".to_string()), data: Some(serde_json::json!({"status": status, "reason": "leaseless_orphan_reconciliation", "exit_code": exit_code})) });
+            } else {
+                let reason =
+                    "control plane lost before the job reached a terminal status".to_string();
+                stored.job.status = JobStatus::Failed;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = Some(reason.clone());
+                let classification = stale_after_restart_classification(stored);
+                for (kind, message, data) in [
+                    (
+                        JobEventKind::Error,
+                        reason,
+                        serde_json::json!({"reason":"leaseless_orphan_reconciliation", "classification": classification, "retry_guidance":"Inspect retained job events, then retry eligible work through its original command or workflow."}),
+                    ),
+                    (
+                        JobEventKind::Status,
+                        "job marked failed after lease-less control-plane loss".to_string(),
+                        serde_json::json!({"status":JobStatus::Failed, "reason":"leaseless_orphan_reconciliation"}),
+                    ),
+                ] {
+                    let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    stored.events.push(JobEvent {
+                        sequence,
+                        job_id: *job_id,
+                        kind,
+                        timestamp_ms: now,
+                        message: Some(message),
+                        data: Some(data),
+                    });
             }
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
         }
-        diagnostics.terminalized_job_ids.sort();
-        diagnostics.durable_run_ids.sort();
-        diagnostics.durable_run_ids.dedup();
         drop(inner);
         self.persist()?;
-        Ok(diagnostics)
+        Ok(job_ids)
+    }
+
+    pub fn reconcile_missing_daemon_lease_jobs(
+        &self,
+        state_identity: &str,
+    ) -> Result<DaemonMissingLeaseJobDiagnostics> {
+        let terminalized_job_ids = self.reconcile_leaseless_orphan_jobs()?;
+        Ok(DaemonMissingLeaseJobDiagnostics {
+            terminalized_job_ids,
+            durable_run_ids: Vec::new(),
+            owned_job_ids: Vec::new(),
+        })
     }
 
     pub(crate) fn active_runner_jobs(&self) -> Vec<super::types::ActiveRunnerJobSummary> {

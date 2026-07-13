@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::{
     artifact_content_url, ensure_running_with_operations, fetch_artifact_to_path,
     reconcile_dead_lease_and_ensure_running_with_operations,
+    reconcile_leaseless_orphan_store_with_operations,
 };
 use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::core::build_identity::BuildIdentity;
@@ -18,6 +19,103 @@ use crate::test_support::with_isolated_home;
 struct FakeEnsureState {
     daemon: Option<super::DaemonStartResult>,
     starts: usize,
+}
+
+#[test]
+fn leaseless_store_requires_missing_lease_and_no_owner_then_preserves_evidence() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Stdout,
+                Some("retained output".to_string()),
+                None,
+            )
+            .expect("output");
+        let replacement = fake_daemon(4343, "fresh-lease");
+        let result = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(leaseless_status(1)),
+            || Ok(vec!["no process".to_string(), "no listener".to_string()]),
+            || {
+                let snapshot = path.with_extension("snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || Ok(replacement.clone()),
+        )
+        .expect("reconcile");
+        assert_eq!(result.affected_job_ids, vec![job.id.to_string()]);
+        assert_eq!(result.no_owner_proof.len(), 2);
+        assert!(std::path::Path::new(&result.snapshot_path).exists());
+        let recovered = JobStore::open_without_reconciliation(&path).expect("recovered");
+        assert_eq!(
+            recovered.get(job.id).expect("job").status,
+            JobStatus::Failed
+        );
+        assert!(recovered
+            .events(job.id)
+            .expect("events")
+            .iter()
+            .any(|event| event.message.as_deref() == Some("retained output")));
+    });
+}
+
+#[test]
+fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
+    for probe in [
+        || {
+            Err(crate::core::Error::internal_unexpected(
+                "daemon listener probe was ambiguous",
+            ))
+        },
+        || {
+            Err(crate::core::Error::validation_invalid_argument(
+                "owner_probe",
+                "a Homeboy daemon listener is live",
+                None,
+                None,
+            ))
+        },
+    ] {
+        let error = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(leaseless_status(1)),
+            probe,
+            || unreachable!("must not reconcile"),
+            || unreachable!("must not start"),
+        )
+        .expect_err("probe must fail closed");
+        assert!(error.message.contains("probe") || error.message.contains("listener"));
+    }
+}
+
+fn leaseless_status(active_jobs: usize) -> DaemonStatus {
+    DaemonStatus {
+        running: false,
+        fresh: false,
+        reachable: false,
+        freshness: DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            runtime_paths: None,
+            active_jobs,
+            repair_plan: Vec::new(),
+        },
+        stale_reason: None,
+        state: None,
+        state_path: "/fake/daemon-state.json".to_string(),
+    }
 }
 
 #[test]
@@ -360,6 +458,10 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
             stale_reason_code: Some(DaemonStaleReasonCode::PidDead),
             restartable: false,
             lease_id: Some(daemon.lease_id.clone()),
+            pid: Some(daemon.pid),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
             binary_hash: None,
             runtime_paths: None,
             active_jobs: 1,
