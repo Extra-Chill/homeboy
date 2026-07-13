@@ -4,6 +4,84 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.0] - 2026-07-13
+
+### Added
+- enforce terminal run artifact retention
+- resolve external worktrees by handle
+
+### Changed
+- Recover stale linked rigs from active checkout paths
+- Recover lease-less orphan daemon job stores
+- Recover missing daemon lease state
+- Recover jobs owned by dead runner daemons
+- verify committed harvest patch contents
+- Unify resource-aware execution placement
+- Protect active runner jobs during reconnect
+- Preserve runner jobs across reconnects
+- Persist Lab cooks before materialization
+- exercise committed harvest metadata failure
+- Prevent recursive Lab handoffs
+- Add controller scratch cleanup lifecycle
+- Persist cook phases before Lab dispatch
+- format release workflow policy assertion
+
+### Fixed
+- Fix Lab cook lifecycle identity staging
+- recover dead pre-schema daemon leases
+- expose dead lease recovery evidence
+- expose orphan lease recovery diagnostics
+- resume timed-out draft release uploads
+- Fix runtime binary promotion races
+- preserve staged cook lifecycle identity (#8009)
+- require explicit dead daemon recovery
+- adopt proven dead runner daemon leases
+- bound observation storage and triage latency
+- align extension dev-run workspace dispatch
+- check out release quality policy source
+- constrain portable promotion handback (#7986)
+- recover dead daemon leases with active jobs
+- install source upgrades from Cargo target dir (#7995)
+- reuse terminal child run evidence
+- materialize portable promotion targets as git worktrees (#7986)
+- emit visual artifact fixture for selected scenarios
+- bind detached Lab cook staging to attempt lifecycle
+- keep extension dev runs out of nested Lab dispatch
+- pipe portable promotion provider requests (#7974)
+- unify detached Lab cook lifecycle identity
+- Fix runner-side cook routing boundary
+- preserve agent task plans across Lab handoffs
+- canonicalize runner workload command identity
+- offload agent-task promotion to Lab
+- resume controller proxies on recorded runner (#7960)
+- repair promisor commit graph bundle closure
+- restore review test checkout
+- quarantine timed-out workspaces
+- promote detached Lab cooks
+- recover runner transport agent-task proxies
+- atomically persist terminal agent task state (#7939)
+- bound project deploy execution phases
+- keep daemon jobs in runner namespace
+- persist terminal runner poll failures
+- isolate committed task harvest
+- hydrate promisor objects before Lab bundles
+- bind runner child reconciliation identity
+- Fix private Lab workspace materialization
+- harvest executor committed patches
+- preserve exact worktree provider diagnostics
+- reconcile disconnected runner children (#7919)
+- format extension exit-code test
+- derive lint result from producer status
+- authenticate exact deploy ref resolution
+- fetch missing exact deploy refs from remote
+- preserve release test failure evidence
+- guide recovery for orphaned runner jobs
+- ignore deleted extension dev overlays
+- register runner rig installs on controller
+- bound status remote version probes
+- preserve agent task run metadata across Lab offload
+- enforce release blocking review commands
+
 ## [0.283.1] - 2026-07-13
 
 ### Fixed
