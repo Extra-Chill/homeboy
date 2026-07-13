@@ -11,8 +11,9 @@ pub use remote_runner::{
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
-    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics, Job,
-    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleOwner, RunnerJobSource,
+    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics,
+    DaemonMissingLeaseJobDiagnostics, Job, JobClaimMetadata, JobEvent, JobEventKind, JobStatus,
+    RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
 #[cfg(test)]
@@ -582,6 +583,41 @@ mod tests {
             store.get(legacy_job.id).expect("legacy job").status,
             JobStatus::Running
         );
+    }
+
+    #[test]
+    fn missing_lease_recovery_terminalizes_unowned_active_jobs_with_retryable_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path).expect("open store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+
+        let recovered = JobStore::open_without_reconciliation(&path)
+            .expect("open recovery store")
+            .reconcile_missing_daemon_lease_jobs("sha256:inspected-state")
+            .expect("recover missing lease");
+
+        assert_eq!(recovered.terminalized_job_ids, vec![job.id]);
+        let reopened = JobStore::open_without_reconciliation(&path).expect("reopen store");
+        let terminal = reopened.get(job.id).expect("terminal job");
+        assert_eq!(terminal.status, JobStatus::Failed);
+        assert!(
+            terminal.stale_reason.is_some(),
+            "failed job remains retryable"
+        );
+        assert!(reopened
+            .events(job.id)
+            .expect("events")
+            .iter()
+            .any(|event| {
+                event.kind == JobEventKind::Error
+                    && event.data.as_ref().is_some_and(|data| {
+                        data["reason"] == json!("missing_daemon_lease")
+                            && data["state_identity"] == json!("sha256:inspected-state")
+                            && data["retryable"] == json!(true)
+                    })
+            }));
     }
 
     #[test]

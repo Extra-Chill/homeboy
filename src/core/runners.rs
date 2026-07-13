@@ -27,9 +27,9 @@
 pub use super::runner::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, capture_lab_offload_subprocess_metadata,
-    connect, connect_with_orphan_adoption, reverse_broker_artifact, reverse_broker_reconcile,
-    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
-    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    connect, connect_with_orphan_adoption, connect_with_recovery, reverse_broker_artifact,
+    reverse_broker_reconcile, BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope,
+    MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use super::runner::{
     connect_reverse, disconnect, download_remote_artifact,
@@ -97,12 +97,12 @@ pub mod registry {
 /// Connect/disconnect/status helpers for runner sessions.
 pub mod connection {
     pub use super::super::runner::{
-        connect, connect_reverse, connect_with_orphan_adoption, disconnect, run_reverse_worker,
-        status, statuses, ReverseRunnerConnectOptions, ReverseRunnerWorkerOptions,
-        ReverseRunnerWorkerOutput, RunnerAvailability, RunnerChangedRuntimePath,
-        RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
-        RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
-        RunnerStatusReport, RunnerTunnelMode,
+        connect, connect_reverse, connect_with_orphan_adoption, connect_with_recovery, disconnect,
+        run_reverse_worker, status, statuses, ReverseRunnerConnectOptions,
+        ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerAvailability,
+        RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+        RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
     };
 }
 

@@ -17,7 +17,10 @@ use super::persistence::{
     DEFAULT_EVENT_RETENTION_LIMIT,
 };
 use super::remote_runner;
-use super::types::{DaemonLeaseJobDiagnostics, Job, JobEvent, JobEventKind, JobStatus};
+use super::types::{
+    DaemonLeaseJobDiagnostics, DaemonMissingLeaseJobDiagnostics, Job, JobEvent, JobEventKind,
+    JobStatus,
+};
 use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -378,6 +381,119 @@ impl JobStore {
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
         }
+        drop(inner);
+        self.persist()?;
+        Ok(diagnostics)
+    }
+
+    /// Explicitly terminalize legacy unowned jobs only after a missing-lease
+    /// recovery has pinned the exact state and durable queue snapshot.
+    pub fn reconcile_missing_daemon_lease_jobs(
+        &self,
+        state_identity: &str,
+    ) -> Result<DaemonMissingLeaseJobDiagnostics> {
+        let mut diagnostics = DaemonMissingLeaseJobDiagnostics::default();
+        let now = timestamp_ms();
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        for stored in inner.jobs.values() {
+            if matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                && stored.job.daemon_lease_id.is_some()
+            {
+                diagnostics.owned_job_ids.push(stored.job.id);
+            }
+        }
+        diagnostics.owned_job_ids.sort();
+        if !diagnostics.owned_job_ids.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "state-identity",
+                format!(
+                    "refusing missing-lease recovery: active jobs still name daemon lease(s): {}",
+                    diagnostics
+                        .owned_job_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(state_identity.to_string()),
+                None,
+            ));
+        }
+
+        for stored in inner.jobs.values_mut() {
+            if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+                continue;
+            }
+            diagnostics.terminalized_job_ids.push(stored.job.id);
+            if let Some(request) = stored.remote_runner.as_ref().map(|remote| &remote.request) {
+                let durable_run_id = request
+                    .lifecycle
+                    .as_ref()
+                    .and_then(|lifecycle| lifecycle.durable_run_id.clone())
+                    .or_else(|| {
+                        request
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("durable_run_id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        request
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("run_id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                if let Some(durable_run_id) = durable_run_id {
+                    diagnostics.durable_run_ids.push(durable_run_id);
+                }
+            }
+            let reason = "daemon lease metadata was missing after control-plane loss".to_string();
+            stored.job.status = JobStatus::Failed;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason = Some(reason.clone());
+            let classification = stale_after_restart_classification(stored);
+            for (kind, message, data) in [
+                (
+                    JobEventKind::Error,
+                    reason,
+                    serde_json::json!({
+                        "reason": "missing_daemon_lease",
+                        "classification": classification,
+                        "state_identity": state_identity,
+                        "retryable": true,
+                    }),
+                ),
+                (
+                    JobEventKind::Status,
+                    "job marked failed after missing daemon lease".to_string(),
+                    serde_json::json!({
+                        "status": JobStatus::Failed,
+                        "reason": "missing_daemon_lease",
+                        "state_identity": state_identity,
+                        "retryable": true,
+                    }),
+                ),
+            ] {
+                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                stored.events.push(JobEvent {
+                    sequence,
+                    job_id: stored.job.id,
+                    kind,
+                    timestamp_ms: now,
+                    message: Some(message),
+                    data: Some(data),
+                });
+            }
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+        }
+        diagnostics.terminalized_job_ids.sort();
+        diagnostics.durable_run_ids.sort();
+        diagnostics.durable_run_ids.dedup();
         drop(inner);
         self.persist()?;
         Ok(diagnostics)

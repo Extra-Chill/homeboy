@@ -55,6 +55,16 @@ pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
 ) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_recovery(runner_id, orphan_lease_id, None)
+}
+
+/// Connect while explicitly selecting either an exact dead lease or an exact
+/// missing-lease status snapshot. Ordinary reconnects supply neither selector.
+pub fn connect_with_recovery(
+    runner_id: &str,
+    orphan_lease_id: Option<&str>,
+    missing_lease_state_identity: Option<&str>,
+) -> Result<(RunnerConnectReport, i32)> {
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
     // different configured executable halfway through the transaction.
@@ -96,7 +106,14 @@ pub fn connect_with_orphan_adoption(
     let version = identity.version.clone();
 
     let previous_session = read_session(runner_id)?;
-    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
+    let daemon = ensure_remote_daemon(
+        &client,
+        homeboy,
+        previous_session.as_ref(),
+        orphan_lease_id,
+        missing_lease_state_identity,
+        runner_id,
+    );
     let Ok(daemon) = daemon else {
         return Ok(failed_connect(
             runner_id,
@@ -1001,6 +1018,7 @@ mod remote_daemon {
         pub(super) fresh: bool,
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
+        pub(super) state_identity: Option<String>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1014,6 +1032,8 @@ mod remote_daemon {
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
         orphan_lease_id: Option<&str>,
+        missing_lease_state_identity: Option<&str>,
+        runner_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
         let status = remote_daemon_status(client, homeboy)?;
         if let Some(lease_id) = orphan_lease_id {
@@ -1026,6 +1046,27 @@ mod remote_daemon {
             {
                 return remote_daemon_adopt_orphan(client, homeboy, lease_id);
             }
+        }
+        if let Some(state_identity) = missing_lease_state_identity {
+            if status.stale_reason_code == Some(DaemonStaleReasonCode::LeaseMissing)
+                && status.daemon.is_none()
+                && !status.reachable
+                && status.active_jobs > 0
+                && status.state_identity.as_deref() == Some(state_identity)
+            {
+                return remote_daemon_recover_missing_lease(client, homeboy, state_identity);
+            }
+        }
+        if status.stale_reason_code == Some(DaemonStaleReasonCode::LeaseMissing)
+            && status.daemon.is_none()
+            && !status.reachable
+            && status.active_jobs > 0
+        {
+            return Err(missing_lease_recovery_guidance(
+                runner_id,
+                status.active_jobs,
+                status.state_identity.as_deref().unwrap_or("<unavailable>"),
+            ));
         }
         match remote_daemon_connect_action(previous_session, &status)? {
             RemoteDaemonConnectAction::Reattach => {
@@ -1130,6 +1171,10 @@ mod remote_daemon {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
+                state_identity: data
+                    .get("state_identity")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             });
         }
         let Some(state) = data.get("state") else {
@@ -1146,6 +1191,10 @@ mod remote_daemon {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
+                state_identity: data
+                    .get("state_identity")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             });
         };
         Ok(RemoteDaemonStatus {
@@ -1158,6 +1207,10 @@ mod remote_daemon {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
+            state_identity: data
+                .get("state_identity")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
     }
 
@@ -1275,6 +1328,53 @@ mod remote_daemon {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         })
+    }
+
+    fn remote_daemon_recover_missing_lease(
+        client: &SshClient,
+        homeboy: &str,
+        state_identity: &str,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        let command = format!(
+            "{} daemon recover-missing-lease --state-identity {} --confirm-lease-missing --addr 127.0.0.1:0",
+            shell::quote_arg(homeboy),
+            shell::quote_arg(state_identity),
+        );
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote daemon missing-lease recovery failed",
+                &output,
+            ));
+        }
+        let envelope = parse_envelope(&output.stdout).map_err(|err| {
+            format!("remote daemon missing-lease recovery returned invalid JSON: {err}")
+        })?;
+        if !envelope.success {
+            return Err(format!(
+                "remote daemon missing-lease recovery failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ));
+        }
+        let data = envelope
+            .data
+            .ok_or_else(|| "remote daemon missing-lease recovery returned no data".to_string())?;
+        let replacement = data.get("replacement").ok_or_else(|| {
+            "remote daemon missing-lease recovery returned no replacement lease".to_string()
+        })?;
+        Ok(remote_daemon_from_state(replacement))
+    }
+
+    pub(super) fn missing_lease_recovery_guidance(
+        runner_id: &str,
+        active_jobs: usize,
+        state_identity: &str,
+    ) -> String {
+        format!(
+            "remote daemon has {active_jobs} active job(s) with missing lease metadata; refusing implicit replacement. Recover only the inspected state with `homeboy runner connect {} --recover-missing-lease-state {} --confirm-lease-missing`",
+            shell::quote_arg(runner_id),
+            shell::quote_arg(state_identity),
+        )
     }
 
     pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
@@ -1628,6 +1728,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_lease_with_active_jobs_prescribes_exact_recovery_command() {
+        let status = RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: Some("daemon lease is missing".to_string()),
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+            fresh: false,
+            reachable: false,
+            active_jobs: 1,
+            state_identity: Some("sha256:inspected-state".to_string()),
+        };
+
+        let error = remote_daemon_connect_action(None, &status)
+            .expect_err("default path must still refuse missing lease recovery");
+        assert!(error.contains("refusing implicit replacement"));
+
+        let guidance = missing_lease_recovery_guidance("runner-1", 1, "sha256:inspected-state");
+        assert!(guidance.contains("homeboy runner connect runner-1"));
+        assert!(guidance.contains("--recover-missing-lease-state sha256:inspected-state"));
+        assert!(guidance.contains("--confirm-lease-missing"));
+    }
+
+    #[test]
     fn lost_local_session_refuses_dead_daemon_with_active_jobs_without_explicit_adoption() {
         let status = remote_daemon_status_for_test_with_reason(
             false,
@@ -1681,6 +1803,7 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
+            state_identity: None,
         };
 
         assert_eq!(
@@ -1699,6 +1822,7 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
+            state_identity: None,
         };
 
         assert_eq!(
@@ -2346,6 +2470,7 @@ mod tests {
             fresh,
             reachable,
             active_jobs,
+            state_identity: None,
         }
     }
 }

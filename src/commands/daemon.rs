@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
+    self, BrokerConfig, BrokerConfigOptions, DaemonMissingLeaseRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
@@ -37,6 +37,17 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly recover active jobs when the daemon lease metadata is absent
+    RecoverMissingLease {
+        /// Exact state_identity reported by `homeboy daemon status`
+        #[arg(long)]
+        state_identity: String,
+        /// Confirm the endpoint is unreachable and the lease metadata is absent
+        #[arg(long)]
+        confirm_lease_missing: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -92,6 +103,7 @@ pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
     AdoptOrphan(DaemonOrphanAdoptionResult),
+    RecoverMissingLease(DaemonMissingLeaseRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -123,6 +135,14 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         )),
         DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
             DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
+            0,
+        )),
+        DaemonCommand::RecoverMissingLease { state_identity, confirm_lease_missing, addr } => Ok((
+            DaemonOutput::RecoverMissingLease(daemon::recover_missing_lease_state(
+                &state_identity,
+                confirm_lease_missing,
+                &addr,
+            )?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),

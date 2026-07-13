@@ -205,6 +205,8 @@ pub(super) fn connect(
     broker_url: Option<String>,
     adopt_orphan_lease: Option<String>,
     confirm_pid_dead: bool,
+    recover_missing_lease_state: Option<String>,
+    confirm_lease_missing: bool,
 ) -> CmdResult<RunnerOutput> {
     if adopt_orphan_lease.is_some() && !confirm_pid_dead {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -212,6 +214,25 @@ pub(super) fn connect(
             "--adopt-orphan-lease requires --confirm-pid-dead",
             None,
             Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
+        ));
+    }
+    if recover_missing_lease_state.is_some() && !confirm_lease_missing {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "confirm_lease_missing",
+            "--recover-missing-lease-state requires --confirm-lease-missing",
+            None,
+            Some(vec![
+                "Inspect `homeboy daemon status` on the runner and use its exact state_identity."
+                    .to_string(),
+            ]),
+        ));
+    }
+    if adopt_orphan_lease.is_some() && recover_missing_lease_state.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "recover_missing_lease_state",
+            "choose either exact lease adoption or missing-lease recovery",
+            None,
+            None,
         ));
     }
     if reverse && adopt_orphan_lease.is_some() {
@@ -237,7 +258,11 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        runner::connect_with_orphan_adoption(id, adopt_orphan_lease.as_deref())?
+        runner::connect_with_recovery(
+            id,
+            adopt_orphan_lease.as_deref(),
+            recover_missing_lease_state.as_deref(),
+        )?
     };
     Ok((
         RunnerOutput {

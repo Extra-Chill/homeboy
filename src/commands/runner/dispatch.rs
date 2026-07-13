@@ -136,6 +136,8 @@ pub fn run(
             broker_url,
             adopt_orphan_lease,
             confirm_pid_dead,
+            recover_missing_lease_state,
+            confirm_lease_missing,
         } => map_registry(connect(
             &id,
             reverse,
@@ -143,6 +145,8 @@ pub fn run(
             broker_url,
             adopt_orphan_lease,
             confirm_pid_dead,
+            recover_missing_lease_state,
+            confirm_lease_missing,
         )),
         RunnerCommand::Status { id } => map_registry(status_mod::status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
