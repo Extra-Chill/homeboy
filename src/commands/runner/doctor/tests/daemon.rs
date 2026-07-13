@@ -105,3 +105,55 @@ fn remote_default_artifact_root_normalizes_trailing_home_slash() {
 fn remote_default_artifact_root_rejects_empty_home() {
     assert_eq!(remote::default_artifact_root_for_home("  "), None);
 }
+
+#[test]
+fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
+    let recovery = homeboy::core::daemon::DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(homeboy::core::daemon::DaemonStaleReasonCode::PidDead),
+        restartable: false,
+        lease_id: Some("lease-dead".to_string()),
+        pid: Some(4545),
+        recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::ProvenDead),
+        ownership_evidence: Some(
+            "remote daemon status over SSH proved PID 4545 is dead".to_string(),
+        ),
+        adoption_command: Some(
+            "homeboy runner connect lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+                .to_string(),
+        ),
+        binary_hash: None,
+        runtime_paths: None,
+        active_jobs: 1,
+        repair_plan: Vec::new(),
+    };
+    let runner = Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: Some("lab".to_string()),
+        workspace_root: None,
+        settings: server::RunnerSettings::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: server::RunnerPolicy::default(),
+    };
+    let server = server::Server {
+        id: "lab".to_string(),
+        aliases: Vec::new(),
+        host: "example.test".to_string(),
+        user: "runner".to_string(),
+        port: 22,
+        identity_file: None,
+        kind: None,
+        auth: None,
+        env: Default::default(),
+        runner: None,
+    };
+
+    let report = remote::disconnected_report("lab", &runner, &server, Some(recovery));
+
+    assert_eq!(report.checks.len(), 1);
+    assert_eq!(report.checks[0].id, "daemon.recovery");
+    assert_eq!(report.daemon_recovery.expect("recovery").active_jobs, 1);
+}

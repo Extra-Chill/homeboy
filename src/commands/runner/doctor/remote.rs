@@ -8,6 +8,17 @@ pub fn report(
     client: &SshClient,
     options: &RunnerDoctorOptions,
 ) -> RunnerDoctorOutput {
+    if options.scope == RunnerDoctorScope::LabOffload {
+        match runner::status(runner_id) {
+            Ok(status) if !status.connected => {
+                return disconnected_report(runner_id, runner, server, status.daemon_freshness);
+            }
+            Err(_) => {
+                return disconnected_report(runner_id, runner, server, None);
+            }
+            Ok(_) => {}
+        }
+    }
     let workspace_root = runner
         .workspace_root
         .clone()
@@ -242,6 +253,55 @@ pub fn report(
         capabilities,
         resources,
         checks,
+        daemon_recovery: None,
+        repairs: Vec::new(),
+    }
+}
+
+pub(super) fn disconnected_report(
+    runner_id: &str,
+    runner: &Runner,
+    server: &Server,
+    daemon_recovery: Option<homeboy::core::daemon::DaemonFreshnessReport>,
+) -> RunnerDoctorOutput {
+    let mut details = BTreeMap::new();
+    let (message, remediation) = match daemon_recovery.as_ref() {
+        Some(recovery) => {
+            details.insert("active_jobs".to_string(), recovery.active_jobs.to_string());
+            if let Some(lease_id) = &recovery.lease_id {
+                details.insert("lease_id".to_string(), lease_id.clone());
+            }
+            if let Some(pid) = recovery.pid {
+                details.insert("pid".to_string(), pid.to_string());
+            }
+            if let Some(evidence) = &recovery.ownership_evidence {
+                details.insert("ownership_evidence".to_string(), evidence.clone());
+            }
+            (
+                "Disconnected runner was checked through bounded remote lease recovery".to_string(),
+                recovery.adoption_command.clone(),
+            )
+        }
+        None => (
+            "Disconnected runner has no remote daemon recovery evidence".to_string(),
+            None,
+        ),
+    };
+    RunnerDoctorOutput {
+        variant: "doctor",
+        command: "runner.doctor",
+        runner_id: runner_id.to_string(),
+        runner: runner_summary("ssh", Some(runner), Some(server)),
+        status: RunnerDoctorStatus::Error,
+        capabilities: RunnerCapabilities::default(),
+        resources: RunnerResources::default(),
+        checks: vec![checks::error(
+            "daemon.recovery",
+            message,
+            remediation,
+            details,
+        )],
+        daemon_recovery,
         repairs: Vec::new(),
     }
 }

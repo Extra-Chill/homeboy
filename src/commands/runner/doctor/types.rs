@@ -19,6 +19,8 @@ pub struct RunnerDoctorOutput {
     pub capabilities: RunnerCapabilities,
     pub resources: RunnerResources,
     pub checks: Vec<RunnerCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_recovery: Option<homeboy::core::daemon::DaemonFreshnessReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
 }
