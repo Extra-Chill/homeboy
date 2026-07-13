@@ -2,11 +2,11 @@ use std::fs;
 
 use serde_json::{json, Value};
 
-use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent};
+use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::error::{Error, Result};
 use crate::core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use crate::core::notification_route::NotificationRoute;
-use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord, RunStatus};
 use crate::core::redaction::redact_argv_display;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events,
@@ -137,6 +137,41 @@ pub fn mirror_daemon_job_progress(
         run_id,
         None,
     )
+}
+
+/// Records that the controller can no longer observe an accepted runner job.
+/// The remote job may still exist, but the controller-side lifecycle is terminal
+/// and includes the polling diagnostic instead of leaving a stale running mirror.
+pub fn terminalize_mirrored_daemon_job(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    run_id: Option<&str>,
+    diagnostic: &Value,
+) -> Result<RunRecord> {
+    let store = ObservationStore::open_initialized()?;
+    let mut terminal_job = job.clone();
+    terminal_job.status = JobStatus::Failed;
+    terminal_job.finished_at_ms = Some(terminal_job.updated_at_ms.max(terminal_job.created_at_ms));
+    let run = mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        &terminal_job,
+        &[],
+        &json!({}),
+        run_id,
+        None,
+    )?;
+    let mut metadata = run.metadata_json;
+    metadata["lab"]["controller_terminal"] = json!({
+        "status": "failed",
+        "reason": "runner_job_unobservable",
+        "diagnostic": diagnostic,
+    });
+    store.finish_run(&run.id, RunStatus::Fail, Some(metadata))
 }
 
 pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRecord>>> {

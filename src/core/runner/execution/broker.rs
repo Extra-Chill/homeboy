@@ -167,7 +167,18 @@ pub(super) fn exec_via_reverse_broker(
         std::thread::sleep(Duration::from_millis(200));
         let job_id = job.id.to_string();
         job = fetch_daemon_job_resilient(&client, broker_url, &job_id).map_err(|err| {
-            daemon_job_context_error(&runner.id, &job_id, persisted_run_id.as_deref(), err)
+            terminal_runner_poll_failure(
+                runner,
+                &cwd,
+                &command,
+                &job,
+                "reverse_broker",
+                path_materialization_plan.as_ref(),
+                &source_snapshot,
+                &require_paths,
+                persisted_run_id.as_deref(),
+                err,
+            )
         })?;
     }
     let events = redact_runner_job_events(

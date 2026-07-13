@@ -18,6 +18,7 @@ use super::super::capabilities::{
 use super::super::daemon_http_get::daemon_get;
 use super::super::evidence::{
     local_job_run_id, mirror_daemon_evidence, mirror_daemon_job_progress, runner_exec_run_label,
+    terminalize_mirrored_daemon_job,
 };
 use super::super::resource_metrics::RunnerResourceMetrics;
 use super::super::{Runner, RunnerCapabilityPreflight, RunnerJob, RunnerKind};
@@ -183,7 +184,18 @@ pub(super) fn exec_via_daemon(
         std::thread::sleep(Duration::from_millis(200));
         let job_id = job.id.to_string();
         job = fetch_daemon_job_resilient(&client, local_url, &job_id).map_err(|err| {
-            daemon_job_context_error(&runner.id, &job_id, persisted_run_id.as_deref(), err)
+            terminal_runner_poll_failure(
+                runner,
+                &cwd,
+                &command,
+                &job,
+                "daemon",
+                path_materialization_plan.as_ref(),
+                &source_snapshot,
+                &require_paths,
+                persisted_run_id.as_deref(),
+                err,
+            )
         })?;
     }
     let job_id = job.id.to_string();
@@ -590,6 +602,73 @@ pub(super) fn daemon_job_context_error(
     }
     with_context.retryable = Some(true);
     with_context
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn terminal_runner_poll_failure(
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    transport: &str,
+    path_materialization_plan: Option<&PathMaterializationPlan>,
+    source_snapshot: &SourceSnapshot,
+    _require_paths: &[String],
+    persisted_run_id: Option<&str>,
+    source: Error,
+) -> Error {
+    let job_id = job.id.to_string();
+    let mut error = daemon_job_context_error(&runner.id, &job_id, persisted_run_id, source);
+    error.retryable = Some(false);
+    error.details["status"] = Value::String("terminal_failure".to_string());
+    error.details["reason"] = Value::String("runner_job_unobservable".to_string());
+
+    let diagnostic = json!({
+        "error_code": error.code.as_str(),
+        "message": error.message.clone(),
+        "details": error.details.clone(),
+    });
+    let mirror_run_id = match terminalize_mirrored_daemon_job(
+        runner,
+        cwd,
+        command,
+        job,
+        persisted_run_id,
+        &diagnostic,
+    ) {
+        Ok(run) => Some(run.id),
+        Err(persistence_error) => {
+            error = error.with_hint(format!(
+                "Could not persist terminal controller diagnostics for runner job `{job_id}`: {}",
+                persistence_error.message
+            ));
+            None
+        }
+    };
+    let record = RunnerExecutionRecord::terminal(job_id.clone(), runner.id.clone(), transport, 1)
+        .with_job_id(job_id.clone())
+        .with_mirror_run_id(mirror_run_id.clone())
+        .with_path_materialization_plan(path_materialization_plan.cloned())
+        .with_orchestration_provenance(orchestration_target_provenance(
+            runner,
+            None,
+            Some(source_snapshot),
+            &[],
+        ))
+        .with_next_actions(runner_execution_next_actions(&runner.id, &job_id));
+    if let Err(persistence_error) = persist_runner_execution_transition(&record, cwd, command) {
+        error = error.with_hint(format!(
+            "Could not persist the terminal runner execution record for job `{job_id}`: {}",
+            persistence_error.message
+        ));
+    }
+    if let Some(run_id) = mirror_run_id {
+        error.details["persisted_run_id"] = Value::String(run_id.clone());
+        error = error.with_hint(format!(
+            "Persisted terminal controller diagnostics as run `{run_id}`; inspect it with `homeboy runs show {run_id}`."
+        ));
+    }
+    error
 }
 
 pub(super) fn lab_terminal_result_transport_error(
