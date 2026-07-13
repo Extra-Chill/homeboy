@@ -365,6 +365,66 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
 }
 
 #[test]
+fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
+    crate::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job();
+        let job_id = job.id.to_string();
+        let command = vec![
+            "homeboy".to_string(),
+            "runtime".to_string(),
+            "refresh".to_string(),
+        ];
+        let run_id =
+            persist_lab_offload_handoff_run(&runner, "/srv/homeboy/project", &command, &job, None)
+                .expect("accepted handoff mirror");
+
+        let err = terminal_runner_poll_failure(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            "daemon",
+            None,
+            &SourceSnapshot::existing_remote("lab", "/srv/homeboy/project", Some("/srv/homeboy")),
+            &[],
+            Some(&run_id),
+            Error::internal_unexpected("daemon returned no active job for the accepted id"),
+        );
+
+        assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+        assert_eq!(err.retryable, Some(false));
+        assert_eq!(err.details["status"], "terminal_failure");
+        assert_eq!(err.details["reason"], "runner_job_unobservable");
+        assert_eq!(err.details["persisted_run_id"], run_id);
+
+        let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run(&run_id)
+            .expect("read terminal mirror")
+            .expect("terminal mirror");
+        assert_eq!(run.status, "fail");
+        assert_eq!(run.metadata_json["lab"]["remote_job"]["id"], job_id);
+        assert_eq!(
+            run.metadata_json["lab"]["controller_terminal"]["reason"],
+            "runner_job_unobservable"
+        );
+
+        let records = store
+            .list_runs(crate::core::observation::RunListFilter {
+                kind: Some("runner_execution".to_string()),
+                ..Default::default()
+            })
+            .expect("runner execution records");
+        assert!(records.iter().any(|record| {
+            record.status == "fail"
+                && record.metadata_json["runner_execution_record"]["job_id"] == job_id
+                && record.metadata_json["runner_execution_record"]["status"] == "failed"
+        }));
+    });
+}
+
+#[test]
 fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
     crate::test_support::with_isolated_home(|_| {
         allow_unauthenticated_loopback_broker();
