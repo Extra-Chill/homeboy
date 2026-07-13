@@ -152,6 +152,7 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
                 runner_id: "lab-local",
                 remote_workspace: &workspace.path().display().to_string(),
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("controller proxy persisted");

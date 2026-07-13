@@ -1074,6 +1074,19 @@ pub(crate) fn run_lab_offload_inner(
     )?;
     plan = dependency_hydration.plan;
     if let Some(run_id) = agent_task_run_id.as_deref() {
+        let execution_ids = match &dependency_hydration.record {
+            LabWorkspaceHydrationRecord::Applied(output) => output
+                .steps
+                .iter()
+                .filter_map(|step| step.job_id.clone())
+                .collect(),
+            LabWorkspaceHydrationRecord::NotApplied { .. } => Vec::new(),
+        };
+        agent_task_lifecycle::record_lab_offload_phase_executions(
+            run_id,
+            "hydrating",
+            execution_ids,
+        )?;
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,

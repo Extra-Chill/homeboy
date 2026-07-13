@@ -794,6 +794,34 @@ pub fn record_lab_offload_phase(
     Ok(record)
 }
 
+/// Record child setup executions against the controller proxy. A staging job
+/// can outlive the foreground caller, so its runner IDs belong to the durable
+/// phase record rather than only transient command output.
+pub fn record_lab_offload_phase_executions(
+    run_id: &str,
+    phase: &str,
+    execution_ids: impl IntoIterator<Item = String>,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    let execution_ids: Vec<String> = execution_ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    record.updated_at = Some(now_timestamp());
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("phase".to_string(), json!(phase));
+    metadata.insert(
+        "materialization_execution_ids".to_string(),
+        json!(execution_ids),
+    );
+    metadata.insert(
+        "materialization_resume".to_string(),
+        json!("resume reuses the controller proxy and recorded completed staging"),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
     let plan = detached_lab_plan(&run_id, &input);
@@ -916,8 +944,12 @@ fn record_lab_offload_proxy(
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
     metadata.insert("runner_id".to_string(), json!(runner_id));
-    metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
-    metadata.insert("remote_command".to_string(), json!(remote_command));
+    if remote_workspace != "pending" {
+        metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
+    }
+    if !remote_command.is_empty() {
+        metadata.insert("remote_command".to_string(), json!(remote_command));
+    }
     metadata.insert("retryable".to_string(), json!(true));
     metadata.insert(
         "runner_execution_record".to_string(),
