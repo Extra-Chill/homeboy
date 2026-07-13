@@ -361,6 +361,7 @@ where
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     task_base_sha,
+                    timed_out: false,
                 });
 
                 thread::spawn(move || {
@@ -386,6 +387,7 @@ where
 
             let wait_timeout = running
                 .iter()
+                .filter(|task| !task.timed_out)
                 .filter_map(|task| {
                     task.timeout_ms
                         .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
@@ -411,6 +413,11 @@ where
                     let Some(running_task) = running_task else {
                         continue;
                     };
+                    // A timed-out task has already produced its terminal
+                    // outcome; its late completion only releases ownership.
+                    if running_task.timed_out {
+                        continue;
+                    }
                     let mut outcome = result.outcome;
                     if let Err(error) = harvest_committed_patch(&mut outcome, &running_task) {
                         outcome = committed_harvest_failure(outcome, error);
@@ -579,6 +586,8 @@ struct RunningTask {
     /// Workspace HEAD captured immediately before the executor runs. It bounds
     /// any committed patch candidate to this dispatch attempt.
     task_base_sha: Option<String>,
+    /// Timed-out executor threads retain workspace ownership until completion.
+    timed_out: bool,
 }
 
 struct TaskResult {
@@ -652,6 +661,16 @@ fn harvest_committed_patch(
         path: path.clone(),
         message: error.to_string(),
     })?;
+    let range = format!("{base}..HEAD");
+    // Retain the patch before collecting optional commit metadata so a later
+    // Git failure cannot strand the recoverable artifact.
+    outcome.artifacts.push(committed_patch_artifact(
+        &path,
+        &patch,
+        base,
+        &range,
+        Vec::new(),
+    ));
     let commits = git_output(
         root,
         &[
@@ -662,8 +681,27 @@ fn harvest_committed_patch(
         ],
     )?;
     let commits = committed_change_metadata(&commits);
-    let range = format!("{base}..HEAD");
-    outcome.artifacts.push(AgentTaskArtifact {
+    outcome
+        .artifacts
+        .last_mut()
+        .expect("committed patch artifact was attached")
+        .metadata = serde_json::json!({
+        "change_source": "local_commits",
+        "base_ref": base,
+        "commit_range": range,
+        "commits": commits,
+    });
+    Ok(())
+}
+
+fn committed_patch_artifact(
+    path: &Path,
+    patch: &str,
+    base: &str,
+    range: &str,
+    commits: Vec<serde_json::Value>,
+) -> AgentTaskArtifact {
+    AgentTaskArtifact {
         schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
         id: "committed-changes".to_string(),
         kind: "patch".to_string(),
@@ -682,8 +720,7 @@ fn harvest_committed_patch(
             "commit_range": range,
             "commits": commits,
         }),
-    });
-    Ok(())
+    }
 }
 
 fn committed_patch_path(root: &Path, base: &str, head: &str) -> Result<PathBuf, HarvestError> {
@@ -838,23 +875,15 @@ mod committed_harvest_tests {
     use super::*;
 
     #[test]
-    fn harvest_failures_preserve_executor_evidence_and_report_the_failed_operation() {
+    fn metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
-        outcome.artifacts.push(AgentTaskArtifact {
-            schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "executor-log".to_string(),
-            kind: "transcript".to_string(),
-            name: Some("executor.log".to_string()),
-            label: None,
-            role: None,
-            semantic_key: None,
-            path: Some("artifacts/executor.log".to_string()),
-            url: None,
-            mime: Some("text/plain".to_string()),
-            size_bytes: None,
-            sha256: None,
-            metadata: serde_json::Value::Null,
-        });
+        outcome.artifacts.push(committed_patch_artifact(
+            Path::new("artifacts/committed.patch"),
+            "diff --git a/file b/file\n",
+            "base",
+            "base..HEAD",
+            Vec::new(),
+        ));
 
         let failed = committed_harvest_failure(
             outcome,
@@ -865,7 +894,11 @@ mod committed_harvest_tests {
         );
 
         assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
-        assert_eq!(failed.artifacts[0].id, "executor-log");
+        assert_eq!(failed.artifacts[0].id, "committed-changes");
+        assert_eq!(
+            failed.artifacts[0].path.as_deref(),
+            Some("artifacts/committed.patch")
+        );
         assert!(failed.evidence_refs.iter().any(|evidence| {
             evidence.uri == "homeboy://agent-task/committed-harvest-preflight"
         }));

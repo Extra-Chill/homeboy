@@ -311,6 +311,103 @@ mod concurrency_tests {
     }
 
     #[test]
+    fn serializes_root_and_subdirectory_of_the_same_git_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        init_git_workspace(&workspace);
+        let subdirectory = workspace.join("src");
+        fs::create_dir(&subdirectory).expect("subdirectory");
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[1].workspace.root = Some(subdirectory.display().to_string());
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Clone)]
+    struct LateMutatingExecutor {
+        workspace: std::path::PathBuf,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for LateMutatingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("{}-started", request.task_id));
+            if request.task_id == "task-1" {
+                std::thread::sleep(Duration::from_millis(200));
+                fs::write(self.workspace.join("late-change.txt"), "late\n")
+                    .expect("late workspace mutation");
+                assert!(Command::new("git")
+                    .args(["add", "late-change.txt"])
+                    .current_dir(&self.workspace)
+                    .status()
+                    .expect("stage late mutation")
+                    .success());
+                assert!(Command::new("git")
+                    .args(["commit", "-m", "late mutation"])
+                    .current_dir(&self.workspace)
+                    .status()
+                    .expect("commit late mutation")
+                    .success());
+            }
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("{}-finished", request.task_id));
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    #[test]
+    fn timed_out_task_keeps_workspace_owned_until_late_executor_terminates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        init_git_workspace(&workspace);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(LateMutatingExecutor {
+            workspace: workspace.clone(),
+            events: Arc::clone(&events),
+        });
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[1].workspace.root = Some(workspace.display().to_string());
+
+        let aggregate = scheduler.run(plan);
+        let events = events.lock().expect("events");
+        let first_finished = events
+            .iter()
+            .position(|event| event == "task-1-finished")
+            .expect("late task finished");
+        let second_started = events
+            .iter()
+            .position(|event| event == "task-2-started")
+            .expect("second task started");
+
+        assert!(first_finished < second_started);
+        assert!(aggregate
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.task_id == "task-1"
+                && outcome.status == AgentTaskOutcomeStatus::Timeout));
+    }
+
+    #[test]
     fn rejects_dirty_workspace_before_executor_can_commit_user_changes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");

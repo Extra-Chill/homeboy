@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -570,21 +571,19 @@ impl AgentTaskScheduleSupport {
     ) where
         E: AgentTaskExecutorAdapter,
     {
-        let mut index = 0;
-        while index < running.len() {
-            let timed_out = running[index]
+        for task in running.iter_mut() {
+            if task.timed_out {
+                continue;
+            }
+            let timed_out = task
                 .timeout_ms
-                .map(|timeout_ms| {
-                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
-                })
+                .map(|timeout_ms| task.started_at.elapsed() > timeout_with_grace(timeout_ms))
                 .unwrap_or(false);
 
             if !timed_out {
-                index += 1;
                 continue;
             }
 
-            let task = running.remove(index);
             executor.cancel(&task.task_id);
             let outcome = Self::timeout_outcome(
                 task.task_id.clone(),
@@ -599,6 +598,7 @@ impl AgentTaskScheduleSupport {
                 outcome.summary.clone(),
             ));
             outcomes.push(outcome);
+            task.timed_out = true;
         }
     }
 
@@ -1362,12 +1362,31 @@ fn workspace_is_busy(request: &AgentTaskRequest, running: &[RunningTask]) -> boo
 
 pub(super) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
     let root = request.workspace.root.as_deref()?;
-    Some(
+    let git_identity = Command::new("git")
+        .args([
+            "-C",
+            root,
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
+        .output();
+    if let Ok(output) = git_identity {
+        if output.status.success() {
+            let identity = String::from_utf8_lossy(&output.stdout);
+            let mut lines = identity.lines();
+            if let (Some(top_level), Some(common_dir)) = (lines.next(), lines.next()) {
+                return Some(format!("git:{top_level}:{common_dir}"));
+            }
+        }
+    }
+    Some(format!(
+        "path:{}",
         std::fs::canonicalize(root)
             .unwrap_or_else(|_| Path::new(root).to_path_buf())
             .display()
-            .to_string(),
-    )
+    ))
 }
 
 pub(super) fn select_artifact_payload(
