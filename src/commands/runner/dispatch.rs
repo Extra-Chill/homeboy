@@ -134,7 +134,16 @@ pub fn run(
             reverse,
             reverse_runner,
             broker_url,
-        } => map_registry(connect(&id, reverse, reverse_runner, broker_url)),
+            adopt_orphan_lease,
+            confirm_pid_dead,
+        } => map_registry(connect(
+            &id,
+            reverse,
+            reverse_runner,
+            broker_url,
+            adopt_orphan_lease,
+            confirm_pid_dead,
+        )),
         RunnerCommand::Status { id } => map_registry(status_mod::status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
         RunnerCommand::RefreshHomeboy {

@@ -36,8 +36,8 @@ mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
-    artifact_content_url, ensure_running, fetch_artifact_to_path, start_background,
-    ArtifactFetchOutcome,
+    adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
+    start_background, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -123,6 +123,15 @@ pub struct DaemonStartResult {
     pub address: String,
     pub state_path: String,
     pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonOrphanAdoptionResult {
+    pub adopted_lease_id: String,
+    pub dead_pid: u32,
+    pub active_jobs_terminalized: usize,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

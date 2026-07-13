@@ -203,7 +203,25 @@ pub(super) fn connect(
     reverse: bool,
     runner_id: Option<String>,
     broker_url: Option<String>,
+    adopt_orphan_lease: Option<String>,
+    confirm_pid_dead: bool,
 ) -> CmdResult<RunnerOutput> {
+    if adopt_orphan_lease.is_some() && !confirm_pid_dead {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "confirm_pid_dead",
+            "--adopt-orphan-lease requires --confirm-pid-dead",
+            None,
+            Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
+        ));
+    }
+    if reverse && adopt_orphan_lease.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "adopt_orphan_lease",
+            "orphan daemon adoption only applies to direct SSH runner connections",
+            None,
+            None,
+        ));
+    }
     let (report, exit_code) = if reverse {
         let runner_id = runner_id.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -219,7 +237,7 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        runner::connect(id)?
+        runner::connect_with_orphan_adoption(id, adopt_orphan_lease.as_deref())?
     };
     Ok((
         RunnerOutput {

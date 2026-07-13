@@ -212,6 +212,14 @@ pub(super) enum RunnerCommand {
         /// Broker/controller URL observed by the reverse runner
         #[arg(long)]
         broker_url: Option<String>,
+
+        /// Explicitly adopt this exact remote daemon lease after confirming its PID is dead
+        #[arg(long)]
+        adopt_orphan_lease: Option<String>,
+
+        /// Confirm the recorded PID for --adopt-orphan-lease is dead
+        #[arg(long)]
+        confirm_pid_dead: bool,
     },
     /// Show persisted runner tunnel status
     Status {
