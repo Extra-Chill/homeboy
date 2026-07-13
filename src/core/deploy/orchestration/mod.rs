@@ -279,6 +279,7 @@ pub(super) fn deploy_components(
                 &identity.requested_ref,
                 &identity.resolved_sha,
                 &identity.source,
+                &identity.resolution_mode,
             );
         }
 

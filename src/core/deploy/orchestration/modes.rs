@@ -121,10 +121,12 @@ pub(super) fn run_dry_run_mode(
                     &identity.requested_ref,
                     &identity.resolved_sha,
                     &identity.source,
+                    &identity.resolution_mode,
                 );
                 result.warnings.push(format!(
-                    "source: {}; requested ref: {}; resolved SHA: {}; plan: materialize detached temporary worktree and build exact commit; destination: {}",
+                    "source: {}; resolution mode: {}; requested ref: {}; resolved SHA: {}; plan: materialize detached temporary worktree and build exact commit; destination: {}",
                     identity.source,
+                    identity.resolution_mode,
                     identity.requested_ref,
                     identity.resolved_sha,
                     result.remote_path.as_deref().unwrap_or("unresolved")
