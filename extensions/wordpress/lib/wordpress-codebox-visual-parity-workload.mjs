@@ -1,8 +1,15 @@
+/**
+ * External dependencies
+ */
 import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
+/**
+ * Internal dependencies
+ */
 import {
   createArtifactContext,
   metric,
@@ -11,9 +18,13 @@ import {
   writeJson,
 } from '../../nodejs/scripts/bench/lib/workload-utils.mjs';
 
+const require = createRequire(import.meta.url);
+const { normalizeWordPressVisualAttribution } = require('./wordpress-visual-attribution.js');
+
 /**
  * Run a WordPress/Codebox visual-compare recipe and emit a normalized visual
  * parity artifact for Homeboy bench workloads.
+ * @param {Object} options Workload configuration.
  */
 export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -40,7 +51,7 @@ export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
   await writeJson(recipePath, recipe, { redact: false });
 
   const server = source.server ? createStaticFileServer(source.server.root) : undefined;
-  if (server) await listen(server, source.server.port);
+  if (server) {await listen(server, source.server.port);}
 
   let codeboxResult;
   try {
@@ -51,12 +62,18 @@ export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
     });
     codeboxResult = parseJsonOutput(result.stdout, 'WP Codebox recipe output');
   } finally {
-    if (server) server.close();
+    if (server) {server.close();}
   }
 
   const visualDiffRef = findVisualCompareArtifactRef(codeboxResult) || 'files/browser/visual-compare/visual-diff.json';
   const visualDiffPath = path.join(artifactDirectory, visualDiffRef);
   const visualDiff = parseJsonOutput(await readFile(visualDiffPath, 'utf8'), visualDiffPath);
+  const attribution = await normalizeVisualAttribution({ artifactDirectory, candidate, limits: options.attributionLimits, visualDiff });
+  const attributionArtifact = await context.writeJson(options.attributionArtifactName || 'wordpress-visual-attribution', attribution, {
+    label: options.attributionArtifactLabel || 'WordPress visual attribution',
+    kind: 'wordpress-visual-attribution',
+    redact: false,
+  });
   const normalized = normalizeVisualParityArtifact({
     artifactDirectory,
     candidate,
@@ -66,6 +83,8 @@ export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
     source,
     visualDiff,
     visualDiffRef,
+    attribution: attributionArtifact.path,
+    topFindings: attribution.top_findings,
   });
   const artifact = await context.writeJson(options.artifactName || 'visual-parity-artifact', normalized, {
     label: options.artifactLabel || 'Visual parity artifact',
@@ -83,6 +102,7 @@ export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
     },
     artifacts: {
       visualParity: artifact,
+      visualAttribution: attributionArtifact,
     },
     metadata: {
       visual_parity_schema: normalized.schema,
@@ -140,6 +160,7 @@ function normalizeVisualParityCandidate(candidate) {
     url: String(candidate.url),
     recipe: candidate.recipe && typeof candidate.recipe === 'object' && !Array.isArray(candidate.recipe) ? candidate.recipe : {},
     context: candidate.context && typeof candidate.context === 'object' && !Array.isArray(candidate.context) ? candidate.context : {},
+    provenance: candidate.provenance && typeof candidate.provenance === 'object' && !Array.isArray(candidate.provenance) ? candidate.provenance : {},
   };
 }
 
@@ -221,7 +242,7 @@ function buildVisualParityRecipe({ artifactDirectory, candidate, compare, source
   };
 }
 
-function normalizeVisualParityArtifact({ artifactDirectory, candidate, codeboxResult, compare, recipePath, source, visualDiff, visualDiffRef }) {
+function normalizeVisualParityArtifact({ artifactDirectory, attribution, candidate, codeboxResult, compare, recipePath, source, topFindings, visualDiff, visualDiffRef }) {
   const comparison = visualDiff.comparison || {};
   const mismatchPixels = metric(comparison.mismatchPixels);
   const totalPixels = metric(comparison.totalPixels);
@@ -269,6 +290,9 @@ function normalizeVisualParityArtifact({ artifactDirectory, candidate, codeboxRe
       diff_screenshot: files.diffScreenshot || null,
       summary: files.summary || null,
       explanation: files.visualExplanation || null,
+      source_dom_snapshot: files.sourceDomSnapshot || null,
+      candidate_dom_snapshot: files.candidateDomSnapshot || null,
+      attribution,
     },
     codebox: {
       schema: visualDiff.schema || null,
@@ -280,7 +304,40 @@ function normalizeVisualParityArtifact({ artifactDirectory, candidate, codeboxRe
       comparison,
       limitations: visualDiff.limitations || [],
     },
+    top_findings: topFindings,
   };
+}
+
+async function normalizeVisualAttribution({ artifactDirectory, candidate, limits, visualDiff }) {
+  const files = visualDiff.files || {};
+  const [visualExplanation, sourceDomSnapshot, candidateDomSnapshot] = await Promise.all([
+    readOptionalJsonArtifact(artifactDirectory, files.visualExplanation),
+    readOptionalJsonArtifact(artifactDirectory, files.sourceDomSnapshot),
+    readOptionalJsonArtifact(artifactDirectory, files.candidateDomSnapshot),
+  ]);
+  return normalizeWordPressVisualAttribution({
+    visualDiff,
+    visualExplanation,
+    sourceDomSnapshot,
+    candidateDomSnapshot,
+    candidateProvenance: candidate.provenance,
+    limits,
+    refs: {
+      visualExplanation: files.visualExplanation,
+      sourceDomSnapshot: files.sourceDomSnapshot,
+      candidateDomSnapshot: files.candidateDomSnapshot,
+    },
+  });
+}
+
+async function readOptionalJsonArtifact(artifactDirectory, ref) {
+  if (typeof ref !== 'string' || !ref) {return null;}
+  try {
+    return parseJsonOutput(await readFile(path.join(artifactDirectory, ref), 'utf8'), ref);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {return null;}
+    throw error;
+  }
 }
 
 function findVisualCompareArtifactRef(codeboxResult) {
@@ -288,7 +345,7 @@ function findVisualCompareArtifactRef(codeboxResult) {
   for (const command of commands) {
     const artifact = command?.artifact || command?.result?.artifact;
     const ref = artifact?.files?.visualDiff;
-    if (typeof ref === 'string' && ref) return ref;
+    if (typeof ref === 'string' && ref) {return ref;}
   }
   return undefined;
 }
@@ -302,7 +359,7 @@ function parseJsonOutput(value, label) {
 }
 
 function deepMerge(base, override) {
-  if (!override || typeof override !== 'object' || Array.isArray(override)) return base;
+  if (!override || typeof override !== 'object' || Array.isArray(override)) {return base;}
   const merged = { ...base };
   for (const [key, value] of Object.entries(override)) {
     if (value && typeof value === 'object' && !Array.isArray(value) && base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) {

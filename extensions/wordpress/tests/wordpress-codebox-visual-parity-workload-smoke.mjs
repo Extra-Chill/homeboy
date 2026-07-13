@@ -39,13 +39,21 @@ const visual = {
     candidateScreenshot: 'files/browser/visual-compare/candidate.png',
     diffScreenshot: 'files/browser/visual-compare/diff.png',
     visualDiff: 'files/browser/visual-compare/visual-diff.json',
-    summary: 'files/browser/visual-compare/summary.json'
+    summary: 'files/browser/visual-compare/summary.json',
+    visualExplanation: 'files/browser/visual-compare/visual-explanation.json',
+    sourceDomSnapshot: 'files/browser/visual-compare/source-dom.json',
+    candidateDomSnapshot: 'files/browser/visual-compare/candidate-dom.json'
   },
   viewport: { width: 640, height: 480 },
   comparison: { mismatchPixels: 10, totalPixels: 1000, mismatchRatio: 0.01, dimensionMismatch: false, regions: [{ x: 1, y: 2, width: 3, height: 4 }] }
 };
 await writeFile(join(dir, 'visual-diff.json'), JSON.stringify(visual, null, 2));
 await writeFile(join(dir, 'summary.json'), JSON.stringify(visual, null, 2));
+const snapshot = { schema: 'wp-codebox/browser-dom-snapshot/v1', snapshot: { capturedElements: [] } };
+const explanation = { schema: 'wp-codebox/visual-explanation/v1', summary: { changedElements: 0, addedElements: 0, removedElements: 0 }, mismatchRegions: [], selectorDeltas: [], changes: [], added: [], removed: [] };
+await writeFile(join(dir, 'source-dom.json'), JSON.stringify(snapshot));
+await writeFile(join(dir, 'candidate-dom.json'), JSON.stringify(snapshot));
+await writeFile(join(dir, 'visual-explanation.json'), JSON.stringify(explanation));
 process.stdout.write(JSON.stringify({
   success: true,
   commands: [{ artifact: { files: { visualDiff: 'files/browser/visual-compare/visual-diff.json' } } }]
@@ -64,10 +72,12 @@ process.stdout.write(JSON.stringify({
       ref: 'candidate-ref',
       label: 'candidate-wordpress',
       context: { runtime: 'playground' },
+      provenance: { 'main > p': { source_file: 'page.html' } },
       recipe: { runtime: { wp: 'latest' }, inputs: { mounts: [] }, workflow: { steps: [{ command: 'wordpress.setup', args: [] }] } },
     },
     viewport: { width: 640, height: 480 },
     threshold: 0.02,
+    attributionLimits: { maxFindings: 1, maxRegions: 1, maxElementChanges: 1, maxStyleDeltas: 1 },
   });
   assert.equal(visualResult.metrics.visual_parity_pass, 1);
   assert.equal(visualResult.metrics.visual_parity_mismatch_ratio, 0.01);
@@ -78,6 +88,11 @@ process.stdout.write(JSON.stringify({
   assert.equal(visualArtifact.summary.status, 'passed');
   assert.equal(visualArtifact.summary.region_count, 1);
   assert.equal(visualArtifact.artifacts.visual_diff, 'files/browser/visual-compare/visual-diff.json');
+  assert.equal(typeof visualArtifact.artifacts.attribution, 'string');
+  const attribution = JSON.parse(await readFile(visualResult.artifacts.visualAttribution.path, 'utf8'));
+  assert.equal(attribution.schema, 'homeboy/WordPressVisualAttribution/v1');
+  assert.equal(attribution.evidence.visual_explanation, 'files/browser/visual-compare/visual-explanation.json');
+  assert.equal(attribution.limits.maxFindings, 1);
   const recipeArtifact = JSON.parse(await readFile(visualResult.metadata.codebox_recipe, 'utf8'));
   assert.equal(recipeArtifact.runtime.wp, 'latest');
   assert.equal(recipeArtifact.workflow.steps[0].command, 'wordpress.setup');

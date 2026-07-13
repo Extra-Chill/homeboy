@@ -4,6 +4,7 @@
  * Internal dependencies
  */
 const staticVisualParity = require('./lib/static-visual-parity');
+const wordpressVisualAttribution = require('./lib/wordpress-visual-attribution');
 
 module.exports = {
 	...require('./lib/admin-page-scenarios'),
@@ -63,6 +64,7 @@ module.exports = {
 	normalizeStaticVisualParityArtifacts: staticVisualParity.normalizeStaticVisualParityArtifacts,
 	runStaticVisualParity: staticVisualParity.runStaticVisualParity,
 	writeStaticVisualParitySummary: staticVisualParity.writeStaticVisualParitySummary,
+	normalizeWordPressVisualAttribution: wordpressVisualAttribution.normalizeWordPressVisualAttribution,
 	...require('./lib/wordpress-runtime-task-planner'),
 	wpCodebox: {
 		...require('./lib/codebox-memory-report'),
@@ -80,5 +82,6 @@ module.exports = {
 		normalizeWpCodeboxStaticVisualParityArtifacts: staticVisualParity.normalizeWpCodeboxStaticVisualParityArtifacts,
 		runWpCodeboxStaticVisualParity: staticVisualParity.runWpCodeboxStaticVisualParity,
 		writeWpCodeboxStaticVisualParitySummary: staticVisualParity.writeWpCodeboxStaticVisualParitySummary,
+		normalizeWordPressVisualAttribution: wordpressVisualAttribution.normalizeWordPressVisualAttribution,
 	},
 };
