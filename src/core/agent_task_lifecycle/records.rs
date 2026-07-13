@@ -135,6 +135,23 @@ impl AgentTaskRunRecord {
         metadata.insert("retryable".to_string(), json!(true));
     }
 
+    /// A controller cannot infer progress from a runner connection that is no
+    /// longer available. Preserve the last confirmed heartbeat as evidence,
+    /// while making its liveness explicitly unknown.
+    pub(crate) fn annotate_runner_disconnected(&mut self) {
+        if self.state != AgentTaskRunState::Running || !self.is_runner_backed() {
+            return;
+        }
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("runner_liveness".to_string(), json!("disconnected"));
+        metadata.insert("stale_running".to_string(), json!(true));
+        metadata.insert(
+            "stale_running_reason".to_string(),
+            json!("runner_disconnected"),
+        );
+        metadata.insert("retryable".to_string(), json!(true));
+    }
+
     pub(crate) fn owner_process_is_running(&self) -> bool {
         self.owner_pid()
             .is_some_and(crate::core::process::pid_is_running)

@@ -177,24 +177,32 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = resolve_run_id(run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
-    if let (Ok(aggregate), Ok(plan)) = (
-        store::read_aggregate(&record.run_id),
-        store::read_plan_path(&record.plan_path),
-    ) {
-        let aggregate_path = store::aggregate_path(&record.run_id)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "aggregate.json".to_string());
-        let mut reconciled = record.clone();
-        apply_aggregate_to_record(&mut reconciled, &plan, &aggregate, aggregate_path);
+    if !is_terminal_run_state(record.state) {
+        if let (Ok(aggregate), Ok(plan)) = (
+            store::read_aggregate(&record.run_id),
+            store::read_plan_path(&record.plan_path),
+        ) {
+            let aggregate_path = store::aggregate_path(&record.run_id)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "aggregate.json".to_string());
+            let mut reconciled = record.clone();
+            let projection_plan = aggregate_projection_plan(&plan, &aggregate);
+            apply_aggregate_to_record(
+                &mut reconciled,
+                &projection_plan,
+                &aggregate,
+                aggregate_path,
+            );
 
-        if reconciled != record {
-            if let Err(error) = store::write_record(&reconciled) {
-                reconciled
-                    .ensure_metadata_object()
-                    .insert("finalization_error".to_string(), json!(error.message));
+            if reconciled != record {
+                if let Err(error) = store::write_record(&reconciled) {
+                    reconciled
+                        .ensure_metadata_object()
+                        .insert("finalization_error".to_string(), json!(error.message));
+                }
+
+                record = reconciled;
             }
-
-            record = reconciled;
         }
     }
     let before_liveness_reconciliation = record.clone();
@@ -226,9 +234,28 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
     ) else {
         return;
     };
-    let Ok(snapshot) = crate::core::runners::runner_job_log_snapshot(&runner_id, &job_id) else {
-        return;
+    let snapshot = match crate::core::runners::runner_job_log_snapshot(&runner_id, &job_id) {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            if crate::core::runners::status(&runner_id)
+                .map(|status| !status.connected)
+                .unwrap_or(false)
+            {
+                record.annotate_runner_disconnected();
+            }
+            return;
+        }
     };
+    reconcile_runner_job_snapshot(record, &snapshot);
+}
+
+pub(crate) fn reconcile_runner_job_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &crate::core::runner::RunnerJobLogSnapshot,
+) {
+    if is_terminal_run_state(record.state) {
+        return;
+    }
     match snapshot.job.status {
         crate::core::api_jobs::JobStatus::Queued | crate::core::api_jobs::JobStatus::Running => {
             record.updated_at = Some(now_timestamp());
@@ -241,10 +268,83 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
         crate::core::api_jobs::JobStatus::Succeeded
         | crate::core::api_jobs::JobStatus::Failed
         | crate::core::api_jobs::JobStatus::Cancelled => {
+            if let Some(event) = crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&snapshot.events)).filter(|event| {
+                event.identity.runner_id == record.runner_id().unwrap_or_default()
+                    && event.identity.runner_job_id == record.runner_job_id().unwrap_or_default()
+            }) {
+                let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
+                let aggregate_path = store::aggregate_path(&record.run_id)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "aggregate.json".to_string());
+                apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
+                let _ = store::write_aggregate(&record.run_id, &event.aggregate);
+            }
             apply_runner_job_terminal_state(record, snapshot.job.status, &snapshot.events);
         }
     }
     let _ = store::write_record(record);
+}
+
+fn is_terminal_run_state(state: AgentTaskRunState) -> bool {
+    matches!(
+        state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    )
+}
+
+fn aggregate_projection_plan(
+    plan: &AgentTaskPlan,
+    aggregate: &AgentTaskAggregate,
+) -> AgentTaskPlan {
+    if aggregate.outcomes.iter().all(|outcome| {
+        plan.tasks
+            .iter()
+            .any(|task| task.task_id == outcome.task_id)
+    }) {
+        return plan.clone();
+    }
+    aggregate_projection_plan_from_outcomes(aggregate)
+}
+
+fn aggregate_projection_plan_from_outcomes(aggregate: &AgentTaskAggregate) -> AgentTaskPlan {
+    let tasks = aggregate
+        .outcomes
+        .iter()
+        .map(|outcome| AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: outcome.task_id.clone(),
+            group_key: Some("runner-child".to_string()),
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: outcome
+                    .metadata
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("runner-child")
+                    .to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: outcome.summary.clone().unwrap_or_default(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: outcome.metadata.clone(),
+        })
+        .collect();
+    AgentTaskPlan::new(&aggregate.plan_id, tasks)
 }
 
 pub(crate) fn apply_runner_job_terminal_state(

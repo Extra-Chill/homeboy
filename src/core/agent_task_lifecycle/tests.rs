@@ -250,6 +250,96 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
 }
 
 #[test]
+fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut record = status("agent-task-disconnected-child").expect("status");
+        let heartbeat = record
+            .lifecycle
+            .heartbeat
+            .clone()
+            .expect("confirmed heartbeat");
+
+        record.annotate_runner_disconnected();
+        assert_eq!(record.metadata["runner_liveness"], "disconnected");
+        assert_eq!(
+            record.metadata["stale_running_reason"],
+            "runner_disconnected"
+        );
+        assert_eq!(record.lifecycle.heartbeat, Some(heartbeat));
+
+        let child_plan = test_plan();
+        let mut child_aggregate = succeeded_aggregate(&child_plan);
+        child_aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
+            "patch",
+            "patch",
+            None,
+            Some("/runner/artifacts/patch.diff"),
+        )];
+        child_aggregate.outcomes[0].diagnostics = vec![AgentTaskDiagnostic {
+            class: "provider.attempt".to_string(),
+            message: "attempt 1 succeeded".to_string(),
+            data: json!({ "attempt": 1 }),
+        }];
+        let snapshot = terminal_child_snapshot(&child_aggregate);
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot);
+        let once = record.clone();
+        reconcile_runner_job_snapshot(&mut record, &snapshot);
+
+        assert_eq!(
+            record, once,
+            "repeated terminal reconciliation is idempotent"
+        );
+        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
+        assert_eq!(record.metadata["runner_job_status"], "succeeded");
+        assert!(record.metadata.get("runner_liveness").is_some());
+        let aggregate = store::read_aggregate("agent-task-disconnected-child")
+            .expect("projected child aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "provider.attempt"
+        );
+    });
+}
+
+#[test]
+fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-running",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-789",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let heartbeat = record.lifecycle.heartbeat.clone();
+
+        record.annotate_runner_disconnected();
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.lifecycle.heartbeat, heartbeat);
+        assert_eq!(record.metadata["runner_liveness"], "disconnected");
+        assert_eq!(record.metadata["stale_running"], true);
+        assert_eq!(
+            record.metadata["stale_running_reason"],
+            "runner_disconnected"
+        );
+    });
+}
+
+#[test]
 fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -1897,6 +1987,50 @@ fn test_plan() -> AgentTaskPlan {
             metadata: Value::Null,
         }],
     )
+}
+
+fn terminal_child_snapshot(
+    aggregate: &AgentTaskAggregate,
+) -> crate::core::runner::RunnerJobLogSnapshot {
+    let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
+    crate::core::runner::RunnerJobLogSnapshot {
+        job: crate::core::api_jobs::Job {
+            id: job_id,
+            operation: "agent-task".to_string(),
+            status: crate::core::api_jobs::JobStatus::Succeeded,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            finished_at_ms: Some(2),
+            event_count: 1,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        },
+        events: vec![crate::core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id,
+            kind: crate::core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: 2,
+            message: Some("agent-task lifecycle event".to_string()),
+            data: Some(json!({
+                "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                "identity": {
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": job_id.to_string(),
+                    "run_id": "agent-task-disconnected-child",
+                },
+                "aggregate": aggregate,
+            })),
+        }],
+    }
 }
 
 fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
