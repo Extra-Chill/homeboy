@@ -47,6 +47,7 @@ pub use managed_source::{
 mod offload_changed_since;
 mod offload_metadata;
 mod origin_refs;
+mod progress;
 mod resource_metrics;
 mod rig_materialization;
 mod runtime_materialization_status;

@@ -2,6 +2,7 @@
 
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Output};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -9,6 +10,9 @@ use crate::core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
+
+pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new(program).args(args).output().map_err(|e| {
@@ -140,12 +144,29 @@ pub fn wait_with_bounded_output(
 pub fn wait_with_bounded_output_until_cancelled(
     child: &mut Child,
     byte_limit: usize,
+    is_cancelled: impl FnMut() -> bool,
+) -> io::Result<BoundedCommandOutput> {
+    wait_with_bounded_output_until_cancelled_with_stdout_observer(
+        child,
+        byte_limit,
+        is_cancelled,
+        None,
+    )
+}
+
+pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
+    child: &mut Child,
+    byte_limit: usize,
     mut is_cancelled: impl FnMut() -> bool,
+    stdout_line_observer: Option<StdoutLineObserver>,
 ) -> io::Result<BoundedCommandOutput> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_handle =
-        stdout.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
+    let stdout_handle = stdout.map(|stream| {
+        thread::spawn(move || {
+            capture_tail_with_stdout_observer(stream, byte_limit, stdout_line_observer)
+        })
+    });
     let stderr_handle =
         stderr.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
 
@@ -247,6 +268,46 @@ fn capture_tail(mut stream: impl Read, byte_limit: usize) -> io::Result<BoundedS
             break;
         }
         capture.push(&buf[..n]);
+    }
+    Ok(capture.finish())
+}
+
+fn capture_tail_with_stdout_observer(
+    mut stream: impl Read,
+    byte_limit: usize,
+    observer: Option<StdoutLineObserver>,
+) -> io::Result<BoundedStreamCapture> {
+    let mut capture = TailCapture::new(byte_limit);
+    let mut pending = Vec::new();
+    let mut discard_until_newline = false;
+    let mut buf = [0_u8; 8192];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        capture.push(chunk);
+        if let Some(observer) = observer.as_ref() {
+            for byte in chunk {
+                if discard_until_newline {
+                    if *byte == b'\n' {
+                        discard_until_newline = false;
+                    }
+                    continue;
+                }
+                if *byte == b'\n' {
+                    let line = String::from_utf8_lossy(&pending);
+                    observer(line.trim_end_matches('\r'));
+                    pending.clear();
+                } else if pending.len() < MAX_OBSERVED_LINE_BYTES {
+                    pending.push(*byte);
+                } else {
+                    pending.clear();
+                    discard_until_newline = true;
+                }
+            }
+        }
     }
     Ok(capture.finish())
 }

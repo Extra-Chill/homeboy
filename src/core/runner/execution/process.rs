@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::core::engine::command::StdoutLineObserver;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::redaction::{redact_argv, RedactionPolicy};
@@ -271,6 +273,7 @@ pub(crate) fn prepare_runner_process(
         cwd,
         command: request.command,
         env,
+        secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
     })
@@ -377,6 +380,7 @@ pub(crate) fn prepare_daemon_local_process(
         cwd,
         command: request.command,
         env,
+        secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
     })
@@ -403,6 +407,8 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         &mut command,
         is_cancelled,
         progress_sink,
+        &plan.env,
+        &plan.secret_env_names,
         plan.runner.settings.concurrency_limit,
     )
 }
@@ -494,12 +500,29 @@ pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    env: &HashMap<String, String>,
+    secret_env_names: &[String],
     concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
+    let stdout_line_observer = progress_sink.as_ref().map(|sink| {
+        let sink = Arc::clone(sink);
+        let env = env.clone();
+        let secret_env_names = secret_env_names.to_vec();
+        Arc::new(move |line: &str| {
+            if let Some(progress) = crate::core::runner::progress::parse_child_progress_line(
+                line,
+                &env,
+                &secret_env_names,
+            ) {
+                sink(progress);
+            }
+        }) as StdoutLineObserver
+    });
     let measured = measured_command_output_until_cancelled_with_progress(
         command,
         is_cancelled,
         progress_sink,
+        stdout_line_observer,
         concurrency_limit,
     )?;
     let output = measured.output;
