@@ -85,6 +85,8 @@ pub struct PersistedArtifactCleanupOptions {
     pub run_kind: Option<String>,
     pub component_id: Option<String>,
     pub limit: i64,
+    /// Only terminal, known run states may release persisted evidence.
+    pub terminal_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +111,7 @@ pub struct PersistedArtifactCleanupRow {
     pub artifact_id: String,
     pub run_id: String,
     pub run_kind: String,
+    pub run_status: String,
     pub component_id: Option<String>,
     pub kind: String,
     #[serde(rename = "type")]
@@ -880,7 +883,8 @@ mod persisted_cleanup {
         let mut skipped_count = 0;
 
         for candidate in candidates.iter() {
-            let mut row = classify_persisted_artifact(candidate, &artifact_root)?;
+            let mut row =
+                classify_persisted_artifact(candidate, &artifact_root, options.terminal_only)?;
             if row.action == "remove" {
                 planned_record_count += 1;
                 planned_size_bytes += row.size_bytes;
@@ -927,12 +931,20 @@ mod persisted_cleanup {
     fn classify_persisted_artifact(
         candidate: &ArtifactCleanupCandidateRecord,
         artifact_root: &Path,
+        terminal_only: bool,
     ) -> Result<PersistedArtifactCleanupRow> {
         let artifact = &candidate.artifact;
         let path = persisted_artifact_path_from_record(artifact_root, &artifact.path);
         let mut exists = false;
         let mut size_bytes = 0;
-        let (action, reason) = if artifact.artifact_type == "url"
+        let (action, reason) = if terminal_only
+            && !RunStatus::from_label(&candidate.run_status).is_some_and(RunStatus::is_terminal)
+        {
+            (
+                "skip",
+                "owning run is active or has an unknown lifecycle state",
+            )
+        } else if artifact.artifact_type == "url"
             || crate::core::runners::is_remote_runner_artifact_path(&artifact.path)
             || EXECUTION_CONTRACT
                 .artifacts
@@ -957,6 +969,7 @@ mod persisted_cleanup {
             artifact_id: artifact.id.clone(),
             run_id: artifact.run_id.clone(),
             run_kind: candidate.run_kind.clone(),
+            run_status: candidate.run_status.clone(),
             component_id: candidate.component_id.clone(),
             kind: artifact.kind.clone(),
             artifact_type: artifact.artifact_type.clone(),

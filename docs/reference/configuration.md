@@ -38,6 +38,7 @@ the higher-level system model and core/extension boundary, see
 - `settings` — Generic extension and executor settings, addressed through `/settings/...`.
 - `release_gate` — Routing safety policy for release-gate hot commands.
 - `artifact_root` — Optional directory where persisted run artifacts are copied. Override per command with `homeboy --artifact-root <dir>` or per process with `HOMEBOY_ARTIFACT_ROOT`.
+- `retention` — Bounded cleanup policy shared by terminal-run evidence and runtime resources.
 - `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set `HOMEBOY_NO_UPDATE_CHECK=1`.
 - `resident_services` — Long-running services to restart after `homeboy upgrade` swaps the on-disk binary.
 
@@ -55,6 +56,12 @@ variables.
 
 - `preferred_runner` — Default Lab runner ID.
 - `runner_workspace_ttl` — Optional workspace retention duration for runner materialization.
+
+### `RetentionConfig`
+
+- `terminal_run_days` — Age threshold before terminal persisted-run artifacts are eligible for cleanup (default: 30). Active and unknown run states remain protected.
+- `runtime_tmp_days` — Age threshold for Homeboy runtime temporary entries (default: 7).
+- `limit` — Maximum persisted-run artifact records inspected per aggregate cleanup invocation (default: 1000).
 
 ### `TriageConfig`
 
