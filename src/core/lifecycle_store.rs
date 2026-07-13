@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde_json::{json, Value};
 
 use super::{
@@ -11,6 +14,9 @@ use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::core::engine::local_files::write_json_file as write_json;
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::core::{paths, Error, ErrorCode, Result};
+
+#[cfg(test)]
+static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     let path = run_dir(run_id)?.join("plan.json");
@@ -39,13 +45,69 @@ pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
+        return Err(Error::internal_io(
+            "injected lifecycle record persistence failure",
+            Some(record.run_id.clone()),
+        ));
+    }
+    write_record_with_aggregate(record, read_mirrored_aggregate(&record.run_id)?)
+}
+
+/// Persist an aggregate and its controller projection as one recoverable unit.
+/// If the controller write fails, restore the previously visible aggregate so
+/// status, logs, and artifacts continue to describe the same lifecycle state.
+pub(super) fn write_aggregate_and_record(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<PathBuf> {
+    let previous = read_aggregate(&record.run_id).ok();
+    let path = match write_aggregate(&record.run_id, aggregate) {
+        Ok(path) => path,
+        Err(error) => {
+            restore_aggregate(&record.run_id, previous.as_ref())?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_record(record) {
+        restore_aggregate(&record.run_id, previous.as_ref())?;
+        return Err(error);
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_record_write_for_test() {
+    FAIL_NEXT_RECORD_WRITE.store(true, Ordering::SeqCst);
+}
+
+fn restore_aggregate(run_id: &str, aggregate: Option<&AgentTaskAggregate>) -> Result<()> {
+    let path = aggregate_path(run_id)?;
+    match aggregate {
+        Some(aggregate) => {
+            write_json(&path, aggregate)?;
+        }
+        None if path.exists() => fs::remove_file(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?,
+        None => {}
+    }
+    let record = read_record(run_id)?;
+    write_record_with_aggregate(&record, aggregate.cloned())
+}
+
+fn write_record_with_aggregate(
+    record: &AgentTaskRunRecord,
+    aggregate: Option<AgentTaskAggregate>,
+) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
     let metadata_json = merge_observation_metadata(
         store
             .get_run(&record.run_id)?
             .map(|run| run.metadata_json)
             .unwrap_or_else(|| json!({})),
-        observation_metadata(record, read_mirrored_aggregate(&record.run_id)?)?,
+        observation_metadata(record, aggregate)?,
     );
     store.upsert_imported_run(&RunRecord {
         id: record.run_id.clone(),

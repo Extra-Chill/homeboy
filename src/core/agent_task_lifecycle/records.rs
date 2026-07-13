@@ -152,6 +152,16 @@ impl AgentTaskRunRecord {
         metadata.insert("retryable".to_string(), json!(true));
     }
 
+    /// A reachable runner job is authoritative liveness evidence. Clear only
+    /// the controller's disconnected/stale projection, not unrelated metadata.
+    pub(crate) fn record_runner_reachable(&mut self) {
+        let metadata = self.ensure_metadata_object();
+        metadata.insert("runner_liveness".to_string(), json!("reachable"));
+        metadata.remove("stale_running");
+        metadata.remove("stale_running_reason");
+        metadata.remove("retryable");
+    }
+
     pub(crate) fn owner_process_is_running(&self) -> bool {
         self.owner_pid()
             .is_some_and(crate::core::process::pid_is_running)

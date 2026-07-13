@@ -291,9 +291,9 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
         }];
         let snapshot = terminal_child_snapshot(&child_aggregate);
 
-        reconcile_runner_job_snapshot(&mut record, &snapshot);
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("terminal reconciliation");
         let once = record.clone();
-        reconcile_runner_job_snapshot(&mut record, &snapshot);
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("repeated reconciliation");
 
         assert_eq!(
             record, once,
@@ -302,13 +302,120 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
         assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
         assert_eq!(record.metadata["runner_job_status"], "succeeded");
-        assert!(record.metadata.get("runner_liveness").is_some());
+        assert_eq!(record.metadata["runner_liveness"], "reachable");
         let aggregate = store::read_aggregate("agent-task-disconnected-child")
             .expect("projected child aggregate");
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].class,
             "provider.attempt"
         );
+    });
+}
+
+#[test]
+fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-reconnected-running",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        record.annotate_runner_disconnected();
+        let disconnected_heartbeat = record.lifecycle.heartbeat.clone();
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = crate::core::api_jobs::JobStatus::Running;
+        snapshot.events.clear();
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("reachable reconciliation");
+
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(record.metadata["runner_liveness"], "reachable");
+        assert!(record.metadata.get("stale_running").is_none());
+        assert!(record.metadata.get("stale_running_reason").is_none());
+        assert!(record.metadata.get("retryable").is_none());
+        assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn terminal_child_projection_rejects_mismatched_persisted_run_identity() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let before = record.clone();
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!("another-controller-run");
+
+        let error = reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect_err("mismatched child must be rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(record, before);
+        assert!(store::read_aggregate(&record.run_id).is_err());
+    });
+}
+
+#[test]
+fn terminal_projection_rolls_back_aggregate_when_controller_persistence_fails() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let before = record.clone();
+        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        store::fail_next_record_write_for_test();
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect_err("controller persistence failure is surfaced");
+
+        assert_eq!(record, before);
+        let persisted = status(&record.run_id).expect("persisted controller record");
+        assert_eq!(persisted.state, AgentTaskRunState::Running);
+        assert!(persisted.artifact_refs.is_empty());
+        assert!(store::read_aggregate(&record.run_id).is_err());
+    });
+}
+
+#[test]
+fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let terminal = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        reconcile_runner_job_snapshot(&mut record, &terminal).expect("terminal reconciliation");
+        let terminal_record = record.clone();
+
+        let mut running = terminal.clone();
+        running.job.status = crate::core::api_jobs::JobStatus::Running;
+        running.events.clear();
+        reconcile_runner_job_snapshot(&mut record, &running)
+            .expect("terminal records stay immutable");
+
+        assert_eq!(record, terminal_record);
     });
 }
 
@@ -2025,6 +2132,7 @@ fn terminal_child_snapshot(
                 "identity": {
                     "runner_id": "homeboy-lab",
                     "runner_job_id": job_id.to_string(),
+                    "persisted_run_id": "agent-task-disconnected-child",
                     "run_id": "agent-task-disconnected-child",
                 },
                 "aggregate": aggregate,
