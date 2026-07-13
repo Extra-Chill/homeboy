@@ -352,6 +352,67 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
 }
 
 #[test]
+fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "homeboy@example.test"]);
+    git(&repo, &["config", "user.name", "Homeboy Test"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "old\n").expect("write base file");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    let base = git_head(&repo, "HEAD");
+    std::fs::write(repo.join("lib.rs"), "new\n").expect("write committed change");
+    git(&repo, &["commit", "-am", "agent: committed change"]);
+
+    let source_path = temp.path().join("outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task-1",
+        "status": "succeeded",
+        "artifacts": []
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-no-artifact".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("main".to_string()),
+            task_base_sha: Some(base),
+            to_worktree: "repo@promoted".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+        },
+        &mut provider,
+    )
+    .expect("committed changes are promoted without a patch artifact");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.changed_files, vec!["lib.rs"]);
+    assert_eq!(report.provenance["change_source"], "local_commits");
+    assert_eq!(
+        report.provenance["commits"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(report.provenance["artifact_metadata"].is_null());
+    assert_eq!(provider.apply_calls.len(), 1);
+}
+
+#[test]
 fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -411,6 +472,7 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     git(&repo, &["init"]);
     git(&repo, &["config", "user.email", "agent@example.test"]);
     git(&repo, &["config", "user.name", "Agent"]);
+    git(&repo, &["checkout", "-b", "main"]);
     std::fs::write(repo.join("file.txt"), "base\n").expect("base");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "base"]);
@@ -418,7 +480,7 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
     std::fs::write(repo.join("file.txt"), "unrelated\n").expect("unrelated");
     git(&repo, &["commit", "-am", "unrelated"]);
     let unrelated = git_head(&repo, "HEAD");
-    git(&repo, &["checkout", "master"]);
+    git(&repo, &["checkout", "main"]);
     std::fs::write(repo.join("file.txt"), "agent\n").expect("agent");
     git(&repo, &["commit", "-am", "agent"]);
     let (source_path, source) = write_empty_patch_source(&temp);

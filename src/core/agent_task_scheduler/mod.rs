@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -312,6 +314,7 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
+                let task_base_sha = workspace_git_head(&request);
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -341,6 +344,7 @@ where
                     timeout_ms: Some(task_timeout_ms),
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
+                    task_base_sha,
                 });
 
                 thread::spawn(move || {
@@ -391,10 +395,10 @@ where
                     let Some(running_task) = running_task else {
                         continue;
                     };
-                    let outcome = AgentTaskScheduleSupport::normalize_outcome(
-                        result.outcome,
-                        Some(&running_task),
-                    );
+                    let mut outcome = result.outcome;
+                    harvest_committed_patch(&mut outcome, &running_task);
+                    let outcome =
+                        AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
                     events.push(event(
                         &outcome.task_id,
@@ -554,6 +558,9 @@ struct RunningTask {
     rotation_index: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
+    /// Workspace HEAD captured immediately before the executor runs. It bounds
+    /// any committed patch candidate to this dispatch attempt.
+    task_base_sha: Option<String>,
 }
 
 struct TaskResult {
@@ -565,6 +572,135 @@ struct TaskResult {
 enum SchedulerEvent {
     TaskResult(TaskResult),
     Cancellation,
+}
+
+fn workspace_git_head(request: &AgentTaskRequest) -> Option<String> {
+    let root = request.workspace.root.as_deref()?;
+    git_output(Path::new(root), &["rev-parse", "HEAD"])
+}
+
+fn harvest_committed_patch(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
+    if outcome.status != AgentTaskOutcomeStatus::Succeeded
+        || outcome.artifacts.iter().any(|artifact| {
+            is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact)
+        })
+    {
+        return;
+    }
+    let Some(base) = running.task_base_sha.as_deref() else {
+        return;
+    };
+    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
+        return;
+    };
+    let Some(head) = git_output(root, &["rev-parse", "HEAD"]) else {
+        return;
+    };
+    if head == base || !git_is_ancestor(root, base, "HEAD") {
+        return;
+    }
+    let Some(patch) = git_output(
+        root,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            base,
+            "HEAD",
+        ],
+    ) else {
+        return;
+    };
+    if patch.trim().is_empty() {
+        return;
+    }
+    let Some(path) = committed_patch_path(root, base, &head) else {
+        return;
+    };
+    if std::fs::write(&path, patch.as_bytes()).is_err() {
+        return;
+    }
+    let commits = git_output(
+        root,
+        &[
+            "log",
+            "--reverse",
+            "--format=%H%x1f%an%x1f%ae%x1f%s",
+            &format!("{base}..HEAD"),
+        ],
+    )
+    .map(|output| committed_change_metadata(&output))
+    .unwrap_or_default();
+    let range = format!("{base}..HEAD");
+    outcome.artifacts.push(AgentTaskArtifact {
+        schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "committed-changes".to_string(),
+        kind: "patch".to_string(),
+        name: Some("committed-changes.patch".to_string()),
+        label: Some("executor committed changes".to_string()),
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some(path.display().to_string()),
+        url: None,
+        mime: Some("text/x-patch".to_string()),
+        size_bytes: Some(patch.len() as u64),
+        sha256: None,
+        metadata: serde_json::json!({
+            "change_source": "local_commits",
+            "base_ref": base,
+            "commit_range": range,
+            "commits": commits,
+        }),
+    });
+}
+
+fn committed_patch_path(root: &Path, base: &str, head: &str) -> Option<PathBuf> {
+    let git_dir = git_output(root, &["rev-parse", "--git-dir"])?;
+    let git_dir = PathBuf::from(git_dir);
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        root.join(git_dir)
+    };
+    let dir = git_dir.join("homeboy-agent-task");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("committed-changes-{base}-{head}.patch")))
+}
+
+fn committed_change_metadata(output: &str) -> Vec<serde_json::Value> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            Some(serde_json::json!({
+                "sha": fields.next()?,
+                "author_name": fields.next()?,
+                "author_email": fields.next()?,
+                "subject": fields.next()?,
+            }))
+        })
+        .collect()
+}
+
+fn git_is_ancestor(cwd: &Path, base: &str, head: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", base, head])
+        .current_dir(cwd)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Record a finalized outcome in the completed-by-task index and the ordered
