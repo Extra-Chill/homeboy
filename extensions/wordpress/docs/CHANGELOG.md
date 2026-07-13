@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.0] - 2026-07-13
+
+### Added
+- add visual parity attribution
+
 ## [3.23.44] - 2026-07-13
 
 ### Fixed
