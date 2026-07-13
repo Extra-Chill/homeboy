@@ -25,7 +25,7 @@ use crate::core::{paths, Error, Result};
 
 pub(crate) use helpers::*;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {

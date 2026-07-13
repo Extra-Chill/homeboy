@@ -84,6 +84,8 @@ pub(super) enum RunsCommand {
     Hotspots(RunsHotspotsArgs),
     /// Mark orphaned running observation records stale
     Reconcile(RunsReconcileArgs),
+    /// Plan or apply bounded retention of terminal observation rows and dependent records
+    Retention(RunsRetentionArgs),
     /// Block and stream a run's status until it reaches a terminal state,
     /// exiting with a code that reflects pass/fail. Works for attached and
     /// detached/offloaded runs.
@@ -186,6 +188,28 @@ pub struct RunsListArgs {
     pub include_active_runner_jobs: bool,
 }
 
+#[derive(Args, Clone)]
+pub struct RunsRetentionArgs {
+    /// Delete the planned terminal rows. Without this flag, only reports the plan.
+    #[arg(long)]
+    pub apply: bool,
+    /// Only include terminal runs finished more than this many days ago.
+    #[arg(long, default_value_t = 30)]
+    pub older_than_days: i64,
+    /// Maximum terminal run rows to inspect and remove in one invocation.
+    #[arg(long, default_value_t = 1000)]
+    pub limit: i64,
+}
+
+#[derive(Serialize)]
+pub struct RunsRetentionOutput {
+    pub command: &'static str,
+    pub dry_run: bool,
+    pub older_than_days: i64,
+    pub candidate_run_ids: Vec<String>,
+    pub removed_run_count: usize,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "variant", content = "payload", rename_all = "snake_case")]
 pub enum RunsOutput {
@@ -216,6 +240,7 @@ pub enum RunsOutput {
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
     Reconcile(RunsReconcileOutput),
+    Retention(RunsRetentionOutput),
     Watch(RunsWatchOutput),
     Export(RunsExportOutput),
     Import(RunsImportOutput),

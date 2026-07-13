@@ -156,6 +156,23 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: "",
     },
+    Migration {
+        version: 8,
+        sql: r#"
+        -- Equality filters followed by started_at let latest/list queries walk
+        -- a bounded index instead of sorting the full observation history.
+        CREATE INDEX IF NOT EXISTS idx_runs_started_at_desc
+            ON runs(started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_status_started_at_desc
+            ON runs(status, started_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_runs_kind_component_started_at_desc
+            ON runs(kind, component_id, started_at DESC, id DESC);
+        -- Terminal retention selects known statuses before its finished-at
+        -- cutoff, so this avoids scanning the full history on each cleanup.
+        CREATE INDEX IF NOT EXISTS idx_runs_status_finished_at
+            ON runs(status, finished_at ASC, id ASC);
+        "#,
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
