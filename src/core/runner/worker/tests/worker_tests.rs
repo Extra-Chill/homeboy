@@ -117,6 +117,57 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
 }
 
 #[test]
+fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecycle_fields() {
+    test_support::with_isolated_home(|_| {
+        create_shell_runner();
+        let store = JobStore::default();
+        let mut request = run_id_echo_request();
+        request.command[2] = "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"import\",\"current_item\":\"%s\",\"completed\":1,\"total\":2,\"metadata\":{\"api_key\":\"%s\"}}\\n' \"$TOKEN\" \"$TOKEN\"; printf 'HOMEBOY_RUNNER_PROGRESS {not-json}\\n'; printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"done\",\"status\":\"succeeded\"}\\n'; sleep 0.1; dd if=/dev/zero bs=1024 count=4097 2>/dev/null; printf tail".to_string();
+        request
+            .env
+            .insert("TOKEN".to_string(), "child-secret".to_string());
+        request.secret_env_names = vec!["TOKEN".to_string()];
+        store.submit_remote_runner_job(request).expect("submit job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+
+        let (output, exit_code) =
+            run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        let job = output.job.expect("job");
+        handle.join().expect("mock broker joins");
+        let events = store.events(job.id).expect("persisted events");
+        let progress_index = events
+            .iter()
+            .position(|event| event.kind == JobEventKind::Progress && event.data.is_some())
+            .expect("child progress event persisted before finish");
+        let result_index = events
+            .iter()
+            .position(|event| event.kind == JobEventKind::Result)
+            .expect("result event");
+        assert!(
+            progress_index < result_index,
+            "progress must stream before terminal result"
+        );
+        let progress = events[progress_index].data.as_ref().expect("progress data");
+        assert_eq!(progress["phase"], "import");
+        assert_eq!(progress["current_item"], "[REDACTED]");
+        assert_eq!(progress["metadata"]["api_key"], "[REDACTED]");
+        assert!(events.iter().all(|event| event.kind != JobEventKind::Status
+            || event.message.as_deref() != Some("succeeded")));
+        let result = result_event_data(&store, job.id);
+        assert!(result["stdout"].as_str().expect("stdout").ends_with("tail"));
+        assert_eq!(result["capture"]["stdout"]["truncated"], true);
+        assert!(
+            result["capture"]["stdout"]["bytes_retained"]
+                .as_u64()
+                .unwrap()
+                <= 4 * 1024 * 1024
+        );
+    });
+}
+
+#[test]
 fn reverse_worker_injects_lifecycle_run_id_into_claimed_job_env() {
     test_support::with_isolated_home(|_| {
         create_shell_runner();

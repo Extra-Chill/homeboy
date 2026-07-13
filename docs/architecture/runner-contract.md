@@ -97,6 +97,26 @@ the wrapper process group is terminated and the runner command returns failure
 evidence promptly instead of waiting forever. Runners may include `message`,
 `error`, `summary`, or `failure.message` for the stderr detail surfaced by core.
 
+## Structured workload progress
+
+A child command can report durable, live workload progress by writing one
+newline-delimited stdout record with this exact prefix and JSON envelope:
+
+```text
+HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"import","current_item":"fixture-a","completed":1,"total":5,"metadata":{"source":"matrix"}}
+```
+
+`phase`, `current_item`, `completed`, `total`, and `metadata` are optional;
+the envelope must contain at least one of them. When both counters are present,
+`completed` cannot exceed `total`. Homeboy redacts the envelope and appends it
+as a durable `progress` job event immediately, so
+`homeboy runner job logs <runner-id> <job-id> --follow` displays it before the
+command exits.
+
+The envelope accepts only these fields and never controls job lifecycle. Lines
+that are malformed, use another schema, or include terminal-state fields stay
+ordinary bounded stdout and cannot change the runner job status.
+
 ## Failure context
 
 Runner exec results expose a generic `failure_context` object when the executed

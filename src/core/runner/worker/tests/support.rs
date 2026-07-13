@@ -303,7 +303,7 @@ fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
                 request.body["claim_id"].as_str().expect("event claim id"),
                 JobEventKind::Progress,
                 request.body["message"].as_str().map(ToString::to_string),
-                None,
+                request.body.get("data").cloned(),
             )
             .expect("append event");
         return serde_json::json!({

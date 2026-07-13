@@ -639,6 +639,7 @@ pub(crate) struct PreparedRunnerProcess {
     pub cwd: String,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    pub secret_env_names: Vec<String>,
     pub source_snapshot: SourceSnapshot,
     pub require_paths: Vec<String>,
 }

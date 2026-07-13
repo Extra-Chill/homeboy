@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::engine::command::{
-    isolate_process_tree, wait_with_bounded_output, wait_with_bounded_output_until_cancelled,
-    CommandCaptureMetadata, DEFAULT_CAPTURE_LIMIT_BYTES,
+    isolate_process_tree, wait_with_bounded_output,
+    wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
+    StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::core::error::{Error, Result};
 
@@ -125,6 +126,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
     mut is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    stdout_line_observer: Option<StdoutLineObserver>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -142,17 +144,21 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         Some(Arc::clone(&guard_violation)),
         concurrency_limit,
     );
-    let bounded_output =
-        wait_with_bounded_output_until_cancelled(&mut child, DEFAULT_CAPTURE_LIMIT_BYTES, || {
+    let bounded_output = wait_with_bounded_output_until_cancelled_with_stdout_observer(
+        &mut child,
+        DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
             is_cancelled()
                 || guard_violation
                     .lock()
                     .expect("resource guard mutex poisoned")
                     .is_some()
-        })
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
-        })?;
+        },
+        stdout_line_observer,
+    )
+    .map_err(|err| {
+        Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
+    })?;
     let capture = bounded_output.capture.clone();
     let output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());
