@@ -40,7 +40,8 @@ fn prepare_rig_bench_context(
     rig_id: &str,
     args: &BenchRunArgs,
 ) -> homeboy::core::Result<RigBenchContext> {
-    let mut source = rig::RigSourceContext::load_for_invocation(rig_id)?;
+    let mut source =
+        rig::RigSourceContext::load_for_invocation_at(rig_id, args.comp.path.as_deref())?;
     report_rig_source(&source);
     let mut spec = source.spec.clone();
     let declared_spec = spec.clone();
@@ -147,14 +148,15 @@ fn rig_bench_components(spec: &RigSpec) -> Vec<String> {
 }
 
 pub(super) fn validate_profile_available_for_rigs(
-    rig_ids: &[String],
+    args: &BenchRunArgs,
     profile: &str,
 ) -> homeboy::core::Result<()> {
     let mut missing = Vec::new();
     let mut available_by_rig = Vec::new();
 
-    for rig_id in rig_ids {
-        let spec = rig::RigSourceContext::load_for_invocation(rig_id)?.spec;
+    for rig_id in &args.rig {
+        let spec =
+            rig::RigSourceContext::load_for_invocation_at(rig_id, args.comp.path.as_deref())?.spec;
         if !spec.bench_profiles.contains_key(profile) {
             missing.push(rig_id.clone());
         }
