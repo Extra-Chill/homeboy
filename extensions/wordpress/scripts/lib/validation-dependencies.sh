@@ -1071,8 +1071,15 @@ _homeboy_report_resolved_dependency() {
 
 homeboy_resolve_validation_dependency_path() {
     local dependency="${1:-}"
+    local direct_path="$dependency"
 
     [ -z "$dependency" ] && return 1
+
+    # Settings are component configuration. Resolve relative paths from that
+    # component rather than the runner's transient working directory.
+    if [[ "$direct_path" != /* ]] && [ -n "${_HOMEBOY_DEP_PLUGIN_PATH:-}" ]; then
+        direct_path="${_HOMEBOY_DEP_PLUGIN_PATH%/}/${direct_path#./}"
+    fi
 
     local lab_mapped
     lab_mapped=$(_homeboy_resolve_lab_mapped_dependency_path "$dependency" || true)
@@ -1081,13 +1088,27 @@ homeboy_resolve_validation_dependency_path() {
         return 0
     fi
 
-    # 1. Direct path (absolute or relative directory)
-    if [ -d "$dependency" ]; then
-        _homeboy_report_resolved_dependency "$dependency" "direct path" "$dependency"
-        _homeboy_warn_if_dependency_stale "$dependency" "$dependency"
-        printf '%s\n' "$dependency"
+    # 1. Direct path. Relative settings paths are anchored to the component
+    # workspace, then canonicalized before callers embed them in generated
+    # config files that may live outside that workspace.
+    if [ -d "$direct_path" ]; then
+        direct_path=$(cd "$direct_path" && pwd -P)
+        _homeboy_report_resolved_dependency "$dependency" "direct path" "$direct_path"
+        _homeboy_warn_if_dependency_stale "$dependency" "$direct_path"
+        printf '%s\n' "$direct_path"
         return 0
     fi
+
+    # An explicitly relative or absolute path is not a dependency slug. Return
+    # its component-rooted location so the consuming validation tool can report
+    # the missing path instead of silently treating a configuration typo as an
+    # unresolved plugin name.
+    case "$dependency" in
+        /*|./*|../*)
+            printf '%s\n' "$direct_path"
+            return 0
+            ;;
+    esac
 
     # 2. Prefer the consumer's Composer-locked plugin package when available.
     # This keeps validation aligned with the dependency ref the component actually
