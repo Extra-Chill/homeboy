@@ -16,8 +16,8 @@ use crate::core::process::pid_is_running;
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonOrphanAdoptionResult,
+    DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -43,6 +43,69 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     ensure_running_with_wait(addr, Duration::from_secs(5))
+}
+
+/// Replace one explicitly identified, provably dead daemon lease. The operation
+/// lock covers validation, durable-job reconciliation, and replacement startup.
+pub fn adopt_orphaned_lease(
+    lease_id: &str,
+    confirm_pid_dead: bool,
+    addr: &str,
+) -> Result<DaemonOrphanAdoptionResult> {
+    if !confirm_pid_dead {
+        return Err(Error::validation_invalid_argument(
+            "confirm_pid_dead",
+            "orphan adoption requires explicit confirmation that the recorded daemon PID is dead",
+            None,
+            Some(vec!["Inspect `homeboy daemon status` and retry with --confirm-pid-dead only for the reported dead lease.".to_string()]),
+        ));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    let state = status.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "orphan adoption requires a persisted daemon lease",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "recorded daemon lease `{}` does not match requested orphan lease `{lease_id}`",
+                state.lease_id
+            ),
+            Some(lease_id.to_string()),
+            Some(vec![
+                "Run `homeboy daemon status` and adopt only its exact dead lease.".to_string(),
+            ]),
+        ));
+    }
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!("daemon lease `{lease_id}` is not proven dead"),
+            Some(lease_id.to_string()),
+            Some(vec!["Live or ambiguous daemon ownership is protected; inspect `homeboy daemon status` before retrying.".to_string()]),
+        ));
+    }
+
+    let active_jobs =
+        super::JobStore::active_count_at_path(crate::core::paths::daemon_jobs_file()?)?;
+    // Opening the durable store records terminal failure/retry evidence for jobs
+    // owned by this dead daemon before the replacement can accept new work.
+    let _reconciled = super::JobStore::open(crate::core::paths::daemon_jobs_file()?)?;
+    let replacement = start_background_unlocked(addr)?;
+    Ok(DaemonOrphanAdoptionResult {
+        adopted_lease_id: lease_id.to_string(),
+        dead_pid: state.pid,
+        active_jobs_terminalized: active_jobs,
+        retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
+        replacement,
+    })
 }
 
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {

@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonStartResult, DaemonStatus, DaemonStopResult,
+    self, BrokerConfig, BrokerConfigOptions, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
@@ -26,6 +26,17 @@ enum DaemonCommand {
     },
     /// Return the current live daemon or start one when no live daemon exists
     EnsureRunning {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
+    AdoptOrphan {
+        /// Exact lease ID reported by `homeboy daemon status`
+        #[arg(long)]
+        lease_id: String,
+        /// Confirm the recorded PID was inspected and is dead
+        #[arg(long)]
+        confirm_pid_dead: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -80,6 +91,7 @@ pub struct DaemonArtifactGetArgs {
 pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
+    AdoptOrphan(DaemonOrphanAdoptionResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -107,6 +119,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         }
         DaemonCommand::EnsureRunning { addr } => Ok((
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
+            0,
+        )),
+        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),

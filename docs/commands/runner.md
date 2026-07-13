@@ -324,6 +324,7 @@ plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 
 ```sh
 homeboy runner connect <runner-id>
+homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
@@ -332,6 +333,15 @@ it. This is the preferred Lab execution path because later `runner exec` calls
 can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
+
+When a controller session was lost while a remote daemon lease is dead and its
+durable jobs remain, inspect the remote `homeboy daemon status` first. Recovery
+requires the explicit exact-lease form shown above. It verifies the recorded PID
+is dead under the remote daemon lifecycle lock, preserves job events while
+terminalizing jobs from that dead control plane with retry guidance, starts one
+replacement daemon, and then records the fresh local session. Ordinary `runner
+connect` never infers that orphan ownership; live, ambiguous, and lease-mismatched
+daemon records remain protected.
 
 Reverse runner connections record the runner-initiated session substrate and use
 the controller daemon as the broker. A reverse runner can register itself with

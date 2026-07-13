@@ -14,8 +14,8 @@ use crate::core::output::MergeOutput;
 
 use super::connection::active_jobs_before_daemon_replacement;
 use super::{
-    connect, disconnect, exec, load, materialize_runner_extension_with_env, merge,
-    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
+    connect_with_orphan_adoption, disconnect, exec, load, materialize_runner_extension_with_env,
+    merge, normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
     RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
     RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
@@ -231,6 +231,18 @@ pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
     let plan = plan_homeboy_binary_refresh(&options)?;
+    // A refresh owns the lease it observed before changing the runner binary.
+    // If its local session disappears during that transition, reconnect can
+    // explicitly reconcile only that exact proven-dead lease.
+    let refresh_owned_lease = options
+        .reconnect
+        .then(|| {
+            super::status(&plan.runner_id)
+                .ok()
+                .and_then(|report| report.session)
+                .and_then(refresh_owned_lease)
+        })
+        .flatten();
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -310,7 +322,8 @@ pub fn refresh_homeboy_binary(
             options.force,
         )?;
         let _ = disconnect(&plan.runner_id);
-        let (_report, connect_exit_code) = connect(&plan.runner_id)?;
+        let (_report, connect_exit_code) =
+            connect_with_orphan_adoption(&plan.runner_id, refresh_owned_lease.as_deref())?;
         daemon_refreshed = connect_exit_code == 0;
     } else {
         interrupted_job_ids = Vec::new();
@@ -334,6 +347,13 @@ pub fn refresh_homeboy_binary(
         },
         0,
     ))
+}
+
+fn refresh_owned_lease(session: super::RunnerSession) -> Option<String> {
+    (session.mode == super::RunnerTunnelMode::DirectSsh
+        && session.role == super::RunnerSessionRole::Controller)
+        .then_some(session.remote_daemon_lease_id)
+        .flatten()
 }
 
 fn refresh_failure(
@@ -1023,6 +1043,7 @@ fn shell_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::runner::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
     use crate::test_support;
 
     #[test]
@@ -1057,6 +1078,35 @@ mod tests {
         assert_eq!(
             interrupted,
             vec!["0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string()]
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
+        let session = RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:7421".to_string()),
+            local_port: Some(7421),
+            local_url: Some("http://127.0.0.1:7421".to_string()),
+            tunnel_pid: Some(1),
+            remote_daemon_pid: Some(2),
+            remote_daemon_lease_id: Some("lease-refresh".to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+        };
+
+        assert_eq!(
+            refresh_owned_lease(session),
+            Some("lease-refresh".to_string())
         );
     }
 

@@ -46,6 +46,15 @@ struct CliEnvelope {
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption(runner_id, None)
+}
+
+/// Connect while explicitly adopting one recorded dead remote lease. This is an
+/// operator recovery path; ordinary reconnects never infer orphan ownership.
+pub fn connect_with_orphan_adoption(
+    runner_id: &str,
+    orphan_lease_id: Option<&str>,
+) -> Result<(RunnerConnectReport, i32)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
@@ -81,7 +90,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let version = identity.version.clone();
 
     let previous_session = read_session(runner_id)?;
-    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref());
+    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
     let Ok(daemon) = daemon else {
         return Ok(failed_connect(
             runner_id,
@@ -998,8 +1007,20 @@ mod remote_daemon {
         client: &SshClient,
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
+        orphan_lease_id: Option<&str>,
     ) -> std::result::Result<RemoteDaemon, String> {
         let status = remote_daemon_status(client, homeboy)?;
+        if let Some(lease_id) = orphan_lease_id {
+            if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+                && status
+                    .daemon
+                    .as_ref()
+                    .and_then(|daemon| daemon.lease_id.as_deref())
+                    == Some(lease_id)
+            {
+                return remote_daemon_adopt_orphan(client, homeboy, lease_id);
+            }
+        }
         match remote_daemon_connect_action(previous_session, &status)? {
             RemoteDaemonConnectAction::Reattach => {
                 return status.daemon.ok_or_else(|| {
@@ -1077,7 +1098,7 @@ mod remote_daemon {
             session.mode == RunnerTunnelMode::DirectSsh
                 && session.role == RunnerSessionRole::Controller
         }) else {
-            return true;
+            return false;
         };
 
         match session.remote_daemon_lease_id.as_deref() {
@@ -1236,6 +1257,58 @@ mod remote_daemon {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         })
+    }
+
+    fn remote_daemon_adopt_orphan(
+        client: &SshClient,
+        homeboy: &str,
+        lease_id: &str,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id);
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote daemon orphan adoption failed",
+                &output,
+            ));
+        }
+        let envelope = parse_envelope(&output.stdout)
+            .map_err(|err| format!("remote daemon orphan adoption returned invalid JSON: {err}"))?;
+        if !envelope.success {
+            return Err(format!(
+                "remote daemon orphan adoption failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ));
+        }
+        let data = envelope
+            .data
+            .ok_or_else(|| "remote daemon orphan adoption returned no data".to_string())?;
+        let replacement = data.get("replacement").ok_or_else(|| {
+            "remote daemon orphan adoption returned no replacement lease".to_string()
+        })?;
+        Ok(RemoteDaemon {
+            address: replacement
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            pid: replacement
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok()),
+            lease_id: replacement
+                .get("lease_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
+        format!(
+            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead --addr 127.0.0.1:0",
+            shell::quote_arg(homeboy),
+            shell::quote_arg(lease_id),
+        )
     }
 
     pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
@@ -1577,6 +1650,32 @@ mod tests {
             remote_daemon_connect_action(Some(&session), &status).expect("ensure start"),
             RemoteDaemonConnectAction::Start
         );
+    }
+
+    #[test]
+    fn lost_local_session_refuses_dead_daemon_with_active_jobs_without_explicit_adoption() {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        let err = remote_daemon_connect_action(None, &status)
+            .expect_err("lost session must not imply orphan ownership");
+
+        assert!(err.contains("refusing implicit replacement"));
+    }
+
+    #[test]
+    fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
+        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead");
+
+        assert!(command.contains("daemon adopt-orphan"));
+        assert!(command.contains("--lease-id 'lease dead'"));
+        assert!(command.contains("--confirm-pid-dead"));
     }
 
     #[test]
