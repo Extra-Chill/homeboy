@@ -93,6 +93,114 @@ fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
     }
 }
 
+#[test]
+fn concurrent_leaseless_recovery_callers_commit_once_and_preserve_job_evidence() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Stdout,
+                Some("output before control-plane loss".to_string()),
+                None,
+            )
+            .expect("output");
+
+        let lifecycle = Arc::new(Mutex::new(false));
+        let starts = Arc::new(Mutex::new(0_usize));
+        let barrier = Arc::new(Barrier::new(3));
+        let first = concurrent_leaseless_recovery(
+            Arc::clone(&barrier),
+            Arc::clone(&lifecycle),
+            Arc::clone(&starts),
+            path.clone(),
+        );
+        let second = concurrent_leaseless_recovery(
+            Arc::clone(&barrier),
+            Arc::clone(&lifecycle),
+            Arc::clone(&starts),
+            path.clone(),
+        );
+        barrier.wait();
+
+        let first = first.join().expect("first caller");
+        let second = second.join().expect("second caller");
+        assert_eq!(
+            [first, second].into_iter().filter(Result::is_ok).count(),
+            1,
+            "only one caller may commit the recovery transaction"
+        );
+        assert_eq!(*starts.lock().expect("starts"), 1);
+
+        let recovered = JobStore::open_without_reconciliation(&path).expect("recovered store");
+        let events = recovered.events(job.id).expect("events");
+        assert_eq!(
+            recovered.get(job.id).expect("job").status,
+            JobStatus::Failed
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data["reason"] == "leaseless_orphan_reconciliation")
+                })
+                .count(),
+            2,
+            "one error and one status event are appended exactly once"
+        );
+        assert!(events
+            .iter()
+            .any(|event| { event.message.as_deref() == Some("output before control-plane loss") }));
+    });
+}
+
+fn concurrent_leaseless_recovery(
+    barrier: Arc<Barrier>,
+    lifecycle: Arc<Mutex<bool>>,
+    starts: Arc<Mutex<usize>>,
+    path: std::path::PathBuf,
+) -> std::thread::JoinHandle<
+    crate::core::error::Result<super::DaemonLeaselessOrphanReconciliationResult>,
+> {
+    std::thread::spawn(move || {
+        barrier.wait();
+        let mut committed = lifecycle.lock().expect("lifecycle lock");
+        if *committed {
+            return Err(crate::core::Error::validation_invalid_argument(
+                "lifecycle",
+                "replacement daemon already committed by concurrent recovery",
+                None,
+                None,
+            ));
+        }
+        let result = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(leaseless_status(1)),
+            || Ok(vec!["no process".to_string(), "no listener".to_string()]),
+            || {
+                let snapshot = path.with_extension(format!("{}.snapshot", uuid::Uuid::new_v4()));
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || {
+                let mut starts = starts.lock().expect("starts");
+                *starts += 1;
+                Ok(fake_daemon(5000 + *starts as u32, "replacement-lease"))
+            },
+        );
+        if result.is_ok() {
+            *committed = true;
+        }
+        result
+    })
+}
+
 fn leaseless_status(active_jobs: usize) -> DaemonStatus {
     DaemonStatus {
         running: false,
