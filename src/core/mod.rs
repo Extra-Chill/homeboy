@@ -71,6 +71,7 @@ pub mod command_execution_plan;
 pub mod command_invocation;
 pub mod component;
 pub mod context;
+pub mod controller_scratch;
 pub mod daemon;
 pub mod db;
 pub mod deploy;
