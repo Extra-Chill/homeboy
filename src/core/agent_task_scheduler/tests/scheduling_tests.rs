@@ -331,6 +331,30 @@ mod concurrency_tests {
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn canonicalizes_non_git_workspace_paths_without_git_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let child = workspace.join("child");
+        fs::create_dir(&workspace).expect("workspace");
+        fs::create_dir(&child).expect("child");
+        let mut root_request = request("root");
+        root_request.workspace.root = Some(workspace.display().to_string());
+        let mut equivalent_request = request("equivalent");
+        equivalent_request.workspace.root = Some(workspace.join(".").display().to_string());
+        let mut child_request = request("child");
+        child_request.workspace.root = Some(child.display().to_string());
+
+        assert_eq!(
+            AgentTaskScheduleSupport::workspace_key(&root_request),
+            AgentTaskScheduleSupport::workspace_key(&equivalent_request)
+        );
+        assert_ne!(
+            AgentTaskScheduleSupport::workspace_key(&root_request),
+            AgentTaskScheduleSupport::workspace_key(&child_request)
+        );
+    }
+
     #[derive(Clone)]
     struct LateMutatingExecutor {
         workspace: std::path::PathBuf,
