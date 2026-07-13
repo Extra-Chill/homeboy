@@ -234,11 +234,21 @@ pub struct DaemonLeaseJobDiagnostics {
     pub unowned_job_ids: Vec<Uuid>,
 }
 
+/// Active durable jobs selected by the explicit lease-less recovery operation.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-pub struct DaemonMissingLeaseJobDiagnostics {
-    pub terminalized_job_ids: Vec<Uuid>,
-    pub durable_run_ids: Vec<String>,
-    pub owned_job_ids: Vec<Uuid>,
+pub struct LeaselessOrphanJobDiagnostics {
+    pub reconciled_job_ids: Vec<Uuid>,
+    pub lease_owned_job_ids: Vec<Uuid>,
+}
+
+impl LeaselessOrphanJobDiagnostics {
+    pub fn reconciled_count(&self) -> usize {
+        self.reconciled_job_ids.len()
+    }
+
+    pub fn lease_owned_count(&self) -> usize {
+        self.lease_owned_job_ids.len()
+    }
 }
 
 impl DaemonLeaseJobDiagnostics {

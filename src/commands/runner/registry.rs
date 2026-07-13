@@ -205,10 +205,8 @@ pub(super) fn connect(
     broker_url: Option<String>,
     adopt_orphan_lease: Option<String>,
     confirm_pid_dead: bool,
-    recover_missing_lease_state: Option<String>,
-    confirm_lease_missing: bool,
     reconcile_leaseless_orphans: bool,
-    confirm_control_plane_lost: bool,
+    confirm_no_daemon_owner: bool,
 ) -> CmdResult<RunnerOutput> {
     if adopt_orphan_lease.is_some() && !confirm_pid_dead {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -218,40 +216,26 @@ pub(super) fn connect(
             Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
         ));
     }
-    if recover_missing_lease_state.is_some() && !confirm_lease_missing {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "confirm_lease_missing",
-            "--recover-missing-lease-state requires --confirm-lease-missing",
-            None,
-            Some(vec![
-                "Inspect `homeboy daemon status` on the runner and use its exact state_identity."
-                    .to_string(),
-            ]),
-        ));
-    }
-    if reconcile_leaseless_orphans && !confirm_control_plane_lost {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "confirm_control_plane_lost",
-            "--reconcile-leaseless-orphans requires --confirm-control-plane-lost",
-            None,
-            None,
-        ));
-    }
-    if (adopt_orphan_lease.is_some() && recover_missing_lease_state.is_some())
-        || (reconcile_leaseless_orphans
-            && (adopt_orphan_lease.is_some() || recover_missing_lease_state.is_some()))
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "choose one exact-lease adoption, missing-lease recovery, or lease-less reconciliation path",
-            None,
-            None,
-        ));
-    }
     if reverse && adopt_orphan_lease.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "adopt_orphan_lease",
             "orphan daemon adoption only applies to direct SSH runner connections",
+            None,
+            None,
+        ));
+    }
+    if reconcile_leaseless_orphans != confirm_no_daemon_owner {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "--reconcile-leaseless-orphans requires --confirm-no-daemon-owner, and vice versa",
+            None,
+            None,
+        ));
+    }
+    if reverse && reconcile_leaseless_orphans {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "lease-less recovery only applies to direct SSH runner connections",
             None,
             None,
         ));
@@ -271,15 +255,11 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        if reconcile_leaseless_orphans {
-            runner::connect_with_leaseless_orphan_reconciliation(id)?
-        } else {
-            runner::connect_with_recovery(
-                id,
-                adopt_orphan_lease.as_deref(),
-                recover_missing_lease_state.as_deref(),
-            )?
-        }
+        runner::connect_with_orphan_adoption(
+            id,
+            adopt_orphan_lease.as_deref(),
+            reconcile_leaseless_orphans,
+        )?
     };
     Ok((
         RunnerOutput {
@@ -317,6 +297,29 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
 
     for runner in &mut output.entities {
         redact_runner_env(runner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect;
+
+    #[test]
+    fn leaseless_recovery_requires_both_affirmative_flags() {
+        for (recover, confirm) in [(true, false), (false, true)] {
+            let error = connect("runner", false, None, None, None, false, recover, confirm)
+                .expect_err("partial confirmation must fail before connecting");
+            assert!(error
+                .message
+                .contains("--reconcile-leaseless-orphans requires"));
+        }
+    }
+
+    #[test]
+    fn reverse_connections_cannot_reconcile_leaseless_jobs() {
+        let error = connect("runner", true, None, None, None, false, true, true)
+            .expect_err("reverse recovery is unsupported");
+        assert!(error.message.contains("direct SSH"));
     }
 }
 

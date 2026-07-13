@@ -221,20 +221,13 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         confirm_pid_dead: bool,
 
-        /// Explicitly recover the exact missing-lease daemon state reported by daemon status
-        #[arg(long)]
-        recover_missing_lease_state: Option<String>,
-
-        /// Confirm the missing-lease state was inspected and its endpoint is unreachable
-        #[arg(long)]
-        confirm_lease_missing: bool,
-        /// Explicitly reconcile a lease-less orphan store before connecting
+        /// Explicitly reconcile legacy unowned active jobs after proving no daemon owns the remote store
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
 
-        /// Confirm the runner daemon control plane was lost for lease-less reconciliation
+        /// Confirm the remote store has no daemon owner before lease-less reconciliation
         #[arg(long)]
-        confirm_control_plane_lost: bool,
+        confirm_no_daemon_owner: bool,
     },
     /// Show persisted runner tunnel status
     Status {
