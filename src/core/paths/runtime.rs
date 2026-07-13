@@ -34,6 +34,15 @@ pub fn runner_session_file(id: &str) -> Result<PathBuf> {
     Ok(runner_sessions_dir()?.join(format!("{}.json", id)))
 }
 
+/// Controller-owned lease evidence retained after an ephemeral runner session
+/// or remote daemon state file disappears.
+pub(crate) fn runner_lease_evidence_file(runner_id: &str, lease_id: &str) -> Result<PathBuf> {
+    Ok(homeboy()?
+        .join("runner-lease-evidence")
+        .join(sanitize_path_segment(runner_id))
+        .join(format!("{}.json", sanitize_path_segment(lease_id))))
+}
+
 /// Managed service tunnel runtime state directory (~/.local/share/homeboy/service-tunnels/{id}/).
 pub fn service_tunnel_runtime_dir(id: &str) -> Result<PathBuf> {
     Ok(homeboy_data()?

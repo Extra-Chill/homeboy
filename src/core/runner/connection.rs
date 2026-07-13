@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
@@ -43,6 +43,15 @@ struct CliEnvelope {
     success: bool,
     data: Option<Value>,
     error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RunnerLeaseEvidence {
+    schema: String,
+    runner_id: String,
+    lease_id: String,
+    pid: u32,
+    observed_at: String,
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
@@ -1180,6 +1189,7 @@ mod remote_daemon {
         runner_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
         let status = remote_daemon_status(client, homeboy)?;
+        persist_runner_lease_evidence(runner_id, &status).map_err(|error| error.message)?;
         if let Some(lease_id) = orphan_lease_id {
             if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
                 && status
@@ -1189,6 +1199,19 @@ mod remote_daemon {
                     == Some(lease_id)
             {
                 return remote_daemon_adopt_orphan(client, homeboy, lease_id);
+            }
+            let evidence = read_runner_lease_evidence(runner_id, lease_id)
+                .map_err(|error| error.message)?
+                .or_else(|| runner_session_lease_evidence(previous_session, runner_id, lease_id));
+            if let Some(evidence) = evidence {
+                if let Some(pid) = durable_evidence_pid_for_adoption(&status, &evidence, lease_id) {
+                    if !remote_pid_is_dead(client, pid)? {
+                        return Err(format!(
+                            "controller-recorded daemon PID `{pid}` is not proven dead; refusing orphan adoption"
+                        ));
+                    }
+                    return remote_daemon_adopt_orphan_with_pid(client, homeboy, lease_id, pid);
+                }
             }
         }
         if let Some(state_identity) = missing_lease_state_identity {
@@ -1468,7 +1491,25 @@ mod remote_daemon {
         homeboy: &str,
         lease_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
-        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id);
+        remote_daemon_adopt_orphan_with_pid_option(client, homeboy, lease_id, None)
+    }
+
+    fn remote_daemon_adopt_orphan_with_pid(
+        client: &SshClient,
+        homeboy: &str,
+        lease_id: &str,
+        expected_pid: u32,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        remote_daemon_adopt_orphan_with_pid_option(client, homeboy, lease_id, Some(expected_pid))
+    }
+
+    fn remote_daemon_adopt_orphan_with_pid_option(
+        client: &SshClient,
+        homeboy: &str,
+        lease_id: &str,
+        expected_pid: Option<u32>,
+    ) -> std::result::Result<RemoteDaemon, String> {
+        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id, expected_pid);
         let output = client.execute(&command);
         if !output.success {
             return Err(command_failure_message(
@@ -1554,12 +1595,115 @@ mod remote_daemon {
         )
     }
 
-    pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
+    pub(super) fn remote_daemon_adopt_orphan_command(
+        homeboy: &str,
+        lease_id: &str,
+        expected_pid: Option<u32>,
+    ) -> String {
+        let expected_pid = expected_pid
+            .map(|pid| format!(" --expected-pid {pid}"))
+            .unwrap_or_default();
         format!(
-            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead --addr 127.0.0.1:0",
+            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead{} --addr 127.0.0.1:0",
             shell::quote_arg(homeboy),
             shell::quote_arg(lease_id),
+            expected_pid,
         )
+    }
+
+    fn remote_pid_is_dead(client: &SshClient, pid: u32) -> std::result::Result<bool, String> {
+        let command = format!(
+            "if kill -0 {pid} 2>/dev/null; then exit 1; fi; observed=$(ps -p {pid} -o pid= 2>/dev/null | tr -d '[:space:]'); case \"$observed\" in *[0-9]*) exit 2;; esac; exit 0"
+        );
+        let output = client.execute(&format!("sh -c {}", shell::quote_arg(&command)));
+        match output.exit_code {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err("remote PID liveness probe was inconclusive".to_string()),
+        }
+    }
+
+    pub(super) fn persist_runner_lease_evidence(
+        runner_id: &str,
+        status: &RemoteDaemonStatus,
+    ) -> Result<()> {
+        let Some(daemon) = status.daemon.as_ref() else {
+            return Ok(());
+        };
+        let (Some(lease_id), Some(pid)) = (daemon.lease_id.as_deref(), daemon.pid) else {
+            return Ok(());
+        };
+        let path = paths::runner_lease_evidence_file(runner_id, lease_id)?;
+        let parent = path.parent().expect("lease evidence has parent");
+        std::fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create runner lease evidence".to_string()),
+            )
+        })?;
+        let evidence = RunnerLeaseEvidence {
+            schema: "homeboy/runner-lease-evidence/v1".to_string(),
+            runner_id: runner_id.to_string(),
+            lease_id: lease_id.to_string(),
+            pid,
+            observed_at: Utc::now().to_rfc3339(),
+        };
+        let body = serde_json::to_vec_pretty(&evidence)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        std::fs::write(path, body).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write runner lease evidence".to_string()),
+            )
+        })
+    }
+
+    pub(super) fn read_runner_lease_evidence(
+        runner_id: &str,
+        lease_id: &str,
+    ) -> Result<Option<RunnerLeaseEvidence>> {
+        let path = paths::runner_lease_evidence_file(runner_id, lease_id)?;
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return Ok(None);
+        };
+        let evidence = serde_json::from_str::<RunnerLeaseEvidence>(&body).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("read runner lease evidence".to_string()),
+            )
+        })?;
+        Ok((evidence.runner_id == runner_id && evidence.lease_id == lease_id).then_some(evidence))
+    }
+
+    pub(super) fn durable_evidence_pid_for_adoption(
+        status: &RemoteDaemonStatus,
+        evidence: &RunnerLeaseEvidence,
+        requested_lease_id: &str,
+    ) -> Option<u32> {
+        (status.daemon.is_none()
+            && status.active_jobs > 0
+            && evidence.lease_id == requested_lease_id)
+            .then_some(evidence.pid)
+    }
+
+    fn runner_session_lease_evidence(
+        session: Option<&RunnerSession>,
+        runner_id: &str,
+        lease_id: &str,
+    ) -> Option<RunnerLeaseEvidence> {
+        let session = session.filter(|session| {
+            session.mode == RunnerTunnelMode::DirectSsh
+                && session.role == RunnerSessionRole::Controller
+                && session.runner_id == runner_id
+                && session.remote_daemon_lease_id.as_deref() == Some(lease_id)
+        })?;
+        Some(RunnerLeaseEvidence {
+            schema: "homeboy/runner-lease-evidence/v1".to_string(),
+            runner_id: runner_id.to_string(),
+            lease_id: lease_id.to_string(),
+            pid: session.remote_daemon_pid?,
+            observed_at: session.connected_at.clone(),
+        })
     }
 
     pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
@@ -1829,6 +1973,43 @@ mod tests {
     }
 
     #[test]
+    fn durable_lease_evidence_survives_remote_state_loss_for_exact_adoption_only() {
+        test_support::with_isolated_home(|_| {
+            let observed = remote_daemon_status_for_test_with_reason(
+                false,
+                false,
+                1,
+                "lease-observed",
+                846_192,
+                Some(DaemonStaleReasonCode::PidDead),
+            );
+            persist_runner_lease_evidence("homeboy-lab", &observed)
+                .expect("persist controller-owned evidence");
+            let evidence = read_runner_lease_evidence("homeboy-lab", "lease-observed")
+                .expect("read evidence")
+                .expect("exact lease evidence retained");
+            let unavailable = RemoteDaemonStatus {
+                daemon: None,
+                stale_reason: Some("remote state unavailable".to_string()),
+                stale_reason_code: None,
+                fresh: false,
+                reachable: false,
+                active_jobs: 1,
+                state_identity: None,
+            };
+
+            assert_eq!(
+                durable_evidence_pid_for_adoption(&unavailable, &evidence, "lease-observed"),
+                Some(846_192)
+            );
+            assert_eq!(
+                durable_evidence_pid_for_adoption(&unavailable, &evidence, "lease-other"),
+                None
+            );
+        });
+    }
+
+    #[test]
     fn reattaches_active_daemon_without_changing_lease_or_pid() {
         let session = direct_ssh_session("lease-active");
         let status = remote_daemon_status_for_test(true, true, 1, "lease-active", 4242);
@@ -2037,7 +2218,7 @@ mod tests {
 
     #[test]
     fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
-        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead");
+        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", None);
 
         assert!(command.contains("daemon adopt-orphan"));
         assert!(command.contains("--lease-id 'lease dead'"));

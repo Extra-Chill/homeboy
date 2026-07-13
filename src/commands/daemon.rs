@@ -38,6 +38,9 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+        /// Recorded daemon PID for controller-evidence recovery when the remote lease file is gone
+        #[arg(long)]
+        expected_pid: Option<u32>,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -143,8 +146,8 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
             0,
         )),
-        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
-            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
+        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, expected_pid, addr } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, expected_pid, &addr)?),
             0,
         )),
         DaemonCommand::RecoverMissingLease { state_identity, confirm_lease_missing, addr } => Ok((
