@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.11] - 2026-07-13
+
+### Fixed
+- bound action command execution
+
 ## [2.8.10] - 2026-07-12
 
 ### Fixed
