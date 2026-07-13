@@ -331,6 +331,31 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     })
 }
 
+/// Query the daemon job store before an operation replaces its process.
+/// Controller observation may classify child runs as recoverable orphans, but
+/// those inferred records are not authoritative enough to interrupt a daemon.
+pub(super) fn active_jobs_before_daemon_replacement(
+    runner_id: &str,
+) -> Result<Vec<ActiveRunnerJobSummary>> {
+    let report = status(runner_id)?;
+    if !report.connected {
+        return Ok(Vec::new());
+    }
+    if report.active_job_state != RunnerActiveJobState::Available {
+        let mut error = Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "runner `{runner_id}` is connected but its active daemon jobs could not be listed; refusing to replace the daemon"
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+        );
+        error.details["active_job_state"] = serde_json::json!(report.active_job_state);
+        return Err(error);
+    }
+    Ok(report.active_jobs)
+}
+
 fn runner_daemon_freshness(
     runner: &Runner,
     session: Option<&RunnerSession>,

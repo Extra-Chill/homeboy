@@ -12,6 +12,7 @@ use crate::core::error::{Error, Result};
 use crate::core::git::{run_git, run_git_output};
 use crate::core::output::MergeOutput;
 
+use super::connection::active_jobs_before_daemon_replacement;
 use super::{
     connect, disconnect, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
@@ -37,6 +38,7 @@ pub struct HomeboyBinaryRefreshOptions {
     pub git_ref: Option<String>,
     pub target_dir: Option<String>,
     pub reconnect: bool,
+    pub force: bool,
     pub dry_run: bool,
 }
 
@@ -65,6 +67,8 @@ pub struct HomeboyBinaryRefreshOutput {
     pub identity: Option<Value>,
     pub updated_fields: Vec<String>,
     pub daemon_refreshed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupted_job_ids: Vec<String>,
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
@@ -237,6 +241,7 @@ pub fn refresh_homeboy_binary(
                 identity: None,
                 updated_fields: Vec::new(),
                 daemon_refreshed: false,
+                interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
@@ -277,6 +282,7 @@ pub fn refresh_homeboy_binary(
                 identity: None,
                 updated_fields: Vec::new(),
                 daemon_refreshed: false,
+                interrupted_job_ids: Vec::new(),
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
@@ -295,10 +301,19 @@ pub fn refresh_homeboy_binary(
     };
 
     let mut daemon_refreshed = false;
+    let interrupted_job_ids;
     if options.reconnect {
+        let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
+        interrupted_job_ids = protect_active_jobs_before_reconnect(
+            &plan.runner_id,
+            active_jobs.iter().map(|job| job.job_id.as_str()),
+            options.force,
+        )?;
         let _ = disconnect(&plan.runner_id);
         let (_report, connect_exit_code) = connect(&plan.runner_id)?;
         daemon_refreshed = connect_exit_code == 0;
+    } else {
+        interrupted_job_ids = Vec::new();
     }
 
     Ok((
@@ -311,6 +326,7 @@ pub fn refresh_homeboy_binary(
             identity: Some(identity),
             updated_fields,
             daemon_refreshed,
+            interrupted_job_ids,
             selected_binary_path: plan.binary_path.clone(),
             reconnect_required: !daemon_refreshed,
             followup_commands: plan.followup_commands,
@@ -450,6 +466,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             git_ref: None,
             target_dir: None,
             reconnect: options.reconnect,
+            force: false,
             dry_run: false,
         })?;
         if exit_code != 0 {
@@ -930,6 +947,49 @@ fn refresh_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
     }
 }
 
+fn active_job_reconnect_error(runner_id: &str, job_ids: &[String]) -> Error {
+    let follow_commands = job_ids
+        .iter()
+        .map(|job_id| {
+            format!(
+                "homeboy runner job logs {} {} --follow",
+                shell_arg(runner_id),
+                shell_arg(job_id)
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut error = Error::validation_invalid_argument(
+        "reconnect",
+        format!(
+            "runner `{runner_id}` has active daemon jobs: {}. Wait for them to reach a terminal state before reconnecting, or rerun with --force to interrupt them",
+            job_ids.join(", ")
+        ),
+        Some(runner_id.to_string()),
+        Some(follow_commands),
+    );
+    error.details["active_job_ids"] = serde_json::json!(job_ids);
+    error.details["force_command"] = serde_json::json!(format!(
+        "homeboy runner refresh-homeboy {} --force --reconnect",
+        shell_arg(runner_id)
+    ));
+    error
+}
+
+fn protect_active_jobs_before_reconnect<'a>(
+    runner_id: &str,
+    active_job_ids: impl IntoIterator<Item = &'a str>,
+    force: bool,
+) -> Result<Vec<String>> {
+    let job_ids = active_job_ids
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !job_ids.is_empty() && !force {
+        return Err(active_job_reconnect_error(runner_id, &job_ids));
+    }
+    Ok(job_ids)
+}
+
 fn non_empty<'a>(name: &str, value: &'a str) -> Result<&'a str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -966,6 +1026,41 @@ mod tests {
     use crate::test_support;
 
     #[test]
+    fn routine_reconnect_refuses_to_interrupt_a_detached_lab_cook() {
+        let error = protect_active_jobs_before_reconnect(
+            "homeboy-lab",
+            ["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"],
+            false,
+        )
+        .expect_err("routine reconnect must preserve the active cook");
+
+        assert_eq!(
+            error.details["active_job_ids"],
+            serde_json::json!(["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"])
+        );
+        assert!(error.message.contains("homeboy-lab"));
+        assert!(error.message.contains("--force"));
+        assert!(error.details["tried"][0]
+            .as_str()
+            .is_some_and(|command| command.contains("runner job logs homeboy-lab")));
+    }
+
+    #[test]
+    fn forced_reconnect_reports_the_jobs_it_will_interrupt() {
+        let interrupted = protect_active_jobs_before_reconnect(
+            "homeboy-lab",
+            ["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"],
+            true,
+        )
+        .expect("explicit force permits interruption");
+
+        assert_eq!(
+            interrupted,
+            vec!["0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string()]
+        );
+    }
+
+    #[test]
     fn materialize_plan_uses_clean_runner_cache() {
         let options = HomeboyBinaryRefreshOptions {
             runner_id: "lab".to_string(),
@@ -974,6 +1069,7 @@ mod tests {
             git_ref: Some("fix/foo".to_string()),
             target_dir: Some("/runner/ws/homeboy-clean".to_string()),
             reconnect: false,
+            force: false,
             dry_run: true,
         };
         let plan = HomeboyBinaryRefreshPlan {
@@ -1082,6 +1178,7 @@ mod tests {
                 git_ref: Some("main".to_string()),
                 target_dir: Some(workspace.join("build").display().to_string()),
                 reconnect: false,
+                force: false,
                 dry_run: false,
             })
             .expect("refresh returns diagnostics for compiler failure");
