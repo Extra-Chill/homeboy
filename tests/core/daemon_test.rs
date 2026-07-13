@@ -133,6 +133,18 @@ fn lease_writer_rejects_an_unsupported_schema() {
 }
 
 #[test]
+fn lease_writer_rejects_a_missing_lease_id() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.lease_id.clear();
+
+    let error = write_lease(&state_path().expect("state path"), &state)
+        .expect_err("leases without an identity are not persisted");
+
+    assert!(error.message.contains("without a lease ID"));
+}
+
+#[test]
 fn health_route_refreshes_daemon_lease_heartbeat() {
     let _home = HomeGuard::new();
     let mut state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
@@ -388,7 +400,11 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
         .stale_reason
         .as_deref()
         .unwrap_or_default()
-        .contains("invalid daemon lease"));
+        .contains("no schema or lease identity"));
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing)
+    );
 }
 
 #[test]
@@ -433,6 +449,26 @@ fn status_keeps_corrupt_lease_fail_closed_without_identity() {
     );
     assert!(status.state.is_none());
     assert!(status.freshness.lease_id.is_none());
+}
+
+#[test]
+fn status_treats_dead_known_legacy_lease_as_missing_metadata_for_recovery() {
+    let _home = HomeGuard::new();
+    let (path, _) = write_legacy_daemon_state_for_test(u32::MAX, "127.0.0.1:1");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing)
+    );
+    assert!(status.state.is_none());
+    assert!(status.freshness.lease_id.is_none());
+    assert!(status
+        .stale_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("no schema")));
+    assert!(path.exists());
 }
 
 #[test]

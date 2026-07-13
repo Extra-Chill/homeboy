@@ -1998,6 +1998,27 @@ mod tests {
     }
 
     #[test]
+    fn dead_missing_schema_lease_prescribes_exact_adoption_command() {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-from-pre-schema-state",
+            4242,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        let error = remote_daemon_connect_action(None, &status)
+            .expect_err("default reconnect must preserve the active job");
+
+        assert!(error.contains("lease_id=lease-from-pre-schema-state"));
+        assert!(error.contains("active_job_count=1"));
+        assert!(
+            error.contains("--adopt-orphan-lease lease-from-pre-schema-state --confirm-pid-dead")
+        );
+    }
+
+    #[test]
     fn lost_local_session_refuses_dead_daemon_with_active_jobs_without_explicit_adoption() {
         let status = remote_daemon_status_for_test_with_reason(
             false,
