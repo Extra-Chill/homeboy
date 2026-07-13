@@ -811,12 +811,13 @@ stale `recipe-run` process checks, and archive cache cleanup behavior.
 | `HOMEBOY_FIX_ONLY=1` | Lint runner fix-only mode (set automatically by `homeboy refactor`) |
 | `HOMEBOY_SUMMARY_MODE=1` | Compact summary output |
 | `HOMEBOY_STEP=phpcs` / `HOMEBOY_SKIP=eslint` | Filter lint steps |
+| `HOMEBOY_LINT_FAIL_ON=errors\|warnings` | PHPCS gate severity (default `errors`: warnings reported but non-blocking; `warnings` restores legacy block-on-warning). ESLint already gates on errors only. |
 
 ## Blocking vs advisory
 
 | Check | Behavior |
 |---|---|
-| PHPCS | **Blocks** the test run (lint-before-tests gate) |
+| PHPCS | **Blocks on errors.** Warnings are reported (summary + findings) but non-blocking by default; set `HOMEBOY_LINT_FAIL_ON=warnings` to also block on warnings. |
 | PHPStan (level 7) | **Blocks** |
 | ESLint | **Blocks** when JS/TS files are present |
 | PHPUnit (Playground or host-smoke) | **Blocks** |

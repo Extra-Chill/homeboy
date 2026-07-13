@@ -154,7 +154,11 @@ code 1.
   adjustments applied). Text domain is auto-detected from the plugin
   header. When PHPCS reports auto-fixable findings, the runner surfaces a
   prominent CTA showing the exact `homeboy refactor` command to clean
-  them up.
+  them up. **Errors block; warnings are reported (summary + findings) but
+  non-blocking by default** (`ignore_warnings_on_exit 1`), so an
+  error-clean repo releases without `--skip-checks=lint`. Set
+  `HOMEBOY_LINT_FAIL_ON=warnings` to restore legacy block-on-warning
+  behavior.
 - **PHPStan** — `phpstan.neon.dist` runs static analysis at **level 7**
   with WordPress + WP-CLI + WooCommerce stubs. Level 7 unlocks argument
   type flow analysis (catches `false` / `null` leaking into strict-typed

@@ -706,6 +706,18 @@ fi
 if [[ "${HOMEBOY_ERRORS_ONLY:-}" == "1" ]]; then
     phpcs_base_args+=(--warning-severity=0)
 fi
+# Gate severity: PHPCS errors always block, but warnings are reported (still
+# printed in the summary and counted in findings) without failing the phpcs
+# step. PHPCS distinguishes errors from warnings precisely so CI can gate on
+# errors while surfacing warnings; blocking on warnings pushed operators to
+# `--skip-checks=lint`, which discarded the error gate too. `ignore_warnings_on_exit`
+# makes PHPCS exit 0 when only warnings are present, so the exit code becomes an
+# errors-only gate. Set HOMEBOY_LINT_FAIL_ON=warnings to restore legacy behavior
+# where warnings also fail the gate (#2234).
+HOMEBOY_LINT_FAIL_ON="${HOMEBOY_LINT_FAIL_ON:-errors}"
+if [ "$HOMEBOY_LINT_FAIL_ON" != "warnings" ]; then
+    phpcs_base_args+=(--runtime-set ignore_warnings_on_exit 1)
+fi
 # Sniff filtering
 if [ -n "$EFFECTIVE_SNIFFS" ]; then
     phpcs_base_args+=(--sniffs="$EFFECTIVE_SNIFFS")
