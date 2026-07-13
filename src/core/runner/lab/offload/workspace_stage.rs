@@ -146,7 +146,9 @@ fn prepare_lab_offload_workspace_stage_inner(
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: sync_mode,
-            controller_routed_git: false,
+            // Lab already has the authenticated controller checkout. Ship its
+            // refs instead of requiring the runner to clone or fetch the source.
+            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
             git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
@@ -798,6 +800,8 @@ fn command_accepts_extension_override(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
     fn rig_workload(
         kind: crate::command_contract::LabRigWorkloadKind,
@@ -1873,6 +1877,149 @@ mod tests {
                 std::env::remove_var(self.name);
             }
         }
+    }
+
+    #[test]
+    fn stage_routes_changed_since_private_source_through_controller_bundle() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source checkout");
+            let runner_root = tempfile::tempdir().expect("runner workspace root");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            std::fs::write(source.path().join("file.txt"), "base\n").expect("write base");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            let base = git_output(source.path(), &["rev-parse", "HEAD"]);
+            git(source.path(), &["branch", "base"]);
+            std::fs::write(source.path().join("file.txt"), "head\n").expect("write head");
+            git(source.path(), &["commit", "-am", "head"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.example.invalid/example-org/private-source.git",
+                ],
+            );
+
+            let bin = tempfile::tempdir().expect("git wrapper dir");
+            let wrapper = bin.path().join("git");
+            std::fs::write(
+                &wrapper,
+                "#!/bin/sh\nif [ \"$1\" = \"ls-remote\" ]; then printf '%s\\trefs/heads/base\\n' \"$HOMEBOY_TEST_LS_REMOTE_BASE\"; exit 0; fi\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n",
+            )
+            .expect("write git wrapper");
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+                .expect("make git wrapper executable");
+            let prior_path = std::env::var("PATH").expect("PATH");
+            let prior_real_git = std::env::var("HOMEBOY_TEST_REAL_GIT").ok();
+            let prior_base = std::env::var("HOMEBOY_TEST_LS_REMOTE_BASE").ok();
+            std::env::set_var("HOMEBOY_TEST_REAL_GIT", "/usr/bin/git");
+            std::env::set_var("HOMEBOY_TEST_LS_REMOTE_BASE", &base);
+            std::env::set_var("PATH", format!("{}:{prior_path}", bin.path().display()));
+
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"lab-controller-bundle-stage","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let args = vec![
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--changed-since".to_string(),
+                "base".to_string(),
+            ];
+            let request = LabOffloadRequest {
+                command: None,
+                normalized_args: &args,
+                explicit_runner: Some("lab-controller-bundle-stage"),
+                force_hot: false,
+                local_policy: LabLocalExecutionPolicy::from_flags(false, false, false),
+                allow_dirty_lab_workspace: false,
+                skip_deps_hydration: false,
+                capture_patch: false,
+                mutation_flag: None,
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                job_overrides: LabJobOverrides::default(),
+            };
+            let contract = LabOffloadCommand {
+                command: crate::command_contract::LabCommandContract::portable(
+                    "audit",
+                    None,
+                    false,
+                    &[],
+                ),
+                required_extensions: Vec::new(),
+                required_capabilities: Vec::new(),
+                workload: None,
+            };
+            let runner_workspace_root = runner_root.path().display().to_string();
+            let stage = prepare_lab_offload_workspace_stage(
+                &request,
+                &contract,
+                crate::core::runner::lab_plan::base_lab_plan(Some(&contract)),
+                "lab-controller-bundle-stage",
+                source.path(),
+                "homeboy",
+                &["homeboy".to_string()],
+                Some(&runner_workspace_root),
+                None,
+            );
+            std::env::set_var("PATH", prior_path);
+            match prior_real_git {
+                Some(value) => std::env::set_var("HOMEBOY_TEST_REAL_GIT", value),
+                None => std::env::remove_var("HOMEBOY_TEST_REAL_GIT"),
+            }
+            match prior_base {
+                Some(value) => std::env::set_var("HOMEBOY_TEST_LS_REMOTE_BASE", value),
+                None => std::env::remove_var("HOMEBOY_TEST_LS_REMOTE_BASE"),
+            }
+
+            let stage = stage.expect("controller bundle stage");
+            assert!(
+                stage
+                    .synced
+                    .materialization_plan
+                    .declared_inputs
+                    .controller_routed_git
+            );
+            assert_eq!(
+                stage.changed_since_preflight.resolved_base.as_deref(),
+                Some(base.as_str())
+            );
+            assert!(stage.remapped_args.contains(&base));
+            assert_eq!(
+                git_output(Path::new(&stage.remote_cwd), &["rev-parse", &base]),
+                base
+            );
+        });
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {} failed", args.join(" "));
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn test_synced_workspace(local_path: &str, remote_path: &str) -> RunnerWorkspaceSyncOutput {

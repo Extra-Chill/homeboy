@@ -9,18 +9,8 @@ use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorks
 use crate::core::runner::workspace::util::git_output;
 
 #[test]
-fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
+fn controller_routed_git_sync_materializes_private_unavailable_remote_with_changed_since_base() {
     crate::test_support::with_isolated_home(|_| {
-        // Recognize `github.example.com` as a private/proxied source host so the
-        // sync takes the hermetic controller-bundle path
-        // (`materialize_git_from_controller_bundle`) instead of attempting a
-        // real `git clone` over SSH. This keeps the test fully hermetic: it
-        // exercises private-remote materialization without reaching the
-        // network. `with_isolated_home` serializes env-mutating tests via a
-        // global lock, so setting/clearing this env var here is race-free.
-        let prior_private_hosts = std::env::var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS").ok();
-        std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", "github.example.com");
-
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         git(source.path(), &["init"]);
@@ -29,13 +19,31 @@ fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
         fs::write(source.path().join("file.txt"), "base\n").expect("write file");
         git(source.path(), &["add", "."]);
         git(source.path(), &["commit", "-m", "base"]);
+        let base = git_output(source.path(), &["rev-parse", "HEAD"]).expect("base revision");
+        let branch =
+            git_output(source.path(), &["branch", "--show-current"]).expect("source branch");
+        fs::write(source.path().join("file.txt"), "head\n").expect("write file");
+        git(source.path(), &["commit", "-am", "head"]);
+        git(
+            source.path(),
+            &["checkout", "-b", "unrelated-private-history", &base],
+        );
+        fs::write(source.path().join("private.txt"), "unrelated\n").expect("write private");
+        git(source.path(), &["add", "."]);
+        git(
+            source.path(),
+            &["commit", "-m", "unrelated private history"],
+        );
+        let unrelated = git_output(source.path(), &["rev-parse", "HEAD"]).expect("unrelated");
+        git(source.path(), &["tag", "unrelated-private-tag"]);
+        git(source.path(), &["checkout", &branch]);
         git(
             source.path(),
             &[
                 "remote",
                 "add",
                 "origin",
-                "git@github.example.com:example-org/conductor.git",
+                "https://github.example.invalid/example-org/private-source.git",
             ],
         );
 
@@ -53,21 +61,14 @@ fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Git,
-                controller_routed_git: false,
-                changed_since_base: None,
+                controller_routed_git: true,
+                changed_since_base: Some(base.clone()),
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
                 run_isolation_token: None,
             },
         );
-
-        // Restore the prior env value before asserting so a failure does not
-        // leak the override into subsequent tests.
-        match prior_private_hosts {
-            Some(value) => std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", value),
-            None => std::env::remove_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS"),
-        }
 
         let (output, exit_code) = sync_result.expect("sync workspace");
 
@@ -90,17 +91,24 @@ fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
             git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
             "true"
         );
-        // The controller-bundle path repoints origin at the real (private)
-        // remote URL without fetching from it, proving the checkout was
-        // materialized from the local bundle rather than a network clone.
+        // The controller-bundle path repoints origin without fetching it. The
+        // source URL is deliberately unavailable from the runner, so this
+        // proves materialization did not fall back to a network clone.
         assert_eq!(
             git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "git@github.example.com:example-org/conductor.git"
+            "https://github.example.invalid/example-org/private-source.git"
         );
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
-            "base\n"
+            "head\n"
         );
+        assert_eq!(git_output(remote, &["rev-parse", &base]).unwrap(), base);
+        assert_eq!(
+            git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
+            base
+        );
+        assert!(git_output(remote, &["rev-parse", "unrelated-private-tag"]).is_err());
+        assert!(git_output(remote, &["cat-file", "-e", &unrelated]).is_err());
     });
 }
 

@@ -129,15 +129,7 @@ pub(super) fn materialize_git_from_controller_bundle(
     })?;
     let bundle_path = bundle_dir.path().join("workspace.bundle");
 
-    let mut refs = vec![
-        head.to_string(),
-        "--branches".to_string(),
-        "--tags".to_string(),
-    ];
-    if let Some(base) = changed_since_base {
-        refs.push(base.to_string());
-    }
-    refs.extend(git_fetch_refs.iter().cloned());
+    let refs = controller_bundle_refs("HEAD", changed_since_base, git_fetch_refs);
 
     let output = Command::new("git")
         .arg("bundle")
@@ -195,6 +187,33 @@ pub(super) fn materialize_git_from_controller_bundle(
     };
 
     result
+}
+
+fn controller_bundle_refs(
+    head: &str,
+    changed_since_base: Option<&str>,
+    git_fetch_refs: &[String],
+) -> Vec<String> {
+    let mut refs = vec![head.to_string()];
+    if let Some(base) = changed_since_base {
+        push_unique_bundle_ref(&mut refs, base);
+    }
+    for git_ref in git_fetch_refs {
+        // A fetch refspec may name a destination for runner-side fetches. A
+        // bundle only needs its controller-local source ref.
+        let source_ref = git_ref
+            .trim_start_matches('+')
+            .split_once(':')
+            .map_or(git_ref.as_str(), |(source, _)| source);
+        push_unique_bundle_ref(&mut refs, source_ref);
+    }
+    refs
+}
+
+fn push_unique_bundle_ref(refs: &mut Vec<String>, git_ref: &str) {
+    if !git_ref.trim().is_empty() && !refs.iter().any(|existing| existing == git_ref) {
+        refs.push(git_ref.to_string());
+    }
 }
 
 fn validate_controller_git_bundle_source(local_path: &Path) -> Result<()> {
