@@ -406,6 +406,7 @@ pub fn record_lab_offload_phase(
     phase: &str,
     remote_workspace: Option<&str>,
     source_checkout: Option<&Value>,
+    provider_rotation: Option<&Value>,
 ) -> Result<AgentTaskRunRecord> {
     let placeholder_workspace = remote_workspace.unwrap_or("pending");
     let mut record =
@@ -419,6 +420,9 @@ pub fn record_lab_offload_phase(
     }
     if let Some(source_checkout) = source_checkout {
         metadata.insert("source_checkout".to_string(), source_checkout.clone());
+    }
+    if let Some(provider_rotation) = provider_rotation {
+        metadata.insert("provider_rotation".to_string(), provider_rotation.clone());
     }
     store::write_record(&record)?;
     Ok(record)

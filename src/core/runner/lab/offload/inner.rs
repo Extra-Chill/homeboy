@@ -807,6 +807,9 @@ pub(crate) fn run_lab_offload_inner(
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
     let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    let provider_rotation =
+        serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
+            .unwrap_or(serde_json::Value::Null);
     if let Some(run_id) = run_isolation_token.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
@@ -814,6 +817,7 @@ pub(crate) fn run_lab_offload_inner(
             "materializing",
             None,
             Some(&source_checkout),
+            Some(&provider_rotation),
         )?;
     }
     let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
@@ -1023,6 +1027,7 @@ pub(crate) fn run_lab_offload_inner(
             "hydrating",
             Some(&remote_cwd),
             Some(&source_checkout),
+            Some(&provider_rotation),
         )?;
     }
     let cleanup_policy = if agent_task_run_id.is_some() {
@@ -1064,6 +1069,7 @@ pub(crate) fn run_lab_offload_inner(
             "dispatching",
             Some(&remote_cwd),
             Some(&source_checkout),
+            Some(&provider_rotation),
         )?;
     }
 

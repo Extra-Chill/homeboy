@@ -174,6 +174,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             "materializing",
             None,
             Some(&source),
+            Some(&json!({"entries": [{"model": "openai/gpt-5.6-terra"}]})),
         )
         .expect("materialization phase persisted");
 
@@ -181,6 +182,10 @@ fn controller_proxy_records_pre_execution_phase_progress() {
         assert_eq!(materializing.metadata["phase"], "materializing");
         assert_eq!(materializing.metadata["provider_state"], "pending");
         assert_eq!(materializing.metadata["source_checkout"]["head"], "abc123");
+        assert_eq!(
+            materializing.metadata["provider_rotation"]["entries"][0]["model"],
+            "openai/gpt-5.6-terra"
+        );
         assert!(materializing.metadata.get("runner_job_id").is_none());
 
         let hydrating = record_lab_offload_phase(
@@ -189,6 +194,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             "hydrating",
             Some("/runner/workspace/repo"),
             Some(&source),
+            None,
         )
         .expect("hydration phase persisted");
         assert_eq!(hydrating.metadata["phase"], "hydrating");
