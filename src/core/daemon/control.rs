@@ -12,10 +12,12 @@ use std::time::{Duration, Instant};
 
 use crate::core::error::{Error, Result};
 use crate::core::execution_contract::encode_uri_component;
+use crate::core::process::pid_is_running;
 
 use super::{
-    acquire_daemon_operation_lock, parse_bind_addr, read_status, repair_legacy_lease_for_start,
-    stop_unlocked, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
+    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonStartResult,
+    DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -34,7 +36,55 @@ pub struct ArtifactFetchOutcome {
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
+    start_background_unlocked(addr)
+}
 
+/// Return a live daemon under the lifecycle lock, or start one when its lease
+/// is absent or its recorded PID is dead.
+pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
+    ensure_running_with_wait(addr, Duration::from_secs(5))
+}
+
+fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
+    parse_bind_addr(addr)?;
+    ensure_running_with_operations(
+        wait,
+        acquire_daemon_operation_lock_for_ensure,
+        read_status,
+        pid_is_running,
+        || start_background_unlocked(addr),
+    )
+}
+
+fn ensure_running_with_operations<Lock, AcquireLock, ReadStatus, PidIsRunning, Start>(
+    wait: Duration,
+    acquire_lock: AcquireLock,
+    read_status: ReadStatus,
+    pid_is_running: PidIsRunning,
+    start: Start,
+) -> Result<DaemonStartResult>
+where
+    AcquireLock: FnOnce(Duration) -> Result<Lock>,
+    ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: FnOnce(u32) -> bool,
+    Start: FnOnce() -> Result<DaemonStartResult>,
+{
+    let _lock = acquire_lock(wait)?;
+    let status = read_status()?;
+    if let Some(state) = status.state {
+        if pid_is_running(state.pid) {
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+    }
+    start()
+}
+
+fn start_background_unlocked(addr: &str) -> Result<DaemonStartResult> {
     let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     let existing = read_status()?;
     if existing.state.is_some() || existing.stale_reason.is_some() {

@@ -1,8 +1,20 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 
-use super::{artifact_content_url, fetch_artifact_to_path};
+use super::{artifact_content_url, ensure_running_with_operations, fetch_artifact_to_path};
+use crate::core::build_identity::BuildIdentity;
+use crate::core::daemon::{
+    DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
+};
 use crate::test_support::with_isolated_home;
+
+#[derive(Default)]
+struct FakeEnsureState {
+    daemon: Option<super::DaemonStartResult>,
+    starts: usize,
+}
 
 #[test]
 fn artifact_content_url_builds_encoded_daemon_byte_alias() {
@@ -53,4 +65,165 @@ fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
         assert_eq!(outcome.sha256.as_deref(), Some("abc123"));
         assert_eq!(std::fs::read(&output).expect("output"), br#"{"ok":true}"#);
     });
+}
+
+#[test]
+fn ensure_running_times_out_when_lifecycle_lock_remains_held() {
+    with_isolated_home(|_| {
+        let _lock = super::super::acquire_daemon_operation_lock().expect("hold lifecycle lock");
+
+        let err = ensure_running_with_operations(
+            Duration::from_millis(10),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            || unreachable!("lock acquisition should time out first"),
+            |_| unreachable!("lock acquisition should time out first"),
+            || unreachable!("lock acquisition should time out first"),
+        )
+        .expect_err("ensure should time out behind held lock");
+
+        assert!(err.message.contains("timed out"));
+        assert!(err.message.contains("ensure-running lifecycle lock"));
+    });
+}
+
+#[test]
+fn ensure_running_returns_stale_live_daemon_without_starting_duplicate() {
+    with_isolated_home(|_| {
+        let daemon = fake_daemon(4242, "lease-stale");
+        let state = Arc::new(Mutex::new(FakeEnsureState {
+            daemon: Some(daemon.clone()),
+            starts: 0,
+        }));
+        let read_state = Arc::clone(&state);
+        let start_state = Arc::clone(&state);
+
+        let attached = ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            move || {
+                Ok(fake_status(
+                    read_state.lock().expect("state").daemon.clone(),
+                    false,
+                ))
+            },
+            |pid| pid == daemon.pid,
+            move || {
+                let mut state = start_state.lock().expect("state");
+                state.starts += 1;
+                Ok(fake_daemon(4343, "unexpected-replacement"))
+            },
+        )
+        .expect("attach stale live daemon");
+
+        assert_eq!(attached, daemon);
+        assert_eq!(state.lock().expect("state").starts, 0);
+    });
+}
+
+#[test]
+fn ensure_running_concurrent_callers_converge_on_same_daemon() {
+    with_isolated_home(|_| {
+        let daemon = fake_daemon(4242, "lease-shared");
+        let state = Arc::new(Mutex::new(FakeEnsureState::default()));
+        let barrier = Arc::new(Barrier::new(3));
+        let first =
+            ensure_with_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon.clone());
+        let second = ensure_with_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon);
+        barrier.wait();
+
+        let first = first.join().expect("first thread").expect("first ensure");
+        let second = second
+            .join()
+            .expect("second thread")
+            .expect("second ensure");
+        assert_eq!(first.pid, second.pid);
+        assert_eq!(first.lease_id, second.lease_id);
+        assert_eq!(first.address, second.address);
+        assert_eq!(state.lock().expect("state").starts, 1);
+    });
+}
+
+fn ensure_with_fake_operations(
+    barrier: Arc<Barrier>,
+    state: Arc<Mutex<FakeEnsureState>>,
+    daemon: super::DaemonStartResult,
+) -> std::thread::JoinHandle<crate::core::error::Result<super::DaemonStartResult>> {
+    std::thread::spawn(move || {
+        barrier.wait();
+        let read_state = Arc::clone(&state);
+        let start_state = Arc::clone(&state);
+        let daemon_pid = daemon.pid;
+        ensure_running_with_operations(
+            Duration::from_secs(1),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            move || {
+                Ok(fake_status(
+                    read_state.lock().expect("state").daemon.clone(),
+                    true,
+                ))
+            },
+            move |pid| pid == daemon_pid,
+            move || {
+                let mut state = start_state.lock().expect("state");
+                state.starts += 1;
+                state.daemon = Some(daemon.clone());
+                Ok(daemon)
+            },
+        )
+    })
+}
+
+fn fake_daemon(pid: u32, lease_id: &str) -> super::DaemonStartResult {
+    super::DaemonStartResult {
+        pid,
+        address: "127.0.0.1:49152".to_string(),
+        state_path: "/fake/daemon-state.json".to_string(),
+        lease_id: lease_id.to_string(),
+    }
+}
+
+fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
+    let stale_reason_code = (!fresh).then_some(DaemonStaleReasonCode::VersionMismatch);
+    DaemonStatus {
+        running: fresh,
+        fresh,
+        reachable: true,
+        freshness: DaemonFreshnessReport {
+            fresh,
+            stale_reason_code,
+            restartable: !fresh,
+            lease_id: daemon.as_ref().map(|daemon| daemon.lease_id.clone()),
+            binary_hash: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            repair_plan: Vec::new(),
+        },
+        stale_reason: (!fresh).then(|| "simulated stale daemon".to_string()),
+        state: daemon.map(fake_daemon_state),
+        state_path: "/fake/daemon-state.json".to_string(),
+    }
+}
+
+fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
+    DaemonState {
+        schema: "homeboy.daemon.session_lease.v1".to_string(),
+        lease_id: daemon.lease_id,
+        startup_token: "fake-startup-token".to_string(),
+        address: daemon.address,
+        pid: daemon.pid,
+        state_path: daemon.state_path,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        last_seen_at: "2026-01-01T00:00:00Z".to_string(),
+        build_identity: BuildIdentity {
+            version: "test".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            display: "homeboy test".to_string(),
+        },
+        binary_sha256: None,
+        runtime_paths: DaemonRuntimeSnapshot {
+            loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            paths: Vec::new(),
+        },
+    }
 }

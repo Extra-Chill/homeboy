@@ -10,11 +10,10 @@ use crate::core::server::{Server, SshClient};
 
 use super::super::session::RunnerStaleRuntimePath;
 use super::{
-    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_start,
-    remote_daemon_stop, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
+    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, reserve_loopback_port,
+    terminate_pid, wait_for_tcp, RemoteDaemon,
 };
 use crate::core::runner::connection::remote_daemon::parse_json_from_mixed_stdout;
-use crate::core::runner::daemon_freshness::repair_or_fail;
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
 
@@ -26,8 +25,8 @@ struct DaemonVersionResponse {
 
 pub(super) fn connect_remote_daemon(
     server: &Server,
-    client: &SshClient,
-    homeboy: &str,
+    _client: &SshClient,
+    _homeboy: &str,
     daemon: RemoteDaemon,
     expected_version: &str,
     expected_identity: &str,
@@ -48,52 +47,20 @@ pub(super) fn connect_remote_daemon(
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
     match daemon_freshness_report(&local_url, expected_version, expected_identity) {
-        Ok(report) if report.fresh => Ok((local_port, tunnel_pid, local_url, daemon)),
-        Ok(report) if repair_or_fail(&report).is_ok() => {
-            if let Some(pid) = tunnel_pid {
-                terminate_pid(pid);
-            }
-            if let Err(message) = remote_daemon_stop(client, homeboy) {
-                return Err(failed_connect(
-                    runner_id,
-                    session_path.to_path_buf(),
-                    RunnerFailureKind::DaemonStartupFailure,
-                    message,
-                ));
-            }
-            let daemon = match remote_daemon_start(client, homeboy) {
-                Ok(daemon) => daemon,
-                Err(message) => {
-                    return Err(failed_connect(
-                        runner_id,
-                        session_path.to_path_buf(),
-                        RunnerFailureKind::DaemonStartupFailure,
-                        message,
-                    ));
-                }
-            };
-            let (local_port, tunnel_pid, local_url) =
-                open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-            match daemon_freshness_report(&local_url, expected_version, expected_identity) {
-                Ok(report) if report.fresh => {}
-                Ok(report) => {
-                    return Err(failed_after_tunnel(
-                        tunnel_pid,
-                        format!(
-                            "remote daemon restarted but still reports stale Homeboy build: {:?}",
-                            report.stale_reason_code
-                        ),
-                    ));
-                }
-                Err(message) => {
-                    return Err(failed_after_tunnel(tunnel_pid, message));
-                }
-            }
+        Ok(report) if report.fresh && report.lease_id == daemon.lease_id => {
             Ok((local_port, tunnel_pid, local_url, daemon))
         }
+        Ok(report) if report.fresh => Err(failed_after_tunnel(
+            tunnel_pid,
+            format!(
+                "remote daemon lease changed before tunnel validation (expected {:?}, got {:?}); refusing to write session",
+                daemon.lease_id, report.lease_id
+            ),
+        )),
+        Ok(report) if report.lease_id == daemon.lease_id => Ok((local_port, tunnel_pid, local_url, daemon)),
         Ok(report) => Err(failed_after_tunnel(
             tunnel_pid,
-            repair_or_fail(&report).unwrap_err(),
+            format!("remote daemon health lease changed or is unavailable: {:?}", report.lease_id),
         )),
         Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
     }

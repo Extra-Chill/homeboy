@@ -79,7 +79,8 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     };
     let version = identity.version.clone();
 
-    let daemon = ensure_remote_daemon(&client, homeboy);
+    let previous_session = read_session(runner_id)?;
+    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref());
     let Ok(daemon) = daemon else {
         return Ok(failed_connect(
             runner_id,
@@ -944,54 +945,89 @@ mod remote_daemon {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub(super) struct RemoteDaemon {
         pub(super) address: String,
         pub(super) pid: Option<u32>,
         pub(super) lease_id: Option<String>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub(super) struct RemoteDaemonStatus {
         pub(super) daemon: Option<RemoteDaemon>,
         pub(super) stale_reason: Option<String>,
+        pub(super) fresh: bool,
+        pub(super) reachable: bool,
+        pub(super) active_jobs: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) enum RemoteDaemonConnectAction {
+        Reattach,
+        Start,
     }
 
     pub(super) fn ensure_remote_daemon(
         client: &SshClient,
         homeboy: &str,
+        previous_session: Option<&RunnerSession>,
     ) -> std::result::Result<RemoteDaemon, String> {
         let status = remote_daemon_status(client, homeboy)?;
-        if let Some(stale_reason) = status.stale_reason {
-            log_status!(
-                "runner",
-                "Remote managed daemon lease is stale ({stale_reason}); restarting it"
-            );
-            remote_daemon_stop(client, homeboy)?;
-            return remote_daemon_start(client, homeboy);
+        match remote_daemon_connect_action(previous_session, &status)? {
+            RemoteDaemonConnectAction::Reattach => {
+                return status.daemon.ok_or_else(|| {
+                    "remote daemon reattach selected without a daemon lease".to_string()
+                });
+            }
+            RemoteDaemonConnectAction::Start => {
+                return remote_daemon_ensure_running(client, homeboy)
+            }
         }
-        if let Some(daemon) = status.daemon {
-            return Ok(daemon);
-        }
-        remote_daemon_start(client, homeboy)
     }
 
-    /// Stop a remote homeboy daemon over SSH, surfacing a command-failure message on
-    /// non-zero exit. Shared by the connection and connection-daemon refresh paths
-    /// so the stop command + error handling lives in one place (#5362).
-    pub(super) fn remote_daemon_stop(
-        client: &SshClient,
-        homeboy: &str,
-    ) -> std::result::Result<(), String> {
-        let command = format!("{} daemon stop", shell::quote_arg(homeboy));
-        let output = client.execute(&command);
-        if !output.success {
-            return Err(command_failure_message(
-                "remote daemon stop failed while refreshing stale daemon",
-                &output,
+    pub(super) fn remote_daemon_connect_action(
+        previous_session: Option<&RunnerSession>,
+        status: &RemoteDaemonStatus,
+    ) -> std::result::Result<RemoteDaemonConnectAction, String> {
+        let healthy = status.fresh && status.reachable;
+        if status.active_jobs > 0 && !healthy {
+            return Err(format!(
+                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement",
+                status.active_jobs, status.fresh, status.reachable, status.stale_reason
             ));
         }
-        Ok(())
+
+        let Some(daemon) = status.daemon.as_ref() else {
+            return Ok(RemoteDaemonConnectAction::Start);
+        };
+
+        if healthy {
+            if let Some(session) = previous_session.filter(|session| {
+                session.mode == RunnerTunnelMode::DirectSsh
+                    && session.role == RunnerSessionRole::Controller
+            }) {
+                if session.remote_daemon_lease_id.is_none() {
+                    if session.remote_daemon_pid == daemon.pid
+                        && session.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
+                    {
+                        return Ok(RemoteDaemonConnectAction::Reattach);
+                    }
+                    return Err("persisted direct-SSH runner session has no daemon lease and does not match the live daemon PID/address; refusing replacement".to_string());
+                }
+                let expected_lease = session.remote_daemon_lease_id.as_deref().expect("checked");
+                let actual_lease = daemon.lease_id.as_deref().ok_or_else(|| {
+                    "live remote daemon did not report a lease; refusing to replace it".to_string()
+                })?;
+                if expected_lease != actual_lease {
+                    return Err(format!(
+                        "live remote daemon lease `{actual_lease}` does not match persisted session lease `{expected_lease}`; refusing to replace the live daemon"
+                    ));
+                }
+            }
+            return Ok(RemoteDaemonConnectAction::Reattach);
+        }
+
+        Ok(RemoteDaemonConnectAction::Start)
     }
 
     pub(super) fn remote_daemon_status(
@@ -1001,28 +1037,22 @@ mod remote_daemon {
         let command = format!("{} daemon status", shell::quote_arg(homeboy));
         let output = client.execute(&command);
         if !output.success {
-            return Ok(RemoteDaemonStatus {
-                daemon: None,
-                stale_reason: Some(command_failure_message(
-                    "remote daemon status failed",
-                    &output,
-                )),
-            });
+            return Err(command_failure_message(
+                "remote daemon status failed",
+                &output,
+            ));
         }
         let envelope = parse_envelope(&output.stdout)
             .map_err(|err| format!("remote daemon status returned invalid JSON: {}", err))?;
         if !envelope.success {
-            return Ok(RemoteDaemonStatus {
-                daemon: None,
-                stale_reason: None,
-            });
+            return Err(format!(
+                "remote daemon status returned an error: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ));
         }
-        let Some(data) = envelope.data else {
-            return Ok(RemoteDaemonStatus {
-                daemon: None,
-                stale_reason: None,
-            });
-        };
+        let data = envelope
+            .data
+            .ok_or_else(|| "remote daemon status returned no data".to_string())?;
         let stale_reason = data
             .get("stale_reason")
             .and_then(Value::as_str)
@@ -1033,8 +1063,14 @@ mod remote_daemon {
             .unwrap_or(false)
         {
             return Ok(RemoteDaemonStatus {
-                daemon: None,
+                daemon: data.get("state").map(remote_daemon_from_state),
                 stale_reason,
+                fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
+                reachable: data
+                    .get("reachable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                active_jobs: remote_daemon_active_jobs(&data),
             });
         }
         let Some(state) = data.get("state") else {
@@ -1044,54 +1080,81 @@ mod remote_daemon {
                     stale_reason
                         .unwrap_or_else(|| "remote daemon status has no lease state".to_string()),
                 ),
+                fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
+                reachable: data
+                    .get("reachable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                active_jobs: remote_daemon_active_jobs(&data),
             });
         };
         Ok(RemoteDaemonStatus {
-            daemon: Some(RemoteDaemon {
-                address: state
-                    .get("address")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                pid: state
-                    .get("pid")
-                    .and_then(Value::as_u64)
-                    .and_then(|pid| u32::try_from(pid).ok()),
-                lease_id: state
-                    .get("lease_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            }),
+            daemon: Some(remote_daemon_from_state(state)),
             stale_reason,
+            fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
+            reachable: data
+                .get("reachable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            active_jobs: remote_daemon_active_jobs(&data),
         })
     }
 
-    pub(super) fn remote_daemon_start(
+    fn remote_daemon_from_state(state: &Value) -> RemoteDaemon {
+        RemoteDaemon {
+            address: state
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            pid: state
+                .get("pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok()),
+            lease_id: state
+                .get("lease_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }
+    }
+
+    pub(super) fn remote_daemon_active_jobs(data: &Value) -> usize {
+        data.pointer("/freshness/active_jobs")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0)
+    }
+
+    pub(super) fn remote_daemon_ensure_running(
         client: &SshClient,
         homeboy: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
         let command = format!(
-            "{} daemon start --addr 127.0.0.1:0",
+            "{} daemon ensure-running --addr 127.0.0.1:0",
             shell::quote_arg(homeboy)
         );
         let output = client.execute(&command);
         if !output.success {
             return Err(command_failure_message(
-                "remote daemon startup failed",
+                "remote daemon ensure-running failed",
                 &output,
             ));
         }
-        let envelope = parse_envelope(&output.stdout)
-            .map_err(|err| format!("remote daemon start returned invalid JSON: {}", err))?;
+        let envelope = parse_envelope(&output.stdout).map_err(|err| {
+            format!(
+                "remote daemon ensure-running returned invalid JSON: {}",
+                err
+            )
+        })?;
         if !envelope.success {
             return Err(format!(
-                "remote daemon start failed: {}",
+                "remote daemon ensure-running failed: {}",
                 envelope.error.unwrap_or(Value::Null)
             ));
         }
         let data = envelope
             .data
-            .ok_or_else(|| "remote daemon start returned no data".to_string())?;
+            .ok_or_else(|| "remote daemon ensure-running returned no data".to_string())?;
         Ok(RemoteDaemon {
             address: data
                 .get("address")
@@ -1364,6 +1427,133 @@ mod tests {
                 .unwrap(),
             "127.0.0.1:49152"
         );
+    }
+
+    #[test]
+    fn reads_remote_active_job_count_from_daemon_freshness() {
+        let status = serde_json::json!({
+            "freshness": { "active_jobs": 2 }
+        });
+
+        assert_eq!(remote_daemon_active_jobs(&status), 2);
+    }
+
+    #[test]
+    fn reattaches_active_daemon_without_changing_lease_or_pid() {
+        let session = direct_ssh_session("lease-active");
+        let status = remote_daemon_status_for_test(true, true, 1, "lease-active", 4242);
+
+        let action = remote_daemon_connect_action(Some(&session), &status).expect("reattach");
+
+        assert_eq!(action, RemoteDaemonConnectAction::Reattach);
+        let daemon = status.daemon.expect("daemon");
+        assert_eq!(daemon.lease_id.as_deref(), Some("lease-active"));
+        assert_eq!(daemon.pid, Some(4242));
+        assert_eq!(
+            status.active_jobs, 1,
+            "active job must not trigger replacement"
+        );
+    }
+
+    #[test]
+    fn tunnel_only_failure_reattaches_the_persisted_daemon() {
+        let mut session = direct_ssh_session("lease-tunnel");
+        session.tunnel_pid = Some(999_999);
+        session.local_url = Some("http://127.0.0.1:1".to_string());
+        let status = remote_daemon_status_for_test(true, true, 0, "lease-tunnel", 4343);
+
+        assert_eq!(
+            remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
+            RemoteDaemonConnectAction::Reattach
+        );
+    }
+
+    #[test]
+    fn stale_daemon_without_jobs_routes_to_safe_replacement() {
+        let status = remote_daemon_status_for_test(false, true, 0, "lease-stale", 4444);
+
+        assert_eq!(
+            remote_daemon_connect_action(None, &status).expect("replace stale daemon"),
+            RemoteDaemonConnectAction::Start
+        );
+    }
+
+    #[test]
+    fn refuses_to_replace_unreachable_daemon_with_active_jobs() {
+        let status = remote_daemon_status_for_test(false, true, 1, "lease-busy", 4545);
+
+        let err = remote_daemon_connect_action(None, &status).expect_err("refuse replacement");
+
+        assert!(err.contains("1 active job(s)"));
+        assert!(err.contains("refusing implicit replacement"));
+    }
+
+    #[test]
+    fn dead_recorded_daemon_routes_to_idempotent_ensure_start() {
+        let status = RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: Some("daemon lease pid is not running".to_string()),
+            fresh: false,
+            reachable: false,
+            active_jobs: 0,
+        };
+
+        assert_eq!(
+            remote_daemon_connect_action(Some(&direct_ssh_session("lease-dead")), &status)
+                .expect("ensure start"),
+            RemoteDaemonConnectAction::Start
+        );
+    }
+
+    #[test]
+    fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
+        let status = RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: None,
+            fresh: false,
+            reachable: false,
+            active_jobs: 0,
+        };
+
+        assert_eq!(
+            remote_daemon_connect_action(None, &status).expect("ensure start"),
+            RemoteDaemonConnectAction::Start
+        );
+    }
+
+    #[test]
+    fn refuses_to_replace_live_daemon_with_a_different_persisted_lease() {
+        let session = direct_ssh_session("lease-recorded");
+        let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+
+        let err =
+            remote_daemon_connect_action(Some(&session), &status).expect_err("lease mismatch");
+
+        assert!(err.contains("does not match persisted session lease"));
+        assert!(err.contains("refusing to replace"));
+    }
+
+    #[test]
+    fn legacy_session_adopts_consistent_live_daemon_identity() {
+        let mut session = direct_ssh_session("lease-old");
+        session.remote_daemon_lease_id = None;
+        let status = remote_daemon_status_for_test(true, true, 1, "lease-live", 4242);
+
+        assert_eq!(
+            remote_daemon_connect_action(Some(&session), &status).expect("adopt live lease"),
+            RemoteDaemonConnectAction::Reattach
+        );
+    }
+
+    #[test]
+    fn legacy_session_refuses_pid_reuse_with_different_daemon_identity() {
+        let mut session = direct_ssh_session("lease-old");
+        session.remote_daemon_lease_id = None;
+        let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 5555);
+
+        assert!(remote_daemon_connect_action(Some(&session), &status)
+            .expect_err("identity mismatch")
+            .contains("does not match the live daemon PID/address"));
     }
 
     #[test]
@@ -1908,6 +2098,49 @@ mod tests {
             retryable: Some(false),
             active_child_count: None,
             active_cell_count: None,
+        }
+    }
+
+    fn direct_ssh_session(lease_id: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("homeboy-lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
+            local_port: Some(49153),
+            local_url: Some("http://127.0.0.1:49153".to_string()),
+            tunnel_pid: Some(1234),
+            remote_daemon_pid: Some(4242),
+            remote_daemon_lease_id: Some(lease_id.to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+abc123".to_string()),
+            connected_at: Utc::now().to_rfc3339(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+        }
+    }
+
+    fn remote_daemon_status_for_test(
+        fresh: bool,
+        reachable: bool,
+        active_jobs: usize,
+        lease_id: &str,
+        pid: u32,
+    ) -> RemoteDaemonStatus {
+        RemoteDaemonStatus {
+            daemon: Some(RemoteDaemon {
+                address: "127.0.0.1:49152".to_string(),
+                pid: Some(pid),
+                lease_id: Some(lease_id.to_string()),
+            }),
+            stale_reason: (!fresh).then(|| "daemon is stale".to_string()),
+            fresh,
+            reachable,
+            active_jobs,
         }
     }
 }

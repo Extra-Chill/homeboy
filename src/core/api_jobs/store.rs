@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,6 +63,27 @@ pub struct JobHandle {
 }
 
 impl JobStore {
+    /// Count non-terminal jobs without opening or reconciling the durable store.
+    ///
+    /// Daemon status runs in a separate CLI process, so using [`Self::open`]
+    /// here would reconcile live jobs as though the daemon had restarted.
+    pub(crate) fn active_count_at_path(path: impl Into<PathBuf>) -> Result<usize> {
+        let path = path.into();
+        if !path.exists() {
+            return Ok(0);
+        }
+        let content = fs::read_to_string(&path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
+        })?;
+        let durable: DurableJobStore = serde_json::from_str(&content)
+            .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
+        Ok(durable
+            .jobs
+            .into_iter()
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            .count())
+    }
+
     pub(crate) fn open(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open_with_event_retention(path, DEFAULT_EVENT_RETENTION_LIMIT)
     }
