@@ -11,7 +11,7 @@ use crate::core::agent_task::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 mod adaptive_concurrency_tests {
@@ -335,6 +335,7 @@ mod concurrency_tests {
     struct LateMutatingExecutor {
         workspace: std::path::PathBuf,
         events: Arc<Mutex<Vec<String>>>,
+        finished: Arc<AtomicBool>,
     }
 
     impl AgentTaskExecutorAdapter for LateMutatingExecutor {
@@ -348,7 +349,7 @@ mod concurrency_tests {
                 .expect("events")
                 .push(format!("{}-started", request.task_id));
             if request.task_id == "task-1" {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(3_000));
                 fs::write(self.workspace.join("late-change.txt"), "late\n")
                     .expect("late workspace mutation");
                 assert!(Command::new("git")
@@ -368,43 +369,56 @@ mod concurrency_tests {
                 .lock()
                 .expect("events")
                 .push(format!("{}-finished", request.task_id));
+            if request.task_id == "task-1" {
+                self.finished.store(true, Ordering::SeqCst);
+            }
             outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
         }
     }
 
     #[test]
-    fn timed_out_task_keeps_workspace_owned_until_late_executor_terminates() {
+    fn timeout_quarantines_only_its_workspace_without_starving_unrelated_work() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
+        let unrelated = temp.path().join("unrelated");
         init_git_workspace(&workspace);
+        init_git_workspace(&unrelated);
         let events = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(AtomicBool::new(false));
         let scheduler = AgentTaskScheduler::new(LateMutatingExecutor {
             workspace: workspace.clone(),
             events: Arc::clone(&events),
+            finished: Arc::clone(&finished),
         });
-        let mut plan = plan_with_tasks(2);
-        plan.options.max_concurrency = 2;
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_concurrency = 3;
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.tasks[0].limits.timeout_ms = Some(1);
         plan.tasks[1].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[2].workspace.root = Some(unrelated.display().to_string());
 
+        let started = Instant::now();
         let aggregate = scheduler.run(plan);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        while !finished.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let events = events.lock().expect("events");
-        let first_finished = events
-            .iter()
-            .position(|event| event == "task-1-finished")
-            .expect("late task finished");
-        let second_started = events
-            .iter()
-            .position(|event| event == "task-2-started")
-            .expect("second task started");
 
-        assert!(first_finished < second_started);
+        assert!(events.iter().any(|event| event == "task-3-started"));
+        assert!(!events.iter().any(|event| event == "task-2-started"));
         assert!(aggregate
             .outcomes
             .iter()
             .any(|outcome| outcome.task_id == "task-1"
                 && outcome.status == AgentTaskOutcomeStatus::Timeout));
+        assert!(aggregate.outcomes.iter().any(|outcome| {
+            outcome.task_id == "task-2"
+                && outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "backpressure"
+                        && diagnostic.message.contains("workspace remains quarantined")
+                })
+        }));
     }
 
     #[test]
