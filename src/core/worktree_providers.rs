@@ -11,7 +11,7 @@ use crate::core::defaults::{
     self, HomeboyConfig, WorktreeProviderConfig, WorktreeProviderKind,
     WorktreeProviderListResultMapping,
 };
-use crate::core::error::{Error, Result};
+use crate::core::error::{CommandEvidence, Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct WorktreeProviderCleanupOptions {
@@ -162,7 +162,7 @@ fn run_provider_resolve_command(
         .iter()
         .map(|argument| argument.replace("{handle}", handle))
         .collect::<Vec<_>>();
-    run_provider_list_command(provider_id, provider, &command)
+    run_provider_lookup_command(provider_id, provider, &command, "resolve")
 }
 
 fn run_provider_list_command(
@@ -170,14 +170,23 @@ fn run_provider_list_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
 ) -> Result<Vec<WorktreeProviderHandle>> {
+    run_provider_lookup_command(provider_id, provider, command, "list")
+}
+
+fn run_provider_lookup_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    operation: &str,
+) -> Result<Vec<WorktreeProviderHandle>> {
     let (program, args) = command
         .split_first()
         .filter(|(program, _)| !program.trim().is_empty())
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "worktree_providers.commands.list",
+                format!("worktree_providers.commands.{operation}"),
                 format!(
-                    "worktree provider `{provider_id}` list command must include an executable"
+                    "worktree provider `{provider_id}` {operation} command must include an executable"
                 ),
                 Some(provider_id.to_string()),
                 None,
@@ -186,29 +195,34 @@ fn run_provider_list_command(
     let output = Command::new(program).args(args).output().map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
-            format!("worktree provider `{provider_id}` list command could not start: {error}"),
+            format!(
+                "worktree provider `{provider_id}` {operation} command could not start: {error}"
+            ),
             Some(provider_id.to_string()),
             None,
         )
     })?;
     if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::validation_invalid_argument_with_evidence(
             "to_worktree",
             format!(
-                "worktree provider `{provider_id}` list command failed with exit code {}",
-                output.status.code().unwrap_or(1)
+                "worktree provider `{provider_id}` {operation} command failed with {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| format!("exit code {code}"))
+                    .unwrap_or_else(|| "a signal".to_string())
             ),
             Some(provider_id.to_string()),
-            Some(vec![String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string()]),
+            None,
+            Some(provider_command_evidence(command, &output)),
         ));
     }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree provider `{provider_id}` list command returned invalid JSON: {error}"
+                "worktree provider `{provider_id}` {operation} command returned invalid JSON: {error}"
             ),
             Some(provider_id.to_string()),
             None,
@@ -225,6 +239,28 @@ fn run_provider_list_command(
         )
     })?;
     map_provider_list_result(provider_id, mapping, &value)
+}
+
+fn provider_command_evidence(command: &[String], output: &std::process::Output) -> CommandEvidence {
+    let (stdout, stdout_truncated) = bounded_provider_output(&output.stdout);
+    let (stderr, stderr_truncated) = bounded_provider_output(&output.stderr);
+    CommandEvidence {
+        command: command.join(" "),
+        cwd: None,
+        location: Some("local".to_string()),
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+        truncated: stdout_truncated || stderr_truncated,
+    }
+}
+
+fn bounded_provider_output(output: &[u8]) -> (String, bool) {
+    const MAX_OUTPUT_CHARS: usize = 8_192;
+
+    let output = String::from_utf8_lossy(output);
+    let truncated = output.chars().count() > MAX_OUTPUT_CHARS;
+    (output.chars().take(MAX_OUTPUT_CHARS).collect(), truncated)
 }
 
 fn map_provider_list_result(
@@ -1016,6 +1052,97 @@ mod tests {
     }
 
     #[test]
+    fn resolve_does_not_invoke_list_when_both_commands_are_configured() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let marker = workspace.path().join("list-invoked");
+        let resolve = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+        let list =
+            fake_list_provider_script_with_marker(serde_json::json!({ "worktrees": [] }), &marker);
+
+        let handle = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![resolve, "{handle}".to_string()]),
+                    list: Some(vec![list]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect("targeted resolve succeeds");
+
+        assert_eq!(handle.handle, "fixture@cook-target");
+        assert!(!marker.exists(), "list command must not be invoked");
+    }
+
+    #[test]
+    fn list_is_the_compatibility_fallback_when_resolve_is_unavailable() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let marker = workspace.path().join("list-invoked");
+        let list = fake_list_provider_script_with_marker(
+            serde_json::json!({
+                "worktrees": [{
+                    "handle": "fixture@cook-target",
+                    "path": workspace.path(),
+                    "branch": "cook-target",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }]
+            }),
+            &marker,
+        );
+
+        resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(list_provider(list, worktrees_mapping())),
+        )
+        .expect("list fallback succeeds");
+
+        assert!(marker.exists(), "list fallback must be invoked");
+    }
+
+    #[test]
+    fn resolve_failure_preserves_command_classification() {
+        let script = fake_failing_provider_script();
+        let err = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![script, "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect_err("failed resolve must be reported");
+
+        assert!(err
+            .message
+            .contains("resolve command failed with exit code 23"));
+        assert!(!err.message.contains("invalid JSON"));
+        assert_eq!(err.details["command_evidence"]["exit_code"], 23);
+        assert_eq!(
+            err.details["command_evidence"]["stderr"],
+            "provider failed\n"
+        );
+    }
+
+    #[test]
     fn rejects_provider_handles_with_unsafe_safety_metadata() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "cook-target");
@@ -1272,6 +1399,34 @@ mod tests {
         let script = dir.join("provider");
         fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", output))
             .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    fn fake_list_provider_script_with_marker(output: Value, marker: &std::path::Path) -> String {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{}'\n",
+                marker.display(),
+                output
+            ),
+        )
+        .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    fn fake_failing_provider_script() -> String {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let script = dir.join("provider");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'provider failed\\n' >&2\nexit 23\n",
+        )
+        .expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
     }

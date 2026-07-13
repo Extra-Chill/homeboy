@@ -202,6 +202,8 @@ pub struct WorktreeProviderCommands {
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<Vec<String>>,
+    /// Discovery command and compatibility fallback for providers without
+    /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
