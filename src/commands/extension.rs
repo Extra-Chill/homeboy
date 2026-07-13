@@ -274,6 +274,10 @@ pub fn run(
 }
 
 impl ExtensionArgs {
+    pub(crate) fn owns_runner_execution(&self) -> bool {
+        matches!(self.command, ExtensionCommand::DevRun { .. })
+    }
+
     pub(crate) fn is_runner_resident_read_command(&self) -> bool {
         matches!(self.command, ExtensionCommand::Show { .. })
     }

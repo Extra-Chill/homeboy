@@ -44,6 +44,7 @@ pub(super) fn exec_via_daemon(
     detach_after_handoff: bool,
     mirror_evidence: bool,
     print_handoff_output: bool,
+    accepted_daemon_identity: Option<String>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .no_proxy()
@@ -194,6 +195,7 @@ pub(super) fn exec_via_daemon(
                 &source_snapshot,
                 &require_paths,
                 persisted_run_id.as_deref(),
+                accepted_daemon_identity.as_deref(),
                 err,
             )
         })?;
@@ -615,6 +617,7 @@ pub(super) fn terminal_runner_poll_failure(
     source_snapshot: &SourceSnapshot,
     _require_paths: &[String],
     persisted_run_id: Option<&str>,
+    accepted_daemon_identity: Option<&str>,
     source: Error,
 ) -> Error {
     let job_id = job.id.to_string();
@@ -622,6 +625,16 @@ pub(super) fn terminal_runner_poll_failure(
     error.retryable = Some(false);
     error.details["status"] = Value::String("terminal_failure".to_string());
     error.details["reason"] = Value::String("runner_job_unobservable".to_string());
+    let current_daemon_identity = super::super::status(&runner.id).ok().and_then(|status| {
+        status
+            .session
+            .and_then(|session| session.homeboy_build_identity)
+    });
+    if let Some(transition) =
+        daemon_identity_transition(accepted_daemon_identity, current_daemon_identity.as_deref())
+    {
+        error.details["daemon_identity_transition"] = transition;
+    }
 
     let diagnostic = json!({
         "error_code": error.code.as_str(),
@@ -669,6 +682,22 @@ pub(super) fn terminal_runner_poll_failure(
         ));
     }
     error
+}
+
+pub(super) fn daemon_identity_transition(
+    accepted_identity: Option<&str>,
+    current_identity: Option<&str>,
+) -> Option<Value> {
+    let (Some(from), Some(to)) = (accepted_identity, current_identity) else {
+        return None;
+    };
+    (from != to).then(|| {
+        json!({
+            "status": "changed",
+            "accepted_daemon_build_identity": from,
+            "observed_daemon_build_identity": to,
+        })
+    })
 }
 
 pub(super) fn lab_terminal_result_transport_error(
