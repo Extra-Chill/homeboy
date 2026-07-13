@@ -15,8 +15,9 @@ use crate::core::output::MergeOutput;
 use super::{
     connect, disconnect, exec, load, materialize_runner_extension_with_env, merge,
     normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExtensionMaterializationRequest,
-    RunnerExtensionMaterializationSource, RunnerFileTransfer, RunnerKind,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    RunnerFileTransfer, RunnerKind,
 };
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
@@ -67,6 +68,31 @@ pub struct HomeboyBinaryRefreshOutput {
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<HomeboyBinaryRefreshFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeboyBinaryRefreshFailure {
+    pub exit_code: i32,
+    pub failed_command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
+    pub build_path: String,
+    pub stdout: String,
+    pub stderr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::core::engine::command::CommandCaptureMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_record: Option<crate::core::runner_execution_envelope::RunnerExecutionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +240,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                failure: None,
                 plan,
             },
             0,
@@ -229,13 +256,16 @@ pub fn refresh_homeboy_binary(
 
     let (exec_output, exit_code) = exec(
         &plan.runner_id,
-        RunnerExecOptions::diagnostic_raw_shell(plan.script.clone()).with_capability_preflight(
-            RunnerCapabilityPreflight {
-                command: "runner.refresh-homeboy".to_string(),
-                required_commands,
-                ..Default::default()
-            },
-        ),
+        RunnerExecOptions::raw_command(vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            plan.script.clone(),
+        ])
+        .with_capability_preflight(RunnerCapabilityPreflight {
+            command: "runner.refresh-homeboy".to_string(),
+            required_commands,
+            ..Default::default()
+        }),
     )?;
     if exit_code != 0 {
         return Ok((
@@ -250,6 +280,7 @@ pub fn refresh_homeboy_binary(
                 selected_binary_path: plan.binary_path.clone(),
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
+                failure: Some(refresh_failure(&plan, exec_output, exit_code)),
                 plan,
             },
             exit_code,
@@ -283,9 +314,31 @@ pub fn refresh_homeboy_binary(
             selected_binary_path: plan.binary_path.clone(),
             reconnect_required: !daemon_refreshed,
             followup_commands: plan.followup_commands,
+            failure: None,
         },
         0,
     ))
+}
+
+fn refresh_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: RunnerExecOutput,
+    exit_code: i32,
+) -> HomeboyBinaryRefreshFailure {
+    HomeboyBinaryRefreshFailure {
+        exit_code,
+        failed_command: execution.argv.clone(),
+        source: plan.source.clone(),
+        git_ref: plan.git_ref.clone(),
+        source_sha: source_sha_from_output(&execution.stdout),
+        build_path: plan.binary_path.clone(),
+        stdout: execution.stdout.clone(),
+        stderr: execution.stderr.clone(),
+        capture: execution.capture.clone(),
+        execution_record: execution.execution_record.clone(),
+        job_id: execution.job_id.clone(),
+        mirror_run_id: execution.mirror_run_id.clone(),
+    }
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
@@ -621,12 +674,20 @@ fn installed_homeboy_env(
 
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
     format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
+        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
         quote_path(binary_path),
     )
+}
+
+fn source_sha_from_output(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        line.strip_prefix("HOMEBOY_REFRESH_SOURCE_SHA=")
+            .filter(|sha| !sha.is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn identity_probe_script(binary_path: &str) -> String {
@@ -939,6 +1000,128 @@ mod tests {
             plan.binary_path,
             "/runner/ws/homeboy-clean/target/release/homeboy"
         );
+    }
+
+    #[test]
+    fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
+        test_support::with_isolated_home(|_| {
+            let fixture = tempfile::tempdir().expect("fixture directory");
+            let source = fixture.path().join("source");
+            let workspace = fixture.path().join("workspace");
+            let bin = fixture.path().join("bin");
+            std::fs::create_dir_all(source.join("src")).expect("source directory");
+            std::fs::create_dir_all(&workspace).expect("workspace directory");
+            std::fs::create_dir_all(&bin).expect("tool directory");
+            let cargo = bin.join("cargo");
+            std::fs::write(
+                &cargo,
+                "#!/bin/sh\necho compiler_diagnostic_marker >&2\nexit 101\n",
+            )
+            .expect("fake cargo");
+            let status = Command::new("chmod")
+                .args(["0755", cargo.to_str().expect("cargo path")])
+                .status()
+                .expect("make fake cargo executable");
+            assert!(status.success(), "fake cargo is executable");
+            std::fs::write(
+                source.join("Cargo.toml"),
+                "[package]\nname = \"homeboy\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("manifest");
+            std::fs::write(
+                source.join("src/main.rs"),
+                "fn main() { compiler_diagnostic_marker }\n",
+            )
+            .expect("invalid source");
+            for args in [
+                vec!["init", "-b", "main"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "commit",
+                    "-m",
+                    "fixture",
+                ],
+            ] {
+                let status = Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("run git");
+                assert!(status.success(), "git fixture setup succeeds");
+            }
+            let source_sha = String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&source)
+                    .output()
+                    .expect("read source SHA")
+                    .stdout,
+            )
+            .expect("source SHA is UTF-8")
+            .trim()
+            .to_string();
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"lab-local","kind":"local","workspace_root":"{}","homeboy_path":"/active/homeboy","env":{{"PATH":"{}:{}"}}}}"#,
+                    workspace.display(),
+                    bin.display(),
+                    std::env::var("PATH").expect("PATH")
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let (output, exit_code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+                runner_id: "lab-local".to_string(),
+                mode: HomeboyBinaryRefreshMode::Materialize,
+                source: Some(source.display().to_string()),
+                git_ref: Some("main".to_string()),
+                target_dir: Some(workspace.join("build").display().to_string()),
+                reconnect: false,
+                dry_run: false,
+            })
+            .expect("refresh returns diagnostics for compiler failure");
+
+            assert_eq!(
+                exit_code,
+                101,
+                "stdout: {}\nstderr: {}",
+                output
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.stdout.as_str())
+                    .unwrap_or_default(),
+                output
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.stderr.as_str())
+                    .unwrap_or_default()
+            );
+            let failure = output.failure.expect("failure evidence is preserved");
+            assert_eq!(failure.exit_code, 101);
+            assert_eq!(failure.source_sha.as_deref(), Some(source_sha.as_str()));
+            assert!(failure
+                .failed_command
+                .starts_with(&["bash".to_string(), "-lc".to_string()]));
+            assert!(failure
+                .build_path
+                .ends_with("/build/target/release/homeboy"));
+            assert!(failure.stderr.contains("compiler_diagnostic_marker"));
+            assert!(failure.capture.is_some());
+            assert!(failure.execution_record.is_some());
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload runner")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/active/homeboy")
+            );
+        });
     }
 
     #[test]
