@@ -162,7 +162,7 @@ function buildConfig(env) {
     component_id: componentId,
     component_path: componentPath,
     workload_id: workload.id || workloadId,
-    workload_label: workload.label || workload.name || env.WORKLOAD_LABEL || `Run ${workloadId}`,
+    workload_label: workload.label || workload.name || env.WORKLOAD_LABEL || workloadProfile.workload_label || `Run ${workloadId}`,
     workload,
     validation_dependencies: validationDependencies.paths,
     runtime_id: runtime.id,
@@ -181,7 +181,7 @@ function buildConfig(env) {
     workload_run_after: parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []),
     required_abilities: parseJsonInput('required_abilities', env.REQUIRED_ABILITIES || '[]', 'array', []),
     success_requires_pr: env.SUCCESS_REQUIRES_PR !== 'false',
-    proof_profile: env.PROOF_PROFILE || 'artifact_only',
+    proof_profile: env.PROOF_PROFILE || workloadProfile.proof_profile || 'artifact_only',
     success_completion_outcomes: parseJsonInput('success_completion_outcomes', env.SUCCESS_COMPLETION_OUTCOMES || '[]', 'array', []),
     provider: env.PROVIDER || '',
     model: env.MODEL || '',
@@ -222,10 +222,10 @@ function buildConfig(env) {
     allowed_repos: allowedRepos.length > 0 ? allowedRepos : appTokenRepos.length > 0 ? appTokenRepos : [targetRepo],
     engine_key: env.ENGINE_KEY || '',
     tool_results_key: env.TOOL_RESULTS_KEY || 'tool_results',
-    max_turns: Number(env.MAX_TURNS || 12),
+    max_turns: numberDefault(env.MAX_TURNS, workloadProfile.max_turns, 12),
     prompt: env.PROMPT || '',
-    step_budget: Number(env.STEP_BUDGET || 16),
-    time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
+    step_budget: numberDefault(env.STEP_BUDGET, workloadProfile.step_budget, 16),
+    time_budget_ms: numberDefault(env.TIME_BUDGET_MS, workloadProfile.time_budget_ms, 600000),
     ...(Object.keys(loopPolicy).length > 0 ? { loop_policy: loopPolicy } : {}),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: runtimeProjection.artifact_declarations,
@@ -288,9 +288,14 @@ function parseRuntimeWorkloadProfile(value) {
       runtime: stringDefault(profile.runtime),
       profile: stringDefault(profile.profile),
       workload_id: stringDefault(profile.workload_id),
+      workload_label: stringDefault(profile.workload_label),
       workload: objectDefault(profile.workload),
       tool_profile: objectDefault(profile.tool_profile),
       loop_policy: objectDefault(profile.loop_policy),
+      proof_profile: stringDefault(profile.proof_profile),
+      max_turns: positiveNumber(profile.max_turns),
+      step_budget: positiveNumber(profile.step_budget),
+      time_budget_ms: positiveNumber(profile.time_budget_ms),
     };
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -317,6 +322,13 @@ function objectDefault(value) {
 function positiveNumber(value) {
   const parsed = Number(value || 0);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function numberDefault(explicitValue, profileValue, fallback) {
+  if (explicitValue !== undefined && explicitValue !== '') {
+    return Number(explicitValue);
+  }
+  return profileValue > 0 ? profileValue : fallback;
 }
 
 function providerBenchEnvFromManifest(runtime, provider, env) {

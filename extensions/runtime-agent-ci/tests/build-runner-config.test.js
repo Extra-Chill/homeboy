@@ -57,13 +57,22 @@ assert.deepEqual(parseRuntimeWorkloadProfile(JSON.stringify({
   workload: { id: 'profile-workload', label: 'Profile workload' },
   tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
   loop_policy: { mode: 'duration', max_revolutions: 2 },
+  proof_profile: 'cook_to_pr',
+  max_turns: 7,
+  step_budget: 9,
+  time_budget_ms: 120000,
 })), {
   runtime: 'local-shell',
   profile: 'profile-default',
   workload_id: '',
+  workload_label: '',
   workload: { id: 'profile-workload', label: 'Profile workload' },
   tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
   loop_policy: { mode: 'duration', max_revolutions: 2 },
+  proof_profile: 'cook_to_pr',
+  max_turns: 7,
+  step_budget: 9,
+  time_budget_ms: 120000,
 });
 
 assert.throws(
@@ -193,9 +202,14 @@ try {
       runtime: 'local-shell',
       profile: 'profile-default',
       workload_id: 'profile-workload',
+      workload_label: 'Profile scalar workload',
       workload: { label: 'Profile workload' },
       tool_profile: { workspace_tools: { inspect: { command: 'git status --short' } } },
       loop_policy: { mode: 'duration', max_revolutions: 2 },
+      proof_profile: 'cook_to_pr',
+      max_turns: 7,
+      step_budget: 9,
+      time_budget_ms: 120000,
     }),
   });
 
@@ -203,6 +217,10 @@ try {
   assert.equal(config.runtime_profile, 'profile-default');
   assert.equal(config.workload_id, 'profile-workload');
   assert.equal(config.workload_label, 'Profile workload');
+  assert.equal(config.proof_profile, 'cook_to_pr');
+  assert.equal(config.max_turns, 7);
+  assert.equal(config.step_budget, 9);
+  assert.equal(config.time_budget_ms, 120000);
   assert.deepEqual(config.loop_policy, { mode: 'duration', max_revolutions: 2 });
 } finally {
   fs.rmSync(profileTmpRoot, { recursive: true, force: true });
@@ -222,12 +240,20 @@ try {
     WORKLOAD: '{"label":"Explicit workload"}',
     LOOP_POLICY: '{"mode":"revolution"}',
     MAX_REVOLUTIONS: '5',
+    PROOF_PROFILE: 'artifact_only',
+    MAX_TURNS: '12',
+    STEP_BUDGET: '16',
+    TIME_BUDGET_MS: '600000',
     RUNTIME_WORKLOAD_PROFILE_JSON: JSON.stringify({
       runtime: 'other-runtime',
       profile: 'profile-default',
       workload_id: 'profile-workload',
       workload: { label: 'Profile workload' },
       loop_policy: { mode: 'duration', max_revolutions: 2 },
+      proof_profile: 'cook_to_pr',
+      max_turns: 7,
+      step_budget: 9,
+      time_budget_ms: 120000,
     }),
   });
 
@@ -235,6 +261,10 @@ try {
   assert.equal(config.runtime_profile, 'explicit-profile');
   assert.equal(config.workload_id, 'explicit-workload');
   assert.equal(config.workload_label, 'Explicit workload');
+  assert.equal(config.proof_profile, 'artifact_only');
+  assert.equal(config.max_turns, 12);
+  assert.equal(config.step_budget, 16);
+  assert.equal(config.time_budget_ms, 600000);
   assert.deepEqual(config.loop_policy, { mode: 'revolution', max_revolutions: 5 });
 } finally {
   fs.rmSync(explicitProfileTmpRoot, { recursive: true, force: true });
