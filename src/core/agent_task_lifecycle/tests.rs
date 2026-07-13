@@ -163,6 +163,83 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let attempt_run_id = "cook-7970-attempt-1-controller";
+        let queued = record_lab_offload_phase(
+            attempt_run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&test_plan()),
+        )
+        .expect("pre-acceptance attempt record");
+
+        assert_eq!(queued.state, AgentTaskRunState::Queued);
+        assert_eq!(queued.metadata["phase"], "materializing");
+        assert!(queued.metadata.get("runner_job_id").is_none());
+
+        let accepted = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: attempt_run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-7970",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("daemon acceptance advances the same attempt");
+
+        assert_eq!(accepted.run_id, attempt_run_id);
+        assert_eq!(accepted.state, AgentTaskRunState::Running);
+        assert_eq!(accepted.metadata["runner_job_id"], "job-7970");
+        assert_eq!(
+            accepted.metadata["runner_execution_record"]["status"],
+            "running"
+        );
+    });
+}
+
+#[test]
+fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
+    with_isolated_home(|_| {
+        let attempt_run_id = "cook-7970-attempt-1-staging-failure";
+        let plan = test_plan();
+        record_lab_offload_phase(
+            attempt_run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("pre-acceptance attempt record");
+
+        record_pre_execution_failure(
+            attempt_run_id,
+            &plan,
+            "lab_workspace_stage",
+            &Error::internal_unexpected("workspace materialization failed"),
+        )
+        .expect("terminal staging failure");
+
+        let record = status(attempt_run_id).expect("terminal attempt record");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "lab_workspace_stage"
+        );
+        assert!(record.metadata.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
 fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
     with_isolated_home(|_| {
         let mut plan = test_plan();

@@ -816,10 +816,18 @@ pub(crate) fn run_lab_offload_inner(
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
     let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    // Cook's public run id identifies the retry series. Persist pre-acceptance
+    // Lab progress under its first attempt id so daemon acceptance advances the
+    // same canonical lifecycle record instead of leaving a queued proxy behind.
+    let pre_acceptance_run_id = ensure_agent_task_lifecycle_identity_with(
+        request.normalized_args,
+        run_isolation_token.as_deref(),
+    )
+    .map(|(_, run_id)| run_id);
     let provider_rotation =
         serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
             .unwrap_or(serde_json::Value::Null);
-    if let Some(run_id) = run_isolation_token.as_deref() {
+    if let Some(run_id) = pre_acceptance_run_id.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,
@@ -995,7 +1003,7 @@ pub(crate) fn run_lab_offload_inner(
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
     let workspace_sync_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
-    let workspace_stage = prepare_lab_offload_workspace_stage(
+    let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
         &contract,
         plan,
@@ -1005,7 +1013,24 @@ pub(crate) fn run_lab_offload_inner(
         &command_prefix.argv,
         Some(&runner_workspace_root),
         run_isolation_token,
-    )?;
+    ) {
+        Ok(stage) => stage,
+        Err(error) => {
+            if let Some(run_id) = pre_acceptance_run_id.as_deref() {
+                if let Ok(plan) = agent_task_lifecycle::load_plan(run_id) {
+                    // Staging is still controller-side. Make a failed handoff
+                    // actionable instead of retaining an unclaimed proxy.
+                    let _ = agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "lab_workspace_stage",
+                        &error,
+                    );
+                }
+            }
+            return Err(error);
+        }
+    };
     workspace_sync_timer.finish();
     let LabOffloadWorkspaceStage {
         plan: next_plan,
@@ -1030,6 +1055,11 @@ pub(crate) fn run_lab_offload_inner(
         runtime_overlay_metadata,
     } = workspace_stage;
     plan = next_plan;
+    if agent_task_run_id != pre_acceptance_run_id {
+        return Err(Error::internal_unexpected(
+            "Lab workspace staging changed the pre-acceptance agent-task lifecycle identity",
+        ));
+    }
     if let Some(run_id) = agent_task_run_id.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
