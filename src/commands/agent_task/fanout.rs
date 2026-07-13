@@ -531,6 +531,17 @@ impl BatchCookSpec {
             .unwrap_or_else(|| default_cook_commit_message(self));
         let source_worktree_path =
             agent_task_service::source_worktree_path(self.cwd.clone(), self.workspace.clone());
+        let task_base_sha = source_worktree_path
+            .as_deref()
+            .and_then(|path| {
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(path)
+                    .output()
+                    .ok()
+            })
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
         Ok(BatchCookInvocation {
             dispatch,
             options: AgentTaskCookServiceOptions {
@@ -547,6 +558,7 @@ impl BatchCookSpec {
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,
                 base: self.base.clone(),
+                task_base_sha,
                 head: self.head.clone(),
                 title,
                 commit_message,

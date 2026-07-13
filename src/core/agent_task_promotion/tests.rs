@@ -263,6 +263,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
             source_path: Some(source_path),
             source_worktree_path: None,
             base_ref: None,
+            task_base_sha: None,
             to_worktree: "repo@promoted-task".to_string(),
             task_id: None,
             artifact_id: None,
@@ -302,7 +303,10 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     git(&repo, &["commit", "-am", "fix: committed change"]);
 
     let (source_path, source) = write_empty_patch_source(&temp);
-    let mut provider = FakePromotionWorkspaceProvider::default();
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
 
     let report = promote_with_provider(
         AgentTaskPromotionOptions {
@@ -311,6 +315,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
             base_ref: Some("main".to_string()),
+            task_base_sha: Some(git_head(&repo, "main")),
             to_worktree: "repo@fix-committed".to_string(),
             task_id: None,
             artifact_id: None,
@@ -337,9 +342,106 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
         report.provenance["change_source"].as_str(),
         Some("local_commits")
     );
-    assert_eq!(provider.apply_calls.len(), 0);
+    assert_eq!(
+        report.provenance["commits"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(provider.verify_calls[0].0, repo);
+}
+
+#[test]
+fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("first.txt"), "base\n").expect("base");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "base"]);
+    let base = git_head(&repo, "HEAD");
+    git(&repo, &["checkout", "-b", "agent/work"]);
+    std::fs::write(repo.join("first.txt"), "one\n").expect("first");
+    git(&repo, &["commit", "-am", "agent: first"]);
+    std::fs::write(repo.join("second.txt"), "two\n").expect("second");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "agent: second"]);
+    let (source_path, source) = write_empty_patch_source(&temp);
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run-two-commits".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("main".to_string()),
+            task_base_sha: Some(base.clone()),
+            to_worktree: "repo@promoted".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+        },
+        &mut FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("commits promoted");
+
+    assert_eq!(report.provenance["base_ref"].as_str(), Some(base.as_str()));
+    assert_eq!(
+        report.provenance["commits"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(report.provenance["commits"][0]["subject"], "agent: first");
+    assert_eq!(report.provenance["commits"][1]["subject"], "agent: second");
+}
+
+#[test]
+fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    std::fs::write(repo.join("file.txt"), "base\n").expect("base");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(&repo, &["checkout", "-b", "unrelated"]);
+    std::fs::write(repo.join("file.txt"), "unrelated\n").expect("unrelated");
+    git(&repo, &["commit", "-am", "unrelated"]);
+    let unrelated = git_head(&repo, "HEAD");
+    git(&repo, &["checkout", "master"]);
+    std::fs::write(repo.join("file.txt"), "agent\n").expect("agent");
+    git(&repo, &["commit", "-am", "agent"]);
+    let (source_path, source) = write_empty_patch_source(&temp);
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo),
+            base_ref: None,
+            task_base_sha: Some(unrelated),
+            to_worktree: "repo@promoted".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+        },
+        &mut FakePromotionWorkspaceProvider::default(),
+    )
+    .expect_err("unrelated base rejected");
+    assert!(error.message.contains("not an ancestor"));
 }
 
 #[test]
@@ -452,6 +554,7 @@ fn promote_dry_run_reports_selected_patch_without_provider_mutation() {
         source_path: Some(source_path),
         source_worktree_path: None,
         base_ref: None,
+        task_base_sha: None,
         to_worktree: "repo@promoted-task".to_string(),
         task_id: None,
         artifact_id: None,
@@ -490,6 +593,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
             source_path: Some(source_path),
             source_worktree_path: None,
             base_ref: None,
+            task_base_sha: None,
             to_worktree: "repo@controlled-worktree".to_string(),
             task_id: None,
             artifact_id: None,
@@ -589,6 +693,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                 source_path: Some(source_path),
                 source_worktree_path: None,
                 base_ref: None,
+                task_base_sha: None,
                 to_worktree: "repo@worktree".to_string(),
                 task_id: None,
                 artifact_id: None,
@@ -652,6 +757,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
             source_path: Some(source_path),
             source_worktree_path: None,
             base_ref: None,
+            task_base_sha: None,
             to_worktree: "homeboy@promoted-task".to_string(),
             task_id: None,
             artifact_id: None,
@@ -689,6 +795,7 @@ fn promote_requires_provider_for_apply() {
         source_path: Some(source_path),
         source_worktree_path: None,
         base_ref: None,
+        task_base_sha: None,
         to_worktree: "repo@controlled-worktree".to_string(),
         task_id: None,
         artifact_id: None,
@@ -716,6 +823,7 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
         source_path: None,
         source_worktree_path: None,
         base_ref: None,
+        task_base_sha: None,
         to_worktree: "repo@flatten".to_string(),
         task_id: None,
         artifact_id: None,
@@ -746,6 +854,16 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
     let round_trip: AgentTaskPromotionOptions =
         serde_json::from_value(value).expect("deserialize flat options");
     assert_eq!(round_trip, options);
+}
+
+fn git_head(cwd: &Path, reference: &str) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", reference])
+        .current_dir(cwd)
+        .output()
+        .expect("resolve git ref");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[test]
