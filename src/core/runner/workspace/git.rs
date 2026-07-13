@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::process::Stdio;
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
@@ -130,6 +131,7 @@ pub(super) fn materialize_git_from_controller_bundle(
     let bundle_path = bundle_dir.path().join("workspace.bundle");
 
     let refs = controller_bundle_refs("HEAD", changed_since_base, git_fetch_refs);
+    hydrate_controller_bundle_objects(local_path, &refs)?;
 
     let output = Command::new("git")
         .arg("bundle")
@@ -187,6 +189,71 @@ pub(super) fn materialize_git_from_controller_bundle(
     };
 
     result
+}
+
+/// Resolve the exact object closure locally before `git bundle` can invoke a
+/// promisor remote itself. The controller is the only participant allowed to
+/// use the source checkout's authenticated transport.
+fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
+    let mut object_list = Command::new("git")
+        .args(["rev-list", "--objects", "--no-object-names"])
+        .args(refs)
+        .current_dir(local_path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("list git bundle objects".to_string()))
+        })?;
+    let mut hydrate = Command::new("git")
+        .args(["cat-file", "--batch-check"])
+        .current_dir(local_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("hydrate git bundle objects".to_string()),
+            )
+        })?;
+
+    let mut object_list_stdout = object_list
+        .stdout
+        .take()
+        .expect("piped git object list stdout");
+    let mut hydrate_stdin = hydrate
+        .stdin
+        .take()
+        .expect("piped git object hydration stdin");
+    std::io::copy(&mut object_list_stdout, &mut hydrate_stdin).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("stream git bundle objects".to_string()),
+        )
+    })?;
+    drop(hydrate_stdin);
+
+    let object_list_status = object_list.wait().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("list git bundle objects".to_string()))
+    })?;
+    if !object_list_status.success() {
+        return Err(Error::internal_unexpected(
+            "list git bundle objects failed while resolving the controller object closure",
+        ));
+    }
+    let hydrate_status = hydrate.wait().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("hydrate git bundle objects".to_string()),
+        )
+    })?;
+    if !hydrate_status.success() {
+        return Err(Error::internal_unexpected(
+            "hydrate git bundle objects failed while resolving the controller object closure",
+        ));
+    }
+
+    Ok(())
 }
 
 fn controller_bundle_refs(
@@ -252,7 +319,7 @@ fn materialize_git_bundle_piped(
     run_shell_command(&command, action)
 }
 
-fn git_bundle_install_command(
+pub(crate) fn git_bundle_install_command(
     remote_path: &str,
     head: &str,
     branch: Option<&str>,

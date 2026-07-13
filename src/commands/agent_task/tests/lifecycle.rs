@@ -90,6 +90,44 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
 }
 
 #[test]
+fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
+    with_temp_home(|| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-resume-transport-proxy",
+                runner_id: "remote-runner-42",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+        let executor = CapturingExecutor::default();
+
+        let error = run_resume_with_executor(
+            "run-cli-resume-transport-proxy".to_string(),
+            executor.clone(),
+        )
+        .expect_err("transport proxy needs runner recovery");
+
+        assert!(error
+            .message
+            .contains("provider execution was not attempted"));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::status("run-cli-resume-transport-proxy")
+                .expect("proxy state preserved")
+                .state,
+            AgentTaskRunState::Queued
+        );
+    });
+}
+
+#[test]
 fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

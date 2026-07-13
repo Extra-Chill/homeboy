@@ -847,6 +847,7 @@ pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<Ru
         run_kind: args.run_kind,
         component_id: args.component_id,
         limit: args.limit,
+        terminal_only: true,
     })?;
 
     Ok((
@@ -1391,6 +1392,8 @@ mod tests {
                     apply: false,
                     include: vec![crate::commands::cleanup::CleanupCategoryArg::RunnerDownloads],
                     exclude: Vec::new(),
+                    older_than_days: None,
+                    limit: None,
                     command: None,
                 },
                 &crate::commands::GlobalArgs {},
@@ -1457,6 +1460,32 @@ mod tests {
                 .expect("artifact");
             let stored_path = PathBuf::from(&artifact.path);
             assert!(stored_path.exists());
+
+            // The retention contract never reaps evidence while its run owns an
+            // active lease, even when the age threshold is zero.
+            let active = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
+                apply: true,
+                older_than_days: 0,
+                run_id: Some(run.id.clone()),
+                kind: None,
+                artifact_type: None,
+                run_kind: None,
+                component_id: None,
+                limit: 100,
+            })
+            .expect("active cleanup")
+            .0;
+            let RunsOutput::ArtifactCleanupPersisted(active) = active else {
+                panic!("unexpected output");
+            };
+            assert_eq!(active.removed_record_count, 0);
+            assert_eq!(active.rows[0].run_status, "running");
+            assert_eq!(active.rows[0].action, "skip");
+            assert!(stored_path.exists());
+
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
 
             let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
                 apply: false,

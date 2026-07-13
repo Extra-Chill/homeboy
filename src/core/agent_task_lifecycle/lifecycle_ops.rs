@@ -206,7 +206,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         }
     }
     let before_liveness_reconciliation = record.clone();
-    reconcile_runner_job_state(&mut record);
+    reconcile_runner_job_state(&mut record)?;
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
         store::write_record(&record)?;
@@ -224,15 +224,15 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
-fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
-    if is_terminal_run_state(record.state) {
-        return;
+fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
+    if record.state != AgentTaskRunState::Running {
+        return Ok(());
     }
     let (Some(runner_id), Some(job_id)) = (
         record.runner_id().map(str::to_string),
         record.runner_job_id().map(str::to_string),
     ) else {
-        return;
+        return Ok(());
     };
     let snapshot = match crate::core::runners::runner_job_log_snapshot(&runner_id, &job_id) {
         Ok(snapshot) => snapshot,
@@ -243,10 +243,10 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
             {
                 record.annotate_runner_disconnected();
             }
-            return;
+            return Ok(());
         }
     };
-    reconcile_runner_job_snapshot(record, &snapshot);
+    reconcile_runner_job_snapshot(record, &snapshot)
 }
 
 /// A controller proxy is a transport handoff, not an agent provider task. Its
@@ -309,7 +309,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 
     match crate::core::runners::runner_job_log_snapshot(&runner_id, &runner_job_id) {
         Ok(snapshot) => {
-            reconcile_transport_proxy_snapshot(&mut record, &snapshot);
+            reconcile_transport_proxy_snapshot(&mut record, &snapshot)?;
             store::write_record(&record)?;
             Ok(Some(TransportProxyRecovery::Reconciled {
                 record,
@@ -332,7 +332,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
 pub(crate) fn reconcile_transport_proxy_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &crate::core::runner::RunnerJobLogSnapshot,
-) {
+) -> Result<()> {
     if record.state == AgentTaskRunState::Queued {
         set_run_state(record, AgentTaskRunState::Running);
         for task in &mut record.tasks {
@@ -341,7 +341,7 @@ pub(crate) fn reconcile_transport_proxy_snapshot(
             }
         }
     }
-    reconcile_runner_job_snapshot(record, snapshot);
+    reconcile_runner_job_snapshot(record, snapshot)
 }
 
 fn is_transport_proxy(record: &AgentTaskRunRecord) -> bool {
@@ -387,37 +387,86 @@ fn transport_proxy_runner_job_id(record: &AgentTaskRunRecord) -> Option<String> 
 pub(crate) fn reconcile_runner_job_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &crate::core::runner::RunnerJobLogSnapshot,
-) {
+) -> Result<()> {
     if is_terminal_run_state(record.state) {
-        return;
+        return Ok(());
     }
+    validate_runner_job_snapshot(record, snapshot)?;
+    let mut reconciled = record.clone();
+    reconciled.record_runner_reachable();
     match snapshot.job.status {
         crate::core::api_jobs::JobStatus::Queued | crate::core::api_jobs::JobStatus::Running => {
-            record.updated_at = Some(now_timestamp());
-            update_lifecycle_heartbeat(record);
-            let last_seen_at = record.updated_at.clone();
-            let metadata = record.ensure_metadata_object();
+            reconciled.updated_at = Some(now_timestamp());
+            update_lifecycle_heartbeat(&mut reconciled);
+            let last_seen_at = reconciled.updated_at.clone();
+            let metadata = reconciled.ensure_metadata_object();
             metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
             metadata.insert("runner_job_last_seen_at".to_string(), json!(last_seen_at));
+            store::write_record(&reconciled)?;
         }
         crate::core::api_jobs::JobStatus::Succeeded
         | crate::core::api_jobs::JobStatus::Failed
         | crate::core::api_jobs::JobStatus::Cancelled => {
-            if let Some(event) = crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&snapshot.events)).filter(|event| {
-                event.identity.runner_id == record.runner_id().unwrap_or_default()
-                    && event.identity.runner_job_id == record.runner_job_id().unwrap_or_default()
-            }) {
+            if let Some(event) = crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&snapshot.events)) {
+                validate_terminal_child_identity(&reconciled, snapshot, &event)?;
                 let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
-                let aggregate_path = store::aggregate_path(&record.run_id)
+                let aggregate_path = store::aggregate_path(&reconciled.run_id)
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "aggregate.json".to_string());
-                apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
-                let _ = store::write_aggregate(&record.run_id, &event.aggregate);
+                apply_aggregate_to_record(&mut reconciled, &projection_plan, &event.aggregate, aggregate_path);
+                apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
+                store::write_aggregate_and_record(&reconciled, &event.aggregate)?;
+            } else {
+                apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
+                store::write_record(&reconciled)?;
             }
-            apply_runner_job_terminal_state(record, snapshot.job.status, &snapshot.events);
         }
     }
-    let _ = store::write_record(record);
+    *record = reconciled;
+    Ok(())
+}
+
+fn validate_runner_job_snapshot(
+    record: &AgentTaskRunRecord,
+    snapshot: &crate::core::runner::RunnerJobLogSnapshot,
+) -> Result<()> {
+    let expected_job_id = record.runner_job_id().unwrap_or_default();
+    if expected_job_id == snapshot.job.id.to_string() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "runner_job_id",
+        format!(
+            "runner snapshot job {} does not match controller job {expected_job_id}",
+            snapshot.job.id
+        ),
+        Some(record.run_id.clone()),
+        None,
+    ))
+}
+
+fn validate_terminal_child_identity(
+    record: &AgentTaskRunRecord,
+    snapshot: &crate::core::runner::RunnerJobLogSnapshot,
+    event: &crate::core::runner::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+) -> Result<()> {
+    let expected_runner_id = record.runner_id().unwrap_or_default();
+    let expected_job_id = record.runner_job_id().unwrap_or_default();
+    let expected_run_id = record.run_id.as_str();
+    if event.identity.runner_id == expected_runner_id
+        && event.identity.runner_job_id == expected_job_id
+        && snapshot.job.id.to_string() == expected_job_id
+        && event.identity.run_id.as_deref() == Some(expected_run_id)
+        && event.identity.persisted_run_id.as_deref() == Some(expected_run_id)
+    {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "runner_lifecycle_identity",
+        "terminal runner child lifecycle event does not match its controller run, persisted run, runner, and job identity",
+        Some(record.run_id.clone()),
+        None,
+    ))
 }
 
 fn is_terminal_run_state(state: AgentTaskRunState) -> bool {

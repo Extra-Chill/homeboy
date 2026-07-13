@@ -119,6 +119,7 @@ pub(crate) fn agent_task_run_plan_lifecycle_event_from_workload_result(
         identity: AgentTaskDispatchIdentity {
             runner_id: runner_id.to_string(),
             runner_job_id: runner_job_id.to_string(),
+            persisted_run_id: Some(agent_task.run_id.clone()),
             run_id: Some(agent_task.run_id.clone()),
             ..AgentTaskDispatchIdentity::default()
         },

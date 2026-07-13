@@ -525,6 +525,11 @@ pub(crate) fn record_aggregate(
         aggregate,
         aggregate_path.display().to_string(),
     );
+    crate::core::controller_scratch::register_outcome_resources(
+        &record.run_id,
+        &aggregate.outcomes,
+    )?;
+    crate::core::controller_scratch::finalize_run(&record.run_id)?;
     store::write_record(record)?;
     Ok(record.clone())
 }

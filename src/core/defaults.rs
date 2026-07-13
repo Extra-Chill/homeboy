@@ -77,6 +77,11 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub release_gate: ReleaseGateConfig,
 
+    /// Bounded retention policy shared by terminal run evidence and runtime
+    /// resources. Individual commands may request a narrower scope.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+
     /// Directory where persisted run artifacts are copied.
     ///
     /// Defaults to the machine-local product data directory under
@@ -140,11 +145,48 @@ impl Default for HomeboyConfig {
             github_hosts: HashMap::new(),
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
+            retention: RetentionConfig::default(),
             artifact_root: None,
             update_check: true,
             resident_services: Vec::new(),
         }
     }
+}
+
+/// Safe default retention windows for resources created by Homeboy commands.
+///
+/// This is deliberately resource-oriented: controller scratch ownership has a
+/// separate lifecycle contract and is not inferred from these paths.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetentionConfig {
+    #[serde(default = "default_terminal_run_retention_days")]
+    pub terminal_run_days: i64,
+    #[serde(default = "default_runtime_tmp_retention_days")]
+    pub runtime_tmp_days: u64,
+    #[serde(default = "default_retention_limit")]
+    pub limit: i64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            terminal_run_days: default_terminal_run_retention_days(),
+            runtime_tmp_days: default_runtime_tmp_retention_days(),
+            limit: default_retention_limit(),
+        }
+    }
+}
+
+fn default_terminal_run_retention_days() -> i64 {
+    30
+}
+
+fn default_runtime_tmp_retention_days() -> u64 {
+    7
+}
+
+fn default_retention_limit() -> i64 {
+    1000
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
