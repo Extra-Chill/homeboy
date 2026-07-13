@@ -36,7 +36,7 @@ fn runner_job_event_format_includes_sequence_kind_message_and_data() {
 
 #[test]
 fn reverse_runner_status_commands_include_lifecycle_operations() {
-    let report = RunnerStatusReport {
+    let mut report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
         state: runner::RunnerSessionState::Connected,
@@ -135,6 +135,23 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     assert!(serialized.contains("homeboy runner job reconcile homeboy-lab"));
     assert!(serialized.contains("homeboy runner job artifacts homeboy-lab job-123 <artifact-id>"));
     assert!(!serialized.contains("curl -fsS"));
+
+    let mut orphan = report.active_runner_jobs[0].clone();
+    orphan.job_id = "orphaned-child-run-run-123".to_string();
+    orphan.lifecycle_state = Some("recoverable_orphan".to_string());
+    orphan.stale_reason = Some("child_run_running_without_active_runner_job".to_string());
+    orphan.retryable = Some(true);
+    report.active_runner_jobs.clear();
+    report.active_jobs.clear();
+    report.active_job_count = 0;
+    report.stale_runner_jobs = vec![orphan];
+    report.stale_runner_job_count = 1;
+
+    let commands = runner_status_operator_commands(&report);
+    let serialized = serde_json::to_string(&commands).expect("serialize orphan commands");
+    assert!(serialized.contains("homeboy agent-task status run-123 --full"));
+    assert!(serialized.contains("homeboy agent-task retry run-123"));
+    assert!(!serialized.contains("runner job logs"));
 }
 
 #[test]

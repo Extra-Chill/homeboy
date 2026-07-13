@@ -491,7 +491,7 @@ fn orphaned_child_run_job(runner_id: &str, run: RunSummary) -> ActiveRunnerJobSu
         lifecycle: None,
         durable_run_id: Some(run.id),
         stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
-        lifecycle_state: Some("stale".to_string()),
+        lifecycle_state: Some("recoverable_orphan".to_string()),
         retryable: Some(true),
         active_child_count: None,
         active_cell_count: None,
@@ -1792,7 +1792,7 @@ mod tests {
             job.stale_reason.as_deref(),
             Some("child_run_running_without_active_runner_job")
         );
-        assert_eq!(job.lifecycle_state.as_deref(), Some("stale"));
+        assert_eq!(job.lifecycle_state.as_deref(), Some("recoverable_orphan"));
         assert_eq!(job.retryable, Some(true));
     }
 
