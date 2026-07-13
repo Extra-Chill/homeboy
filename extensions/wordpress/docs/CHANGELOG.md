@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.43] - 2026-07-13
+
+### Fixed
+- guard lint gate against corrupted phpstan.phar (#2233)
+- gate PHPCS on errors, not warnings (#2234)
+
 ## [3.23.42] - 2026-07-12
 
 ### Fixed
