@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.23.44] - 2026-07-13
+
+### Fixed
+- resolve PHPStan dependency paths from component
+
 ## [3.23.43] - 2026-07-13
 
 ### Fixed
