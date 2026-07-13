@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.282.1] - 2026-07-13
+
+### Changed
+- consolidate runner workspace projection
+- plan Lab path materialization
+
+### Fixed
+- preserve main workspace staging flow
+- reconcile detached agent-task liveness
+- preserve local source identity for runner upgrades
+
 ## [0.282.0] - 2026-07-12
 
 ### Added
