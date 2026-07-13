@@ -660,10 +660,12 @@ fn inject_materialized_promotion_provider(
     if !matches!(
         args.get(agent_task_index + 1).map(String::as_str),
         Some("cook" | "promote")
-    ) || args
-        .iter()
-        .any(|arg| arg == "--provider-command" || arg.starts_with("--provider-command="))
-    {
+    ) || args.iter().any(|arg| {
+        arg == "--provider-command"
+            || arg.starts_with("--provider-command=")
+            || arg == "--provider-argv"
+            || arg.starts_with("--provider-argv=")
+    }) {
         return args;
     }
     let Some(homeboy_path) = homeboy_path.filter(|path| !path.trim().is_empty()) else {
@@ -677,8 +679,10 @@ fn inject_materialized_promotion_provider(
     args.splice(
         insert_at..insert_at,
         [
-            "--provider-command".to_string(),
-            format!("{homeboy_path} agent-task promotion-provider --workspace {workspace}"),
+            format!("--provider-argv={homeboy_path}"),
+            "--provider-argv=agent-task".to_string(),
+            "--provider-argv=promotion-provider".to_string(),
+            format!("--provider-argv=--workspace={workspace}"),
         ],
     );
     args
@@ -1482,8 +1486,10 @@ mod tests {
                 "homeboy@fix-7913",
                 "--verify",
                 "cargo test --lib",
-                "--provider-command",
-                "/runner/bin/homeboy agent-task promotion-provider --workspace /runner/workspaces/homeboy",
+                "--provider-argv=/runner/bin/homeboy",
+                "--provider-argv=agent-task",
+                "--provider-argv=promotion-provider",
+                "--provider-argv=--workspace=/runner/workspaces/homeboy",
             ]
         );
     }
@@ -1538,10 +1544,13 @@ mod tests {
             );
 
             assert!(command.contains(&"/runner/artifacts/detached/aggregate.json".to_string()));
-            assert!(command.windows(2).any(|args| args == [
-                "--provider-command",
-                "/runner/bin/homeboy agent-task promotion-provider --workspace /runner/workspaces/homeboy-fix-7964",
-            ]));
+            assert!(command.windows(4).any(|args| args
+                == [
+                    "--provider-argv=/runner/bin/homeboy",
+                    "--provider-argv=agent-task",
+                    "--provider-argv=promotion-provider",
+                    "--provider-argv=--workspace=/runner/workspaces/homeboy-fix-7964",
+                ]));
             assert!(!command.iter().any(|arg| arg.contains("/Users/")));
         }
     }

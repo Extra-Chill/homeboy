@@ -13,6 +13,7 @@ use homeboy::core::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::core::command_invocation::CommandInvocation;
 
 use super::super::CmdResult;
 use super::args::{
@@ -122,6 +123,10 @@ where
             to_worktree: args.to_worktree,
             source_worktree_path,
             provider_command: args.provider_command,
+            provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
+                argv: args.provider_argv,
+                ..Default::default()
+            }),
             gates: args.gates.into(),
             max_attempts: args.max_attempts,
             no_finalize: args.no_finalize,

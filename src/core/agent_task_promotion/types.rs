@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::agent_task_gate::{AgentTaskGateReport, VerifyGateOptions};
+use crate::core::command_invocation::CommandInvocation;
 use crate::core::gate::HomeboyGateResult;
 use crate::core::stream_capture::StreamCaptureMetadata;
 
@@ -37,6 +38,10 @@ pub struct AgentTaskPromotionOptions {
     pub gates: VerifyGateOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_command: Option<String>,
+    /// Structured provider invocation. This preserves argv boundaries for
+    /// portable providers; `provider_command` remains a deprecated fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_invocation: Option<CommandInvocation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -475,6 +475,15 @@ pub struct AgentTaskCookArgs {
     #[arg(long, value_name = "COMMAND")]
     pub provider_command: Option<String>,
 
+    /// One argument for an argv-safe external workspace provider invocation.
+    /// Repeat this option in provider argv order.
+    #[arg(
+        long = "provider-argv",
+        value_name = "ARG",
+        conflicts_with = "provider_command"
+    )]
+    pub provider_argv: Vec<String>,
+
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 
@@ -775,6 +784,15 @@ pub struct PromoteArgs {
     /// External workspace provider command. When omitted, HOMEBOY_AGENT_TASK_PROMOTION_COMMAND is used.
     #[arg(long, value_name = "COMMAND")]
     pub provider_command: Option<String>,
+
+    /// One argument for an argv-safe external workspace provider invocation.
+    /// Repeat this option in provider argv order.
+    #[arg(
+        long = "provider-argv",
+        value_name = "ARG",
+        conflicts_with = "provider_command"
+    )]
+    pub provider_argv: Vec<String>,
 
     /// Outcome task id to select when SOURCE is an aggregate.
     #[arg(long, value_name = "TASK_ID")]

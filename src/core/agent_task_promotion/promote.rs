@@ -142,7 +142,7 @@ pub(crate) fn promote_with_provider(
 
     let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
-    if !options.dry_run {
+    {
         let normalized_patch_file;
         let provider_patch_path = if normalized_patch.content == patch {
             patch_path.display().to_string()
@@ -155,9 +155,12 @@ pub(crate) fn promote_with_provider(
             to_workspace: options.to_worktree.clone(),
             patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
+            dry_run: options.dry_run,
         })?;
         command_evidence.extend(target.command_evidence);
-        applied_worktree_path = Some(target.path);
+        if !options.dry_run {
+            applied_worktree_path = Some(target.path);
+        }
     }
 
     let gates = if let Some(worktree_path) = applied_worktree_path.as_deref() {
@@ -225,18 +228,15 @@ fn promote_committed_changes(
         &options.to_worktree,
     )?;
     let mut command_evidence = Vec::new();
-    let applied_worktree_path = if options.dry_run {
-        None
-    } else {
-        let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
-            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-            to_workspace: options.to_worktree.clone(),
-            patch_path: committed_patch.patch_path.display().to_string(),
-            changed_files: normalized_patch.changed_files.clone(),
-        })?;
-        command_evidence.extend(target.command_evidence);
-        Some(target.path)
-    };
+    let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: options.to_worktree.clone(),
+        patch_path: committed_patch.patch_path.display().to_string(),
+        changed_files: normalized_patch.changed_files.clone(),
+        dry_run: options.dry_run,
+    })?;
+    command_evidence.extend(target.command_evidence);
+    let applied_worktree_path = (!options.dry_run).then_some(target.path);
     let gates = if let Some(path) = applied_worktree_path.as_deref() {
         run_promotion_gates(options, provider, path)?
     } else {

@@ -317,6 +317,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             },
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -369,6 +370,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             },
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -438,6 +440,7 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
             dry_run: false,
             gates: VerifyGateOptions::default(),
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -490,6 +493,7 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
             dry_run: false,
             gates: VerifyGateOptions::default(),
             provider_command: None,
+            provider_invocation: None,
         },
         &mut FakePromotionWorkspaceProvider {
             workspace_path: Some(repo.clone()),
@@ -542,6 +546,7 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
             dry_run: false,
             gates: VerifyGateOptions::default(),
             provider_command: None,
+            provider_invocation: None,
         },
         &mut FakePromotionWorkspaceProvider::default(),
     )
@@ -649,35 +654,45 @@ fn select_patch_artifact_requires_unambiguous_patch() {
 }
 
 #[test]
-fn promote_dry_run_reports_selected_patch_without_provider_mutation() {
+fn promote_dry_run_validates_provider_request_without_applying() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (source_path, source) = write_patch_source(&temp);
 
-    let report = promote(AgentTaskPromotionOptions {
-        source,
-        source_run_id: None,
-        source_path: Some(source_path),
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: None,
-        to_worktree: "repo@promoted-task".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: true,
-        gates: VerifyGateOptions {
-            verify: Vec::new(),
-            private_verify: Vec::new(),
-            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("controlled-worktree")),
+        ..Default::default()
+    };
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@promoted-task".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: true,
+            gates: VerifyGateOptions {
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
         },
-        provider_command: None,
-    })
+        &mut provider,
+    )
     .expect("dry-run promotion report");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::DryRun);
     assert_eq!(report.source.task_id, "task-1");
     assert_eq!(report.patch_artifact.id, "patch");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
-    assert!(report.command_evidence.is_empty());
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert!(provider.apply_calls[0].dry_run);
+    assert_eq!(report.command_evidence.len(), 1);
     assert!(report.deterministic_gates.is_empty());
 }
 
@@ -709,6 +724,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
             },
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -790,6 +806,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             },
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -853,6 +870,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 },
                 provider_command: None,
+                provider_invocation: None,
             },
             &mut provider,
         )
@@ -917,6 +935,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
             },
             provider_command: None,
+            provider_invocation: None,
         },
         &mut provider,
     )
@@ -955,6 +974,7 @@ fn promote_requires_provider_for_apply() {
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
         },
         provider_command: None,
+        provider_invocation: None,
     })
     .expect_err("missing provider rejected");
 
@@ -983,6 +1003,7 @@ fn promotion_options_keep_flat_verify_gate_serialized_shape() {
             private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
         },
         provider_command: None,
+        provider_invocation: None,
     };
 
     let value = serde_json::to_value(&options).expect("serialize options");
@@ -1117,6 +1138,7 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         to_workspace: "target-workspace".to_string(),
         patch_path: temp.path().join("changes.patch").display().to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
+        dry_run: false,
     };
     let workspace = run_provider_command(
         &CommandInvocation {

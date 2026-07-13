@@ -18,6 +18,7 @@ use crate::core::agent_task_promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
+use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
 use super::execution::run_loaded_plan;
@@ -30,6 +31,7 @@ pub struct AgentTaskCookServiceOptions {
     pub to_worktree: String,
     pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
+    pub provider_invocation: Option<CommandInvocation>,
     /// Shared deterministic verification gate fields, factored out of the
     /// per-field duplication that previously spanned the loop/promote types.
     pub gates: VerifyGateOptions,
@@ -335,6 +337,7 @@ fn promote_attempt(
         dry_run: false,
         gates: options.gates.clone(),
         provider_command: options.provider_command.clone(),
+        provider_invocation: options.provider_invocation.clone(),
     })
 }
 
