@@ -143,6 +143,7 @@ pub(super) fn deploy_components(
     let remote_versions =
         if config.outdated || config.behind_upstream || config.dry_run || config.check {
             fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
+                .versions
         } else {
             HashMap::new()
         };

@@ -62,6 +62,7 @@ pub(super) fn log_dashboard_table(rows: &[ProjectStatusRow]) {
             ProjectComponentDashboardStatus::Bundled => "📦 bundled",
             ProjectComponentDashboardStatus::Retired => "🗄️  retired",
             ProjectComponentDashboardStatus::Unknown => "❓ unknown",
+            ProjectComponentDashboardStatus::Degraded => "⚠️  degraded",
         };
 
         eprintln!(
@@ -78,6 +79,9 @@ pub(super) fn log_dashboard_table(rows: &[ProjectStatusRow]) {
             remote_w = widths.remote,
             origin_w = widths.origin,
         );
+        if let Some(diagnostic) = &row.remote_version_diagnostic {
+            eprintln!("    remote probe: {diagnostic}");
+        }
     }
 }
 

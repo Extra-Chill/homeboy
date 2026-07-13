@@ -43,7 +43,8 @@ pub(super) fn remote_version_after_deploy_effect(
         Some(project),
         base_path,
         client,
-    );
+    )
+    .versions;
     let observed = observed_versions.get(&component.id).cloned().ok_or_else(|| {
         format!(
             "Deploy command completed for '{}' at '{}', but Homeboy could not read remote_version from the applied tree. Refusing to report success from stale pre-deploy observations.",

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
@@ -13,7 +15,8 @@ use super::super::{
 };
 use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
-    execute_local_command, execute_local_command_interactive, execute_local_command_with_stdin,
+    execute_local_command, execute_local_command_in_dir_with_timeout,
+    execute_local_command_interactive, execute_local_command_with_stdin,
 };
 use super::{CommandOutput, SshClient};
 
@@ -327,6 +330,107 @@ impl SshClient {
     pub fn execute(&self, command: &str) -> CommandOutput {
         let effective = self.prepend_env(command);
         self.execute_with_stdin(&effective, SshStdin::None)
+    }
+
+    /// Execute a short, read-only probe with a hard wall-clock deadline.
+    ///
+    /// Status/version checks must return partial diagnostics instead of allowing
+    /// an unavailable remote command to block the entire dashboard.
+    pub fn execute_with_timeout(&self, command: &str, timeout: Duration) -> CommandOutput {
+        let effective = self.prepend_env(command);
+        if self.is_local {
+            return execute_local_command_in_dir_with_timeout(&effective, None, None, timeout);
+        }
+
+        let args = self.build_ssh_args(Some(&effective), false);
+        let mut cmd = Command::new("ssh");
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::core::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!("SSH error: {err}"),
+                    success: false,
+                    exit_code: -1,
+                    timed_out: false,
+                    child_resource: None,
+                }
+            }
+        };
+        let pid = child.id();
+        let stdout = child.stdout.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).to_string()
+            })
+        });
+        let stderr = child.stderr.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).to_string()
+            })
+        });
+        let started = Instant::now();
+        let mut timed_out = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+                Ok(None) => {
+                    timed_out = true;
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGTERM);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let status = child.wait().ok();
+        let stdout = stdout
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let mut stderr = stderr
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        if timed_out {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!(
+                "Homeboy remote probe timed out after {}ms; terminated child process group.",
+                timeout.as_millis()
+            ));
+        }
+        CommandOutput {
+            stdout,
+            stderr,
+            success: !timed_out && status.is_some_and(|status| status.success()),
+            exit_code: if timed_out {
+                124
+            } else {
+                status.and_then(|status| status.code()).unwrap_or(-1)
+            },
+            timed_out,
+            child_resource: None,
+        }
     }
 
     /// Execute `command` with secret env vars delivered over stdin instead of
