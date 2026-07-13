@@ -1143,9 +1143,42 @@ mod remote_daemon {
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
         let healthy = status.fresh && status.reachable;
         if status.active_jobs > 0 && !healthy {
+            let lease_evidence = status
+                .daemon
+                .as_ref()
+                .map(|daemon| {
+                    format!(
+                        "lease_id={}, recorded_pid={}",
+                        daemon.lease_id.as_deref().unwrap_or("unavailable"),
+                        daemon
+                            .pid
+                            .map(|pid| pid.to_string())
+                            .as_deref()
+                            .unwrap_or("unavailable")
+                    )
+                })
+                .unwrap_or_else(|| "lease_id=unavailable, recorded_pid=unavailable".to_string());
+            let recovery = match (
+                status.stale_reason_code,
+                status
+                    .daemon
+                    .as_ref()
+                    .and_then(|daemon| daemon.lease_id.as_deref()),
+            ) {
+                (Some(DaemonStaleReasonCode::PidDead), Some(lease_id)) => format!(
+                    " The recorded PID is proven dead; recover this exact lease with `homeboy runner connect <runner-id> --adopt-orphan-lease {lease_id} --confirm-pid-dead`."
+                ),
+                _ => " Inspect `homeboy daemon status`; explicit adoption is available only after the recorded PID is proven dead.".to_string(),
+            };
             return Err(format!(
-                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement. Inspect `homeboy daemon status` and recover only the exact dead lease with `homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead`",
-                status.active_jobs, status.fresh, status.reachable, status.stale_reason,
+                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}, {}, active_job_count={}); refusing implicit replacement.{}",
+                status.active_jobs,
+                status.fresh,
+                status.reachable,
+                status.stale_reason,
+                lease_evidence,
+                status.active_jobs,
+                recovery,
             ));
         }
 
@@ -1723,6 +1756,10 @@ mod tests {
 
         assert!(err.contains("refusing implicit replacement"));
         assert!(err.contains("--adopt-orphan-lease"));
+        assert!(err.contains("lease_id=lease-dead"));
+        assert!(err.contains("recorded_pid=4545"));
+        assert!(err.contains("active_job_count=1"));
+        assert!(err.contains("--adopt-orphan-lease lease-dead"));
     }
 
     #[test]

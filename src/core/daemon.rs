@@ -53,6 +53,9 @@ const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonState {
+    /// Older writers could omit this field. Retain the remaining identity as
+    /// stale evidence instead of losing the lease and PID during deserialization.
+    #[serde(default)]
     pub schema: String,
     pub lease_id: String,
     #[serde(default)]
@@ -441,20 +444,23 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
     };
 
     let running = pid_is_running(state.pid);
-    if state.schema != DAEMON_LEASE_SCHEMA {
-        return Ok(stale_lease(
-            state,
-            running,
-            DaemonStaleReasonCode::LeaseSchemaMismatch,
-            "unsupported daemon lease schema",
-        ));
-    }
+    // A dead owner is safe to recover even when its persisted schema was
+    // omitted. Keeping the parsed lease identity makes explicit adoption
+    // possible; a live invalid lease remains protected by schema validation.
     if !running {
         return Ok(stale_lease(
             state,
             false,
             DaemonStaleReasonCode::PidDead,
             "daemon lease pid is not running",
+        ));
+    }
+    if state.schema != DAEMON_LEASE_SCHEMA {
+        return Ok(stale_lease(
+            state,
+            true,
+            DaemonStaleReasonCode::LeaseSchemaMismatch,
+            "unsupported daemon lease schema",
         ));
     }
     let current_identity = build_identity::current();
@@ -1663,6 +1669,12 @@ fn heartbeat_lease() -> Result<DaemonState> {
 }
 
 fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
+    if state.schema != DAEMON_LEASE_SCHEMA {
+        return Err(Error::internal_unexpected(format!(
+            "refusing to write daemon lease with unsupported schema `{}`",
+            state.schema
+        )));
+    }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;

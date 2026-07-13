@@ -121,6 +121,18 @@ fn write_state_establishes_daemon_session_lease_identity() {
 }
 
 #[test]
+fn lease_writer_rejects_an_unsupported_schema() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.schema = "homeboy.daemon.session_lease.v0".to_string();
+
+    let error = write_lease(&state_path().expect("state path"), &state)
+        .expect_err("unsupported schema is not persisted");
+
+    assert!(error.message.contains("unsupported schema"));
+}
+
+#[test]
 fn health_route_refreshes_daemon_lease_heartbeat() {
     let _home = HomeGuard::new();
     let mut state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
@@ -377,6 +389,50 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
         .as_deref()
         .unwrap_or_default()
         .contains("invalid daemon lease"));
+}
+
+#[test]
+fn status_retains_dead_missing_schema_lease_identity_for_explicit_recovery() {
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    let path = state_path().expect("state path");
+    let mut lease = serde_json::to_value(state).expect("serialize lease");
+    lease
+        .as_object_mut()
+        .expect("lease object")
+        .remove("schema");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, serde_json::to_string(&lease).expect("lease json")).expect("write state");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::PidDead)
+    );
+    assert_eq!(
+        status.state.as_ref().map(|state| state.lease_id.as_str()),
+        Some("test-lease")
+    );
+    assert_eq!(status.freshness.lease_id.as_deref(), Some("test-lease"));
+    assert!(path.exists());
+}
+
+#[test]
+fn status_keeps_corrupt_lease_fail_closed_without_identity() {
+    let _home = HomeGuard::new();
+    let path = state_path().expect("state path");
+    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    std::fs::write(&path, "{invalid json").expect("write corrupt state");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseCorrupt)
+    );
+    assert!(status.state.is_none());
+    assert!(status.freshness.lease_id.is_none());
 }
 
 #[test]
