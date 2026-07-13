@@ -868,11 +868,13 @@ pub(crate) fn run_lab_offload_inner(
     // Cook's public run id identifies the retry series. Persist pre-acceptance
     // Lab progress under its first attempt id so daemon acceptance advances the
     // same canonical lifecycle record instead of leaving a queued proxy behind.
-    let pre_acceptance_run_id = ensure_agent_task_lifecycle_identity_with(
+    let pre_acceptance_lifecycle = ensure_agent_task_lifecycle_identity_with(
         request.normalized_args,
         run_isolation_token.as_deref(),
-    )
-    .map(|(_, run_id)| run_id);
+    );
+    let pre_acceptance_run_id = pre_acceptance_lifecycle
+        .as_ref()
+        .map(|(_, run_id)| run_id.clone());
     let provider_rotation =
         serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
             .unwrap_or(serde_json::Value::Null);
@@ -1062,6 +1064,10 @@ pub(crate) fn run_lab_offload_inner(
         &command_prefix.argv,
         Some(&runner_workspace_root),
         run_isolation_token,
+        pre_acceptance_lifecycle
+            .as_ref()
+            .map(|(args, _)| args.as_slice())
+            .unwrap_or(request.normalized_args),
     ) {
         Ok(stage) => stage,
         Err(error) => {
