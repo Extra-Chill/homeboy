@@ -411,9 +411,31 @@ fn resolve_path_scope(path: &str, component_id: Option<&str>) -> Result<Vec<Scop
 
 fn resolve_workspace_scope() -> Result<Vec<ScopeComponentRef>> {
     let mut refs = BTreeMap::new();
+    let components = component::list()?;
+    let components_by_id = components
+        .iter()
+        .map(|component| (component.id.as_str(), component))
+        .collect::<BTreeMap<_, _>>();
 
     for proj in project::list()? {
-        for mut component_ref in resolve_project_scope(&proj.id)? {
+        for attachment in proj.components {
+            let component = components_by_id.get(attachment.id.as_str()).copied();
+            let mut component_ref = ScopeComponentRef::new(
+                attachment.id.clone(),
+                if attachment.local_path.is_empty() {
+                    component
+                        .map(|component| component.local_path.clone())
+                        .unwrap_or_default()
+                } else {
+                    attachment.local_path
+                },
+                component.and_then(|component| component.remote_url.clone()),
+                component.and_then(|component| component.triage_remote_url.clone()),
+                format!("project:{}", proj.id),
+            )
+            .with_priority_labels(
+                component.and_then(|component| component.priority_labels.clone()),
+            );
             component_ref.usage.insert(proj.id.clone());
             merge_component_ref(&mut refs, component_ref);
         }
@@ -426,7 +448,7 @@ fn resolve_workspace_scope() -> Result<Vec<ScopeComponentRef>> {
         }
     }
 
-    for comp in component::list()? {
+    for comp in components {
         let source = format!("component:{}", comp.id);
         let priority_labels = comp.priority_labels.clone();
         merge_component_ref(
