@@ -93,19 +93,22 @@ pub fn adopt_orphaned_lease(
         ));
     }
 
-    let active_jobs =
-        super::JobStore::active_count_at_path(crate::core::paths::daemon_jobs_file()?)?;
-    // Opening the durable store records terminal failure/retry evidence for jobs
-    // owned by this dead daemon before the replacement can accept new work.
-    let _reconciled = super::JobStore::open(crate::core::paths::daemon_jobs_file()?)?;
+    let store = super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
     let replacement = start_background_unlocked(addr)?;
     Ok(DaemonOrphanAdoptionResult {
         adopted_lease_id: lease_id.to_string(),
         dead_pid: state.pid,
-        active_jobs_terminalized: active_jobs,
+        active_jobs_terminalized: reconciled.matching_count(),
         retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
     })
+}
+
+fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {
+    let store = super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
+    Ok(())
 }
 
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
@@ -117,6 +120,71 @@ fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartRes
         pid_is_running,
         || start_background_unlocked(addr),
     )
+}
+
+fn reconcile_dead_lease_and_ensure_running_with_operations<
+    Lock,
+    AcquireLock,
+    ReadStatus,
+    PidIsRunning,
+    Reconcile,
+    Start,
+>(
+    wait: Duration,
+    acquire_lock: AcquireLock,
+    expected_lease_id: &str,
+    read_status: ReadStatus,
+    pid_is_running: PidIsRunning,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonStartResult>
+where
+    AcquireLock: FnOnce(Duration) -> Result<Lock>,
+    ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: FnOnce(u32) -> bool,
+    Reconcile: FnOnce() -> Result<()>,
+    Start: FnOnce() -> Result<DaemonStartResult>,
+{
+    let _lock = acquire_lock(wait)?;
+    let status = read_status()?;
+    let state = status.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "expected-lease-id",
+            "remote daemon has no recorded lease; refusing dead-lease reconciliation",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    if pid_is_running(state.pid) {
+        return Ok(DaemonStartResult {
+            pid: state.pid,
+            address: state.address,
+            state_path: state.state_path,
+            lease_id: state.lease_id,
+        });
+    }
+    if status.freshness.stale_reason_code != Some(super::DaemonStaleReasonCode::PidDead) {
+        return Err(Error::validation_invalid_argument(
+            "expected-lease-id",
+            "remote daemon PID is not proven dead; refusing dead-lease reconciliation",
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    if state.lease_id != expected_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "expected-lease-id",
+            format!(
+                "remote daemon lease `{}` does not match expected stale lease; refusing reconciliation",
+                state.lease_id
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+
+    reconcile()?;
+    start()
 }
 
 fn ensure_running_with_operations<Lock, AcquireLock, ReadStatus, PidIsRunning, Start>(

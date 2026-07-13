@@ -660,7 +660,8 @@ where
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
     let state = write_state(local_addr)?;
-    let job_store = JobStore::open(paths::daemon_jobs_file()?)?;
+    let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
+        .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 

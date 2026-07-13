@@ -74,6 +74,9 @@ pub struct Job {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
+    /// Daemon lease that accepted this job. Missing values are legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_runner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,4 +224,24 @@ pub struct JobEvent {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct DaemonLeaseJobDiagnostics {
+    pub expected_lease_id: String,
+    pub matching_job_ids: Vec<Uuid>,
+    pub other_lease_job_ids: Vec<Uuid>,
+    pub unowned_job_ids: Vec<Uuid>,
+}
+
+impl DaemonLeaseJobDiagnostics {
+    pub fn matching_count(&self) -> usize {
+        self.matching_job_ids.len()
+    }
+    pub fn other_lease_count(&self) -> usize {
+        self.other_lease_job_ids.len()
+    }
+    pub fn unowned_count(&self) -> usize {
+        self.unowned_job_ids.len()
+    }
 }
