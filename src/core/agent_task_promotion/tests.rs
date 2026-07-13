@@ -1155,3 +1155,37 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         vec!["provider", "apply"]
     );
 }
+
+#[test]
+fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
+    let request = AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: "target-workspace".to_string(),
+        patch_path: "changes.patch".to_string(),
+        changed_files: vec!["src/lib.rs".to_string()],
+        dry_run: false,
+    };
+
+    let error = run_provider_command(
+        &CommandInvocation {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf provider-stdout; printf provider-stderr >&2; exit 7".to_string(),
+            ],
+            ..Default::default()
+        },
+        &request,
+    )
+    .expect_err("provider failure");
+
+    assert_eq!(error.details["command_evidence"]["exit_code"], 7);
+    assert_eq!(
+        error.details["command_evidence"]["stdout"],
+        "provider-stdout"
+    );
+    assert_eq!(
+        error.details["command_evidence"]["stderr"],
+        "provider-stderr"
+    );
+}
