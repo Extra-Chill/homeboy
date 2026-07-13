@@ -93,6 +93,8 @@ fn upload_failed_result_is_failed_but_records_release_exists() {
         &test_repo(),
         String::new(),
         "could not upload asset".to_string(),
+        Some(1),
+        false,
         1,
         test_repair(),
     );
@@ -106,4 +108,32 @@ fn upload_failed_result_is_failed_but_records_release_exists() {
         .as_deref()
         .unwrap()
         .contains("could not upload asset"));
+    assert!(result
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("Resume the existing draft")));
+}
+
+#[test]
+fn upload_timeout_is_classified_and_preserves_empty_stderr() {
+    let result = upload_failed_result(
+        "v0.10.6",
+        &test_repo(),
+        String::new(),
+        String::new(),
+        Some(124),
+        true,
+        1,
+        test_repair(),
+    );
+    assert_eq!(data_bool(&result, "timed_out"), Some(true));
+    assert_eq!(
+        result
+            .data
+            .as_ref()
+            .and_then(|data| data.get("exit_code"))
+            .and_then(|value| value.as_i64()),
+        Some(124)
+    );
+    assert!(result.error.as_deref().unwrap().contains("timed out"));
 }
