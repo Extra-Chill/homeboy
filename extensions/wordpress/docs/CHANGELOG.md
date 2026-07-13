@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.2] - 2026-07-13
+
+### Fixed
+- align Codebox PHPUnit autoload with bootstrap mode
+
 ## [3.24.1] - 2026-07-13
 
 ### Fixed
