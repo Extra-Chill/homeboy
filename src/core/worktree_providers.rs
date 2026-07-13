@@ -114,6 +114,15 @@ pub fn resolve_worktree_provider_handle_from_config(
         if !provider.enabled {
             continue;
         }
+        if let Some(command) = provider.commands.resolve.as_ref() {
+            attempted.push(provider_id.clone());
+            let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
+            if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
+                validate_provider_handle(&provider_id, &worktree)?;
+                return Ok(worktree);
+            }
+            continue;
+        }
         let Some(command) = provider.commands.list.as_ref() else {
             continue;
         };
@@ -141,6 +150,19 @@ pub fn resolve_worktree_provider_handle_from_config(
             "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string(),
         ]),
     ))
+}
+
+fn run_provider_resolve_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    handle: &str,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{handle}", handle))
+        .collect::<Vec<_>>();
+    run_provider_list_command(provider_id, provider, &command)
 }
 
 fn run_provider_list_command(
@@ -963,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_a_clean_provider_managed_handle_without_a_homeboy_record() {
+    fn resolves_a_clean_provider_managed_handle_with_targeted_command() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "cook-target");
         let script = fake_list_provider_script(serde_json::json!({
@@ -981,7 +1003,7 @@ mod tests {
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
                 commands: WorktreeProviderCommands {
-                    list: Some(vec![script]),
+                    resolve: Some(vec![script, "{handle}".to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(worktrees_mapping()),
