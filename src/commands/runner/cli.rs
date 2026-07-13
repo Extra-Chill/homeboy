@@ -248,6 +248,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconnect: bool,
 
+        /// Interrupt active daemon jobs when reconnecting
+        #[arg(long)]
+        force: bool,
+
         /// Print the plan without executing it or changing runner config
         #[arg(long)]
         dry_run: bool,
