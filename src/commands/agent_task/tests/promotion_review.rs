@@ -261,18 +261,36 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
 }
 
 #[test]
-fn cook_promotes_executor_commit_from_a_clean_workspace_without_patch_candidates() {
+fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
     with_temp_home(|| {
         let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).expect("create workspace");
-        init_runtime_component_checkout(&workspace);
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).expect("create source");
+        init_runtime_component_checkout(&source);
+        let status = Command::new("git")
+            .args([
+                "clone",
+                source.to_str().expect("source path"),
+                target.to_str().expect("target path"),
+            ])
+            .status()
+            .expect("clone target");
+        assert!(status.success());
+        let expected_patch = temp.path().join("expected.patch");
+        std::fs::write(
+            &expected_patch,
+            "diff --git a/agent-change.txt b/agent-change.txt\nnew file mode 100644\nindex 0000000..f3f8b32\n--- /dev/null\n+++ b/agent-change.txt\n@@ -0,0 +1 @@\n+committed work\n",
+        )
+        .expect("write expected patch");
         let provider = temp.path().join("promotion-provider.sh");
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
-                workspace.display()
+                "#!/bin/sh\nset -eu\ncat >/dev/null\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                target.display(),
+                expected_patch.display(),
+                target.display(),
             ),
         )
         .expect("write promotion provider");
@@ -282,7 +300,7 @@ fn cook_promotes_executor_commit_from_a_clean_workspace_without_patch_candidates
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
                     tasks: Vec::new(),
-                    cwd: Some(workspace.display().to_string()),
+                    cwd: Some(source.display().to_string()),
                     workspace: None,
                     repo: Some("fixture-component".to_string()),
                     task_url: None,
@@ -322,7 +340,7 @@ fn cook_promotes_executor_commit_from_a_clean_workspace_without_patch_candidates
                 ai_used_for: "test".to_string(),
             },
             CommittingExecutor {
-                workspace: workspace.clone(),
+                workspace: source.clone(),
             },
         )
         .expect("cook completes");
@@ -349,9 +367,13 @@ fn cook_promotes_executor_commit_from_a_clean_workspace_without_patch_candidates
         );
         let status = Command::new("git")
             .args(["status", "--porcelain"])
-            .current_dir(&workspace)
+            .current_dir(&source)
             .output()
             .expect("read workspace status");
         assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
+            "committed work\n"
+        );
     });
 }

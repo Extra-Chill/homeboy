@@ -10,6 +10,7 @@
 //! widening the crate-public surface.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -38,6 +39,12 @@ impl AgentTaskScheduleSupport {
         queued.iter().position(|task| {
             if !Self::dependencies_satisfied(&task.request, completed_by_task, output_dependencies)
             {
+                return false;
+            }
+
+            // An existing workspace is mutable executor state. Keep one task at
+            // a time in that directory so a commit range belongs to one task.
+            if workspace_is_busy(&task.request, running) {
                 return false;
             }
 
@@ -527,6 +534,10 @@ impl AgentTaskScheduleSupport {
 
         if !resource_capacity_available(&task.request, running, resource_budget) {
             return "resource_budget";
+        }
+
+        if workspace_is_busy(&task.request, running) {
+            return "workspace_concurrency";
         }
 
         "scheduler_capacity"
@@ -1337,6 +1348,26 @@ impl AgentTaskScheduleSupport {
 
         totals
     }
+}
+
+fn workspace_is_busy(request: &AgentTaskRequest, running: &[RunningTask]) -> bool {
+    let Some(workspace) = workspace_key(request) else {
+        return false;
+    };
+    running
+        .iter()
+        .filter_map(|task| workspace_key(&task.request))
+        .any(|running_workspace| running_workspace == workspace)
+}
+
+pub(super) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
+    let root = request.workspace.root.as_deref()?;
+    Some(
+        std::fs::canonicalize(root)
+            .unwrap_or_else(|_| Path::new(root).to_path_buf())
+            .display()
+            .to_string(),
+    )
 }
 
 pub(super) fn select_artifact_payload(
