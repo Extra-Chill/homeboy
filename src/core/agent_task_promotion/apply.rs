@@ -1,6 +1,8 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,24 +25,68 @@ const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMA
 /// report. Mirrors the bounded-capture cap used by extension self-checks so the
 /// retained evidence cannot grow without bound (#5077).
 const PROMOTION_CAPTURE_LIMIT_BYTES: usize = 65_536;
+const PROMOTION_PROVIDER_RESPONSE_LIMIT_BYTES: usize = 1_048_576;
 
-/// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
-/// (most relevant tail) and returning the retained text plus truncation
-/// metadata. Mirrors the `BoundedCapture` pattern in extension self-checks.
-fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, StreamCaptureMetadata) {
-    let seen = bytes.len();
-    let retained: &[u8] = if seen > limit {
-        &bytes[seen - limit..]
-    } else {
-        bytes
-    };
-    let metadata = StreamCaptureMetadata {
-        limit_bytes: limit,
-        seen_bytes: seen,
-        retained_bytes: retained.len(),
-        truncated: seen > retained.len(),
-    };
-    (String::from_utf8_lossy(retained).to_string(), metadata)
+struct ProviderCapturedStream {
+    response: Vec<u8>,
+    retained: Vec<u8>,
+    seen: usize,
+    overflowed: bool,
+}
+
+fn capture_provider_stream(
+    mut reader: impl Read,
+    response_limit: Option<usize>,
+    overflow_signal: Option<mpsc::Sender<()>>,
+) -> std::io::Result<ProviderCapturedStream> {
+    let mut response = Vec::new();
+    let mut retained = Vec::new();
+    let mut seen = 0;
+    let mut buffer = [0_u8; 8_192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        seen += count;
+        retained.extend_from_slice(&buffer[..count]);
+        if retained.len() > PROMOTION_CAPTURE_LIMIT_BYTES {
+            let discard = retained.len() - PROMOTION_CAPTURE_LIMIT_BYTES;
+            retained.drain(..discard);
+        }
+        if let Some(limit) = response_limit {
+            if response.len() + count > limit {
+                if let Some(signal) = overflow_signal.as_ref() {
+                    let _ = signal.send(());
+                }
+                return Ok(ProviderCapturedStream {
+                    response,
+                    retained,
+                    seen,
+                    overflowed: true,
+                });
+            }
+            response.extend_from_slice(&buffer[..count]);
+        }
+    }
+    Ok(ProviderCapturedStream {
+        response,
+        retained,
+        seen,
+        overflowed: false,
+    })
+}
+
+fn captured_stream_report(stream: &ProviderCapturedStream) -> (String, StreamCaptureMetadata) {
+    (
+        String::from_utf8_lossy(&stream.retained).to_string(),
+        StreamCaptureMetadata {
+            limit_bytes: PROMOTION_CAPTURE_LIMIT_BYTES,
+            seen_bytes: stream.seen,
+            retained_bytes: stream.retained.len(),
+            truncated: stream.seen > stream.retained.len(),
+        },
+    )
 }
 
 pub(crate) const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
@@ -281,21 +327,91 @@ pub(crate) fn run_provider_command(
                 Some("write agent-task promotion provider request".to_string()),
             )
         })?;
-    let output = process.wait_with_output().map_err(|error| {
+    drop(process.stdin.take());
+    let stdout = process.stdout.take().ok_or_else(|| {
         Error::internal_io(
-            error.to_string(),
-            Some("run agent-task promotion provider command".to_string()),
+            "provider command stdout was not available".to_string(),
+            Some("capture agent-task promotion provider response".to_string()),
         )
     })?;
-    let exit_code = output.status.code().unwrap_or(1);
-    // The full stdout is parsed for the provider response below, but the bytes
-    // retained in the evidence report are bounded with truncation metadata so
-    // a pathologically large stream cannot grow the report without bound.
-    let full_stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let (retained_stdout, stdout_capture) =
-        bound_captured_stream(&output.stdout, PROMOTION_CAPTURE_LIMIT_BYTES);
-    let (retained_stderr, stderr_capture) =
-        bound_captured_stream(&output.stderr, PROMOTION_CAPTURE_LIMIT_BYTES);
+    let stderr = process.stderr.take().ok_or_else(|| {
+        Error::internal_io(
+            "provider command stderr was not available".to_string(),
+            Some("capture agent-task promotion provider diagnostics".to_string()),
+        )
+    })?;
+    let (overflow_sender, overflow_receiver) = mpsc::channel();
+    let stdout_capture_thread = std::thread::spawn(move || {
+        capture_provider_stream(
+            stdout,
+            Some(PROMOTION_PROVIDER_RESPONSE_LIMIT_BYTES),
+            Some(overflow_sender),
+        )
+    });
+    let stderr_capture_thread =
+        std::thread::spawn(move || capture_provider_stream(stderr, None, None));
+    let mut response_overflow = false;
+    let status = loop {
+        if overflow_receiver.try_recv().is_ok() {
+            response_overflow = true;
+            if let Some(status) = process.try_wait().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("wait for oversized agent-task promotion provider response".to_string()),
+                )
+            })? {
+                break status;
+            }
+            process.kill().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("terminate oversized agent-task promotion provider response".to_string()),
+                )
+            })?;
+            break process.wait().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("wait for terminated agent-task promotion provider command".to_string()),
+                )
+            })?;
+        }
+        if let Some(status) = process.try_wait().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("wait for agent-task promotion provider command".to_string()),
+            )
+        })? {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout_capture_thread
+        .join()
+        .map_err(|_| {
+            Error::internal_unexpected("promotion provider stdout capture thread panicked")
+        })?
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("capture agent-task promotion provider response".to_string()),
+            )
+        })?;
+    let stderr = stderr_capture_thread
+        .join()
+        .map_err(|_| {
+            Error::internal_unexpected("promotion provider stderr capture thread panicked")
+        })?
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("capture agent-task promotion provider diagnostics".to_string()),
+            )
+        })?;
+    response_overflow |= stdout.overflowed;
+    let exit_code = status.code().unwrap_or(1);
+    let full_stdout = String::from_utf8_lossy(&stdout.response).to_string();
+    let (retained_stdout, stdout_capture) = captured_stream_report(&stdout);
+    let (retained_stderr, stderr_capture) = captured_stream_report(&stderr);
     let report = AgentTaskPromotionCommandReport {
         command: std::iter::once(program).chain(args).collect(),
         exit_code,
@@ -306,7 +422,27 @@ pub(crate) fn run_provider_command(
             stderr: stderr_capture,
         },
     };
-    if !output.status.success() {
+    if response_overflow {
+        return Err(Error::validation_invalid_argument_with_evidence(
+            "promotion_provider.response",
+            format!(
+                "promotion provider response exceeded {} bytes and was terminated",
+                PROMOTION_PROVIDER_RESPONSE_LIMIT_BYTES
+            ),
+            None,
+            None,
+            Some(crate::core::error::CommandEvidence {
+                command: display,
+                cwd: invocation.cwd.clone(),
+                location: Some("local".to_string()),
+                exit_code,
+                stdout: report.stdout.clone(),
+                stderr: report.stderr.clone(),
+                truncated: true,
+            }),
+        ));
+    }
+    if !status.success() {
         return Err(Error::validation_invalid_argument_with_evidence(
             "command",
             format!(
