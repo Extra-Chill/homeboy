@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use super::permissions;
 use crate::core::component::{Component, VersionTarget};
@@ -20,6 +21,20 @@ use crate::core::server::SshClient;
 use super::path_roots::resolve_effective_remote_path;
 use super::transfer::scp_file;
 use super::types::{DeployEffect, DeployResult};
+
+const REMOTE_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+pub struct RemoteVersionProbeFailure {
+    pub component_id: String,
+    pub diagnostic: String,
+}
+
+#[derive(Debug, Default)]
+pub struct RemoteVersionProbeResult {
+    pub versions: HashMap<String, String>,
+    pub failures: Vec<RemoteVersionProbeFailure>,
+}
 
 /// Detect if a component's artifact is a CLI binary matching the currently
 /// running process name. Used to print a post-deploy hint for self-deploy.
@@ -82,32 +97,34 @@ pub fn fetch_remote_versions(
     base_path: &str,
     client: &SshClient,
 ) -> HashMap<String, String> {
-    fetch_remote_versions_for_project(components, None, base_path, client)
+    fetch_remote_versions_for_project(components, None, base_path, client).versions
 }
 
-pub(super) fn fetch_remote_versions_for_project(
+pub(crate) fn fetch_remote_versions_for_project(
     components: &[Component],
     project: Option<&Project>,
     base_path: &str,
     client: &SshClient,
-) -> HashMap<String, String> {
-    let mut versions = HashMap::new();
+) -> RemoteVersionProbeResult {
+    let mut result = RemoteVersionProbeResult::default();
 
     for component in components {
         // Try standard version-file approach first
-        if let Some(ver) = fetch_version_from_file(component, project, base_path, client) {
-            versions.insert(component.id.clone(), ver);
+        if let Some(ver) =
+            fetch_version_from_file(component, project, base_path, client, &mut result)
+        {
+            result.versions.insert(component.id.clone(), ver);
             continue;
         }
 
         // Fallback: for CLI binaries (has build_artifact, no remote_path),
         // try running the binary with --version on the remote server.
-        if let Some(ver) = fetch_version_from_binary(component, client) {
-            versions.insert(component.id.clone(), ver);
+        if let Some(ver) = fetch_version_from_binary(component, client, &mut result) {
+            result.versions.insert(component.id.clone(), ver);
         }
     }
 
-    versions
+    result
 }
 
 /// Try to fetch version by reading a version file on the remote server.
@@ -116,6 +133,7 @@ fn fetch_version_from_file(
     project: Option<&Project>,
     base_path: &str,
     client: &SshClient,
+    result: &mut RemoteVersionProbeResult,
 ) -> Option<String> {
     let version_targets = component.version_targets.as_ref()?;
 
@@ -140,7 +158,21 @@ fn fetch_version_from_file(
                 continue;
             }
 
-            let output = client.execute(&format!("cat '{}' 2>/dev/null", remote_path));
+            let output = client.execute_with_timeout(
+                &format!("cat '{}' 2>/dev/null", remote_path),
+                REMOTE_VERSION_PROBE_TIMEOUT,
+            );
+            if output.timed_out {
+                result.failures.push(RemoteVersionProbeFailure {
+                    component_id: component.id.clone(),
+                    diagnostic: format!(
+                        "remote version probe timed out after {}s while reading {}",
+                        REMOTE_VERSION_PROBE_TIMEOUT.as_secs(),
+                        remote_path
+                    ),
+                });
+                return None;
+            }
             if output.success {
                 if let Some(version) =
                     parse_component_version(&output.stdout, pattern, &remote_file)
@@ -172,7 +204,11 @@ fn remote_version_file_candidates(target: &VersionTarget) -> Vec<String> {
 ///
 /// This handles CLI binary components (like homeboy itself) that are installed
 /// as executables without a parseable version file on the remote server.
-fn fetch_version_from_binary(component: &Component, client: &SshClient) -> Option<String> {
+fn fetch_version_from_binary(
+    component: &Component,
+    client: &SshClient,
+    result: &mut RemoteVersionProbeResult,
+) -> Option<String> {
     let artifact = component.build_artifact.as_ref()?;
 
     // Extract binary name from build_artifact path (e.g., "target/release/homeboy" → "homeboy")
@@ -186,10 +222,21 @@ fn fetch_version_from_binary(component: &Component, client: &SshClient) -> Optio
     ];
 
     for candidate in &candidates {
-        let output = client.execute(&format!(
-            "{} --version 2>/dev/null",
-            shell::quote_path(candidate)
-        ));
+        let output = client.execute_with_timeout(
+            &format!("{} --version 2>/dev/null", shell::quote_path(candidate)),
+            REMOTE_VERSION_PROBE_TIMEOUT,
+        );
+        if output.timed_out {
+            result.failures.push(RemoteVersionProbeFailure {
+                component_id: component.id.clone(),
+                diagnostic: format!(
+                    "remote binary version probe timed out after {}s for {}",
+                    REMOTE_VERSION_PROBE_TIMEOUT.as_secs(),
+                    candidate
+                ),
+            });
+            return None;
+        }
         if output.success {
             let stdout = output.stdout.trim();
             // Parse "binary_name X.Y.Z" or just "X.Y.Z"
@@ -764,7 +811,10 @@ mod tests {
             &local_client(),
         );
 
-        assert_eq!(versions.get("fixture").map(String::as_str), Some("2.3.4"));
+        assert_eq!(
+            versions.versions.get("fixture").map(String::as_str),
+            Some("2.3.4")
+        );
     }
 
     #[test]
@@ -799,7 +849,22 @@ mod tests {
             &local_client(),
         );
 
-        assert_eq!(versions.get("fixture").map(String::as_str), Some("3.4.5"));
+        assert_eq!(
+            versions.versions.get("fixture").map(String::as_str),
+            Some("3.4.5")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_version_probe_timeout_is_bounded_and_cleans_up() {
+        let started = std::time::Instant::now();
+        let output = local_client().execute_with_timeout("sleep 30", Duration::from_millis(100));
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(output.timed_out);
+        assert!(!output.success);
+        assert!(output.stderr.contains("terminated child process group"));
     }
 
     #[test]

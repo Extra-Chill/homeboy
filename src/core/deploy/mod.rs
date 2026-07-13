@@ -27,6 +27,7 @@ pub use types::{
     ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
 pub use version_overrides::fetch_remote_versions;
+pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
 
 use crate::core::component;
 use crate::core::context::resolve_project_ssh_with_base_path;
@@ -42,6 +43,23 @@ pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestratio
     project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
     orchestration::deploy_components(config, &project, &ctx, &base_path)
+}
+
+/// Read deployed component versions without running deploy planning or git
+/// checks. Status uses this narrow probe to keep timeout diagnostics attached to
+/// the affected dashboard component.
+pub fn fetch_project_remote_versions(
+    project_id: &str,
+    components: &[component::Component],
+) -> Result<RemoteVersionProbeResult> {
+    let project = project::load(project_id)?;
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    Ok(version_overrides::fetch_remote_versions_for_project(
+        components,
+        Some(&project),
+        &base_path,
+        &ctx.client,
+    ))
 }
 
 /// Deploy components across multiple projects.

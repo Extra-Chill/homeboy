@@ -150,7 +150,8 @@ pub(super) fn plan_component_deploys(
         }));
     } else if config.outdated {
         let remote_versions =
-            fetch_remote_versions_for_project(all_components, Some(project), base_path, client);
+            fetch_remote_versions_for_project(all_components, Some(project), base_path, client)
+                .versions;
         steps.extend(plan_outdated_steps(all_components, &remote_versions));
     } else if config.behind_upstream {
         let mut git_probe_cache = GitProbeCache::default();

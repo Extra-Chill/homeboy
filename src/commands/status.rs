@@ -1,7 +1,7 @@
 use clap::Args;
 use homeboy::core::component;
 use homeboy::core::context;
-use homeboy::core::deploy::{self, DeployConfig, ReleaseState, ReleaseStateStatus};
+use homeboy::core::deploy::{self, ReleaseState, ReleaseStateStatus};
 use homeboy::core::git;
 use homeboy::core::release::version;
 use homeboy::core::scope::{self, Scope};
@@ -191,6 +191,9 @@ pub struct ProjectStatusRow {
     pub component_id: String,
     pub local_version: Option<String>,
     pub remote_version: Option<String>,
+    /// Actionable evidence when the bounded remote version probe failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_version_diagnostic: Option<String>,
     /// Latest tag on origin. When this differs from local_version, the local
     /// checkout is stale and needs a pull.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +231,8 @@ pub enum ProjectComponentDashboardStatus {
     Retired,
     /// Cannot determine status
     Unknown,
+    /// A bounded remote probe failed; local and git data remain available.
+    Degraded,
 }
 
 /// Output for the project status dashboard.
@@ -294,6 +299,8 @@ pub struct ProjectDashboardSummary {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub retired: usize,
     pub unknown: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub degraded: usize,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -670,7 +677,13 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 
     // Gather remote versions via deploy check mode (handles SSH internally)
     timer.begin("fetch_remote_versions");
-    let remote_versions = fetch_project_remote_versions(project_id);
+    let remote_probe = fetch_project_remote_versions(project_id, &components);
+    let remote_versions = remote_probe.versions;
+    let remote_diagnostics: HashMap<String, String> = remote_probe
+        .failures
+        .into_iter()
+        .map(|failure| (failure.component_id, failure.diagnostic))
+        .collect();
     timer.finish("fetch_remote_versions");
 
     let mut git_cache = StatusGitCache::default();
@@ -700,6 +713,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         bundled: 0,
         retired: 0,
         unknown: 0,
+        degraded: 0,
     };
 
     timer.begin("build_dashboard_rows");
@@ -723,6 +737,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
                 component_id: comp.id.clone(),
                 local_version: local_versions.get(&comp.id).cloned(),
                 remote_version: None,
+                remote_version_diagnostic: None,
                 origin_version: None,
                 unreleased_commits: 0,
                 ahead_upstream: None,
@@ -749,7 +764,10 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
 
         // Determine dashboard status.
         // Priority: uncommitted > needs_release > docs_only > behind_upstream > outdated > current > unknown
-        let dashboard_status = match release_status {
+        let dashboard_status = if remote_diagnostics.contains_key(&comp.id) {
+            ProjectComponentDashboardStatus::Degraded
+        } else {
+            match release_status {
             ReleaseStateStatus::Uncommitted => ProjectComponentDashboardStatus::Uncommitted,
             ReleaseStateStatus::NeedsRelease => ProjectComponentDashboardStatus::NeedsRelease,
             ReleaseStateStatus::DocsOnly => ProjectComponentDashboardStatus::DocsOnly,
@@ -770,6 +788,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
                 }
             }
             ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
+            }
         };
 
         match &dashboard_status {
@@ -785,12 +804,14 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             ProjectComponentDashboardStatus::Bundled => summary.bundled += 1,
             ProjectComponentDashboardStatus::Retired => summary.retired += 1,
             ProjectComponentDashboardStatus::Unknown => summary.unknown += 1,
+            ProjectComponentDashboardStatus::Degraded => summary.degraded += 1,
         }
 
         rows.push(ProjectStatusRow {
             component_id: comp.id.clone(),
             local_version: local_ver,
             remote_version: remote_ver,
+            remote_version_diagnostic: remote_diagnostics.get(&comp.id).cloned(),
             origin_version: drift.and_then(|d| d.latest_origin_tag.clone()),
             unreleased_commits,
             ahead_upstream: drift.and_then(|d| d.ahead),
@@ -1089,22 +1110,19 @@ fn default_origin_branch(path: &str) -> Option<String> {
 ///
 /// Uses deploy check mode internally, which handles SSH resolution.
 /// Returns empty map on failure (e.g., no server configured, SSH unavailable).
-fn fetch_project_remote_versions(project_id: &str) -> std::collections::HashMap<String, String> {
-    let config = DeployConfig::check_all_no_pull_head();
-
-    match deploy::run(project_id, &config) {
-        Ok(result) => result
-            .results
-            .into_iter()
-            .filter_map(|r| r.remote_version.map(|v| (r.id, v)))
-            .collect(),
+fn fetch_project_remote_versions(
+    project_id: &str,
+    components: &[component::Component],
+) -> deploy::RemoteVersionProbeResult {
+    match deploy::fetch_project_remote_versions(project_id, components) {
+        Ok(result) => result,
         Err(_) => {
             homeboy::log_status!(
                 "status",
                 "Warning: could not fetch remote versions for project '{}' — showing local data only",
                 project_id
             );
-            std::collections::HashMap::new()
+            deploy::RemoteVersionProbeResult::default()
         }
     }
 }
