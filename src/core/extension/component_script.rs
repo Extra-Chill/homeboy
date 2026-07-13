@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
@@ -55,16 +56,25 @@ pub fn run_component_scripts(
     source_path: &Path,
     passthrough: bool,
 ) -> Result<ComponentScriptOutput> {
-    run_component_scripts_with_env(component, capability, source_path, passthrough, &[], &[])
+    run_component_scripts_with_env_and_timeout(
+        component,
+        capability,
+        source_path,
+        passthrough,
+        &[],
+        &[],
+        None,
+    )
 }
 
-pub(crate) fn run_component_scripts_with_env(
+fn run_component_scripts_with_env_and_timeout(
     component: &Component,
     capability: ExtensionCapability,
     source_path: &Path,
     passthrough: bool,
     extra_env: &[(String, String)],
     script_args: &[String],
+    timeout: Option<Duration>,
 ) -> Result<ComponentScriptOutput> {
     let commands = component.script_commands(capability);
     if commands.is_empty() {
@@ -108,7 +118,7 @@ pub(crate) fn run_component_scripts_with_env(
             super::execution::CapabilityScriptOptions {
                 passthrough,
                 stderr_passthrough: false,
-                timeout: None,
+                timeout,
             },
         )?;
 
@@ -141,6 +151,25 @@ pub(crate) fn run_component_scripts_with_env(
     })
 }
 
+pub(crate) fn run_component_scripts_with_env(
+    component: &Component,
+    capability: ExtensionCapability,
+    source_path: &Path,
+    passthrough: bool,
+    extra_env: &[(String, String)],
+    script_args: &[String],
+) -> Result<ComponentScriptOutput> {
+    run_component_scripts_with_env_and_timeout(
+        component,
+        capability,
+        source_path,
+        passthrough,
+        extra_env,
+        script_args,
+        None,
+    )
+}
+
 pub(crate) fn run_component_scripts_with_run_dir(
     component: &Component,
     capability: ExtensionCapability,
@@ -150,17 +179,40 @@ pub(crate) fn run_component_scripts_with_run_dir(
     extra_env: &[(String, String)],
     script_args: &[String],
 ) -> Result<ComponentScriptOutput> {
+    run_component_scripts_with_run_dir_and_timeout(
+        component,
+        capability,
+        source_path,
+        run_dir,
+        passthrough,
+        extra_env,
+        script_args,
+        None,
+    )
+}
+
+pub(crate) fn run_component_scripts_with_run_dir_and_timeout(
+    component: &Component,
+    capability: ExtensionCapability,
+    source_path: &Path,
+    run_dir: &RunDir,
+    passthrough: bool,
+    extra_env: &[(String, String)],
+    script_args: &[String],
+    timeout: Option<Duration>,
+) -> Result<ComponentScriptOutput> {
     let mut env = run_dir.legacy_env_vars();
     let invocation = InvocationGuard::acquire(run_dir, &InvocationRequirements::default())?;
     env.extend(invocation.env_vars());
     env.extend(extra_env.iter().cloned());
-    let mut output = run_component_scripts_with_env(
+    let mut output = run_component_scripts_with_env_and_timeout(
         component,
         capability,
         source_path,
         passthrough,
         &env,
         script_args,
+        timeout,
     )?;
     output.extension_phase_timings = super::runner::read_extension_phase_timings(run_dir.path())?;
     Ok(output)

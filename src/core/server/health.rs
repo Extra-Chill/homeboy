@@ -6,6 +6,9 @@
 use super::SshClient;
 use crate::core::project::Project;
 use serde::Serialize;
+use std::time::Duration;
+
+const PROJECT_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ============================================================================
 // Types
@@ -116,7 +119,12 @@ fn collect_server_health(client: &SshClient, services: &[String]) -> ServerHealt
     }
 
     let compound_cmd = cmd_parts.join(" && ");
-    let output = client.execute(&compound_cmd);
+    log_status!(
+        "project",
+        "phase=health_probe timeout={}s",
+        PROJECT_HEALTH_PROBE_TIMEOUT.as_secs()
+    );
+    let output = client.execute_with_timeout(&compound_cmd, PROJECT_HEALTH_PROBE_TIMEOUT);
 
     if !output.success && output.stdout.is_empty() {
         // Total SSH failure — return empty health

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::core::engine::command;
 use crate::core::error::{Error, GitCommandFailedDetails, Result};
@@ -121,6 +122,92 @@ pub fn run_git_with_env(
         ));
     }
 
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run Git with a deadline, terminating its isolated process group on expiry.
+///
+/// Remote Git operations can wait indefinitely for a transport or credential
+/// helper. Callers use this only for bounded interactive command phases.
+pub fn run_git_with_env_timeout(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(git_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command::isolate_process_tree(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &error.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(error.to_string()),
+            },
+        )
+    })?;
+    let started = Instant::now();
+    let mut timed_out = false;
+    let output = command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = started.elapsed() >= timeout;
+            timed_out
+        },
+    )
+    .map_err(|error| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &error.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(error.to_string()),
+            },
+        )
+    })?
+    .into_output();
+    if !output.status.success() {
+        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if timed_out {
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!(
+                "Git phase timed out after {}s; terminated child process group.",
+                timeout.as_secs()
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(Error::git_command_failed_with_details(
+            git_failure_message(context, if stderr.is_empty() { &stdout } else { &stderr }),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                io_error: None,
+            },
+        ));
+    }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
@@ -446,6 +533,28 @@ mod tests {
         assert!(err.details["io_error"].as_str().is_some());
         assert_eq!(err.details["stdout"], "");
         assert_eq!(err.details["stderr"], "");
+    }
+
+    #[test]
+    fn bounded_git_command_terminates_hung_child_process_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["config", "alias.hang", "!sleep 10"]);
+
+        let started = Instant::now();
+        let err = run_git_with_env_timeout(
+            dir.path(),
+            &["hang"],
+            "test hung Git phase",
+            &[],
+            Duration::from_millis(50),
+        )
+        .expect_err("hung Git alias should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.details["stderr"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("timed out")));
     }
 
     #[test]
