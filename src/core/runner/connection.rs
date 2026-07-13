@@ -55,6 +55,12 @@ pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
 ) -> Result<(RunnerConnectReport, i32)> {
+    // Reconnect replaces daemon runtime state. It shares the promotion lease
+    // with binary selection so a second session cannot reconnect against a
+    // different configured executable halfway through the transaction.
+    let promotion_lease =
+        crate::core::runtime_promotion::acquire("runner daemon reconnect", runner_id.to_string())?;
+    promotion_lease.assert_generation()?;
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
