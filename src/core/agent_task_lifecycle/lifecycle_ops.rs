@@ -130,7 +130,7 @@ where
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
     let mut queued: Vec<AgentTaskRunRecord> = store::read_records()?
         .into_iter()
-        .filter(|record| record.state == AgentTaskRunState::Queued)
+        .filter(|record| record.state == AgentTaskRunState::Queued && !is_transport_proxy(record))
         .collect();
     queued.sort_by(|left, right| {
         left.submitted_at
@@ -225,7 +225,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 }
 
 fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
-    if record.state != AgentTaskRunState::Running {
+    if is_terminal_run_state(record.state) {
         return;
     }
     let (Some(runner_id), Some(job_id)) = (
@@ -247,6 +247,141 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) {
         }
     };
     reconcile_runner_job_snapshot(record, &snapshot);
+}
+
+/// A controller proxy is a transport handoff, not an agent provider task. Its
+/// synthetic plan task identifies the runner so the durable record remains
+/// inspectable, but must never reach provider lookup on the controller.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransportProxyRecovery {
+    Reconciled {
+        record: AgentTaskRunRecord,
+        next_action: String,
+    },
+    ReconnectRequired {
+        record: AgentTaskRunRecord,
+        next_action: String,
+    },
+}
+
+impl TransportProxyRecovery {
+    pub fn record(&self) -> &AgentTaskRunRecord {
+        match self {
+            Self::Reconciled { record, .. } | Self::ReconnectRequired { record, .. } => record,
+        }
+    }
+
+    pub fn next_action(&self) -> &str {
+        match self {
+            Self::Reconciled { next_action, .. } | Self::ReconnectRequired { next_action, .. } => {
+                next_action
+            }
+        }
+    }
+}
+
+/// Reconnect a transport-owned proxy through its durable runner execution
+/// record. `None` means the run is a normal scheduler-owned plan.
+pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if !is_transport_proxy(&record) {
+        return Ok(None);
+    }
+
+    let Some(runner_id) = transport_proxy_runner_id(&record) else {
+        return Ok(None);
+    };
+    let runner_job_id = transport_proxy_runner_job_id(&record);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert("transport_recovery".to_string(), json!("required"));
+    metadata.insert("runner_id".to_string(), json!(&runner_id));
+
+    let Some(runner_job_id) = runner_job_id else {
+        store::write_record(&record)?;
+        return Ok(Some(TransportProxyRecovery::ReconnectRequired {
+            record,
+            next_action: format!("homeboy runner connect {runner_id}"),
+        }));
+    };
+
+    metadata.insert("runner_job_id".to_string(), json!(&runner_job_id));
+
+    match crate::core::runners::runner_job_log_snapshot(&runner_id, &runner_job_id) {
+        Ok(snapshot) => {
+            reconcile_transport_proxy_snapshot(&mut record, &snapshot);
+            store::write_record(&record)?;
+            Ok(Some(TransportProxyRecovery::Reconciled {
+                record,
+                next_action: format!(
+                    "homeboy runner job logs {runner_id} {runner_job_id} --follow"
+                ),
+            }))
+        }
+        Err(_) => {
+            record.annotate_runner_disconnected();
+            store::write_record(&record)?;
+            Ok(Some(TransportProxyRecovery::ReconnectRequired {
+                record,
+                next_action: format!("homeboy runner connect {runner_id}"),
+            }))
+        }
+    }
+}
+
+pub(crate) fn reconcile_transport_proxy_snapshot(
+    record: &mut AgentTaskRunRecord,
+    snapshot: &crate::core::runner::RunnerJobLogSnapshot,
+) {
+    if record.state == AgentTaskRunState::Queued {
+        set_run_state(record, AgentTaskRunState::Running);
+        for task in &mut record.tasks {
+            if task.state == AgentTaskState::Queued {
+                task.state = AgentTaskState::Running;
+            }
+        }
+    }
+    reconcile_runner_job_snapshot(record, snapshot);
+}
+
+fn is_transport_proxy(record: &AgentTaskRunRecord) -> bool {
+    record
+        .metadata
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.ends_with("_controller_proxy"))
+}
+
+fn transport_proxy_runner_id(record: &AgentTaskRunRecord) -> Option<String> {
+    record.runner_id().map(str::to_string).or_else(|| {
+        record
+            .metadata
+            .get("runner_execution_record")
+            .and_then(|value| {
+                serde_json::from_value::<
+                    crate::core::runner_execution_envelope::RunnerExecutionRecord,
+                >(value.clone())
+                .ok()
+            })
+            .map(|execution| execution.runner_id)
+            .filter(|runner_id| !runner_id.trim().is_empty())
+    })
+}
+
+fn transport_proxy_runner_job_id(record: &AgentTaskRunRecord) -> Option<String> {
+    record.runner_job_id().map(str::to_string).or_else(|| {
+        record
+            .metadata
+            .get("runner_execution_record")
+            .and_then(|value| {
+                serde_json::from_value::<
+                    crate::core::runner_execution_envelope::RunnerExecutionRecord,
+                >(value.clone())
+                .ok()
+            })
+            .and_then(|execution| execution.job_id)
+            .filter(|job_id| !job_id.trim().is_empty())
+    })
 }
 
 pub(crate) fn reconcile_runner_job_snapshot(
@@ -806,6 +941,13 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
         artifacts: aggregate_artifacts(aggregate.as_ref()),
         evidence_refs: aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence),
     })
+}
+
+/// Read the aggregate after a transport reconciliation completed it without
+/// scheduling the controller-side synthetic handoff task.
+pub fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
+    let run_id = resolve_run_id(run_id)?;
+    store::read_aggregate(&run_id)
 }
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
