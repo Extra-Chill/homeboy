@@ -23,6 +23,13 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    // A Lab child executes the controller's already-accepted command. It must
+    // never route that command again, regardless of whether the original
+    // request used an explicit runner or automatic Lab selection.
+    if homeboy::core::runner::runner_lab_handoff_active() {
+        return Ok(None);
+    }
+
     if lab_routing::is_lab_offload_subprocess() {
         return Ok(None);
     }
@@ -1544,6 +1551,49 @@ mod tests {
         let outcome = route_after_parse(&cli, &normalized, None).unwrap();
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn runner_lab_handoff_keeps_cook_orchestration_on_the_accepting_runner() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let cases = [
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@cook-routing".to_string(),
+                "--verify".to_string(),
+                "cargo test --locked".to_string(),
+            ],
+            vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@cook-routing".to_string(),
+                "--verify".to_string(),
+                "cargo test --locked".to_string(),
+            ],
+        ];
+
+        homeboy::core::runner::set_runner_lab_handoff_active_for_test(true);
+        for normalized in cases {
+            let cli = Cli::parse_from(&normalized);
+            assert_eq!(
+                route_after_parse(&cli, &normalized, None)
+                    .expect("the accepting runner must not query or dispatch through Lab"),
+                None,
+                "the accepting runner must execute cook locally without a second Lab dispatch"
+            );
+        }
+        homeboy::core::runner::set_runner_lab_handoff_active_for_test(false);
     }
 
     #[test]
