@@ -399,6 +399,31 @@ pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<Agen
     )
 }
 
+/// Persist controller-owned setup progress before a runner job exists.
+pub fn record_lab_offload_phase(
+    requested_run_id: &str,
+    runner_id: &str,
+    phase: &str,
+    remote_workspace: Option<&str>,
+    source_checkout: Option<&Value>,
+) -> Result<AgentTaskRunRecord> {
+    let placeholder_workspace = remote_workspace.unwrap_or("pending");
+    let mut record =
+        record_lab_offload_proxy(requested_run_id, runner_id, placeholder_workspace, &[])?;
+    record.updated_at = Some(now_timestamp());
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("phase".to_string(), json!(phase));
+    metadata.insert("provider_state".to_string(), json!("pending"));
+    if let Some(remote_workspace) = remote_workspace {
+        metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
+    }
+    if let Some(source_checkout) = source_checkout {
+        metadata.insert("source_checkout".to_string(), source_checkout.clone());
+    }
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
     let plan = detached_lab_plan(&run_id, &input);
