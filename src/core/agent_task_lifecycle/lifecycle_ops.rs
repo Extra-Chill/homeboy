@@ -254,6 +254,10 @@ fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
 /// inspectable, but must never reach provider lookup on the controller.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransportProxyRecovery {
+    Resumed {
+        record: AgentTaskRunRecord,
+        next_action: String,
+    },
     Reconciled {
         record: AgentTaskRunRecord,
         next_action: String,
@@ -267,15 +271,17 @@ pub enum TransportProxyRecovery {
 impl TransportProxyRecovery {
     pub fn record(&self) -> &AgentTaskRunRecord {
         match self {
-            Self::Reconciled { record, .. } | Self::ReconnectRequired { record, .. } => record,
+            Self::Resumed { record, .. }
+            | Self::Reconciled { record, .. }
+            | Self::ReconnectRequired { record, .. } => record,
         }
     }
 
     pub fn next_action(&self) -> &str {
         match self {
-            Self::Reconciled { next_action, .. } | Self::ReconnectRequired { next_action, .. } => {
-                next_action
-            }
+            Self::Resumed { next_action, .. }
+            | Self::Reconciled { next_action, .. }
+            | Self::ReconnectRequired { next_action, .. } => next_action,
         }
     }
 }
@@ -298,11 +304,7 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
     metadata.insert("runner_id".to_string(), json!(&runner_id));
 
     let Some(runner_job_id) = runner_job_id else {
-        store::write_record(&record)?;
-        return Ok(Some(TransportProxyRecovery::ReconnectRequired {
-            record,
-            next_action: format!("homeboy runner connect {runner_id}"),
-        }));
+        return resume_transport_proxy_on_runner(record, runner_id);
     };
 
     metadata.insert("runner_job_id".to_string(), json!(&runner_job_id));
@@ -327,6 +329,76 @@ pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyReco
             }))
         }
     }
+}
+
+/// Resume an unbound proxy where the controller never learned the runner job
+/// identity. The persisted command and workspace belong to the runner, so this
+/// must execute through the runner rather than through the local scheduler.
+fn resume_transport_proxy_on_runner(
+    mut record: AgentTaskRunRecord,
+    runner_id: String,
+) -> Result<Option<TransportProxyRecovery>> {
+    let Some(remote_workspace) = record
+        .metadata
+        .get("remote_workspace")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+    else {
+        store::write_record(&record)?;
+        return Ok(Some(TransportProxyRecovery::ReconnectRequired {
+            record,
+            next_action: format!("homeboy runner connect {runner_id}"),
+        }));
+    };
+    let Some(remote_command) = record
+        .metadata
+        .get("remote_command")
+        .and_then(Value::as_array)
+        .map(|command| {
+            command
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|command| !command.is_empty())
+    else {
+        store::write_record(&record)?;
+        return Ok(Some(TransportProxyRecovery::ReconnectRequired {
+            record,
+            next_action: format!("homeboy runner connect {runner_id}"),
+        }));
+    };
+
+    if !crate::core::runners::exists(&runner_id) {
+        store::write_record(&record)?;
+        return Ok(Some(TransportProxyRecovery::ReconnectRequired {
+            record,
+            next_action: format!("homeboy runner connect {runner_id}"),
+        }));
+    }
+
+    let (_, exit_code) = crate::core::runners::exec(
+        &runner_id,
+        crate::core::runners::RunnerExecOptions {
+            cwd: Some(remote_workspace.to_string()),
+            command: remote_command,
+            run_id: Some(record.run_id.clone()),
+            ..Default::default()
+        },
+    )?;
+    if exit_code != 0 {
+        return Err(Error::internal_unexpected(format!(
+            "runner continuation for agent-task run '{}' exited with status {exit_code}",
+            record.run_id
+        )));
+    }
+
+    record = store::read_record(&record.run_id)?;
+    Ok(Some(TransportProxyRecovery::Resumed {
+        next_action: format!("homeboy agent-task status {} --full", record.run_id),
+        record,
+    }))
 }
 
 pub(crate) fn reconcile_transport_proxy_snapshot(
