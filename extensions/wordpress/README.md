@@ -304,17 +304,27 @@ artifacts inside the deployed plugin or theme can declare explicit include globs
 	"extensions": {
 		"wordpress": {
 			"package_artifacts": [
-				"runtime/studio-web-sandbox/packages/*.zip"
+				"runtime/**/packages/*.zip"
+			],
+			"package_excludes": [
+				"/playground-runtime/",
+				"runtime/**/source-maps/"
 			]
 		}
 	}
 }
 ```
 
-Each pattern is component-relative, must not contain `..`, and must match at
-least one file. Included package artifacts are copied into the staging directory
-after the default rsync excludes and reported with SHA-256 values in the build
-output.
+`package_artifacts` patterns are component-relative, support recursive `**`
+matching, must not contain absolute or traversal paths, and must match at least
+one regular file. Matching files are sorted, deduplicated, copied into staging
+after the default rsync excludes, and reported with SHA-256 values in the build
+output. The managed `.homeboy-build/` staging directory is never eligible.
+
+`package_excludes` adds rsync exclusions without replacing `.buildignore`, the
+defaults, or mandatory Homeboy safety exclusions. Use component-root rsync
+patterns such as `/playground-runtime/` to exclude a root directory. Exclude
+patterns are strings and cannot traverse outside the component.
 
 ### Local workspace dependency overrides
 

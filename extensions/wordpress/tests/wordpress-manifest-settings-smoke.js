@@ -15,6 +15,10 @@ assert.ok(
 	'wordpress manifest declares wp_codebox_bin so --setting wp_codebox_bin is accepted'
 );
 
+for (const settingId of ['package_artifacts', 'package_excludes']) {
+	assert.ok(settingIds.has(settingId), `wordpress manifest declares ${settingId}`);
+}
+
 const fuzzEnv = new Set(manifest.fuzz.env);
 for (const envKey of ['HOMEBOY_SETTINGS_JSON', 'HOMEBOY_SETTINGS_WP_CODEBOX_BIN', 'HOMEBOY_WP_CODEBOX_BIN', 'WP_CODEBOX_BIN']) {
 	assert.ok(

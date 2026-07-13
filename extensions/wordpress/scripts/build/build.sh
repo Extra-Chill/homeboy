@@ -674,8 +674,41 @@ webpack.config.js
 EOF
     fi
 
+    HOMEBOY_WORDPRESS_PACKAGE_EXCLUDES_FILE="$exclude_file" \
+    php <<'PHP'
+<?php
+$settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
+if ( ! is_array( $settings ) ) {
+	fwrite( STDERR, "Invalid HOMEBOY_SETTINGS_JSON; expected a JSON object.\n" );
+	exit( 1 );
+}
+
+$patterns = $settings['package_excludes'] ?? [];
+if ( ! is_array( $patterns ) ) {
+	fwrite( STDERR, "extensions.wordpress.package_excludes must be an array of rsync exclude patterns.\n" );
+	exit( 1 );
+}
+
+$exclude_file = getenv( 'HOMEBOY_WORDPRESS_PACKAGE_EXCLUDES_FILE' );
+foreach ( $patterns as $pattern ) {
+	if ( ! is_string( $pattern ) || '' === trim( $pattern ) ) {
+		fwrite( STDERR, "extensions.wordpress.package_excludes entries must be non-empty strings.\n" );
+		exit( 1 );
+	}
+
+	$normalized = str_replace( '\\', '/', $pattern );
+	if ( preg_match( '#(^|/)\.\.(/|$)#', $normalized ) || str_starts_with( $normalized, '//' ) || preg_match( '#^[A-Za-z]:/#', $normalized ) ) {
+		fwrite( STDERR, "Package excludes cannot contain traversal or filesystem-absolute paths: {$pattern}\n" );
+		exit( 1 );
+	}
+
+	// A single leading slash is an rsync root anchor, relative to the component.
+	file_put_contents( $exclude_file, $normalized . "\n", FILE_APPEND );
+}
+PHP
+
     # Homeboy-managed staging must never be copied into itself. Keep this
-    # mandatory even when a project supplies a custom .buildignore.
+    # mandatory even when a project supplies custom .buildignore or excludes.
     cat >> "$exclude_file" << 'EOF'
 /.homeboy-build/
 EOF
@@ -707,9 +740,55 @@ if ( ! is_array( $patterns ) ) {
 	exit( 1 );
 }
 
-$artifacts = [];
-$seen      = [];
-$list      = '';
+$matches_by_path = [];
+
+function package_artifact_matches( $pattern ) {
+	if ( ! str_contains( $pattern, '**' ) ) {
+		return glob( $pattern, GLOB_BRACE ) ?: [];
+	}
+
+	$regex = '';
+	$length = strlen( $pattern );
+	for ( $index = 0; $index < $length; $index++ ) {
+		$character = $pattern[ $index ];
+		if ( '*' === $character && '*' === ( $pattern[ $index + 1 ] ?? '' ) ) {
+			$index++;
+			if ( '/' === ( $pattern[ $index + 1 ] ?? '' ) ) {
+				$index++;
+				$regex .= '(?:.*/)?';
+			} else {
+				$regex .= '.*';
+			}
+			continue;
+		}
+		if ( '*' === $character ) {
+			$regex .= '[^/]*';
+			continue;
+		}
+		if ( '?' === $character ) {
+			$regex .= '[^/]';
+			continue;
+		}
+		$regex .= preg_quote( $character, '#' );
+	}
+
+	$matches  = [];
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator( '.', FilesystemIterator::SKIP_DOTS )
+	);
+	foreach ( $iterator as $file ) {
+		$relative = str_replace( '\\', '/', $file->getPathname() );
+		$relative = preg_replace( '#^\./#', '', $relative );
+		if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
+			continue;
+		}
+		if ( preg_match( '#^' . $regex . '$#', $relative ) ) {
+			$matches[] = $relative;
+		}
+	}
+
+	return $matches;
+}
 
 foreach ( $patterns as $pattern ) {
 	if ( ! is_string( $pattern ) || '' === $pattern ) {
@@ -718,18 +797,21 @@ foreach ( $patterns as $pattern ) {
 	}
 
 	$normalized = str_replace( '\\', '/', $pattern );
-	if ( str_starts_with( $normalized, '/' ) || preg_match( '#(^|/)\.\.(/|$)#', $normalized ) ) {
+	if ( str_starts_with( $normalized, '/' ) || preg_match( '#^[A-Za-z]:/#', $normalized ) || preg_match( '#(^|/)\.\.(/|$)#', $normalized ) ) {
 		fwrite( STDERR, "Package artifact patterns must be component-relative and cannot contain '..': {$pattern}\n" );
 		exit( 1 );
 	}
 
-	$matches = glob( $pattern, GLOB_BRACE ) ?: [];
+	$matches = package_artifact_matches( $normalized );
 	$files   = [];
 	foreach ( $matches as $match ) {
-		if ( is_file( $match ) ) {
+		if ( is_file( $match ) && ! is_link( $match ) ) {
 			$relative = str_replace( '\\', '/', $match );
 			if ( str_starts_with( $relative, './' ) ) {
 				$relative = substr( $relative, 2 );
+			}
+			if ( preg_match( '#^\.homeboy-build(?:/|$)#', $relative ) ) {
+				continue;
 			}
 			$files[]  = $relative;
 		}
@@ -740,20 +822,22 @@ foreach ( $patterns as $pattern ) {
 		exit( 1 );
 	}
 
-	sort( $files );
 	foreach ( $files as $relative ) {
-		if ( isset( $seen[ $relative ] ) ) {
-			continue;
-		}
-		$seen[ $relative ] = true;
-		$sha256            = hash_file( 'sha256', $relative ) ?: '';
-		$artifacts[]       = [
-			'path'    => $relative,
-			'sha256'  => $sha256,
-			'pattern' => $pattern,
-		];
-		$list .= $relative . "\t" . $sha256 . "\n";
+		$matches_by_path[ $relative ] ??= $pattern;
 	}
+}
+
+ksort( $matches_by_path, SORT_STRING );
+$artifacts = [];
+$list      = '';
+foreach ( $matches_by_path as $relative => $pattern ) {
+	$sha256      = hash_file( 'sha256', $relative ) ?: '';
+	$artifacts[] = [
+		'path'    => $relative,
+		'sha256'  => $sha256,
+		'pattern' => $pattern,
+	];
+	$list .= $relative . "\t" . $sha256 . "\n";
 }
 
 $manifest = [

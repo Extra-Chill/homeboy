@@ -1372,7 +1372,14 @@
       "label": "WordPress package artifacts",
       "type": "array",
       "default": [],
-      "description": "Component-relative glob patterns for intentional package ZIP artifacts that should be included in the production build even though arbitrary *.zip files are excluded by default. Each declared pattern must match at least one file."
+      "description": "Component-relative glob patterns for intentional package ZIP artifacts that should be included in the production build even though arbitrary *.zip files are excluded by default. Supports recursive ** matching at any depth. Each declared pattern must match at least one regular file; absolute and traversal paths are rejected."
+    },
+    {
+      "id": "package_excludes",
+      "label": "WordPress package excludes",
+      "type": "array",
+      "default": [],
+      "description": "Additional rsync exclude patterns applied with .buildignore/default excludes before Homeboy mandatory safety exclusions. Strings are required. Component-root rsync patterns such as /playground-runtime/ are supported; traversal and filesystem-absolute paths are rejected."
     },
     {
       "id": "local_workspace_dependencies",
