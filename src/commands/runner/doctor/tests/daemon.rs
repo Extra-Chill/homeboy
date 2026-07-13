@@ -123,6 +123,8 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
                 .to_string(),
         ),
         binary_hash: None,
+        daemon_version: Some("0.284.0".to_string()),
+        daemon_build_identity: Some("homeboy 0.284.0+live".to_string()),
         runtime_paths: None,
         active_jobs: 1,
         repair_plan: Vec::new(),
@@ -155,5 +157,10 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
 
     assert_eq!(report.checks.len(), 1);
     assert_eq!(report.checks[0].id, "daemon.recovery");
+    assert_eq!(report.checks[0].details["daemon_version"], "0.284.0");
+    assert_eq!(
+        report.checks[0].details["daemon_build_identity"],
+        "homeboy 0.284.0+live"
+    );
     assert_eq!(report.daemon_recovery.expect("recovery").active_jobs, 1);
 }

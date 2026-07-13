@@ -593,6 +593,8 @@ fn restartable_daemon_freshness() -> DaemonFreshnessReport {
         ownership_evidence: None,
         adoption_command: None,
         binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
         runtime_paths: None,
         active_jobs: 0,
         repair_plan: Vec::new(),

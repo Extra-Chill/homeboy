@@ -274,6 +274,12 @@ pub(super) fn disconnected_report(
             if let Some(pid) = recovery.pid {
                 details.insert("pid".to_string(), pid.to_string());
             }
+            if let Some(version) = &recovery.daemon_version {
+                details.insert("daemon_version".to_string(), version.clone());
+            }
+            if let Some(identity) = &recovery.daemon_build_identity {
+                details.insert("daemon_build_identity".to_string(), identity.clone());
+            }
             if let Some(evidence) = &recovery.ownership_evidence {
                 details.insert("ownership_evidence".to_string(), evidence.clone());
             }

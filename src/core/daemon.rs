@@ -131,6 +131,13 @@ pub struct DaemonFreshnessReport {
     pub adoption_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_hash: Option<String>,
+    /// Version observed from the reachable daemon endpoint, rather than inferred
+    /// from the selected runner executable or a persisted controller session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_version: Option<String>,
+    /// Build identity observed from the reachable daemon endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_paths: Option<DaemonRuntimeSnapshot>,
     pub active_jobs: usize,
@@ -613,6 +620,8 @@ fn freshness_report_from_validation(
         ownership_evidence: None,
         adoption_command: None,
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
+        daemon_version: state.map(|state| state.build_identity.version.clone()),
+        daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
         runtime_paths: state.map(|state| state.runtime_paths.clone()),
         active_jobs,
         repair_plan,
