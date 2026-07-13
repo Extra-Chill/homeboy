@@ -1,7 +1,6 @@
 use super::super::exit_code::{
-    effective_lint_exit_code, normalize_empty_finding_exit_code, normalize_finding_exit_code,
+    effective_lint_exit_code, normalize_empty_finding_exit_code, normalize_producer_exit_code,
 };
-use super::lint_finding;
 use crate::core::finding::FindingProducerSummary;
 
 #[test]
@@ -30,10 +29,38 @@ fn empty_filtered_findings_do_not_hide_infrastructure_errors() {
 }
 
 #[test]
-fn findings_force_failure_when_runner_exits_cleanly() {
-    let exit_code = normalize_finding_exit_code(0, &[lint_finding("a", "security", "rule")]);
+fn passed_producers_keep_warning_findings_non_blocking() {
+    let producer_summaries = vec![
+        FindingProducerSummary::new("phpcs", "passed").finding_count(49),
+        FindingProducerSummary::new("eslint", "passed").finding_count(1),
+        FindingProducerSummary::new("phpstan", "passed").finding_count(0),
+    ];
+    let exit_code = normalize_producer_exit_code(0, &producer_summaries);
+
+    assert_eq!(exit_code, 0);
+}
+
+#[test]
+fn failed_producer_amid_warnings_forces_failure() {
+    let producer_summaries = vec![
+        FindingProducerSummary::new("phpcs", "passed").finding_count(49),
+        FindingProducerSummary::new("eslint", "failed").finding_count(1),
+        FindingProducerSummary::new("phpstan", "passed").finding_count(0),
+    ];
+
+    let exit_code = normalize_producer_exit_code(0, &producer_summaries);
 
     assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn crashed_zero_finding_producer_remains_failure() {
+    let producer_summaries = vec![
+        FindingProducerSummary::new("phpstan", "error").finding_count(0),
+    ];
+    let runner_exit_code = normalize_empty_finding_exit_code(1, false, &[], &producer_summaries);
+
+    assert_eq!(normalize_producer_exit_code(runner_exit_code, &producer_summaries), 1);
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! baseline lifecycle, assembles hints, and constructs results.
 
 use super::exit_code::{
-    effective_lint_exit_code, normalize_empty_finding_exit_code, normalize_finding_exit_code,
+    effective_lint_exit_code, normalize_empty_finding_exit_code, normalize_producer_exit_code,
 };
 use super::findings::{
     build_lint_producer_summaries, build_lint_summary, filter_findings_to_scoped_files,
@@ -132,7 +132,7 @@ pub fn run_main_lint_workflow(
         &lint_findings,
         &producer_summaries,
     );
-    let lint_exit_code = normalize_finding_exit_code(runner_exit_code, &lint_findings);
+    let lint_exit_code = normalize_producer_exit_code(runner_exit_code, &producer_summaries);
 
     // Baseline lifecycle
     let (baseline_comparison, baseline_exit_override) =

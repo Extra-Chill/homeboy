@@ -22,8 +22,20 @@ pub(super) fn normalize_empty_finding_exit_code(
     }
 }
 
-pub(super) fn normalize_finding_exit_code(exit_code: i32, lint_findings: &[HomeboyFinding]) -> i32 {
-    if !lint_findings.is_empty() && exit_code == 0 {
+pub(super) fn normalize_producer_exit_code(
+    exit_code: i32,
+    producer_summaries: &[FindingProducerSummary],
+) -> i32 {
+    if exit_code >= 2 || producer_summaries.is_empty() {
+        return exit_code;
+    }
+
+    if producer_summaries
+        .iter()
+        .all(|summary| summary.status == "passed")
+    {
+        0
+    } else if exit_code == 0 {
         1
     } else {
         exit_code
