@@ -640,6 +640,14 @@ fn harvest_committed_patch(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
 ) -> Result<(), HarvestError> {
+    harvest_committed_patch_with_metadata(outcome, running, committed_change_metadata_for_range)
+}
+
+fn harvest_committed_patch_with_metadata(
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+    collect_metadata: impl FnOnce(&Path, &str) -> Result<Vec<serde_json::Value>, HarvestError>,
+) -> Result<(), HarvestError> {
     if outcome.status != AgentTaskOutcomeStatus::Succeeded
         || outcome.artifacts.iter().any(|artifact| {
             is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact)
@@ -692,16 +700,7 @@ fn harvest_committed_patch(
         &range,
         Vec::new(),
     ));
-    let commits = git_output(
-        root,
-        &[
-            "log",
-            "--reverse",
-            "--format=%H%x1f%an%x1f%ae%x1f%s",
-            &format!("{base}..HEAD"),
-        ],
-    )?;
-    let commits = committed_change_metadata(&commits);
+    let commits = collect_metadata(root, &range)?;
     outcome
         .artifacts
         .last_mut()
@@ -713,6 +712,17 @@ fn harvest_committed_patch(
         "commits": commits,
     });
     Ok(())
+}
+
+fn committed_change_metadata_for_range(
+    cwd: &Path,
+    range: &str,
+) -> Result<Vec<serde_json::Value>, HarvestError> {
+    let output = git_output(
+        cwd,
+        &["log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%s", range],
+    )?;
+    Ok(committed_change_metadata(&output))
 }
 
 fn committed_patch_artifact(
@@ -894,37 +904,102 @@ fn committed_harvest_failure(
 #[cfg(test)]
 mod committed_harvest_tests {
     use super::*;
+    use crate::core::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command runs");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
     #[test]
     fn git_metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
+        git(&workspace, &["add", "file.txt"]);
+        git(&workspace, &["commit", "-m", "base"]);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+        std::fs::write(workspace.join("file.txt"), "committed change\n").expect("change");
+        git(&workspace, &["commit", "-am", "agent change"]);
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "task-1".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        let running = RunningTask {
+            task_id: "task-1".to_string(),
+            request,
+            workspace_key: None,
+            executor_key: "test".to_string(),
+            model_key: None,
+            resource_units: 1,
+            attempt: 1,
+            started_at: Instant::now(),
+            timeout_ms: None,
+            rotation_index: 0,
+            rotation_attempts: Vec::new(),
+            task_base_sha: Some(base),
+        };
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
-        outcome.artifacts.push(committed_patch_artifact(
-            Path::new("artifacts/committed.patch"),
-            "diff --git a/file b/file\n",
-            "base",
-            "base..HEAD",
-            Vec::new(),
-        ));
-
-        let error = git_output(
-            Path::new("artifacts/committed.patch"),
-            &["log", "--format=%H", "base..HEAD"],
-        )
-        .expect_err("metadata command fails after patch attachment");
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        let error = harvest_committed_patch_with_metadata(&mut outcome, &running, |_, _| {
+            Err(HarvestError::Git {
+                command: "git log injected metadata failure".to_string(),
+                message: "injected failure".to_string(),
+            })
+        })
+        .expect_err("metadata command fails after the real patch is attached");
+        let patch_path = outcome.artifacts[0].path.clone().expect("patch path");
+        assert!(Path::new(&patch_path).is_file());
         let failed = committed_harvest_failure(outcome, error);
 
         assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
         assert_eq!(failed.artifacts[0].id, "committed-changes");
         assert_eq!(
             failed.artifacts[0].path.as_deref(),
-            Some("artifacts/committed.patch")
+            Some(patch_path.as_str())
         );
         assert!(failed.evidence_refs.iter().any(|evidence| {
             evidence.uri == "homeboy://agent-task/committed-harvest-preflight"
         }));
         assert!(failed.diagnostics.iter().any(|diagnostic| {
             diagnostic.class == "agent_task.committed_harvest_git_failed"
-                && diagnostic.data["command"] == "git log --format=%H base..HEAD"
+                && diagnostic.data["command"] == "git log injected metadata failure"
         }));
     }
 }
