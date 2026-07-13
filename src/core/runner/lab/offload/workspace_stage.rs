@@ -44,6 +44,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     homeboy_path: &str,
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
+    run_isolation_token: Option<String>,
 ) -> Result<LabOffloadWorkspaceStage> {
     // Capture the orchestration facts known *before* staging so any
     // Lab-cannot-proceed error bubbling out of the pre-execution/dispatch path
@@ -66,6 +67,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         homeboy_path,
         command_prefix_argv,
         runner_workspace_root,
+        run_isolation_token,
     )
     .map_err(|error| enrich_lab_cannot_proceed_error(error, &context))
 }
@@ -80,6 +82,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     homeboy_path: &str,
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
+    run_isolation_token: Option<String>,
 ) -> Result<LabOffloadWorkspaceStage> {
     let sync_mode = lab_workspace_sync_mode(
         contract.workspace_mode_policy,
@@ -138,7 +141,6 @@ fn prepare_lab_offload_workspace_stage_inner(
     // can observe its leftover untracked artifacts (#4393). Resolve the
     // agent-task run id (existing or freshly generated) up front and fold it
     // into the workspace identity so each run gets a clean, isolated directory.
-    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {

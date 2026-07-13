@@ -162,6 +162,54 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn controller_proxy_records_pre_execution_phase_progress() {
+    with_isolated_home(|_| {
+        let source = json!({
+            "branch": "main",
+            "head": "abc123",
+        });
+        let materializing = record_lab_offload_phase(
+            "agent-task-pre-execution",
+            "homeboy-lab",
+            "materializing",
+            None,
+            Some(&source),
+            Some(&json!({"entries": [{"model": "openai/gpt-5.6-terra"}]})),
+        )
+        .expect("materialization phase persisted");
+
+        assert_eq!(materializing.state, AgentTaskRunState::Queued);
+        assert_eq!(materializing.metadata["phase"], "materializing");
+        assert_eq!(materializing.metadata["provider_state"], "pending");
+        assert_eq!(materializing.metadata["source_checkout"]["head"], "abc123");
+        assert_eq!(
+            materializing.metadata["provider_rotation"]["entries"][0]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert!(materializing.metadata.get("runner_job_id").is_none());
+
+        let hydrating = record_lab_offload_phase(
+            "agent-task-pre-execution",
+            "homeboy-lab",
+            "hydrating",
+            Some("/runner/workspace/repo"),
+            Some(&source),
+            None,
+        )
+        .expect("hydration phase persisted");
+        assert_eq!(hydrating.metadata["phase"], "hydrating");
+        assert_eq!(
+            hydrating.metadata["remote_workspace"],
+            "/runner/workspace/repo"
+        );
+
+        let loaded = status("agent-task-pre-execution").expect("status resolves during setup");
+        assert_eq!(loaded.metadata["phase"], "hydrating");
+        assert_eq!(loaded.metadata["provider_state"], "pending");
+    });
+}
+
+#[test]
 fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

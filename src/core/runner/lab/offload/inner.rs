@@ -806,6 +806,20 @@ pub(crate) fn run_lab_offload_inner(
         messages.push(warning);
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    let provider_rotation =
+        serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
+            .unwrap_or(serde_json::Value::Null);
+    if let Some(run_id) = run_isolation_token.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "materializing",
+            None,
+            Some(&source_checkout),
+            Some(&provider_rotation),
+        )?;
+    }
     let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
     let require_exact_runner_version = require_exact_runner_version(&runner.settings);
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, &runner_status);
@@ -980,6 +994,7 @@ pub(crate) fn run_lab_offload_inner(
         homeboy_path,
         &command_prefix.argv,
         Some(&runner_workspace_root),
+        run_isolation_token,
     )?;
     workspace_sync_timer.finish();
     let LabOffloadWorkspaceStage {
@@ -1005,6 +1020,16 @@ pub(crate) fn run_lab_offload_inner(
         runtime_overlay_metadata,
     } = workspace_stage;
     plan = next_plan;
+    if let Some(run_id) = agent_task_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "hydrating",
+            Some(&remote_cwd),
+            Some(&source_checkout),
+            Some(&provider_rotation),
+        )?;
+    }
     let cleanup_policy = if agent_task_run_id.is_some() {
         WorkspaceCleanupPolicy::PreserveAlways
     } else {
@@ -1037,6 +1062,16 @@ pub(crate) fn run_lab_offload_inner(
         plan,
     )?;
     plan = dependency_hydration.plan;
+    if let Some(run_id) = agent_task_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "dispatching",
+            Some(&remote_cwd),
+            Some(&source_checkout),
+            Some(&provider_rotation),
+        )?;
+    }
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
