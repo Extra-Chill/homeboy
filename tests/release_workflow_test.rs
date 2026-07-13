@@ -83,6 +83,28 @@ fn release_quality_policy_defaults_to_lint_and_test_blocking() {
 }
 
 #[test]
+fn release_quality_policy_checks_out_event_commit_before_running_script() {
+    let policy = job_section(release_workflow(), "release-quality-policy");
+
+    let checkout_index = policy.find("actions/checkout@v4").expect(
+        "release-quality-policy must check out the repository before running the policy script",
+    );
+    let script_index = policy
+        .find("bash .github/release-quality-policy.sh")
+        .expect("release-quality-policy must invoke the policy script");
+
+    assert!(
+        checkout_index < script_index,
+        "release-quality-policy checkout must precede the policy script invocation"
+    );
+
+    assert!(
+        policy.contains("ref: ${{ github.sha }}"),
+        "release-quality-policy must check out the exact workflow/event commit (github.sha)"
+    );
+}
+
+#[test]
 fn release_quality_policy_blocks_review_test_failures_and_allows_passing_gates() {
     let failed = release_quality_policy("review lint,review test", "failure", "success", "failure");
 
