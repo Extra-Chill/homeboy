@@ -3,7 +3,9 @@ use std::path::Path;
 use std::process::Command;
 
 use super::git;
-use crate::core::runner::workspace::git::{git_snapshot, materialize_git_command};
+use crate::core::runner::workspace::git::{
+    git_bundle_install_command, git_snapshot, materialize_git_command,
+};
 use crate::core::runner::workspace::sync::sync_workspace;
 use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::core::runner::workspace::util::git_output;
@@ -11,32 +13,54 @@ use crate::core::runner::workspace::util::git_output;
 #[test]
 fn controller_routed_git_sync_materializes_private_unavailable_remote_with_changed_since_base() {
     crate::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        git(source.path(), &["init"]);
-        git(source.path(), &["config", "user.email", "test@example.com"]);
-        git(source.path(), &["config", "user.name", "Test User"]);
-        fs::write(source.path().join("file.txt"), "base\n").expect("write file");
-        git(source.path(), &["add", "."]);
-        git(source.path(), &["commit", "-m", "base"]);
-        let base = git_output(source.path(), &["rev-parse", "HEAD"]).expect("base revision");
-        let branch =
-            git_output(source.path(), &["branch", "--show-current"]).expect("source branch");
-        fs::write(source.path().join("file.txt"), "head\n").expect("write file");
-        git(source.path(), &["commit", "-am", "head"]);
+        git(origin.path(), &["init", "--bare"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        fs::write(author.path().join("base-only.txt"), "base\n").expect("write base file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "base"]);
+        let base = git_output(author.path(), &["rev-parse", "HEAD"]).expect("base revision");
+        let base_blob = git_output(author.path(), &["rev-parse", "HEAD:base-only.txt"])
+            .expect("base blob revision");
+        fs::remove_file(author.path().join("base-only.txt")).expect("remove base file");
+        fs::write(author.path().join("file.txt"), "head\n").expect("write head file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "head"]);
+        git(
+            author.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        git(author.path(), &["push", "origin", "main"]);
         git(
             source.path(),
-            &["checkout", "-b", "unrelated-private-history", &base],
+            &[
+                "clone",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
         );
-        fs::write(source.path().join("private.txt"), "unrelated\n").expect("write private");
-        git(source.path(), &["add", "."]);
-        git(
-            source.path(),
-            &["commit", "-m", "unrelated private history"],
+        assert!(
+            git_output(
+                source.path(),
+                &["rev-list", "--objects", "--missing=print", &base]
+            )
+            .expect("list promised objects")
+            .contains(&format!("?{base_blob}")),
+            "the partial source fixture must omit the base-only blob"
         );
-        let unrelated = git_output(source.path(), &["rev-parse", "HEAD"]).expect("unrelated");
-        git(source.path(), &["tag", "unrelated-private-tag"]);
-        git(source.path(), &["checkout", &branch]);
+        git(source.path(), &["remote", "rename", "origin", "controller"]);
         git(
             source.path(),
             &[
@@ -104,11 +128,22 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
         );
         assert_eq!(git_output(remote, &["rev-parse", &base]).unwrap(), base);
         assert_eq!(
+            git_output(remote, &["cat-file", "-e", &base_blob]).unwrap(),
+            ""
+        );
+        assert_eq!(
             git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
             base
         );
-        assert!(git_output(remote, &["rev-parse", "unrelated-private-tag"]).is_err());
-        assert!(git_output(remote, &["cat-file", "-e", &unrelated]).is_err());
+        assert!(
+            !git_output(
+                source.path(),
+                &["rev-list", "--objects", "--missing=print", &base]
+            )
+            .expect("list hydrated objects")
+            .contains(&format!("?{base_blob}")),
+            "the controller must hydrate the promised object before bundling"
+        );
     });
 }
 
@@ -457,6 +492,19 @@ fn git_materialization_fetches_changed_since_base_before_checkout() {
     assert!(command.contains("checkout --detach abc123"));
     assert!(command.contains("reset --hard"));
     assert!(command.contains("reset --hard abc123"));
+}
+
+#[test]
+fn git_bundle_materialization_disables_lazy_fetches() {
+    let command = git_bundle_install_command(
+        "/srv/homeboy/_lab_workspaces/homeboy-abc",
+        "abc123",
+        None,
+        "https://github.example.invalid/example-org/private-source.git",
+        false,
+    );
+
+    assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
 }
 
 #[test]

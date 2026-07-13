@@ -96,6 +96,9 @@ impl WorkspaceMaterializer {
         );
         if self.bundle {
             prefix.push_str("; bundle=\"${dest}.bundle.$$\"");
+            // Bundles are controller-complete transfers. A runner must not
+            // lazily recover a missing object from the source remote.
+            prefix.push_str("; export GIT_NO_LAZY_FETCH=1");
         }
         if self.capture_owner {
             prefix.push_str("; ");
