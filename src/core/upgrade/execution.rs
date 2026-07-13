@@ -597,7 +597,7 @@ fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
     // A caller-selected source path is an immutable build input. In particular,
     // worktree branches may be local-only or detached and must not be rewritten
     // to an origin branch before the source build or runner materialization.
-    ensure_clean_source_workspace(workspace_root)?;
+    ensure_clean_source_workspace(workspace_root)
 }
 
 fn ensure_clean_source_workspace(workspace_root: &Path) -> Result<()> {
