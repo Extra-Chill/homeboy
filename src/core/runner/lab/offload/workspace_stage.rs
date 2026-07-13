@@ -1952,6 +1952,38 @@ mod tests {
     }
 
     #[test]
+    fn portable_promotion_target_materialization_plan_requires_git() {
+        let synced = test_synced_workspace(
+            "/controller/workspaces/homeboy@promotion",
+            "/runner/workspaces/homeboy@promotion",
+        );
+        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+        let contract = LabOffloadCommand {
+            command: crate::command_contract::LabCommandContract {
+                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                ..crate::command_contract::LabCommandContract::portable(
+                    "agent-task promote",
+                    Some("--to-worktree"),
+                    false,
+                    &[],
+                )
+            },
+            required_extensions: Vec::new(),
+            required_capabilities: Vec::new(),
+            workload: None,
+        };
+
+        let plan = workspace_path_materialization_plan(
+            &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            lab_path_materialization_mode(&contract, RunnerWorkspaceSyncMode::Git),
+        );
+
+        assert_eq!(plan.entries[0].materialization_mode, "git");
+        assert_eq!(plan.entries[0].validation_status, "materialized");
+    }
+
+    #[test]
     fn preflight_agent_task_secret_env_before_workspace_stage_fails_missing_controller_secret() {
         let _secret = RemovedEnvVar::new("HOMEBOY_LAB_EARLY_MISSING_SECRET");
         let contract = test_lab_contract_with_agent_task_secrets();

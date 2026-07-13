@@ -788,7 +788,8 @@ impl Commands {
         // covers the backend-specific path, which is `None` when no
         // `--dispatch-backend` is supplied.
         if let Commands::AgentTask(args) = self {
-            if agent_task_controller_materializes_worktree(&args.command)
+            if matches!(args.command, agent_task::AgentTaskCommand::Promote(_))
+                || agent_task_controller_materializes_worktree(&args.command)
                 || agent_task_provider_requires_cwd_git_checkout(&args.command)
             {
                 contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
@@ -822,7 +823,7 @@ impl Commands {
                 command: agent_task::AgentTaskCommand::Promote(_),
             }) => LabCommandContract::portable(
                 AGENT_TASK_PROMOTE_LAB_LABEL,
-                None,
+                Some("--to-worktree"),
                 false,
                 LAB_NO_EXTRA_CAPABILITIES,
             ),
@@ -1308,6 +1309,17 @@ impl Commands {
     }
 
     pub fn lab_offload_captures_mutation_patch(&self) -> bool {
+        if matches!(
+            self,
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Promote(agent_task::PromoteArgs {
+                    dry_run: true,
+                    ..
+                }),
+            })
+        ) {
+            return false;
+        }
         self.lab_contract()
             .is_some_and(|contract| contract.capture_mutation_patch)
     }
@@ -1509,8 +1521,25 @@ mod low_noise_polling_tests {
         assert_eq!(contract.portability, LabCommandPortability::Portable);
         assert_eq!(
             contract.workspace_mode_policy,
-            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+            LabWorkspaceModePolicy::GitCheckoutRequired
         );
+        assert!(contract.capture_mutation_patch);
+        assert!(!command.lab_offload_captures_mutation_patch());
+    }
+
+    #[test]
+    fn agent_task_promote_apply_captures_remote_target_mutation_for_controller_handoff() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "promote",
+            "/runner/artifacts/aggregate.json",
+            "--to-worktree",
+            "homeboy@fix-7986",
+        ]);
+
+        assert!(command.lab_offload_captures_mutation_patch());
+        assert_eq!(command.lab_offload_mutation_flag(), Some("--to-worktree"));
     }
 
     #[test]

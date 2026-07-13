@@ -307,14 +307,23 @@ pub(crate) fn run_provider_command(
         },
     };
     if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::validation_invalid_argument_with_evidence(
             "command",
             format!(
                 "promotion provider command failed with exit code {}: {}",
                 exit_code, display
             ),
             None,
-            Some(vec![report.stderr.clone()]),
+            None,
+            Some(crate::core::error::CommandEvidence {
+                command: display,
+                cwd: invocation.cwd.clone(),
+                location: Some("local".to_string()),
+                exit_code,
+                stdout: report.stdout.clone(),
+                stderr: report.stderr.clone(),
+                truncated: report.capture.stdout.truncated || report.capture.stderr.truncated,
+            }),
         ));
     }
     let response_value: serde_json::Value =
