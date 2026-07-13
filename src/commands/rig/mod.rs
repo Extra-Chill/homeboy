@@ -54,6 +54,15 @@ impl RigArgs {
         )
     }
 
+    pub(crate) fn runner_install_request(&self) -> Option<(&str, Option<&str>, bool)> {
+        match &self.command {
+            RigCommand::Install {
+                source, id, all, ..
+            } => Some((source, id.as_deref(), *all)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn up_dry_run_rig_id(&self) -> Option<&str> {
         match &self.command {
             RigCommand::Up {
@@ -1039,6 +1048,24 @@ mod tests {
                 .expect("rig sync should parse");
 
         assert!(cli.rig.is_runner_source_management_command());
+    }
+
+    #[test]
+    fn exposes_runner_install_request_for_controller_registration() {
+        let cli = TestCli::try_parse_from([
+            "homeboy",
+            "install",
+            "/tmp/rig-package",
+            "--id",
+            "fixture-matrix",
+            "--reinstall",
+        ])
+        .expect("rig install should parse");
+
+        assert_eq!(
+            cli.rig.runner_install_request(),
+            Some(("/tmp/rig-package", Some("fixture-matrix"), false))
+        );
     }
 
     #[test]
