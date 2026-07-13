@@ -59,6 +59,12 @@ pub fn route_after_parse(
             return Ok(Some(exit_code));
         }
         if args.is_runner_source_management_command() {
+            if let Some((source, id, all)) = args.runner_install_request() {
+                // Lab routing resolves rig components and path inputs on the
+                // controller before dispatch, so runner-targeted installs must
+                // keep the controller registry pointed at the same source.
+                homeboy::core::rig::install(source, id, all)?;
+            }
             let (stdout, stderr, exit_code) =
                 run_rig_source_management_on_runner(runner_id, normalized_args, output_file)?;
             if !stderr.is_empty() {

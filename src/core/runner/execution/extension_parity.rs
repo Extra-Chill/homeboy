@@ -429,6 +429,9 @@ fn dev_sync_extension_overlay(
         if overlay.id != extension_id {
             continue;
         }
+        if !Path::new(&overlay.source_path).is_dir() {
+            continue;
+        }
         matches += 1;
         overlay.duplicate_records = matches.saturating_sub(1);
         if selected
@@ -1115,7 +1118,7 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
-        ensure_extension_materialized, plan_extension_parity,
+        dev_sync_extension_overlay, ensure_extension_materialized, plan_extension_parity,
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
@@ -1687,6 +1690,16 @@ mod tests {
             &remote_stdout,
         )
         .expect("matching dev overlay hash should pass parity");
+    }
+
+    #[test]
+    fn dev_overlay_ignores_deleted_controller_source() {
+        let deleted = tempfile::tempdir().expect("deleted source dir");
+        let deleted_path = deleted.path().display().to_string();
+        drop(deleted);
+        let runner = runner_with_overlay("nodejs", &deleted_path, "stale-hash");
+
+        assert!(dev_sync_extension_overlay(&runner, "nodejs").is_none());
     }
 
     #[test]
