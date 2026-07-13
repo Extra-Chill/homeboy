@@ -128,6 +128,60 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
 }
 
 #[test]
+fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
+    with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let continuation = workspace.path().join("runner-continuation");
+        homeboy::core::runners::create(r#"{"id":"lab-local","kind":"local"}"#, false)
+            .expect("local runner created");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "pwd > {} && touch {}",
+                continuation.display(),
+                continuation.display()
+            ),
+        ];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-runner-resume-proxy",
+                runner_id: "lab-local",
+                remote_workspace: &workspace.path().display().to_string(),
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+
+        let executor = CapturingExecutor::default();
+        let error = run_submitted_with_executor(
+            "run-cli-runner-resume-proxy".to_string(),
+            None,
+            executor.clone(),
+        )
+        .expect_err("runner continuation awaits its durable result");
+        assert!(continuation.exists(), "recorded command ran on the runner");
+        assert_eq!(
+            std::fs::read_to_string(&continuation)
+                .expect("runner continuation cwd")
+                .trim(),
+            workspace
+                .path()
+                .canonicalize()
+                .expect("canonical runner workspace")
+                .display()
+                .to_string()
+        );
+        assert!(error.message.contains("was resumed on its recorded runner"));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+    });
+}
+
+#[test]
 fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

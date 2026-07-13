@@ -213,7 +213,11 @@ fn transport_proxy_recovery_command(value: &Value) -> Option<String> {
         .and_then(Value::as_str);
     Some(match job_id {
         Some(job_id) => format!("homeboy runner job logs {runner_id} {job_id} --follow"),
-        None => format!("homeboy runner connect {runner_id}"),
+        None => value
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(|run_id| format!("homeboy agent-task run {run_id}"))
+            .unwrap_or_else(|| format!("homeboy runner connect {runner_id}")),
     })
 }
 
@@ -234,6 +238,22 @@ mod transport_proxy_tests {
         assert_eq!(
             transport_proxy_recovery_command(&value),
             Some("homeboy runner job logs runner-transport-42 job-42 --follow".to_string())
+        );
+    }
+
+    #[test]
+    fn unbound_transport_proxy_recovery_action_resumes_the_durable_run() {
+        let value = json!({
+            "run_id": "agent-task-proxy-42",
+            "metadata": {
+                "kind": "lab_offload_controller_proxy",
+                "runner_id": "homeboy-lab"
+            }
+        });
+
+        assert_eq!(
+            transport_proxy_recovery_command(&value),
+            Some("homeboy agent-task run agent-task-proxy-42".to_string())
         );
     }
 }

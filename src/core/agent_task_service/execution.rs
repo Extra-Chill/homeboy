@@ -27,6 +27,26 @@ pub struct AgentTaskRunResult<T> {
     pub exit_code: i32,
 }
 
+fn transport_proxy_recovery_error(recovery: agent_task_lifecycle::TransportProxyRecovery) -> Error {
+    let recovery_message = match &recovery {
+        agent_task_lifecycle::TransportProxyRecovery::Resumed { .. } => {
+            "was resumed on its recorded runner; await its durable result"
+        }
+        _ => "is owned by runner transport recovery; provider execution was not attempted",
+    };
+    Error::validation_invalid_argument(
+        "run_id",
+        format!(
+            "agent-task run '{}' {recovery_message}",
+            recovery.record().run_id,
+        ),
+        Some(recovery.record().run_id.clone()),
+        None,
+    )
+    .with_hint(format!("Next: {}", recovery.next_action()))
+    .with_retryable(true)
+}
+
 pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
     let raw = config::read_json_spec_to_string(spec)?;
     let mut plan: AgentTaskPlan = serde_json::from_str(&raw).map_err(|error| {
@@ -95,19 +115,7 @@ where
                 value: aggregate,
             });
         }
-        return Err(
-            Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is owned by runner transport recovery; provider execution was not attempted",
-                    recovery.record().run_id
-                ),
-                Some(recovery.record().run_id.clone()),
-                None,
-            )
-            .with_hint(format!("Next: {}", recovery.next_action()))
-            .with_retryable(true),
-        );
+        return Err(transport_proxy_recovery_error(recovery));
     }
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
     if let Some(timeout_ms) = timeout_ms {
@@ -147,19 +155,7 @@ where
                 value: aggregate,
             });
         }
-        return Err(
-            Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is owned by runner transport recovery; provider execution was not attempted",
-                    recovery.record().run_id
-                ),
-                Some(recovery.record().run_id.clone()),
-                None,
-            )
-            .with_hint(format!("Next: {}", recovery.next_action()))
-            .with_retryable(true),
-        );
+        return Err(transport_proxy_recovery_error(recovery));
     }
     agent_task_lifecycle::mark_resuming(&run_id)?;
     run_claimed(run_id, executor)
