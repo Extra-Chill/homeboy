@@ -4,9 +4,9 @@
 use super::*;
 use crate::core::agent_task::{
     AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
-    AgentTaskWorkflowStepStatus, AgentTaskWorkspace, AgentTaskSourceRef, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -269,14 +269,20 @@ fn slow_materialization_remains_discoverable_with_source_identity_and_is_idempot
             "agent-task".to_string(),
             "cook".to_string(),
         ];
+        let mut durable_plan = test_plan();
+        durable_plan.tasks[0].task_id = "https://github.com/example/project/issues/42".to_string();
+        durable_plan.tasks[0].source_refs = vec![AgentTaskSourceRef {
+            kind: "task".to_string(),
+            uri: "https://github.com/example/project/issues/42".to_string(),
+            revision: None,
+        }];
         let started = std::time::Instant::now();
         let first = record_lab_offload_planned(LabOffloadProxyPlan {
             run_id: "slow-materialization",
             runner_id: "homeboy-lab",
             remote_workspace: "pending-materialization",
             remote_command: &command,
-            task_id: Some("https://github.com/example/project/issues/42"),
-            task_source: Some("https://github.com/example/project/issues/42"),
+            durable_plan: Some(&durable_plan),
         })
         .expect("proxy persisted before staging");
 
@@ -291,18 +297,13 @@ fn slow_materialization_remains_discoverable_with_source_identity_and_is_idempot
             visible.tasks[0].task_id,
             "https://github.com/example/project/issues/42"
         );
-        assert_eq!(
-            visible.metadata["task_source"],
-            "https://github.com/example/project/issues/42"
-        );
 
         let resumed = record_lab_offload_planned(LabOffloadProxyPlan {
             run_id: "slow-materialization",
             runner_id: "homeboy-lab",
             remote_workspace: "pending-materialization",
             remote_command: &command,
-            task_id: Some("https://github.com/example/project/issues/42"),
-            task_source: Some("https://github.com/example/project/issues/42"),
+            durable_plan: Some(&durable_plan),
         })
         .expect("resume does not duplicate staging record");
         assert_eq!(resumed.run_id, first.run_id);
