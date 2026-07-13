@@ -184,3 +184,174 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
             .contains("workspace provider command"));
     });
 }
+
+#[derive(Clone)]
+struct CommittingExecutor {
+    workspace: std::path::PathBuf,
+}
+
+impl AgentTaskExecutorAdapter for CommittingExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        std::fs::write(self.workspace.join("agent-change.txt"), "committed work\n")
+            .expect("write executor change");
+        let status = Command::new("git")
+            .args(["add", "agent-change.txt"])
+            .current_dir(&self.workspace)
+            .status()
+            .expect("stage executor change");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args(["commit", "-m", "agent: make committed change"])
+            .current_dir(&self.workspace)
+            .status()
+            .expect("commit executor change");
+        assert!(status.success());
+
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("committed work".to_string()),
+            failure_classification: None,
+            artifacts: vec![
+                AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "agent-result".to_string(),
+                    kind: "agent_result".to_string(),
+                    name: Some("agent-result.json".to_string()),
+                    label: None,
+                    role: None,
+                    semantic_key: None,
+                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    url: None,
+                    mime: Some("application/json".to_string()),
+                    size_bytes: None,
+                    sha256: None,
+                    metadata: Value::Null,
+                },
+                AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "transcript".to_string(),
+                    kind: "transcript".to_string(),
+                    name: Some("transcript.log".to_string()),
+                    label: None,
+                    role: None,
+                    semantic_key: None,
+                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    url: None,
+                    mime: Some("text/plain".to_string()),
+                    size_bytes: None,
+                    sha256: None,
+                    metadata: Value::Null,
+                },
+            ],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+#[test]
+fn cook_promotes_executor_commit_from_a_clean_workspace_without_patch_candidates() {
+    with_temp_home(|| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        init_runtime_component_checkout(&workspace);
+        let provider = temp.path().join("promotion-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                workspace.display()
+            ),
+        )
+        .expect("write promotion provider");
+
+        let (value, exit_code) = run_cook_with_executor(
+            AgentTaskCookArgs {
+                dispatch: DispatchArgs {
+                    prompt: Some("commit a change".to_string()),
+                    tasks: Vec::new(),
+                    cwd: Some(workspace.display().to_string()),
+                    workspace: None,
+                    repo: Some("fixture-component".to_string()),
+                    task_url: None,
+                    backend: Some("fixture".to_string()),
+                    selector: None,
+                    model: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    concurrency: 1,
+                    run_id: Some("cook-committed-work".to_string()),
+                    core: DispatchCoreArgs {
+                        tasks_json: None,
+                        provider_config: None,
+                        client_context: None,
+                        attempts: 1,
+                        queue_only: false,
+                        timeout_ms: None,
+                        resolved_provider_policy: None,
+                    },
+                },
+                goal: None,
+                to_worktree: "fixture-component@promoted".to_string(),
+                provider_command: Some(format!("sh {}", provider.display())),
+                gates: VerifyGateArgs {
+                    verify: vec!["true".to_string()],
+                    private_verify: Vec::new(),
+                    private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                },
+                max_attempts: 1,
+                no_finalize: true,
+                base: "main".to_string(),
+                head: None,
+                title: None,
+                commit_message: None,
+                protected_branches: review::default_protected_branches(),
+                ai_tool: "OpenCode (GPT-5.6 Sol)".to_string(),
+                ai_used_for: "test".to_string(),
+            },
+            CommittingExecutor {
+                workspace: workspace.clone(),
+            },
+        )
+        .expect("cook completes");
+
+        assert_eq!(exit_code, 0, "{value:#}");
+        assert_eq!(value["status"], "green_no_finalize");
+        assert_eq!(
+            value["attempts"][0]["promotion"]["patch_artifact"]["id"],
+            "committed-changes"
+        );
+        assert_eq!(
+            value["attempts"][0]["promotion"]["changed_files"],
+            json!(["agent-change.txt"])
+        );
+        assert_eq!(
+            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["change_source"],
+            "local_commits"
+        );
+        assert_eq!(
+            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["commits"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&workspace)
+            .output()
+            .expect("read workspace status");
+        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+    });
+}

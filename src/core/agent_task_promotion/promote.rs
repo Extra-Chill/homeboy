@@ -60,7 +60,23 @@ pub(crate) fn promote_with_provider(
         ));
     }
 
-    let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
+    let artifact = match select_patch_artifact(&outcome, options.artifact_id.as_deref()) {
+        Ok(artifact) => artifact,
+        Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {
+            if let Some(committed_patch) = committed_changes_patch(&options)? {
+                return promote_committed_changes(
+                    &options,
+                    provider,
+                    &source_kind,
+                    &outcome,
+                    None,
+                    committed_patch,
+                );
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
     let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
         Error::internal_io(
@@ -71,70 +87,14 @@ pub(crate) fn promote_with_provider(
     validate_artifact_content(&artifact, &patch)?;
     if patch.trim().is_empty() {
         if let Some(committed_patch) = committed_changes_patch(&options)? {
-            let normalized_patch = normalize_promotion_patch(
-                &std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
-                    Error::internal_io(
-                        error.to_string(),
-                        Some(format!(
-                            "read committed changes promotion patch {}",
-                            committed_patch.patch_path.display()
-                        )),
-                    )
-                })?,
-                &options.to_worktree,
-            )?;
-            let mut command_evidence = Vec::new();
-            let applied_worktree_path = if options.dry_run {
-                None
-            } else {
-                let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
-                    schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
-                    to_workspace: options.to_worktree.clone(),
-                    patch_path: committed_patch.patch_path.display().to_string(),
-                    changed_files: normalized_patch.changed_files.clone(),
-                })?;
-                command_evidence.extend(target.command_evidence);
-                Some(target.path)
-            };
-            let gates = if let Some(path) = applied_worktree_path.as_deref() {
-                run_promotion_gates(&options, provider, path)?
-            } else {
-                PromotionGateRun::without_gates(options.dry_run)
-            };
-            let target = AgentTaskPromotionTarget::from_worktree(
-                options.to_worktree.clone(),
-                applied_worktree_path.as_deref(),
+            return promote_committed_changes(
+                &options,
+                provider,
+                &source_kind,
+                &outcome,
+                Some(&artifact),
+                committed_patch,
             );
-            let operator_notification = promotion_notification(gates.status, &target);
-
-            return Ok(AgentTaskPromotionReport {
-                schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-                status: gates.status,
-                source: promotion_source(&source_kind, &outcome, &options),
-                to_worktree: options.to_worktree,
-                target,
-                patch_artifact: AgentTaskPromotionArtifactRef {
-                    id: "committed-changes".to_string(),
-                    kind: "patch".to_string(),
-                    path: committed_patch.patch_path.display().to_string(),
-                    sha256: Some(committed_patch.sha256),
-                },
-                changed_files: normalized_patch.changed_files,
-                command_evidence,
-                deterministic_gates: gates.deterministic_gates,
-                gate_results: gates.gate_results,
-                provenance: json!({
-                    "source_schema": outcome.schema,
-                    "artifact_metadata": artifact.metadata,
-                    "worktree_path": applied_worktree_path,
-                    "dependencies_materialized": gates.dependencies_materialized,
-                    "change_source": "local_commits",
-                    "base_ref": committed_patch.base_ref,
-                    "commit_range": committed_patch.commit_range,
-                    "commits": committed_patch.commits,
-                }),
-                operator_notification,
-            });
         }
         let status = AgentTaskPromotionStatus::NoChanges;
         let target = AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), None);
@@ -220,6 +180,87 @@ pub(crate) fn promote_with_provider(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+        }),
+        operator_notification,
+    })
+}
+
+fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
+    outcome
+        .artifacts
+        .iter()
+        .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
+}
+
+fn promote_committed_changes(
+    options: &AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    source_kind: &str,
+    outcome: &AgentTaskOutcome,
+    artifact: Option<&AgentTaskArtifact>,
+    committed_patch: CommittedChangesPatch,
+) -> Result<AgentTaskPromotionReport> {
+    let normalized_patch = normalize_promotion_patch(
+        &std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "read committed changes promotion patch {}",
+                    committed_patch.patch_path.display()
+                )),
+            )
+        })?,
+        &options.to_worktree,
+    )?;
+    let mut command_evidence = Vec::new();
+    let applied_worktree_path = if options.dry_run {
+        None
+    } else {
+        let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: options.to_worktree.clone(),
+            patch_path: committed_patch.patch_path.display().to_string(),
+            changed_files: normalized_patch.changed_files.clone(),
+        })?;
+        command_evidence.extend(target.command_evidence);
+        Some(target.path)
+    };
+    let gates = if let Some(path) = applied_worktree_path.as_deref() {
+        run_promotion_gates(options, provider, path)?
+    } else {
+        PromotionGateRun::without_gates(options.dry_run)
+    };
+    let target = AgentTaskPromotionTarget::from_worktree(
+        options.to_worktree.clone(),
+        applied_worktree_path.as_deref(),
+    );
+    let operator_notification = promotion_notification(gates.status, &target);
+
+    Ok(AgentTaskPromotionReport {
+        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+        status: gates.status,
+        source: promotion_source(source_kind, outcome, options),
+        to_worktree: options.to_worktree.clone(),
+        target,
+        patch_artifact: AgentTaskPromotionArtifactRef {
+            id: "committed-changes".to_string(),
+            kind: "patch".to_string(),
+            path: committed_patch.patch_path.display().to_string(),
+            sha256: Some(committed_patch.sha256),
+        },
+        changed_files: normalized_patch.changed_files,
+        command_evidence,
+        deterministic_gates: gates.deterministic_gates,
+        gate_results: gates.gate_results,
+        provenance: json!({
+            "source_schema": outcome.schema,
+            "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
+            "worktree_path": applied_worktree_path,
+            "dependencies_materialized": gates.dependencies_materialized,
+            "change_source": "local_commits",
+            "base_ref": committed_patch.base_ref,
+            "commit_range": committed_patch.commit_range,
+            "commits": committed_patch.commits,
         }),
         operator_notification,
     })
@@ -311,11 +352,9 @@ fn promotion_source(
 }
 
 struct CommittedChangesPatch {
-    worktree_path: PathBuf,
     base_ref: String,
     patch_path: PathBuf,
     sha256: String,
-    changed_files: Vec<String>,
     commit_range: String,
     commits: Vec<Value>,
 }
@@ -374,11 +413,9 @@ fn committed_changes_patch(
         )
     })?;
     Ok(Some(CommittedChangesPatch {
-        worktree_path: worktree_path.to_path_buf(),
         base_ref,
         patch_path,
         sha256,
-        changed_files,
         commit_range,
         commits,
     }))
