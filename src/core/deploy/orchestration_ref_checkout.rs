@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 use crate::core::git;
+
+const REMOTE_REF_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExactRefIdentity {
@@ -247,11 +250,18 @@ fn resolve_remote_commit(
     let transport_env = component_transport_env(component, &remote_url);
 
     if is_full_sha(requested_ref) {
-        if git::run_git_with_env(
+        log_status!(
+            "deploy",
+            "phase=exact_ref_fetch component={} ref={}",
+            component_id,
+            requested_ref
+        );
+        if git::run_git_with_env_timeout(
             source_root,
             &["fetch", "--no-tags", &remote, requested_ref],
             "fetch exact deploy SHA",
             &transport_env,
+            REMOTE_REF_QUERY_TIMEOUT,
         )
         .is_ok()
         {
@@ -285,11 +295,18 @@ fn resolve_remote_commit(
         component_id,
         &transport_env,
     )?;
-    git::run_git_with_env(
+    log_status!(
+        "deploy",
+        "phase=exact_ref_fetch component={} ref={}",
+        component_id,
+        requested_ref
+    );
+    git::run_git_with_env_timeout(
         source_root,
         &["fetch", "--no-tags", &remote, &remote_ref],
         "fetch named exact deploy ref",
         &transport_env,
+        REMOTE_REF_QUERY_TIMEOUT,
     )
     .map_err(|err| remote_transport_error(&remote, component_id, &err))?;
     let sha = git::run_git(
@@ -322,11 +339,18 @@ fn resolve_named_remote_ref(
     } else {
         vec!["ls-remote", "--refs", remote, requested_ref]
     };
-    let output = git::run_git_with_env(
+    log_status!(
+        "deploy",
+        "phase=exact_ref_remote_query component={} ref={}",
+        component_id,
+        requested_ref
+    );
+    let output = git::run_git_with_env_timeout(
         source_root,
         &args,
         "query named exact deploy ref",
         transport_env,
+        REMOTE_REF_QUERY_TIMEOUT,
     )
     .map_err(|err| remote_transport_error(remote, component_id, &err))?;
     let candidates: Vec<&str> = output
