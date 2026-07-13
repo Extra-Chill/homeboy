@@ -722,6 +722,7 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         args: Vec::new(),
         lab_changed_files_json: None,
         json_summary: args.summary,
+        restore_checkout: true,
     }
 }
 

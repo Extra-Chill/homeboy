@@ -43,6 +43,7 @@ fn test_command_args(root: &Path) -> TestArgs {
         setting_args: SettingArgs::default(),
         args: Vec::new(),
         json_summary: false,
+        restore_checkout: false,
     }
 }
 

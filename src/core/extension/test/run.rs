@@ -36,6 +36,7 @@ pub struct TestRunWorkflowArgs {
     pub changed_since: Option<String>,
     pub precomputed_changed_files: Option<Vec<String>>,
     pub json_summary: bool,
+    pub restore_checkout: bool,
     pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
 }
@@ -149,6 +150,23 @@ fn setting_truthy(settings: &[(String, String)], key: &str) -> bool {
 }
 
 pub fn run_main_test_workflow(
+    component: &Component,
+    source_path: &Path,
+    args: TestRunWorkflowArgs,
+    run_dir: &RunDir,
+) -> crate::core::Result<TestRunWorkflowResult> {
+    if !args.restore_checkout {
+        return run_main_test_workflow_inner(component, source_path, args, run_dir);
+    }
+
+    let component_label = args.component_label.clone();
+    let json_summary = args.json_summary;
+    run_review_test_lifecycle(source_path, component_label, json_summary, || {
+        run_main_test_workflow_inner(component, source_path, args, run_dir)
+    })
+}
+
+fn run_main_test_workflow_inner(
     component: &Component,
     source_path: &Path,
     args: TestRunWorkflowArgs,
@@ -508,6 +526,114 @@ pub fn run_main_test_workflow(
     })
 }
 
+struct TestCheckoutGuard {
+    path: std::path::PathBuf,
+    head: String,
+}
+
+fn run_review_test_lifecycle(
+    source_path: &Path,
+    component: String,
+    json_summary: bool,
+    run: impl FnOnce() -> crate::core::Result<TestRunWorkflowResult>,
+) -> crate::core::Result<TestRunWorkflowResult> {
+    let guard = TestCheckoutGuard::capture(source_path)?;
+    let result =
+        run().unwrap_or_else(|error| failed_test_workflow(component, json_summary, &error));
+    guard.restore()?;
+    Ok(result)
+}
+
+impl TestCheckoutGuard {
+    fn capture(path: &Path) -> crate::core::Result<Self> {
+        let changes = crate::core::git::get_uncommitted_changes(&path.to_string_lossy())?;
+        if changes.has_changes {
+            let files = changes
+                .staged
+                .iter()
+                .chain(changes.unstaged.iter())
+                .chain(changes.untracked.iter())
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(Error::validation_invalid_argument(
+                "working_tree",
+                "Review tests require a clean component checkout",
+                None,
+                Some(vec![format!("Dirty files: {}", files.join(", "))]),
+            ));
+        }
+
+        let head =
+            crate::core::git::run_git(path, &["rev-parse", "HEAD"], "capture review test HEAD")?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            head: head.trim().to_string(),
+        })
+    }
+
+    fn restore(&self) -> crate::core::Result<()> {
+        crate::core::git::run_git(
+            &self.path,
+            &["reset", "--hard", &self.head],
+            "restore review test checkout",
+        )?;
+        crate::core::git::run_git(
+            &self.path,
+            &["clean", "-fd"],
+            "remove review test artifacts",
+        )?;
+
+        let changes = crate::core::git::get_uncommitted_changes(&self.path.to_string_lossy())?;
+        if changes.has_changes {
+            return Err(Error::internal_unexpected(
+                "review test checkout remained dirty after restoration",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn failed_test_workflow(
+    component: String,
+    json_summary: bool,
+    error: &Error,
+) -> TestRunWorkflowResult {
+    let message = error.to_string();
+    TestRunWorkflowResult {
+        status: "failed".to_string(),
+        component,
+        exit_code: 2,
+        test_counts: None,
+        findings: None,
+        failure_analysis_input: None,
+        coverage: None,
+        baseline_comparison: None,
+        analysis: None,
+        autofix: None,
+        hints: Some(vec![
+            "The test runner failed during setup or execution; inspect raw_output.stderr_tail"
+                .to_string(),
+        ]),
+        test_scope: None,
+        summary: json_summary.then(|| build_test_summary(None, None, 2)),
+        raw_output: Some(RawTestOutput {
+            stdout_tail: String::new(),
+            stderr_tail: message.clone(),
+            truncated: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_seen_bytes: 0,
+            stdout_retained_bytes: 0,
+            stderr_seen_bytes: message.len(),
+            stderr_retained_bytes: message.len(),
+            stdout_limit_bytes: 0,
+            stderr_limit_bytes: 0,
+        }),
+        extension_phase_timings: Vec::new(),
+    }
+}
+
 fn run_declared_result_parser(
     component: &Component,
     context: &crate::core::extension::ExtensionExecutionContext,
@@ -840,6 +966,111 @@ mod tests {
     use crate::core::component::ComponentScriptsConfig;
     use crate::core::extension::test::TestFailure;
     use crate::test_support::with_isolated_home;
+
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn clean_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("temp dir");
+        run_git(temp.path(), &["init", "-q", "--initial-branch", "main"]);
+        run_git(
+            temp.path(),
+            &["config", "user.email", "homeboy@example.com"],
+        );
+        run_git(temp.path(), &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(temp.path().join("tracked.txt"), "original\n").expect("tracked file");
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-q", "-m", "fixture"]);
+        temp
+    }
+
+    fn assert_clean(dir: &Path) {
+        assert_eq!(run_git(dir, &["status", "--porcelain=v1"]), "");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tracked.txt")).expect("tracked file"),
+            "original\n"
+        );
+        assert!(!dir.join("generated.txt").exists());
+    }
+
+    #[test]
+    fn setup_failure_returns_structured_result_and_restores_clean_checkout() {
+        let repo = clean_repo();
+
+        let result = run_review_test_lifecycle(repo.path(), "fixture".to_string(), true, || {
+            std::fs::write(repo.path().join("tracked.txt"), "setup mutation\n")
+                .expect("mutate tracked file");
+            std::fs::write(repo.path().join("generated.txt"), "setup artifact\n")
+                .expect("write setup artifact");
+            Err(Error::internal_unexpected("fixture setup failed"))
+        })
+        .expect("setup failure should become a test result");
+        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let json = serde_json::to_value(output).expect("structured output");
+
+        assert_eq!(exit_code, 2);
+        assert_eq!(json["passed"], false);
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["failure"]["category"], "infrastructure");
+        assert!(json["raw_output"]["stderr_tail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("fixture setup failed"));
+        assert_clean(repo.path());
+    }
+
+    #[test]
+    fn test_failure_returns_structured_result_and_restores_clean_checkout() {
+        let repo = clean_repo();
+
+        let result = run_review_test_lifecycle(repo.path(), "fixture".to_string(), true, || {
+            std::fs::write(repo.path().join("tracked.txt"), "test mutation\n")
+                .expect("mutate tracked file");
+            std::fs::write(repo.path().join("generated.txt"), "test artifact\n")
+                .expect("write test artifact");
+            Ok(TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "fixture".to_string(),
+                exit_code: 1,
+                test_counts: Some(TestCounts::new(1, 0, 1, 0)),
+                findings: None,
+                failure_analysis_input: None,
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: Some(build_test_summary(
+                    Some(&TestCounts::new(1, 0, 1, 0)),
+                    None,
+                    1,
+                )),
+                raw_output: None,
+                extension_phase_timings: Vec::new(),
+            })
+        })
+        .expect("test failure should remain a test result");
+        let (output, exit_code) = super::super::report::from_main_workflow(result);
+        let json = serde_json::to_value(output).expect("structured output");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(json["passed"], false);
+        assert_eq!(json["test_counts"]["failed"], 1);
+        assert_eq!(json["failure"]["category"], "findings");
+        assert_clean(repo.path());
+    }
 
     #[test]
     fn tail_lines_returns_full_text_when_under_limit() {
