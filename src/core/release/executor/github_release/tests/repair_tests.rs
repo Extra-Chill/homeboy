@@ -52,6 +52,25 @@ fn repair_commands_regenerate_notes_when_no_persisted_body() {
 }
 
 #[test]
+fn existing_draft_repair_uses_upload_then_publish_not_create() {
+    let repair = github_release_repair_commands(
+        "v0.10.6",
+        &test_repo(),
+        &GithubConfig::default(),
+        &["build/studio-web.zip".to_string()],
+        None,
+        None,
+    );
+
+    assert!(repair
+        .upload_command
+        .contains("gh release upload v0.10.6 build/studio-web.zip --clobber"));
+    assert!(repair
+        .publish_command
+        .contains("gh release edit v0.10.6 --draft=false"));
+}
+
+#[test]
 fn github_cli_env_sets_enterprise_host_and_proxy() {
     let github = GitHubRepo {
         host: "github.enterprise.test".to_string(),

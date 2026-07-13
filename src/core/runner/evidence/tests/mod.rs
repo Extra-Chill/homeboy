@@ -13,7 +13,10 @@ use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
 use super::download::{content_disposition_filename, download_remote_artifact};
-use super::mirror::{mirror_job_run, mirrored_patch_result, primary_mirrored_run};
+use super::mirror::{
+    bounded_remote_events, mirror_job_run, mirrored_patch_result, primary_mirrored_run,
+    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+};
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
     RemoteArtifactToken,
@@ -111,6 +114,7 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -203,6 +207,7 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -243,6 +248,31 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
 }
 
 #[test]
+fn mirrored_remote_events_keep_lifecycle_summary_without_stream_payloads() {
+    let job_id = Uuid::new_v4();
+    let events = (0..(MIRRORED_REMOTE_EVENT_LIMIT + 5))
+        .map(|sequence| JobEvent {
+            sequence: sequence as u64,
+            job_id,
+            kind: JobEventKind::Result,
+            timestamp_ms: 1_700_000_000_000,
+            message: Some("m".repeat(MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT + 100)),
+            data: Some(json!({ "unbounded": "x".repeat(1024 * 1024) })),
+        })
+        .collect::<Vec<_>>();
+    let bounded = bounded_remote_events(&events);
+
+    assert_eq!(bounded.len(), MIRRORED_REMOTE_EVENT_LIMIT);
+    assert_eq!(bounded[0]["sequence"], 5);
+    assert!(bounded.iter().all(|event| event.get("data").is_none()));
+    assert!(bounded.iter().all(|event| {
+        event["message"]
+            .as_str()
+            .is_some_and(|message| message.len() == MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT)
+    }));
+}
+
+#[test]
 fn runner_exec_explicit_run_id_overrides_inferred_name() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
@@ -259,6 +289,7 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -325,6 +356,7 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -395,6 +427,7 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -472,6 +505,7 @@ fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,
@@ -533,6 +567,7 @@ fn test_remote_fuzz_run_mirrors_under_requested_run_id_with_lab_links() {
         source_snapshot: None,
         path_materialization_plan: None,
         stale_reason: None,
+        daemon_lease_id: None,
         target_runner_id: None,
         target_project_id: None,
         claim_id: None,
@@ -669,6 +704,7 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
         source_snapshot: None,
         path_materialization_plan: None,
         stale_reason: None,
+        daemon_lease_id: None,
         target_runner_id: None,
         target_project_id: None,
         claim_id: None,

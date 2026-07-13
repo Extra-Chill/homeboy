@@ -37,6 +37,8 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 
 `--head` is for CI jobs where another step already created the release commit and tag, but Homeboy should still own the rest of the release lifecycle. It keeps the safe preflight checks, skips changelog/version/git mutation steps, populates release state from the version and tag at HEAD, then runs `release.package` (unless `--from-artifacts` is provided), `github.release`, `release.publish`, cleanup, and post-release hooks through the normal pipeline.
 
+GitHub Release asset uploads use a 30-minute timeout by default. Set `HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS` to a positive number of seconds when a slower connection or larger release assets need a longer budget. When `--head` finds an existing draft release, Homeboy resumes it, verifies attached asset metadata, and publishes it only after every requested asset is present.
+
 `--package-only --tag <TAG>` is for operator recovery when the release tag already exists but its package artifact needs to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs only the extension-owned `release.package` action, copies the produced files into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. It does not create tags, push, create GitHub Releases, publish registries, deploy, or clean up the component build output.
 
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.

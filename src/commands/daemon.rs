@@ -3,8 +3,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonStartResult, DaemonStatus, DaemonStopResult,
-    ServiceIdentity,
+    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessOrphanReconciliationResult,
+    DaemonMissingLeaseRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult,
+    DaemonStatus, DaemonStopResult, ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
@@ -26,6 +27,36 @@ enum DaemonCommand {
     },
     /// Return the current live daemon or start one when no live daemon exists
     EnsureRunning {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
+    AdoptOrphan {
+        /// Exact lease ID reported by `homeboy daemon status`
+        #[arg(long)]
+        lease_id: String,
+        /// Confirm the recorded PID was inspected and is dead
+        #[arg(long)]
+        confirm_pid_dead: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly recover active jobs when the daemon lease metadata is absent
+    RecoverMissingLease {
+        /// Exact state_identity reported by `homeboy daemon status`
+        #[arg(long)]
+        state_identity: String,
+        /// Confirm the endpoint is unreachable and the lease metadata is absent
+        #[arg(long)]
+        confirm_lease_missing: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Explicitly reconcile a lease-less orphan job store after no-owner proof
+    ReconcileLeaselessOrphans {
+        /// Confirm the daemon control plane was lost and the store may be terminalized
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -80,6 +111,9 @@ pub struct DaemonArtifactGetArgs {
 pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
+    AdoptOrphan(DaemonOrphanAdoptionResult),
+    RecoverMissingLease(DaemonMissingLeaseRecoveryResult),
+    ReconcileLeaselessOrphans(DaemonLeaselessOrphanReconciliationResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -108,6 +142,21 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         DaemonCommand::EnsureRunning { addr } => Ok((
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
             0,
+        )),
+        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
+            0,
+        )),
+        DaemonCommand::RecoverMissingLease { state_identity, confirm_lease_missing, addr } => Ok((
+            DaemonOutput::RecoverMissingLease(daemon::recover_missing_lease_state(
+                &state_identity,
+                confirm_lease_missing,
+                &addr,
+            )?),
+            0,
+        )),
+        DaemonCommand::ReconcileLeaselessOrphans { confirm_control_plane_lost, addr } => Ok((
+            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphan_store(confirm_control_plane_lost, &addr)?), 0
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),

@@ -124,6 +124,21 @@ pub struct PersistedArtifactCleanupRow {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TerminalRunRetentionOptions {
+    pub apply: bool,
+    pub older_than_days: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRunRetentionOutcome {
+    pub dry_run: bool,
+    pub older_than_days: i64,
+    pub candidate_run_ids: Vec<String>,
+    pub removed_run_count: usize,
+}
+
 #[derive(Debug, Default)]
 struct RunnerDownloadCleanupPreview {
     file_count: usize,
@@ -1085,6 +1100,34 @@ mod persisted_cleanup {
 }
 pub use persisted_cleanup::*;
 
+/// Safe, bounded retention of terminal observation rows. Artifact byte cleanup
+/// remains a separate explicit operation because artifact roots may have their
+/// own evidence-retention policy.
+pub fn retain_terminal_runs(
+    options: TerminalRunRetentionOptions,
+) -> Result<TerminalRunRetentionOutcome> {
+    if options.older_than_days < 0 {
+        return Err(Error::validation_invalid_argument(
+            "older_than_days",
+            "--older-than-days must be zero or greater",
+            Some(options.older_than_days.to_string()),
+            None,
+        ));
+    }
+    let finished_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
+    let mut store = ObservationStore::open_initialized()?;
+    let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
+    if options.apply {
+        store.delete_terminal_runs(&candidate_run_ids)?;
+    }
+    Ok(TerminalRunRetentionOutcome {
+        dry_run: !options.apply,
+        older_than_days: options.older_than_days,
+        removed_run_count: usize::from(options.apply) * candidate_run_ids.len(),
+        candidate_run_ids,
+    })
+}
+
 mod runner_downloads {
     use super::*;
 
@@ -1309,6 +1352,56 @@ mod tests {
             let err = require_run(&store, "missing-run").expect_err("missing");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("run record not found"));
+        });
+    }
+
+    #[test]
+    fn terminal_retention_is_dry_run_by_default_and_deletes_dependent_records_on_apply() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let terminal = store.start_run(sample_run("bench")).expect("terminal run");
+            store
+                .finish_run(&terminal.id, RunStatus::Pass, None)
+                .expect("finish run");
+            store
+                .record_url_artifact(&terminal.id, "report", "https://example.test/report")
+                .expect("artifact");
+            let active = store.start_run(sample_run("trace")).expect("active run");
+            let path = store.status().expect("status").path;
+            drop(store);
+            let db = rusqlite::Connection::open(path).expect("raw db");
+            db.execute(
+                "UPDATE runs SET finished_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                [&terminal.id],
+            )
+            .expect("age terminal run");
+
+            let dry = retain_terminal_runs(TerminalRunRetentionOptions {
+                apply: false,
+                older_than_days: 1,
+                limit: 10,
+            })
+            .expect("dry run");
+            assert_eq!(dry.candidate_run_ids, vec![terminal.id.clone()]);
+
+            let applied = retain_terminal_runs(TerminalRunRetentionOptions {
+                apply: true,
+                older_than_days: 1,
+                limit: 10,
+            })
+            .expect("apply");
+            assert_eq!(applied.removed_run_count, 1);
+            let store = ObservationStore::open_initialized().expect("reopen");
+            assert!(store
+                .get_run(&terminal.id)
+                .expect("terminal read")
+                .is_none());
+            assert!(store
+                .list_artifacts(&terminal.id)
+                .expect("artifact read")
+                .is_empty());
+            assert!(store.get_run(&active.id).expect("active read").is_some());
         });
     }
 

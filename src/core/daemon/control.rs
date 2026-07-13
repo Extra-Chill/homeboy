@@ -16,8 +16,9 @@ use crate::core::process::pid_is_running;
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    read_status, repair_legacy_lease_for_start, stop_unlocked,
+    DaemonLeaselessOrphanReconciliationResult, DaemonMissingLeaseRecoveryResult,
+    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -45,6 +46,241 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     ensure_running_with_wait(addr, Duration::from_secs(5))
 }
 
+/// Replace one explicitly identified, provably dead daemon lease. The operation
+/// lock covers validation, durable-job reconciliation, and replacement startup.
+pub fn adopt_orphaned_lease(
+    lease_id: &str,
+    confirm_pid_dead: bool,
+    addr: &str,
+) -> Result<DaemonOrphanAdoptionResult> {
+    if !confirm_pid_dead {
+        return Err(Error::validation_invalid_argument(
+            "confirm_pid_dead",
+            "orphan adoption requires explicit confirmation that the recorded daemon PID is dead",
+            None,
+            Some(vec!["Inspect `homeboy daemon status` and retry with --confirm-pid-dead only for the reported dead lease.".to_string()]),
+        ));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    let state = status.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "orphan adoption requires a persisted daemon lease",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "recorded daemon lease `{}` does not match requested orphan lease `{lease_id}`",
+                state.lease_id
+            ),
+            Some(lease_id.to_string()),
+            Some(vec![
+                "Run `homeboy daemon status` and adopt only its exact dead lease.".to_string(),
+            ]),
+        ));
+    }
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!("daemon lease `{lease_id}` is not proven dead"),
+            Some(lease_id.to_string()),
+            Some(vec!["Live or ambiguous daemon ownership is protected; inspect `homeboy daemon status` before retrying.".to_string()]),
+        ));
+    }
+
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+    let replacement = start_background_unlocked(addr)?;
+    Ok(DaemonOrphanAdoptionResult {
+        adopted_lease_id: lease_id.to_string(),
+        dead_pid: state.pid,
+        active_jobs_terminalized: reconciled.matching_count(),
+        retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
+        replacement,
+    })
+}
+
+/// Recover an active durable queue only when the daemon lease is absent and the
+/// operator supplies the exact status snapshot identity they inspected.
+pub fn recover_missing_lease_state(
+    state_identity: &str,
+    confirm_lease_missing: bool,
+    addr: &str,
+) -> Result<DaemonMissingLeaseRecoveryResult> {
+    if !confirm_lease_missing {
+        return Err(Error::validation_invalid_argument(
+            "confirm_lease_missing",
+            "missing-lease recovery requires --confirm-lease-missing",
+            None,
+            Some(vec!["Inspect `homeboy daemon status` and use its exact state_identity before terminalizing retryable jobs.".to_string()]),
+        ));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    if status.state_identity != state_identity {
+        return Err(Error::validation_invalid_argument(
+            "state-identity",
+            "daemon state changed since inspection; refusing missing-lease recovery",
+            Some(state_identity.to_string()),
+            Some(vec![
+                "Run `homeboy daemon status` again and use its current state_identity.".to_string(),
+            ]),
+        ));
+    }
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
+        || status.state.is_some()
+        || status.reachable
+        || status.freshness.active_jobs == 0
+    {
+        return Err(Error::validation_invalid_argument(
+            "state-identity",
+            "missing-lease recovery requires an unreachable daemon with absent lease metadata and active jobs",
+            Some(state_identity.to_string()),
+            None,
+        ));
+    }
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let reconciled = store.reconcile_missing_daemon_lease_jobs(state_identity)?;
+    let replacement = start_background_unlocked(addr)?;
+    Ok(DaemonMissingLeaseRecoveryResult {
+        recovered_state_identity: state_identity.to_string(),
+        terminalized_job_ids: reconciled.terminalized_job_ids.into_iter().map(|id| id.to_string()).collect(),
+        durable_run_ids: reconciled.durable_run_ids,
+        retry_guidance: "Inspect the retained job events and durable run IDs, then retry eligible work through its original command or workflow.".to_string(),
+        replacement,
+    })
+}
+
+/// Reconcile a durable store with no lease only when the operator explicitly
+/// confirms control-plane loss and independent host probes find no owner.
+pub fn reconcile_leaseless_orphan_store(
+    confirm_control_plane_lost: bool,
+    addr: &str,
+) -> Result<DaemonLeaselessOrphanReconciliationResult> {
+    if !confirm_control_plane_lost {
+        return Err(Error::validation_invalid_argument("confirm_control_plane_lost", "lease-less orphan reconciliation requires --confirm-control-plane-lost", None, Some(vec!["Inspect the configured runner host and retry only after confirming its daemon control plane is gone.".to_string()])));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    reconcile_leaseless_orphan_store_with_operations(
+        read_status,
+        probe_no_daemon_owner,
+        || {
+            let jobs = crate::core::paths::daemon_jobs_file()?;
+            let snapshot = jobs.with_file_name(format!(
+                "jobs.lease-less-orphan-snapshot-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::copy(&jobs, &snapshot).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("snapshot {}", jobs.display())),
+                )
+            })?;
+            let store = super::JobStore::open_without_reconciliation(jobs)?;
+            let affected = store.reconcile_leaseless_orphan_jobs()?;
+            Ok((snapshot, affected))
+        },
+        || start_background_unlocked(addr),
+    )
+}
+
+fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, Start>(
+    status: Status,
+    probe: Probe,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonLeaselessOrphanReconciliationResult>
+where
+    Status: FnOnce() -> Result<super::DaemonStatus>,
+    Probe: FnOnce() -> Result<Vec<String>>,
+    Reconcile: FnOnce() -> Result<(PathBuf, Vec<uuid::Uuid>)>,
+    Start: FnOnce() -> Result<DaemonStartResult>,
+{
+    let status = status()?;
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
+        || status.freshness.active_jobs == 0
+    {
+        return Err(Error::validation_invalid_argument(
+            "job_store",
+            "lease-less reconciliation requires lease_missing with active jobs",
+            None,
+            None,
+        ));
+    }
+    let no_owner_proof = probe()?;
+    let (snapshot_path, affected) = reconcile()?;
+    let replacement = start()?;
+    Ok(DaemonLeaselessOrphanReconciliationResult {
+        snapshot_path: snapshot_path.display().to_string(), affected_job_ids: affected.iter().map(ToString::to_string).collect(), affected_job_count: affected.len(), no_owner_proof,
+        retry_guidance: "Inspect retained job events, then retry eligible work through its original command or workflow.".to_string(), replacement,
+    })
+}
+
+fn probe_no_daemon_owner() -> Result<Vec<String>> {
+    let process = Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("probe daemon processes".to_string()))
+        })?;
+    if !process.status.success() {
+        return Err(Error::internal_unexpected(
+            "daemon process probe was ambiguous",
+        ));
+    }
+    if String::from_utf8_lossy(&process.stdout)
+        .lines()
+        .any(|line| line.contains("homeboy") && line.contains("daemon serve"))
+    {
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            "refusing lease-less reconciliation: a Homeboy daemon process is live",
+            None,
+            None,
+        ));
+    }
+    let listener = Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-c", "homeboy"])
+        .output()
+        .map_err(|e| {
+            Error::internal_io(e.to_string(), Some("probe daemon listeners".to_string()))
+        })?;
+    if listener.status.code() != Some(1) && !listener.status.success() {
+        return Err(Error::internal_unexpected(
+            "daemon listener probe was ambiguous",
+        ));
+    }
+    if listener.status.success() && !listener.stdout.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            "refusing lease-less reconciliation: a Homeboy daemon listener is live",
+            None,
+            None,
+        ));
+    }
+    Ok(vec![
+        "process probe found no `homeboy daemon serve` process".to_string(),
+        "listener probe found no Homeboy TCP listener".to_string(),
+    ])
+}
+
+fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
+    Ok(())
+}
+
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     ensure_running_with_operations(
@@ -54,6 +290,71 @@ fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartRes
         pid_is_running,
         || start_background_unlocked(addr),
     )
+}
+
+fn reconcile_dead_lease_and_ensure_running_with_operations<
+    Lock,
+    AcquireLock,
+    ReadStatus,
+    PidIsRunning,
+    Reconcile,
+    Start,
+>(
+    wait: Duration,
+    acquire_lock: AcquireLock,
+    expected_lease_id: &str,
+    read_status: ReadStatus,
+    pid_is_running: PidIsRunning,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonStartResult>
+where
+    AcquireLock: FnOnce(Duration) -> Result<Lock>,
+    ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: FnOnce(u32) -> bool,
+    Reconcile: FnOnce() -> Result<()>,
+    Start: FnOnce() -> Result<DaemonStartResult>,
+{
+    let _lock = acquire_lock(wait)?;
+    let status = read_status()?;
+    let state = status.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "expected-lease-id",
+            "remote daemon has no recorded lease; refusing dead-lease reconciliation",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    if pid_is_running(state.pid) {
+        return Ok(DaemonStartResult {
+            pid: state.pid,
+            address: state.address,
+            state_path: state.state_path,
+            lease_id: state.lease_id,
+        });
+    }
+    if status.freshness.stale_reason_code != Some(super::DaemonStaleReasonCode::PidDead) {
+        return Err(Error::validation_invalid_argument(
+            "expected-lease-id",
+            "remote daemon PID is not proven dead; refusing dead-lease reconciliation",
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    if state.lease_id != expected_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "expected-lease-id",
+            format!(
+                "remote daemon lease `{}` does not match expected stale lease; refusing reconciliation",
+                state.lease_id
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+
+    reconcile()?;
+    start()
 }
 
 fn ensure_running_with_operations<Lock, AcquireLock, ReadStatus, PidIsRunning, Start>(

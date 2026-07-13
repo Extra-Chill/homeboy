@@ -139,6 +139,7 @@ pub mod run_outcome_envelope;
 pub mod runner;
 pub mod runner_execution_envelope;
 pub mod runtime_package;
+pub mod runtime_promotion;
 pub mod scope;
 pub mod secret_env_plan;
 pub mod self_status;

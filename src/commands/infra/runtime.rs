@@ -29,6 +29,8 @@ enum RuntimeCommand {
         #[arg(long = "ref")]
         revision: Option<String>,
     },
+    /// Explicitly archive a proven dead or expired runtime-promotion lease.
+    PromotionTakeover,
 }
 
 #[derive(Subcommand)]
@@ -49,6 +51,7 @@ enum RuntimeHelperCommand {
 pub enum RuntimeOutput {
     HelperPath(RuntimeHelperPathOutput),
     RuntimePackageRefresh(RuntimePackageRefreshOutput),
+    RuntimePromotionTakeover(RuntimePromotionTakeoverOutput),
 }
 
 #[derive(Serialize)]
@@ -69,6 +72,15 @@ pub struct RuntimePackageRefreshOutput {
     replaced_existing: bool,
 }
 
+#[derive(Serialize)]
+pub struct RuntimePromotionTakeoverOutput {
+    command: String,
+    previous_pid: u32,
+    previous_operation: String,
+    previous_target: String,
+    archived_path: String,
+}
+
 pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RuntimeOutput> {
     match args.command {
         RuntimeCommand::Helper { command } => match command {
@@ -79,6 +91,7 @@ pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             source,
             revision,
         } => refresh_runtime_package(&runtime_id, &source, revision.as_deref()),
+        RuntimeCommand::PromotionTakeover => promotion_takeover(),
     }
 }
 
@@ -87,7 +100,7 @@ pub fn is_plain_mode(args: &RuntimeArgs) -> bool {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { plain, .. } => *plain,
         },
-        RuntimeCommand::Refresh { .. } => false,
+        RuntimeCommand::Refresh { .. } | RuntimeCommand::PromotionTakeover => false,
     }
 }
 
@@ -105,8 +118,24 @@ pub fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)>
                 Ok((format!("{}\n", path.to_string_lossy()), 0))
             }
         },
-        RuntimeCommand::Refresh { .. } => unreachable!("runtime refresh has no plain mode"),
+        RuntimeCommand::Refresh { .. } | RuntimeCommand::PromotionTakeover => {
+            unreachable!("runtime mutation has no plain mode")
+        }
     }
+}
+
+fn promotion_takeover() -> CmdResult<RuntimeOutput> {
+    let result = homeboy::core::runtime_promotion::takeover_stale_lease()?;
+    Ok((
+        RuntimeOutput::RuntimePromotionTakeover(RuntimePromotionTakeoverOutput {
+            command: "runtime.promotion_takeover".to_string(),
+            previous_pid: result.previous.pid,
+            previous_operation: result.previous.operation,
+            previous_target: result.previous.target,
+            archived_path: result.archived_path,
+        }),
+        0,
+    ))
 }
 
 fn helper_path(helper: &str) -> CmdResult<RuntimeOutput> {

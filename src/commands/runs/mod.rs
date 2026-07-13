@@ -35,6 +35,7 @@ mod refs;
 mod remote;
 mod remote_artifact;
 mod resources;
+mod retention;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -45,7 +46,9 @@ use super::{CmdResult, GlobalArgs};
 // Public command-layer API consumed by routing, raw/json output, rig, and bench.
 pub use dispatch::{global_runner_error, run, run_markdown};
 pub use handlers::list_runs;
-pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
+pub use types::{
+    RunsArgs, RunsOutput, RunsRetentionArgs, RunsRetentionOutput, HOSTED_BLUEPRINT_VIEWER,
+};
 
 // Intra-module re-exports so sibling submodules (and the test modules) can
 // reference shared items via `super::` without depending on each other's

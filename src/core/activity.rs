@@ -517,7 +517,7 @@ mod daemon_jobs {
         if !path.exists() {
             return Ok(());
         }
-        let store = api_jobs::JobStore::open(path)?;
+        let store = api_jobs::JobStore::open_without_reconciliation(path)?;
         for job in store.list() {
             collector.insert(item_from_job(&store, job)?);
         }
@@ -684,6 +684,8 @@ mod runner_sessions {
 mod tests {
     use super::*;
     use crate::core::agent_task_lifecycle::AgentTaskRunState;
+    use crate::core::api_jobs::JobStatus;
+    use crate::test_support::with_isolated_home;
 
     fn item(id: &str, state: ActivityState) -> ActivityItem {
         ActivityItem {
@@ -810,6 +812,27 @@ mod tests {
             item.refs.agent_task_run_id.as_deref(),
             Some("agent-task-run-123")
         );
+    }
+
+    #[test]
+    fn daemon_job_activity_collection_does_not_reconcile_running_jobs() {
+        with_isolated_home(|_| {
+            let path = paths::daemon_jobs_file().expect("jobs path");
+            let store =
+                api_jobs::JobStore::open_without_reconciliation(&path).expect("open durable store");
+            let job = store.create("runner.exec");
+            store.start(job.id).expect("start job");
+
+            let mut collector = ActivityCollector::default();
+            daemon_jobs::collect(&mut collector).expect("collect activity");
+
+            let reopened = api_jobs::JobStore::open_without_reconciliation(&path)
+                .expect("reopen durable store");
+            assert_eq!(
+                reopened.get(job.id).expect("job remains").status,
+                JobStatus::Running
+            );
+        });
     }
 
     #[test]

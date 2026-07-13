@@ -36,7 +36,8 @@ mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
-    artifact_content_url, ensure_running, fetch_artifact_to_path, start_background,
+    adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
+    reconcile_leaseless_orphan_store, recover_missing_lease_state, start_background,
     ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
@@ -53,6 +54,9 @@ const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonState {
+    /// Older writers could omit this field. Retain the remaining identity as
+    /// stale evidence instead of losing the lease and PID during deserialization.
+    #[serde(default)]
     pub schema: String,
     pub lease_id: String,
     #[serde(default)]
@@ -78,6 +82,8 @@ pub struct DaemonStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
+    /// Snapshot identity for explicit recovery when the daemon lease is absent.
+    pub state_identity: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -92,6 +98,14 @@ pub enum DaemonStaleReasonCode {
     VersionMismatch,
     RuntimePathsDrift,
     TransportUnreachable,
+}
+
+/// Whether the daemon lease data is sufficient for an explicit recovery action.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonRecoveryEvidence {
+    ProvenDead,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -109,6 +123,14 @@ pub struct DaemonFreshnessReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_evidence: Option<DaemonRecoveryEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adoption_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_paths: Option<DaemonRuntimeSnapshot>,
@@ -123,6 +145,34 @@ pub struct DaemonStartResult {
     pub address: String,
     pub state_path: String,
     pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonOrphanAdoptionResult {
+    pub adopted_lease_id: String,
+    pub dead_pid: u32,
+    pub active_jobs_terminalized: usize,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonMissingLeaseRecoveryResult {
+    pub recovered_state_identity: String,
+    pub terminalized_job_ids: Vec<String>,
+    pub durable_run_ids: Vec<String>,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonLeaselessOrphanReconciliationResult {
+    pub snapshot_path: String,
+    pub affected_job_ids: Vec<String>,
+    pub affected_job_count: usize,
+    pub no_owner_proof: Vec<String>,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -368,6 +418,7 @@ fn legacy_lease_repair_error(path: &Path, problem: impl Into<String>) -> Error {
 pub fn read_status() -> Result<DaemonStatus> {
     let path = state_path()?;
     let state_path = path.display().to_string();
+    let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
     let validation = validate_lease_file(&path)?;
     let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
 
@@ -379,7 +430,37 @@ pub fn read_status() -> Result<DaemonStatus> {
         stale_reason: validation.stale_reason,
         state: validation.state,
         state_path,
+        state_identity,
     })
+}
+
+/// Identifies the lease file and durable queue observed by `daemon status`.
+/// The recovery command recomputes it under the lifecycle lock before mutating.
+fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
+    fn update_file(hasher: &mut Sha256, label: &[u8], path: &Path) -> Result<()> {
+        hasher.update(label);
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        match fs::read(path) {
+            Ok(bytes) => {
+                hasher.update([1]);
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", path.display())),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    update_file(&mut hasher, b"daemon-state\0", state_path)?;
+    update_file(&mut hasher, b"daemon-jobs\0", jobs_path)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
@@ -416,20 +497,23 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
     };
 
     let running = pid_is_running(state.pid);
-    if state.schema != DAEMON_LEASE_SCHEMA {
-        return Ok(stale_lease(
-            state,
-            running,
-            DaemonStaleReasonCode::LeaseSchemaMismatch,
-            "unsupported daemon lease schema",
-        ));
-    }
+    // A dead owner is safe to recover even when its persisted schema was
+    // omitted. Keeping the parsed lease identity makes explicit adoption
+    // possible; a live invalid lease remains protected by schema validation.
     if !running {
         return Ok(stale_lease(
             state,
             false,
             DaemonStaleReasonCode::PidDead,
             "daemon lease pid is not running",
+        ));
+    }
+    if state.schema != DAEMON_LEASE_SCHEMA {
+        return Ok(stale_lease(
+            state,
+            true,
+            DaemonStaleReasonCode::LeaseSchemaMismatch,
+            "unsupported daemon lease schema",
         ));
     }
     let current_identity = build_identity::current();
@@ -518,6 +602,10 @@ fn freshness_report_from_validation(
         stale_reason_code: validation.stale_reason_code,
         restartable,
         lease_id: state.map(|state| state.lease_id.clone()),
+        pid: state.map(|state| state.pid),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         runtime_paths: state.map(|state| state.runtime_paths.clone()),
         active_jobs,
@@ -651,7 +739,8 @@ where
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
     let state = write_state(local_addr)?;
-    let job_store = JobStore::open(paths::daemon_jobs_file()?)?;
+    let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
+        .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
@@ -1633,6 +1722,12 @@ fn heartbeat_lease() -> Result<DaemonState> {
 }
 
 fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
+    if state.schema != DAEMON_LEASE_SCHEMA {
+        return Err(Error::internal_unexpected(format!(
+            "refusing to write daemon lease with unsupported schema `{}`",
+            state.schema
+        )));
+    }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;

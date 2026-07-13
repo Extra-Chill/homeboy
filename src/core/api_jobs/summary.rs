@@ -128,9 +128,9 @@ fn ms_to_rfc3339(ms: u64) -> String {
 fn runner_job_lifecycle_state(job: &Job) -> &'static str {
     if job.status == JobStatus::Failed
         && job.stale_reason.as_deref()
-            == Some("daemon restarted before the job reached a terminal status")
+            == Some("control plane lost before the job reached a terminal status")
     {
-        "abandoned_after_daemon_restart"
+        "orphaned_after_control_plane_loss"
     } else if job.stale_reason.is_some() {
         "stale"
     } else if matches!(job.status, JobStatus::Queued | JobStatus::Running) {
@@ -143,6 +143,6 @@ fn runner_job_lifecycle_state(job: &Job) -> &'static str {
 fn runner_job_retryable(job: &Job) -> bool {
     matches!(
         runner_job_lifecycle_state(job),
-        "abandoned_after_daemon_restart" | "stale"
+        "orphaned_after_control_plane_loss" | "stale"
     )
 }

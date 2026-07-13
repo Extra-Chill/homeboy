@@ -112,7 +112,7 @@ mod store_init_tests {
 
             assert!(status.exists);
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 6);
+            assert_eq!(status.migration_count, 8);
             assert_eq!(status.table_count, 7);
         });
     }
@@ -127,7 +127,7 @@ mod store_init_tests {
             let status = second.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 6);
+            assert_eq!(status.migration_count, 8);
             assert_eq!(status.table_count, 7);
         });
     }
@@ -149,7 +149,7 @@ mod store_init_tests {
             let status = reopened.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 6);
+            assert_eq!(status.migration_count, 8);
         });
     }
 
@@ -587,6 +587,54 @@ fn test_latest_run() {
         assert_ne!(selected.id, old.id);
         assert_ne!(selected.id, other_kind.id);
         assert!(missing.is_none());
+    });
+}
+
+#[test]
+fn latest_queries_use_timestamp_indexes_for_large_history() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let path = store.status().expect("status").path;
+        let db = rusqlite::Connection::open(path).expect("raw db");
+        let tx = db.unchecked_transaction().expect("transaction");
+        for index in 0..2_000 {
+            tx.execute(
+                "INSERT INTO runs(id, kind, component_id, started_at, status, metadata_json) VALUES (?1, ?2, ?3, ?4, 'pass', '{}')",
+                rusqlite::params![
+                    format!("run-{index:04}"),
+                    if index % 2 == 0 { "triage" } else { "bench" },
+                    if index % 3 == 0 { "workspace" } else { "other" },
+                    format!("2026-01-01T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
+                ],
+            ).expect("insert history");
+        }
+        tx.commit().expect("commit history");
+
+        let latest = store
+            .latest_run(RunListFilter {
+                kind: Some("triage".to_string()),
+                component_id: Some("workspace".to_string()),
+                limit: Some(1),
+                ..RunListFilter::default()
+            })
+            .expect("latest")
+            .expect("matching run");
+        assert_eq!(latest.id, "run-1998");
+
+        for sql in [
+            "EXPLAIN QUERY PLAN SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT 1",
+            "EXPLAIN QUERY PLAN SELECT id FROM runs WHERE kind = 'triage' AND component_id = 'workspace' ORDER BY started_at DESC, id DESC LIMIT 1",
+        ] {
+            let plan = db.prepare(sql).expect("plan").query_map([], |row| row.get::<_, String>(3))
+                .expect("plan rows").collect::<Result<Vec<_>, _>>().expect("plan detail").join(" ");
+            assert!(plan.contains("INDEX"), "expected index-backed plan: {plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
+            assert!(
+                !plan.contains("SCAN runs") || plan.contains("USING COVERING INDEX"),
+                "unexpected table scan: {plan}"
+            );
+        }
     });
 }
 

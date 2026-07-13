@@ -1,6 +1,6 @@
 use std::fs;
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 use uuid::Uuid;
 
 use super::*;
@@ -212,33 +212,45 @@ impl ObservationStore {
 
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
         let limit = filter.limit.unwrap_or(100).clamp(1, 1000);
+        let mut predicates = Vec::new();
+        let mut values: Vec<&dyn ToSql> = Vec::new();
+        if filter.kind.is_some() {
+            predicates.push("kind = ?");
+            values.push(filter.kind.as_ref().expect("checked"));
+        }
+        if filter.component_id.is_some() {
+            predicates.push("component_id = ?");
+            values.push(filter.component_id.as_ref().expect("checked"));
+        }
+        if filter.status.is_some() {
+            predicates.push("status = ?");
+            values.push(filter.status.as_ref().expect("checked"));
+        }
+        if filter.rig_id.is_some() {
+            predicates.push("rig_id = ?");
+            values.push(filter.rig_id.as_ref().expect("checked"));
+        }
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", predicates.join(" AND "))
+        };
+        values.push(&limit);
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
                        homeboy_version, git_sha, rig_id, metadata_json
                 FROM runs
-                WHERE (?1 IS NULL OR kind = ?1)
-                  AND (?2 IS NULL OR component_id = ?2)
-                  AND (?3 IS NULL OR status = ?3)
-                  AND (?4 IS NULL OR rig_id = ?4)
-                ORDER BY started_at DESC, rowid DESC
-                LIMIT ?5
+                {where_clause}
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
                 "#,
-            )
+            ))
             .map_err(sqlite_error("prepare list run records"))?;
         let rows = statement
-            .query_map(
-                params![
-                    filter.kind.as_deref(),
-                    filter.component_id.as_deref(),
-                    filter.status.as_deref(),
-                    filter.rig_id.as_deref(),
-                    limit,
-                ],
-                row_to_run_record,
-            )
+            .query_map(params_from_iter(values), row_to_run_record)
             .map_err(sqlite_error("list run records"))?;
 
         collect_rows(rows, "collect run records")
@@ -247,6 +259,49 @@ impl ObservationStore {
     pub fn latest_run(&self, mut filter: RunListFilter) -> Result<Option<RunRecord>> {
         filter.limit = Some(1);
         Ok(self.list_runs(filter)?.into_iter().next())
+    }
+
+    /// Return a bounded page of terminal rows older than `finished_before`.
+    /// Unknown statuses are deliberately retained rather than guessed terminal.
+    pub fn terminal_run_ids_before(
+        &self,
+        finished_before: &str,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM runs WHERE finished_at < ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale') ORDER BY finished_at ASC, rowid ASC LIMIT ?2",
+        ).map_err(sqlite_error("prepare terminal run retention candidates"))?;
+        let rows = statement
+            .query_map(params![finished_before, limit.clamp(1, 1000)], |row| {
+                row.get(0)
+            })
+            .map_err(sqlite_error("list terminal run retention candidates"))?;
+        collect_rows(rows, "collect terminal run retention candidates")
+    }
+
+    /// Delete run-owned records explicitly so older databases that did not
+    /// enable SQLite foreign keys retain referential integrity as well.
+    pub fn delete_terminal_runs(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction()
+            .map_err(sqlite_error("begin terminal run retention"))?;
+        for id in ids {
+            for table in [
+                "artifacts",
+                "findings",
+                "triage_items",
+                "trace_spans",
+                "trace_runs",
+            ] {
+                tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [id])
+                    .map_err(sqlite_error(format!("delete terminal run {table}")))?;
+            }
+            tx.execute("DELETE FROM runs WHERE id = ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale')", [id])
+                .map_err(sqlite_error("delete terminal run"))?;
+        }
+        tx.commit()
+            .map_err(sqlite_error("commit terminal run retention"))
     }
 
     pub fn list_runs_started_since(&self, started_at: &str) -> Result<Vec<RunRecord>> {

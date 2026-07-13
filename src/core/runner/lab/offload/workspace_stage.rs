@@ -46,6 +46,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
     lifecycle_args: &[String],
+    preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
     // Capture the orchestration facts known *before* staging so any
     // Lab-cannot-proceed error bubbling out of the pre-execution/dispatch path
@@ -70,6 +71,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         runner_workspace_root,
         run_isolation_token,
         lifecycle_args,
+        preferred_attempt_run_id,
     )
     .map_err(|error| enrich_lab_cannot_proceed_error(error, &context))
 }
@@ -86,6 +88,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
     lifecycle_args: &[String],
+    preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
     let sync_mode =
         lab_workspace_sync_mode(contract.workspace_mode_policy, lifecycle_args, source_path)?;
@@ -418,9 +421,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         command_prefix_argv.first().map(String::as_str),
         &remote_cwd,
     );
-    let (remapped_args, agent_task_run_id) =
-        ensure_agent_task_lifecycle_identity_with(&remapped_args, run_isolation_token.as_deref())
-            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
+    let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
+        &remapped_args,
+        run_isolation_token.as_deref(),
+        preferred_attempt_run_id,
+    )
+    .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
     let remote_output_file = request
         .output_file_requested
@@ -1453,7 +1459,7 @@ mod tests {
             "cargo test --lib".to_string(),
         ];
         let (args, lifecycle_run_id) =
-            ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8005"))
+            ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8005"), None)
                 .expect("pre-acceptance lifecycle identity");
 
         let command = build_lab_offload_remote_command(
@@ -2152,6 +2158,7 @@ mod tests {
                 Some(&runner_workspace_root),
                 None,
                 &args,
+                None,
             );
             std::env::set_var("PATH", prior_path);
             match prior_real_git {
@@ -2180,6 +2187,137 @@ mod tests {
                 git_output(Path::new(&stage.remote_cwd), &["rev-parse", &base]),
                 base
             );
+        });
+    }
+
+    #[test]
+    fn managed_worktree_staging_preserves_cook_attempt_identity_through_daemon_acceptance() {
+        crate::test_support::with_isolated_home(|_| {
+            let repository = tempfile::tempdir().expect("repository");
+            let worktree_parent = tempfile::tempdir().expect("worktree parent");
+            let runner_root = tempfile::tempdir().expect("runner workspace root");
+            git(repository.path(), &["init"]);
+            git(
+                repository.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            git(repository.path(), &["config", "user.name", "Test User"]);
+            std::fs::write(
+                repository.path().join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .expect("write fixture manifest");
+            git(repository.path(), &["add", "."]);
+            git(repository.path(), &["commit", "-m", "base"]);
+            let source = worktree_parent.path().join("homeboy-fix-8009");
+            git(
+                repository.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "fix/8009-staging-lifecycle-identity",
+                    source.to_str().expect("source path"),
+                ],
+            );
+
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"lab-managed-worktree-stage","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--run-id".to_string(),
+                "cook-8009".to_string(),
+                "--backend".to_string(),
+                "opencode".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@fix-8009-staging-lifecycle-identity".to_string(),
+                "--verify".to_string(),
+                "cargo check".to_string(),
+            ];
+            let (lifecycle_args, canonical_attempt_id) =
+                ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8009"), None)
+                    .expect("canonical cook attempt id");
+            let request = LabOffloadRequest {
+                command: None,
+                normalized_args: &args,
+                explicit_runner: Some("lab-managed-worktree-stage"),
+                placement: crate::cli_surface::Placement::Lab,
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace: false,
+                skip_deps_hydration: false,
+                capture_patch: false,
+                mutation_flag: None,
+                detach_after_handoff: true,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                durable_agent_task_plan: None,
+                job_overrides: LabJobOverrides::default(),
+            };
+            let contract = LabOffloadCommand {
+                command: crate::command_contract::LabCommandContract::portable(
+                    "agent-task",
+                    None,
+                    true,
+                    &[],
+                ),
+                required_extensions: Vec::new(),
+                required_capabilities: Vec::new(),
+                workload: None,
+            };
+            let runner_workspace_root = runner_root.path().display().to_string();
+            let stage = prepare_lab_offload_workspace_stage(
+                &request,
+                &contract,
+                crate::core::runner::lab_plan::base_lab_plan(Some(&contract)),
+                "lab-managed-worktree-stage",
+                &source,
+                "homeboy",
+                &["homeboy".to_string()],
+                Some(&runner_workspace_root),
+                Some("cook-8009".to_string()),
+                &lifecycle_args,
+                Some(&canonical_attempt_id),
+            )
+            .expect("managed worktree stage");
+
+            assert_eq!(
+                stage.agent_task_run_id.as_deref(),
+                Some(canonical_attempt_id.as_str())
+            );
+            assert!(stage.remapped_args.contains(&"cook-8009".to_string()));
+            assert!(stage.remapped_args.contains(&canonical_attempt_id));
+
+            crate::core::agent_task_lifecycle::record_lab_offload_phase(
+                &canonical_attempt_id,
+                "lab-managed-worktree-stage",
+                "materializing",
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("pre-acceptance lifecycle record");
+            let accepted = crate::core::agent_task_lifecycle::record_detached_lab_run(
+                crate::core::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id: &canonical_attempt_id,
+                    runner_id: "lab-managed-worktree-stage",
+                    runner_job_id: "job-8009",
+                    remote_workspace: &stage.remote_cwd,
+                    remote_command: &stage.remote_command,
+                },
+            )
+            .expect("daemon acceptance");
+            assert_eq!(accepted.run_id, canonical_attempt_id);
+            assert_eq!(accepted.metadata["runner_job_id"], "job-8009");
         });
     }
 

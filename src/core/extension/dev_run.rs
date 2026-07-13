@@ -234,14 +234,14 @@ pub(crate) fn run_extension_dev_run_with(
         &plan,
         "install",
         "extension refresh",
-        &remote_install_source,
+        &synced.remote_path,
         Vec::new(),
     );
 
     let (install, _) = exec(
         &plan.runner_id,
         RunnerExecOptions {
-            cwd: None,
+            cwd: Some(synced.remote_path.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
             command: plan.install_command.clone(),
@@ -303,7 +303,7 @@ pub(crate) fn run_extension_dev_run_with(
     let (command_output, command_exit_code) = exec(
         &plan.runner_id,
         RunnerExecOptions {
-            cwd: None,
+            cwd: Some(synced.remote_path.clone()),
             project_id: None,
             allow_diagnostic_ssh: false,
             command: plan.command.clone(),
@@ -834,6 +834,42 @@ mod tests {
                 .status,
             "succeeded"
         );
+    }
+
+    #[test]
+    fn dev_run_stages_dispatch_from_the_workload_remote_workspace() {
+        let stages = RefCell::new(Vec::new());
+        let command = vec![
+            "homeboy".to_string(),
+            "extension".to_string(),
+            "show".to_string(),
+            "demo".to_string(),
+        ];
+
+        run_extension_dev_run_with(
+            "demo",
+            "lab",
+            "/local/demo",
+            &command,
+            |_runner_id, _options| Ok((sync_output(), 0)),
+            |runner_id, options| {
+                if let Some(workload) = options.runner_workload.clone() {
+                    stages.borrow_mut().push((options.cwd.clone(), workload));
+                }
+                Ok((exec_output(runner_id, options.command, 0), 0))
+            },
+        )
+        .expect("dev run");
+
+        assert_eq!(stages.borrow().len(), 2);
+        for (cwd, workload) in stages.borrow().iter() {
+            assert_eq!(cwd.as_deref(), Some("/remote/demo"));
+            assert_eq!(
+                workload.state.remote_workspace.as_deref(),
+                cwd.as_deref(),
+                "each controller-owned stage must dispatch from its declared remote workspace"
+            );
+        }
     }
 
     #[test]

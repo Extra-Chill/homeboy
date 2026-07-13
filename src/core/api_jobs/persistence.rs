@@ -104,6 +104,7 @@ pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Res
     })
 }
 
+#[cfg(test)]
 pub(super) fn reconcile_stale_jobs(
     durable: &mut DurableJobStore,
     event_retention_limit: usize,
@@ -163,9 +164,9 @@ pub(super) fn reconcile_stale_jobs(
         }
 
         let reason = if remote_runner_job_has_unrecoverable_execution_env(stored) {
-            "daemon restarted before the remote runner claimed secret execution env".to_string()
+            "control plane lost before the remote runner claimed secret execution env".to_string()
         } else {
-            "daemon restarted before the job reached a terminal status".to_string()
+            "control plane lost before the job reached a terminal status".to_string()
         };
         let classification = stale_after_restart_classification(stored);
         stored.job.status = JobStatus::Failed;
@@ -181,7 +182,7 @@ pub(super) fn reconcile_stale_jobs(
             timestamp_ms: now,
             message: Some(reason.clone()),
             data: Some(serde_json::json!({
-                "reason": "stale_after_daemon_restart",
+                "reason": "orphaned_after_control_plane_loss",
                 "classification": classification,
             })),
         });
@@ -191,10 +192,10 @@ pub(super) fn reconcile_stale_jobs(
             job_id: stored.job.id,
             kind: JobEventKind::Status,
             timestamp_ms: now,
-            message: Some("job marked failed after daemon restart".to_string()),
+            message: Some("job marked failed after control-plane loss".to_string()),
             data: Some(serde_json::json!({
                 "status": JobStatus::Failed,
-                "reason": "stale_after_daemon_restart",
+                "reason": "orphaned_after_control_plane_loss",
                 "classification": classification,
             })),
         });
@@ -205,7 +206,7 @@ pub(super) fn reconcile_stale_jobs(
     next_sequence
 }
 
-fn stale_after_restart_classification(stored: &StoredJob) -> Value {
+pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
     let last_child_event = stored
         .events
         .iter()
@@ -219,11 +220,16 @@ fn stale_after_restart_classification(stored: &StoredJob) -> Value {
         .collect::<Vec<_>>();
 
     serde_json::json!({
-        "kind": "unrecoverable_child_after_control_plane_restart",
+        "kind": "orphaned_after_control_plane_loss",
         "recoverable": false,
-        "reason": "stale_after_daemon_restart",
+        "reason": "orphaned_after_control_plane_loss",
+        "terminal_status": "failed",
         "control_plane": {
-            "daemon_restarted": true,
+            "lost": true,
+        },
+        "retry": {
+            "recommended": true,
+            "guidance": "Retry this operation after reconnecting to a live daemon; preserved child output and artifacts describe the interrupted attempt.",
         },
         "child": {
             "terminal_result_recorded": false,

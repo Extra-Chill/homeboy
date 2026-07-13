@@ -31,26 +31,38 @@ use super::types::{
 
 pub fn run(target: super::TriageTarget, options: TriageOptions) -> Result<TriageOutput> {
     let observation = TriageObservation::start(&target, &options);
-    let refs = resolve_target_components(&target)?;
+    let refs = scope::resolve_scope_components(&target)?;
     let global_priority_labels = defaults::load_config().triage.priority_labels;
     let mut components = Vec::new();
     let mut unresolved = Vec::new();
+    let (resolved, unresolved_refs) =
+        resolve_and_dedupe_refs_with_parent_resolver(refs, github_parent_repo);
+    unresolved.extend(unresolved_refs);
 
-    for component_ref in refs {
-        match resolve_repo(&component_ref) {
-            Ok(repo) => components.push(fetch_component_report(
-                &component_ref,
-                repo,
+    if options.include_issues || options.include_prs {
+        ensure_gh_ready().map_err(Error::internal_unexpected)?;
+    }
+    let total = resolved.len();
+    // GitHub fetches are independent. Keep concurrency bounded so a large
+    // workspace improves latency without stampeding the API or local `gh`.
+    for (batch, chunk) in resolved.chunks(4).enumerate() {
+        for (offset, (_, repo)) in chunk.iter().enumerate() {
+            eprintln!(
+                "triage: fetching repository {}/{} ({}/{})",
+                repo.repo.owner,
+                repo.repo.repo,
+                batch * 4 + offset + 1,
+                total
+            );
+        }
+        components.extend(run_batched(chunk, |(component_ref, repo)| {
+            fetch_component_report(
+                component_ref,
+                repo.clone(),
                 &options,
                 global_priority_labels.as_ref(),
-            )),
-            Err(reason) => unresolved.push(TriageUnresolved {
-                component_id: component_ref.component_id,
-                local_path: component_ref.local_path,
-                reason,
-                sources: component_ref.sources.into_iter().collect(),
-            }),
-        }
+            )
+        }));
     }
 
     if options.mine {
@@ -76,6 +88,64 @@ pub fn run(target: super::TriageTarget, options: TriageOptions) -> Result<Triage
     }
 
     Ok(output)
+}
+
+pub(super) fn run_batched<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let mut results = Vec::with_capacity(items.len());
+    for batch in items.chunks(4) {
+        results.extend(std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|item| scope.spawn(|| work(item)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("triage fetch worker panicked"))
+                .collect::<Vec<_>>()
+        }));
+    }
+    results
+}
+
+pub(super) fn resolve_and_dedupe_refs_with_parent_resolver(
+    refs: Vec<ComponentRef>,
+    parent_resolver: impl Fn(&GitHubRepo) -> std::result::Result<Option<GitHubRepo>, String>,
+) -> (Vec<(ComponentRef, ResolvedRepo)>, Vec<TriageUnresolved>) {
+    let mut by_source = BTreeMap::<String, std::result::Result<ResolvedRepo, String>>::new();
+    let mut resolved: BTreeMap<String, (ComponentRef, ResolvedRepo)> = BTreeMap::new();
+    let mut unresolved = Vec::new();
+    for component_ref in refs {
+        let source_key = component_ref
+            .triage_remote_url
+            .clone()
+            .or(component_ref.remote_url.clone())
+            .unwrap_or_else(|| component_ref.local_path.clone());
+        let repo = by_source
+            .entry(source_key)
+            .or_insert_with(|| resolve_repo_with_parent_resolver(&component_ref, &parent_resolver))
+            .clone();
+        match repo {
+            Ok(repo) => {
+                let key = format!(
+                    "{}/{}",
+                    repo.repo.owner.to_lowercase(),
+                    repo.repo.repo.to_lowercase()
+                );
+                if let Some((existing, _)) = resolved.get_mut(&key) {
+                    existing.sources.extend(component_ref.sources);
+                    existing.usage.extend(component_ref.usage);
+                } else {
+                    resolved.insert(key, (component_ref, repo));
+                }
+            }
+            Err(reason) => unresolved.push(TriageUnresolved {
+                component_id: component_ref.component_id,
+                local_path: component_ref.local_path,
+                reason,
+                sources: component_ref.sources.into_iter().collect(),
+            }),
+        }
+    }
+    (resolved.into_values().collect(), unresolved)
 }
 
 fn triage_component_has_items(component: &TriageComponentReport) -> bool {
@@ -335,7 +405,6 @@ fn fetch_issues(
     options: &TriageOptions,
     stale_cutoff: Option<DateTime<Utc>>,
 ) -> std::result::Result<Vec<TriageIssueItem>, String> {
-    ensure_gh_ready()?;
     if !options.issue_numbers.is_empty() {
         return fetch_targeted_issues(repo, options, stale_cutoff);
     }
@@ -399,7 +468,6 @@ fn fetch_prs(
     options: &TriageOptions,
     stale_cutoff: Option<DateTime<Utc>>,
 ) -> std::result::Result<Vec<TriagePrItem>, String> {
-    ensure_gh_ready()?;
     let mut args = vec![
         "pr".to_string(),
         "list".to_string(),

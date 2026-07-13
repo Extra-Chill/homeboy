@@ -25,6 +25,9 @@ use super::util::{
     runner_exec_run_label, runner_metadata, source_snapshot_from_result,
 };
 
+pub(super) const MIRRORED_REMOTE_EVENT_LIMIT: usize = 32;
+pub(super) const MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT: usize = 1_024;
+
 #[derive(Debug)]
 pub struct MirroredDaemonEvidence {
     pub run: RunRecord,
@@ -100,9 +103,9 @@ pub fn mirror_reverse_broker_evidence(
         "job_id": job.id.to_string(),
         "broker_url": broker_url,
         "status": job.status,
-        "events": events,
-        "stdout": result.get("stdout").cloned().unwrap_or(Value::Null),
-        "stderr": result.get("stderr").cloned().unwrap_or(Value::Null),
+        "events": bounded_remote_events(events),
+        "event_count": events.len(),
+        "result_summary": result_summary(result),
         "artifacts": artifacts,
     });
     run = store.update_run_metadata(&run.id, metadata)?;
@@ -328,7 +331,11 @@ pub(super) fn mirror_job_run(
     let mut lab = json!({
         "runner": runner_metadata(runner),
         "remote_job": job,
-        "remote_events": events,
+        // Events can contain streamed executor output. Keep recent lifecycle
+        // evidence in the run row; full runner logs remain retrievable from
+        // the daemon and artifact references remain in the job/result summary.
+        "remote_events": bounded_remote_events(events),
+        "remote_event_count": events.len(),
         "result_summary": result_summary(result),
         "source_snapshot": source_snapshot_from_result(result),
         "run_label": inferred_label,
@@ -393,6 +400,29 @@ pub(super) fn mirror_job_run(
             run.id
         ))
     })
+}
+
+pub(super) fn bounded_remote_events(events: &[JobEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .rev()
+        .take(MIRRORED_REMOTE_EVENT_LIMIT)
+        .rev()
+        .map(|event| {
+            json!({
+                "sequence": event.sequence,
+                "job_id": event.job_id,
+                "kind": event.kind,
+                "timestamp_ms": event.timestamp_ms,
+                "message": event.message.as_deref().map(|message| {
+                    message
+                        .chars()
+                        .take(MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT)
+                        .collect::<String>()
+                }),
+            })
+        })
+        .collect()
 }
 
 fn mirror_remote_observation_runs(

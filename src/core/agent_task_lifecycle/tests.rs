@@ -2415,6 +2415,7 @@ fn terminal_child_snapshot(
             source_snapshot: None,
             path_materialization_plan: None,
             stale_reason: None,
+            daemon_lease_id: None,
             target_runner_id: None,
             target_project_id: None,
             claim_id: None,

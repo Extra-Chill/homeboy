@@ -871,6 +871,7 @@ pub(crate) fn run_lab_offload_inner(
     let pre_acceptance_lifecycle = ensure_agent_task_lifecycle_identity_with(
         request.normalized_args,
         run_isolation_token.as_deref(),
+        None,
     );
     let pre_acceptance_run_id = pre_acceptance_lifecycle
         .as_ref()
@@ -1068,6 +1069,7 @@ pub(crate) fn run_lab_offload_inner(
             .as_ref()
             .map(|(args, _)| args.as_slice())
             .unwrap_or(request.normalized_args),
+        pre_acceptance_run_id.as_deref(),
     ) {
         Ok(stage) => stage,
         Err(error) => {

@@ -12,6 +12,8 @@ pub(crate) struct GitHubReleaseRepairCommands {
     pub notes_guidance: String,
     pub generate_notes_command: String,
     pub create_command: String,
+    pub upload_command: String,
+    pub publish_command: String,
     pub view_command: String,
     pub env_hint: Option<String>,
     /// True when `notes_file` is the persisted exact Homeboy release body
@@ -130,6 +132,27 @@ fn github_release_repair_commands_with_env(
     create.push("-R".to_string());
     create.push(quote_arg(&repo_flag));
 
+    let mut upload = vec![
+        format!("{}gh", env_prefix),
+        "release".to_string(),
+        "upload".to_string(),
+        quote_arg(tag),
+    ];
+    for path in artifact_paths {
+        upload.push(quote_arg(path));
+    }
+    upload.extend([
+        "--clobber".to_string(),
+        "-R".to_string(),
+        quote_arg(&repo_flag),
+    ]);
+    let publish_command = format!(
+        "{}gh release edit {} --draft=false -R {}",
+        env_prefix,
+        quote_arg(tag),
+        quote_arg(&repo_flag)
+    );
+
     let view_command = format!(
         "{}gh release view {} -R {}",
         env_prefix,
@@ -152,6 +175,8 @@ fn github_release_repair_commands_with_env(
         notes_guidance,
         generate_notes_command,
         create_command: create.join(" "),
+        upload_command: upload.join(" "),
+        publish_command,
         view_command,
         env_hint,
         exact_body_available,
@@ -183,12 +208,44 @@ pub(super) fn repair_hints(repair: &GitHubReleaseRepairCommands) -> Vec<crate::c
     hints
 }
 
+pub(super) fn existing_draft_repair_hints(
+    repair: &GitHubReleaseRepairCommands,
+) -> Vec<crate::core::error::Hint> {
+    let mut hints = Vec::new();
+    if let Some(env_hint) = repair.env_hint.as_deref() {
+        hints.push(crate::core::error::Hint {
+            message: env_hint.to_string(),
+        });
+    }
+    hints.push(crate::core::error::Hint {
+        message: format!(
+            "Resume the existing draft by uploading the built artifacts: {}",
+            repair.upload_command
+        ),
+    });
+    hints.push(crate::core::error::Hint {
+        message: format!(
+            "After verifying its assets, publish that existing draft: {}",
+            repair.publish_command
+        ),
+    });
+    hints.push(crate::core::error::Hint {
+        message: format!(
+            "Verify the release and attached assets: {}",
+            repair.view_command
+        ),
+    });
+    hints
+}
+
 pub(super) fn repair_data(repair: &GitHubReleaseRepairCommands) -> serde_json::Value {
     serde_json::json!({
         "notes_file": repair.notes_file,
         "notes_guidance": repair.notes_guidance,
         "generate_notes_command": repair.generate_notes_command,
         "create_command": repair.create_command,
+        "upload_command": repair.upload_command,
+        "publish_command": repair.publish_command,
         "view_command": repair.view_command,
         "env_hint": repair.env_hint,
         "exact_body_available": repair.exact_body_available,
