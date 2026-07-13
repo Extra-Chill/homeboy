@@ -37,7 +37,7 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    start_background, ArtifactFetchOutcome,
+    recover_missing_lease_state, start_background, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -81,6 +81,8 @@ pub struct DaemonStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
+    /// Snapshot identity for explicit recovery when the daemon lease is absent.
+    pub state_identity: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -149,6 +151,15 @@ pub struct DaemonOrphanAdoptionResult {
     pub adopted_lease_id: String,
     pub dead_pid: u32,
     pub active_jobs_terminalized: usize,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonMissingLeaseRecoveryResult {
+    pub recovered_state_identity: String,
+    pub terminalized_job_ids: Vec<String>,
+    pub durable_run_ids: Vec<String>,
     pub retry_guidance: String,
     pub replacement: DaemonStartResult,
 }
@@ -396,6 +407,7 @@ fn legacy_lease_repair_error(path: &Path, problem: impl Into<String>) -> Error {
 pub fn read_status() -> Result<DaemonStatus> {
     let path = state_path()?;
     let state_path = path.display().to_string();
+    let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
     let validation = validate_lease_file(&path)?;
     let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
 
@@ -407,7 +419,37 @@ pub fn read_status() -> Result<DaemonStatus> {
         stale_reason: validation.stale_reason,
         state: validation.state,
         state_path,
+        state_identity,
     })
+}
+
+/// Identifies the lease file and durable queue observed by `daemon status`.
+/// The recovery command recomputes it under the lifecycle lock before mutating.
+fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
+    fn update_file(hasher: &mut Sha256, label: &[u8], path: &Path) -> Result<()> {
+        hasher.update(label);
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        match fs::read(path) {
+            Ok(bytes) => {
+                hasher.update([1]);
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", path.display())),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    let mut hasher = Sha256::new();
+    update_file(&mut hasher, b"daemon-state\0", state_path)?;
+    update_file(&mut hasher, b"daemon-jobs\0", jobs_path)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {

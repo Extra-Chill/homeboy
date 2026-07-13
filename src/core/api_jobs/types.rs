@@ -234,6 +234,13 @@ pub struct DaemonLeaseJobDiagnostics {
     pub unowned_job_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct DaemonMissingLeaseJobDiagnostics {
+    pub terminalized_job_ids: Vec<Uuid>,
+    pub durable_run_ids: Vec<String>,
+    pub owned_job_ids: Vec<Uuid>,
+}
+
 impl DaemonLeaseJobDiagnostics {
     pub fn matching_count(&self) -> usize {
         self.matching_job_ids.len()

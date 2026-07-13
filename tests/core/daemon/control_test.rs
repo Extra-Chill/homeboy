@@ -226,6 +226,35 @@ fn legacy_unowned_job_blocks_replacement_start() {
 }
 
 #[test]
+fn missing_lease_recovery_rejects_changed_active_job_state() {
+    with_isolated_home(|_| {
+        let before = crate::core::daemon::read_status().expect("missing lease status");
+        assert_eq!(
+            before.freshness.stale_reason_code,
+            Some(DaemonStaleReasonCode::LeaseMissing)
+        );
+        let path = crate::core::paths::daemon_jobs_file().expect("daemon jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+
+        let error = super::recover_missing_lease_state(&before.state_identity, true, "127.0.0.1:0")
+            .expect_err("changed durable queue must reject recovery");
+
+        assert!(error.message.contains("state changed since inspection"));
+        assert_eq!(
+            JobStore::open_without_reconciliation(&path)
+                .expect("reopen durable store")
+                .get(job.id)
+                .expect("job remains")
+                .status,
+            JobStatus::Running,
+            "TOCTOU rejection must leave the job untouched"
+        );
+    });
+}
+
+#[test]
 fn dead_lease_reconciliation_reattaches_live_or_refuses_mismatched_daemon() {
     let live_daemon = fake_daemon(4242, "lease-dead");
     let live = reconcile_dead_lease_and_ensure_running_with_operations(
@@ -317,6 +346,7 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
         stale_reason: (!fresh).then(|| "simulated stale daemon".to_string()),
         state: daemon.map(fake_daemon_state),
         state_path: "/fake/daemon-state.json".to_string(),
+        state_identity: "sha256:fake".to_string(),
     }
 }
 
@@ -338,6 +368,7 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
         stale_reason: Some("daemon lease pid is not running".to_string()),
         state: Some(fake_daemon_state(daemon)),
         state_path: "/fake/daemon-state.json".to_string(),
+        state_identity: "sha256:fake".to_string(),
     }
 }
 

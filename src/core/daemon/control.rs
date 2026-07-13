@@ -16,8 +16,8 @@ use crate::core::process::pid_is_running;
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonOrphanAdoptionResult,
-    DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonMissingLeaseRecoveryResult,
+    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -102,6 +102,59 @@ pub fn adopt_orphaned_lease(
         dead_pid: state.pid,
         active_jobs_terminalized: reconciled.matching_count(),
         retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
+        replacement,
+    })
+}
+
+/// Recover an active durable queue only when the daemon lease is absent and the
+/// operator supplies the exact status snapshot identity they inspected.
+pub fn recover_missing_lease_state(
+    state_identity: &str,
+    confirm_lease_missing: bool,
+    addr: &str,
+) -> Result<DaemonMissingLeaseRecoveryResult> {
+    if !confirm_lease_missing {
+        return Err(Error::validation_invalid_argument(
+            "confirm_lease_missing",
+            "missing-lease recovery requires --confirm-lease-missing",
+            None,
+            Some(vec!["Inspect `homeboy daemon status` and use its exact state_identity before terminalizing retryable jobs.".to_string()]),
+        ));
+    }
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    if status.state_identity != state_identity {
+        return Err(Error::validation_invalid_argument(
+            "state-identity",
+            "daemon state changed since inspection; refusing missing-lease recovery",
+            Some(state_identity.to_string()),
+            Some(vec![
+                "Run `homeboy daemon status` again and use its current state_identity.".to_string(),
+            ]),
+        ));
+    }
+    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
+        || status.state.is_some()
+        || status.reachable
+        || status.freshness.active_jobs == 0
+    {
+        return Err(Error::validation_invalid_argument(
+            "state-identity",
+            "missing-lease recovery requires an unreachable daemon with absent lease metadata and active jobs",
+            Some(state_identity.to_string()),
+            None,
+        ));
+    }
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let reconciled = store.reconcile_missing_daemon_lease_jobs(state_identity)?;
+    let replacement = start_background_unlocked(addr)?;
+    Ok(DaemonMissingLeaseRecoveryResult {
+        recovered_state_identity: state_identity.to_string(),
+        terminalized_job_ids: reconciled.terminalized_job_ids.into_iter().map(|id| id.to_string()).collect(),
+        durable_run_ids: reconciled.durable_run_ids,
+        retry_guidance: "Inspect the retained job events and durable run IDs, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
     })
 }
