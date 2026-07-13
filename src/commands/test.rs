@@ -89,6 +89,9 @@ pub struct TestArgs {
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]
     pub json_summary: bool,
+
+    #[arg(skip)]
+    pub restore_checkout: bool,
 }
 
 impl TestArgs {
@@ -240,6 +243,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
             changed_since: args.changed_since.clone(),
             precomputed_changed_files: changed_files_from_args(&args)?,
             json_summary: args.json_summary,
+            restore_checkout: args.restore_checkout,
             ci_env: test_runner_ci_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),
         },
