@@ -622,6 +622,29 @@ impl RigSourceContext {
         }
         Self::load(id)
     }
+
+    /// Load a rig for an invocation with an explicit component checkout.
+    ///
+    /// A linked rig source can disappear when its managed worktree is cleaned
+    /// up. When the active checkout contains the same rig declaration, refresh
+    /// the installed link through the normal install ownership checks.
+    pub fn load_for_invocation_at(id: &str, component_path: Option<&str>) -> Result<Self> {
+        let Some(component_path) = component_path else {
+            return Self::load_for_invocation(id);
+        };
+        let Some(metadata) = read_source_metadata(id) else {
+            return Self::load_for_invocation(id);
+        };
+        if !metadata.linked || Path::new(&metadata.package_path).is_dir() {
+            return Self::load_for_invocation(id);
+        }
+
+        // Confirm the active checkout declares this rig before refreshing its
+        // global registration. `install` then enforces existing ID ownership.
+        load_local_source(component_path, Some(id))?;
+        install(component_path, Some(id), false)?;
+        Self::load(id)
+    }
 }
 
 fn enclosing_local_package_for_rig(id: &str) -> Result<Option<PathBuf>> {

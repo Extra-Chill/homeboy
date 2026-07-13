@@ -645,7 +645,7 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
         ));
     }
     if let Some(profile) = &run_args.profile {
-        matrix::validate_profile_available_for_rigs(&run_args.rig, profile)?;
+        matrix::validate_profile_available_for_rigs(run_args, profile)?;
     }
 
     let ordered_rigs = ordered_rig_ids(run_args);

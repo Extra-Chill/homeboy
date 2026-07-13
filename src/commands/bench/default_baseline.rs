@@ -116,7 +116,8 @@ pub(super) fn maybe_expand_default_baseline(
     }
 
     let candidate = &args.rig[0];
-    let candidate_spec = rig::load(candidate)?;
+    let candidate_spec =
+        rig::RigSourceContext::load_for_invocation_at(candidate, args.comp.path.as_deref())?.spec;
     if args.comp.id().is_none()
         && candidate_spec
             .bench
