@@ -15,6 +15,7 @@ use homeboy::core::agent_tasks::provider::{
 };
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
@@ -209,6 +210,10 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         dry_run: args.dry_run,
         gates: args.gates.into(),
         provider_command: args.provider_command,
+        provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
+            argv: args.provider_argv,
+            ..Default::default()
+        }),
     })?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1

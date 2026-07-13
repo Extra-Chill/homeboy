@@ -550,6 +550,7 @@ impl BatchCookSpec {
                 to_worktree: self.to_worktree.clone(),
                 source_worktree_path,
                 provider_command: self.provider_command.clone(),
+                provider_invocation: None,
                 gates: VerifyGateOptions {
                     verify: self.verify.clone(),
                     private_verify: self.private_verify.clone(),

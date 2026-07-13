@@ -74,17 +74,20 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
         ));
     }
     validate_provider_workspace_path(workspace)?;
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(workspace)
-        .args(["apply", "--whitespace=nowarn", &request.patch_path])
-        .output()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("apply agent-task promotion patch".to_string()),
-            )
-        })?;
+        .args(["apply", "--whitespace=nowarn", &request.patch_path]);
+    if request.dry_run {
+        command.arg("--check");
+    }
+    let output = command.output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("apply agent-task promotion patch".to_string()),
+        )
+    })?;
     if !output.status.success() {
         return Err(Error::validation_invalid_argument(
             "promotion_provider.patch",
@@ -116,6 +119,8 @@ pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) to_workspace: String,
     pub(crate) patch_path: String,
     pub(crate) changed_files: Vec<String>,
+    #[serde(default)]
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,8 +161,11 @@ impl ExternalPromotionWorkspaceProvider {
     pub(crate) fn from_options(options: &AgentTaskPromotionOptions) -> Self {
         Self {
             invocation: options
-                .provider_command
+                .provider_invocation
                 .clone()
+                .or_else(|| options
+                    .provider_command
+                    .clone()
                 .or_else(|| std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok())
                 .map(|command| {
                     eprintln!(
@@ -168,7 +176,7 @@ impl ExternalPromotionWorkspaceProvider {
                         display: Some(command),
                         ..Default::default()
                     }
-                }),
+                })),
         }
     }
 }
@@ -309,8 +317,22 @@ pub(crate) fn run_provider_command(
             Some(vec![report.stderr.clone()]),
         ));
     }
-    let response: AgentTaskPromotionApplyResponse =
+    let response_value: serde_json::Value =
         serde_json::from_str(&full_stdout).map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some("agent-task promotion provider response".to_string()),
+                Some(report.stdout.clone()),
+            )
+        })?;
+    // Homeboy commands emit the standard result envelope. Accept its data
+    // payload while retaining direct provider responses as the generic contract.
+    let response_value = response_value
+        .get("data")
+        .cloned()
+        .unwrap_or(response_value);
+    let response: AgentTaskPromotionApplyResponse = serde_json::from_value(response_value)
+        .map_err(|error| {
             Error::validation_invalid_json(
                 error,
                 Some("agent-task promotion provider response".to_string()),

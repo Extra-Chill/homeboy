@@ -146,6 +146,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
+                provider_argv: Vec::new(),
                 gates: VerifyGateArgs {
                     verify: vec!["cargo test --lib".to_string()],
                     private_verify: Vec::new(),
@@ -325,6 +326,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
                 provider_command: Some(format!("sh {}", provider.display())),
+                provider_argv: Vec::new(),
                 gates: VerifyGateArgs {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
