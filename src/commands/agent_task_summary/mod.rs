@@ -121,12 +121,32 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(path) = aggregate_path.filter(|_| metrics.non_empty_patches > 0) {
         lines.push(format!("Aggregate: {path}"));
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
-    } else if state == "queued" {
+    } else if state == "queued" && !is_transport_proxy(payload) {
         lines.push(format!("Next: homeboy agent-task run {run_id}"));
+    } else if let Some(action) = transport_proxy_next_action(payload) {
+        lines.push(format!("Next: {action}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
     }
     Some(finish(lines))
+}
+
+fn is_transport_proxy(payload: &Value) -> bool {
+    string_value(payload, &["metadata", "kind"])
+        .is_some_and(|kind| kind.ends_with("_controller_proxy"))
+}
+
+fn transport_proxy_next_action(payload: &Value) -> Option<String> {
+    if !is_transport_proxy(payload) {
+        return None;
+    }
+    let runner_id = string_value(payload, &["metadata", "runner_id"])?;
+    let job_id = string_value(payload, &["metadata", "runner_job_id"])
+        .or_else(|| string_value(payload, &["metadata", "runner_execution_record", "job_id"]));
+    Some(match job_id {
+        Some(job_id) => format!("homeboy runner job logs {runner_id} {job_id} --follow"),
+        None => format!("homeboy runner connect {runner_id}"),
+    })
 }
 
 fn render_logs_summary(payload: &Value) -> Option<String> {
@@ -811,6 +831,25 @@ mod tests {
         assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
         assert!(summary.contains("Artifacts: 0\n"));
         assert!(summary.contains("Next: homeboy agent-task run homeboy-4345\n"));
+    }
+
+    #[test]
+    fn status_summary_never_advertises_provider_run_for_transport_proxy() {
+        let payload = json!({
+            "run_id": "homeboy-transport",
+            "state": "queued",
+            "tasks": [{ "task_id": "homeboy-transport" }],
+            "artifact_refs": [],
+            "metadata": {
+                "kind": "remote_controller_proxy",
+                "runner_id": "runner-transport-42"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(!summary.contains("homeboy agent-task run homeboy-transport"));
+        assert!(summary.contains("Next: homeboy runner connect runner-transport-42"));
     }
 
     #[test]

@@ -47,6 +47,120 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
 }
 
 #[test]
+fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
+    with_temp_home(|| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-transport-proxy",
+                runner_id: "remote-runner-42",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+        let executor = CapturingExecutor::default();
+
+        let error = run_submitted_with_executor(
+            "run-cli-transport-proxy".to_string(),
+            None,
+            executor.clone(),
+        )
+        .expect_err("transport proxy needs runner recovery");
+
+        assert!(error
+            .message
+            .contains("provider execution was not attempted"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message == "Next: homeboy runner connect remote-runner-42"));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+
+        let record =
+            agent_task_lifecycle::status("run-cli-transport-proxy").expect("proxy state preserved");
+        assert_eq!(record.state, AgentTaskRunState::Queued);
+        assert_eq!(record.metadata["retryable"], true);
+        assert_eq!(record.metadata["transport_recovery"], "required");
+    });
+}
+
+#[test]
+fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
+    with_temp_home(|| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-resume-transport-proxy",
+                runner_id: "remote-runner-42",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+        let executor = CapturingExecutor::default();
+
+        let error = run_resume_with_executor(
+            "run-cli-resume-transport-proxy".to_string(),
+            executor.clone(),
+        )
+        .expect_err("transport proxy needs runner recovery");
+
+        assert!(error
+            .message
+            .contains("provider execution was not attempted"));
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::status("run-cli-resume-transport-proxy")
+                .expect("proxy state preserved")
+                .state,
+            AgentTaskRunState::Queued
+        );
+    });
+}
+
+#[test]
+fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
+    with_temp_home(|| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-queued-proxy",
+                runner_id: "remote-runner-42",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+        let executor = CapturingExecutor::default();
+
+        let (_, exit_code) =
+            run_next_with_executor(executor.clone()).expect("run-next skips proxy");
+
+        assert_eq!(exit_code, 0);
+        assert!(executor
+            .observed_request
+            .lock()
+            .expect("executor lock")
+            .is_none());
+        assert_eq!(
+            agent_task_lifecycle::status("run-cli-queued-proxy")
+                .expect("proxy status")
+                .state,
+            AgentTaskRunState::Queued
+        );
+    });
+}
+
+#[test]
 fn submit_run_status_reports_terminal_state() {
     with_temp_home(|| {
         let plan = AgentTaskPlan::new(
@@ -883,6 +997,9 @@ fn resume_command_executes_existing_run() {
 #[test]
 fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let workspace_root = workspace.path().display().to_string();
         let observed_request = Arc::new(Mutex::new(None));
         let executor = CapturingExecutor {
             observed_request: Arc::clone(&observed_request),
@@ -896,7 +1013,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
             Some("https://github.com/example/sample-agent-runtime/issues/179".to_string());
         plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
         plan.tasks[0].workspace.materialization = json!({
-            "root": "/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance"
+            "root": workspace_root
         });
 
         let (_value, exit_code) =
@@ -914,7 +1031,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         );
         assert_eq!(
             observed.workspace.root.as_deref(),
-            Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
+            Some(workspace_root.as_str())
         );
         assert_eq!(
             observed.workspace.slug.as_deref(),

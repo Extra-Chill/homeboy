@@ -175,6 +175,13 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         CommandNextAction::new("review run", review_command).with_kind(CommandNextActionKind::Show),
     );
 
+    if let Some(command) = transport_proxy_recovery_command(value) {
+        metadata.next_actions.push(
+            CommandNextAction::new("recover runner transport", command)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
     if value
         .pointer("/metadata/stale_running")
         .and_then(Value::as_bool)
@@ -190,6 +197,45 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
     }
 
     attach_actionable_metadata(value, metadata);
+}
+
+fn transport_proxy_recovery_command(value: &Value) -> Option<String> {
+    let kind = value.pointer("/metadata/kind").and_then(Value::as_str)?;
+    if !kind.ends_with("_controller_proxy") {
+        return None;
+    }
+    let runner_id = value
+        .pointer("/metadata/runner_id")
+        .and_then(Value::as_str)?;
+    let job_id = value
+        .pointer("/metadata/runner_job_id")
+        .or_else(|| value.pointer("/metadata/runner_execution_record/job_id"))
+        .and_then(Value::as_str);
+    Some(match job_id {
+        Some(job_id) => format!("homeboy runner job logs {runner_id} {job_id} --follow"),
+        None => format!("homeboy runner connect {runner_id}"),
+    })
+}
+
+#[cfg(test)]
+mod transport_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn transport_proxy_recovery_action_uses_runner_identity_not_provider_backend() {
+        let value = json!({
+            "metadata": {
+                "kind": "remote_controller_proxy",
+                "runner_id": "runner-transport-42",
+                "runner_execution_record": { "job_id": "job-42" }
+            }
+        });
+
+        assert_eq!(
+            transport_proxy_recovery_command(&value),
+            Some("homeboy runner job logs runner-transport-42 job-42 --follow".to_string())
+        );
+    }
 }
 
 fn attach_agent_task_discovery_actionable(value: &mut Value) {

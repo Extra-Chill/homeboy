@@ -541,6 +541,47 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
 }
 
 #[test]
+fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "agent-task-disconnected-child",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("planned proxy");
+        let job_id = "00000000-0000-0000-0000-000000000123";
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("runner_job_id".to_string(), json!(job_id));
+        metadata.insert(
+            "runner_execution_record".to_string(),
+            serde_json::to_value(
+                crate::core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
+                    job_id,
+                    "homeboy-lab",
+                    "daemon",
+                )
+                .with_job_id(job_id),
+            )
+            .expect("execution record"),
+        );
+
+        let aggregate = succeeded_aggregate(&test_plan());
+        reconcile_transport_proxy_snapshot(&mut record, &terminal_child_snapshot(&aggregate))
+            .expect("transport proxy reconciliation");
+
+        assert_eq!(record.state, AgentTaskRunState::Succeeded);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
+        assert_eq!(record.metadata["runner_job_status"], "succeeded");
+        assert_eq!(
+            record.metadata["runner_execution_record"]["status"],
+            "succeeded"
+        );
+    });
+}
+
+#[test]
 fn detached_runner_failure_transitions_parent_and_task_terminal() {
     let plan = test_plan();
     let mut record = AgentTaskRunRecord {

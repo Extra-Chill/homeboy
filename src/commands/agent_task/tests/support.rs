@@ -24,7 +24,7 @@ pub(in crate::commands::agent_task) use super::super::controller::{
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_cook_with_executor, run_loaded_plan, run_next_with_executor,
-    run_resume_with_executor, run_submitted, submit,
+    run_resume_with_executor, run_submitted, run_submitted_with_executor, submit,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
     cancel, diagnose, evidence, logs, replay_provider_boundary, status,

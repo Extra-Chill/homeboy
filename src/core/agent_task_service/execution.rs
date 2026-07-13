@@ -88,6 +88,27 @@ pub fn run_submitted_with_timeout<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
+    if let Some(recovery) = agent_task_lifecycle::recover_transport_proxy(&run_id)? {
+        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
+            return Ok(AgentTaskRunResult {
+                exit_code: aggregate_exit_code(&aggregate),
+                value: aggregate,
+            });
+        }
+        return Err(
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' is owned by runner transport recovery; provider execution was not attempted",
+                    recovery.record().run_id
+                ),
+                Some(recovery.record().run_id.clone()),
+                None,
+            )
+            .with_hint(format!("Next: {}", recovery.next_action()))
+            .with_retryable(true),
+        );
+    }
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
@@ -119,6 +140,27 @@ pub fn resume<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<Agent
 where
     E: AgentTaskExecutorAdapter,
 {
+    if let Some(recovery) = agent_task_lifecycle::recover_transport_proxy(&run_id)? {
+        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
+            return Ok(AgentTaskRunResult {
+                exit_code: aggregate_exit_code(&aggregate),
+                value: aggregate,
+            });
+        }
+        return Err(
+            Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "agent-task run '{}' is owned by runner transport recovery; provider execution was not attempted",
+                    recovery.record().run_id
+                ),
+                Some(recovery.record().run_id.clone()),
+                None,
+            )
+            .with_hint(format!("Next: {}", recovery.next_action()))
+            .with_retryable(true),
+        );
+    }
     agent_task_lifecycle::mark_resuming(&run_id)?;
     run_claimed(run_id, executor)
 }
