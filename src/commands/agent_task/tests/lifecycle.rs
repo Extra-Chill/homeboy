@@ -997,6 +997,9 @@ fn resume_command_executes_existing_run() {
 #[test]
 fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
     with_temp_home(|| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let workspace_root = workspace.path().display().to_string();
         let observed_request = Arc::new(Mutex::new(None));
         let executor = CapturingExecutor {
             observed_request: Arc::clone(&observed_request),
@@ -1010,7 +1013,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
             Some("https://github.com/example/sample-agent-runtime/issues/179".to_string());
         plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
         plan.tasks[0].workspace.materialization = json!({
-            "root": "/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance"
+            "root": workspace_root
         });
 
         let (_value, exit_code) =
@@ -1028,7 +1031,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         );
         assert_eq!(
             observed.workspace.root.as_deref(),
-            Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
+            Some(workspace_root.as_str())
         );
         assert_eq!(
             observed.workspace.slug.as_deref(),
