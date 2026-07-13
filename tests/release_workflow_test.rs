@@ -78,7 +78,8 @@ fn release_quality_policy_defaults_to_lint_and_test_blocking() {
     assert!(release_quality_policy_script().contains("check_command audit"));
     assert!(release_quality_policy_script().contains("check_command lint"));
     assert!(release_quality_policy_script().contains("check_command test"));
-    assert!(release_quality_policy_script().contains("Command ${command} is tracked but not release-blocking"));
+    assert!(release_quality_policy_script()
+        .contains("Command ${command} is tracked but not release-blocking"));
 }
 
 #[test]
