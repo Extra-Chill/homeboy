@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
+use crate::core::daemon::DaemonStaleReasonCode;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::http_api::RunSummary;
@@ -981,6 +982,7 @@ mod remote_daemon {
     pub(super) struct RemoteDaemonStatus {
         pub(super) daemon: Option<RemoteDaemon>,
         pub(super) stale_reason: Option<String>,
+        pub(super) stale_reason_code: Option<DaemonStaleReasonCode>,
         pub(super) fresh: bool,
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
@@ -1015,7 +1017,10 @@ mod remote_daemon {
         status: &RemoteDaemonStatus,
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
         let healthy = status.fresh && status.reachable;
-        if status.active_jobs > 0 && !healthy {
+        if status.active_jobs > 0
+            && !healthy
+            && !remote_daemon_pid_dead_with_owned_lease(previous_session, status)
+        {
             return Err(format!(
                 "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement",
                 status.active_jobs, status.fresh, status.reachable, status.stale_reason
@@ -1055,6 +1060,35 @@ mod remote_daemon {
         Ok(RemoteDaemonConnectAction::Start)
     }
 
+    fn remote_daemon_pid_dead_with_owned_lease(
+        previous_session: Option<&RunnerSession>,
+        status: &RemoteDaemonStatus,
+    ) -> bool {
+        if status.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
+            return false;
+        }
+        let Some(daemon) = status.daemon.as_ref() else {
+            return false;
+        };
+        let Some(lease_id) = daemon.lease_id.as_deref() else {
+            return false;
+        };
+        let Some(session) = previous_session.filter(|session| {
+            session.mode == RunnerTunnelMode::DirectSsh
+                && session.role == RunnerSessionRole::Controller
+        }) else {
+            return true;
+        };
+
+        match session.remote_daemon_lease_id.as_deref() {
+            Some(expected_lease) => expected_lease == lease_id,
+            None => {
+                session.remote_daemon_pid == daemon.pid
+                    && session.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
+            }
+        }
+    }
+
     pub(super) fn remote_daemon_status(
         client: &SshClient,
         homeboy: &str,
@@ -1082,6 +1116,10 @@ mod remote_daemon {
             .get("stale_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let stale_reason_code = data
+            .pointer("/freshness/stale_reason_code")
+            .cloned()
+            .and_then(|code| serde_json::from_value(code).ok());
         if !data
             .get("running")
             .and_then(Value::as_bool)
@@ -1090,6 +1128,7 @@ mod remote_daemon {
             return Ok(RemoteDaemonStatus {
                 daemon: data.get("state").map(remote_daemon_from_state),
                 stale_reason,
+                stale_reason_code,
                 fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
                 reachable: data
                     .get("reachable")
@@ -1105,6 +1144,7 @@ mod remote_daemon {
                     stale_reason
                         .unwrap_or_else(|| "remote daemon status has no lease state".to_string()),
                 ),
+                stale_reason_code,
                 fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
                 reachable: data
                     .get("reachable")
@@ -1116,6 +1156,7 @@ mod remote_daemon {
         Ok(RemoteDaemonStatus {
             daemon: Some(remote_daemon_from_state(state)),
             stale_reason,
+            stale_reason_code,
             fresh: data.get("fresh").and_then(Value::as_bool).unwrap_or(false),
             reachable: data
                 .get("reachable")
@@ -1504,10 +1545,54 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_replace_unreachable_daemon_with_active_jobs() {
-        let status = remote_daemon_status_for_test(false, true, 1, "lease-busy", 4545);
+    fn refuses_to_replace_non_dead_stale_daemon_with_active_jobs() {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            true,
+            1,
+            "lease-busy",
+            4545,
+            Some(DaemonStaleReasonCode::VersionMismatch),
+        );
 
         let err = remote_daemon_connect_action(None, &status).expect_err("refuse replacement");
+
+        assert!(err.contains("1 active job(s)"));
+        assert!(err.contains("refusing implicit replacement"));
+    }
+
+    #[test]
+    fn proven_dead_daemon_with_active_jobs_and_matching_lease_routes_to_startup_reconciliation() {
+        let session = direct_ssh_session("lease-dead");
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        assert_eq!(
+            remote_daemon_connect_action(Some(&session), &status).expect("ensure start"),
+            RemoteDaemonConnectAction::Start
+        );
+    }
+
+    #[test]
+    fn refuses_to_replace_proven_dead_daemon_with_active_jobs_when_lease_mismatches() {
+        let session = direct_ssh_session("lease-recorded");
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        let err = remote_daemon_connect_action(Some(&session), &status)
+            .expect_err("refuse mismatched dead lease");
 
         assert!(err.contains("1 active job(s)"));
         assert!(err.contains("refusing implicit replacement"));
@@ -1518,6 +1603,7 @@ mod tests {
         let status = RemoteDaemonStatus {
             daemon: None,
             stale_reason: Some("daemon lease pid is not running".to_string()),
+            stale_reason_code: Some(DaemonStaleReasonCode::PidDead),
             fresh: false,
             reachable: false,
             active_jobs: 0,
@@ -1535,6 +1621,7 @@ mod tests {
         let status = RemoteDaemonStatus {
             daemon: None,
             stale_reason: None,
+            stale_reason_code: None,
             fresh: false,
             reachable: false,
             active_jobs: 0,
@@ -2156,6 +2243,24 @@ mod tests {
         lease_id: &str,
         pid: u32,
     ) -> RemoteDaemonStatus {
+        remote_daemon_status_for_test_with_reason(
+            fresh,
+            reachable,
+            active_jobs,
+            lease_id,
+            pid,
+            None,
+        )
+    }
+
+    fn remote_daemon_status_for_test_with_reason(
+        fresh: bool,
+        reachable: bool,
+        active_jobs: usize,
+        lease_id: &str,
+        pid: u32,
+        stale_reason_code: Option<DaemonStaleReasonCode>,
+    ) -> RemoteDaemonStatus {
         RemoteDaemonStatus {
             daemon: Some(RemoteDaemon {
                 address: "127.0.0.1:49152".to_string(),
@@ -2163,6 +2268,7 @@ mod tests {
                 lease_id: Some(lease_id.to_string()),
             }),
             stale_reason: (!fresh).then(|| "daemon is stale".to_string()),
+            stale_reason_code,
             fresh,
             reachable,
             active_jobs,
