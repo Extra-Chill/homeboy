@@ -34,6 +34,80 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
 }
 
 #[test]
+fn submitted_terminal_runs_reuse_durable_evidence_without_reexecution() {
+    with_isolated_home(|_| {
+        for (run_id, expected_exit_code) in [("terminal-succeeded", 0), ("terminal-failed", 1)] {
+            if run_id == "terminal-succeeded" {
+                run_loaded_plan(test_plan(), Some(run_id), SucceedingExecutor)
+                    .expect("succeeded run completed");
+            } else {
+                run_loaded_plan(test_plan(), Some(run_id), TimeoutExecutor)
+                    .expect("failed run completed");
+            }
+
+            let observed_request = Arc::new(Mutex::new(None));
+            let result = run_submitted(
+                run_id.to_string(),
+                CapturingExecutor {
+                    observed_request: Arc::clone(&observed_request),
+                },
+            )
+            .expect("terminal run returns its durable aggregate");
+
+            assert_eq!(result.exit_code, expected_exit_code);
+            assert!(observed_request.lock().expect("executor lock").is_none());
+        }
+    });
+}
+
+#[test]
+fn cancelled_terminal_run_is_not_reexecuted_without_durable_aggregate() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("terminal-cancelled"))
+            .expect("run submitted");
+        agent_task_lifecycle::cancel_run("terminal-cancelled", Some("test cancellation"))
+            .expect("run cancelled");
+
+        let observed_request = Arc::new(Mutex::new(None));
+        let error = run_submitted(
+            "terminal-cancelled".to_string(),
+            CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect_err("cancelled run has no aggregate to reuse");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error.message.contains("terminal with state Cancelled"));
+        assert!(observed_request.lock().expect("executor lock").is_none());
+    });
+}
+
+#[test]
+fn submitted_incomplete_run_still_executes_for_recovery() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("incomplete-queued"))
+            .expect("run submitted");
+
+        let observed_request = Arc::new(Mutex::new(None));
+        let result = run_submitted(
+            "incomplete-queued".to_string(),
+            CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect("queued run recovers through normal execution");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(observed_request.lock().expect("executor lock").is_some());
+        assert_eq!(
+            lifecycle_status("incomplete-queued").expect("status").state,
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
+#[test]
 fn service_persists_timed_out_run_record_and_evidence_refs() {
     with_isolated_home(|_| {
         let result = run_loaded_plan(test_plan(), Some("service-timeout"), TimeoutExecutor)
