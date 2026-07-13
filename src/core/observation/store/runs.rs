@@ -320,6 +320,20 @@ impl ObservationStore {
     }
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
+        self.upsert_imported_run_with_terminal_guard(run, false)
+    }
+
+    /// Upsert an imported projection without allowing a stale in-flight writer
+    /// to replace a settled observation.
+    pub fn upsert_imported_run_preserving_terminal(&self, run: &RunRecord) -> Result<()> {
+        self.upsert_imported_run_with_terminal_guard(run, true)
+    }
+
+    fn upsert_imported_run_with_terminal_guard(
+        &self,
+        run: &RunRecord,
+        preserve_terminal: bool,
+    ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
         if crate::core::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
@@ -336,9 +350,15 @@ impl ObservationStore {
             }
         }
         let metadata_json = serialize_metadata(&run.metadata_json)?;
+        let terminal_guard = if preserve_terminal {
+            " WHERE runs.status = 'running' OR ?6 != 'running'"
+        } else {
+            ""
+        };
         execute_with_retry("upsert imported run record", || {
             self.connection.execute(
-                r#"
+                &format!(
+                    r#"
                 INSERT INTO runs(
                     id,
                     kind,
@@ -365,7 +385,9 @@ impl ObservationStore {
                     git_sha = excluded.git_sha,
                     rig_id = excluded.rig_id,
                     metadata_json = excluded.metadata_json
-                "#,
+                {terminal_guard}
+                "#
+                ),
                 params![
                     run.id,
                     run.kind,
