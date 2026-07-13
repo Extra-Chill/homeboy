@@ -664,7 +664,10 @@ fn bench_observation_mirrors_url_artifact_from_run_artifacts_dir() {
             .find(|artifact| artifact.id == observation_artifact_id)
             .expect("artifact record");
         assert_eq!(record.artifact_type, "file");
-        assert_eq!(record.url, None);
+        assert_eq!(
+            record.url.as_deref(),
+            Some("https://homeboy-artifacts.example.test/finding-packets.json")
+        );
         assert_eq!(record.metadata_json["source"], "bench");
         assert_eq!(record.metadata_json["name"], "finding_packets");
         assert_eq!(

@@ -47,28 +47,30 @@ pub struct TestSummaryOutput {
 #[derive(Debug, Deserialize)]
 struct RawTestFailure {
     #[serde(alias = "test_id", default)]
-    test_name: String,
+    test_name: Option<String>,
     #[serde(alias = "file", default)]
-    test_file: String,
+    test_file: Option<String>,
     #[serde(alias = "failure_type", default)]
-    error_type: String,
+    error_type: Option<String>,
     #[serde(default)]
-    message: String,
+    message: Option<String>,
     #[serde(alias = "source", default)]
-    source_file: String,
+    source_file: Option<String>,
     #[serde(alias = "source_line", alias = "line", default)]
-    source_line: u32,
+    source_line: Option<u32>,
 }
 
 impl From<RawTestFailure> for TestFailure {
     fn from(raw: RawTestFailure) -> Self {
         Self {
-            test_name: raw.test_name,
-            test_file: raw.test_file,
-            error_type: raw.error_type,
-            message: raw.message,
-            source_file: raw.source_file,
-            source_line: raw.source_line,
+            test_name: raw.test_name.unwrap_or_else(|| "unknown test".to_string()),
+            test_file: raw.test_file.unwrap_or_default(),
+            error_type: raw.error_type.unwrap_or_default(),
+            message: raw
+                .message
+                .unwrap_or_else(|| "test failure (no message provided)".to_string()),
+            source_file: raw.source_file.unwrap_or_default(),
+            source_line: raw.source_line.unwrap_or_default(),
         }
     }
 }
@@ -170,6 +172,7 @@ fn parse_failures_payload(
                     structured_sidecar::validate_payload("test.failures", &payload)?;
                     parse_failure_items(payload, path)?
                 }
+                serde_json::Value::Null => Vec::new(),
                 other => {
                     return Err(crate::core::Error::internal_json(
                         format!(
@@ -666,5 +669,57 @@ mod tests {
         assert_eq!(parsed.failures[0].source_line, 42);
         assert_eq!(parsed.failures[0].error_type, "assertion");
         assert_eq!(parsed.failures[0].message, "failed assertion");
+    }
+
+    #[test]
+    fn failures_file_parser_preserves_records_with_nullable_or_missing_fields() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let failures_file = temp_dir.path().join("test-failures.json");
+        std::fs::write(
+            &failures_file,
+            r#"{
+                "failures": [
+                    {
+                        "test_id": "suite::case",
+                        "file": null,
+                        "failure_type": null,
+                        "message": null,
+                        "source": null,
+                        "line": null
+                    },
+                    { "message": "assertion failed" }
+                ],
+                "total": null,
+                "passed": null
+            }"#,
+        )
+        .expect("write test failures");
+
+        let parsed = parse_failures_file(&failures_file)
+            .expect("nullable test failures should parse")
+            .expect("test failures payload should be present");
+
+        assert_eq!(parsed.total, 2);
+        assert_eq!(parsed.passed, 0);
+        assert_eq!(parsed.failures[0].test_name, "suite::case");
+        assert_eq!(
+            parsed.failures[0].message,
+            "test failure (no message provided)"
+        );
+        assert_eq!(parsed.failures[1].test_name, "unknown test");
+        assert_eq!(parsed.failures[1].message, "assertion failed");
+    }
+
+    #[test]
+    fn failures_file_parser_accepts_null_or_missing_failure_collections() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let failures_file = temp_dir.path().join("test-failures.json");
+        std::fs::write(&failures_file, r#"{ "failures": null }"#).expect("write null failures");
+
+        let parsed = parse_failures_file(&failures_file)
+            .expect("null failures should parse")
+            .expect("test failures payload should be present");
+
+        assert!(parsed.failures.is_empty());
     }
 }
