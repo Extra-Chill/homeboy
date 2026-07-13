@@ -11,8 +11,8 @@ pub use remote_runner::{
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
-    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEvent,
-    JobEventKind, JobStatus, RunnerJobLifecycleOwner, RunnerJobSource,
+    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics, Job,
+    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
 #[cfg(test)]
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(stale.status, JobStatus::Failed);
         assert_eq!(
             stale.stale_reason.as_deref(),
-            Some("daemon restarted before the job reached a terminal status")
+            Some("control plane lost before the job reached a terminal status")
         );
         assert!(stale.finished_at_ms.is_some());
 
@@ -437,13 +437,170 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.kind == JobEventKind::Error
                 && event.data.as_ref().is_some_and(|data| {
-                    data["reason"] == json!("stale_after_daemon_restart")
+                    data["reason"] == json!("orphaned_after_control_plane_loss")
                         && data["classification"]["kind"]
-                            == json!("unrecoverable_child_after_control_plane_restart")
+                            == json!("orphaned_after_control_plane_loss")
                         && data["classification"]["recoverable"] == json!(false)
                         && data["classification"]["child"]["output_observed"] == json!(false)
                 })
         }));
+    }
+
+    #[test]
+    fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matching_jobs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let matching = JobStore::open_without_reconciliation(&path)
+            .expect("open matching")
+            .with_daemon_lease("lease-dead".to_string());
+        let succeeded_job = matching.create("runner.exec");
+        matching
+            .start(succeeded_job.id)
+            .expect("start succeeded job");
+        matching
+            .append_event(
+                succeeded_job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 0 })),
+            )
+            .expect("record successful result");
+        let failed_result_job = matching.create("runner.exec");
+        matching
+            .start(failed_result_job.id)
+            .expect("start failed-result job");
+        matching
+            .append_event(
+                failed_result_job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 1 })),
+            )
+            .expect("record failed result");
+        let cancelled_job = matching.create("runner.exec");
+        matching
+            .start(cancelled_job.id)
+            .expect("start cancelled job");
+        matching
+            .append_event(
+                cancelled_job.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "status": "cancelled", "exit_code": 0 })),
+            )
+            .expect("record cancelled result");
+        let unfinished_job = matching.create("runner.exec");
+        matching
+            .start(unfinished_job.id)
+            .expect("start unfinished job");
+
+        let other = JobStore::open_without_reconciliation(&path)
+            .expect("open other")
+            .with_daemon_lease("lease-other".to_string());
+        let other_job = other.create("runner.exec");
+        other.start(other_job.id).expect("start other job");
+
+        let store = JobStore::open_without_reconciliation(&path).expect("open recovery store");
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs("lease-dead")
+            .expect("reconcile matching lease");
+
+        assert_eq!(
+            diagnostics.matching_job_ids,
+            vec![
+                succeeded_job.id,
+                failed_result_job.id,
+                cancelled_job.id,
+                unfinished_job.id,
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(diagnostics.other_lease_job_ids, vec![other_job.id]);
+        assert!(diagnostics.unowned_job_ids.is_empty());
+        assert_eq!(
+            store.get(succeeded_job.id).expect("succeeded job").status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(
+            store
+                .get(failed_result_job.id)
+                .expect("failed-result job")
+                .status,
+            JobStatus::Failed
+        );
+        assert!(store
+            .get(failed_result_job.id)
+            .expect("failed-result job")
+            .stale_reason
+            .is_none());
+        assert_eq!(
+            store.get(cancelled_job.id).expect("cancelled job").status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(
+            store.get(unfinished_job.id).expect("unfinished job").status,
+            JobStatus::Failed
+        );
+        assert_eq!(
+            store.get(other_job.id).expect("other job").status,
+            JobStatus::Running
+        );
+        assert!(store
+            .events(unfinished_job.id)
+            .expect("matching events")
+            .iter()
+            .any(|event| {
+                event.kind == JobEventKind::Error
+                    && event.data.as_ref().is_some_and(|data| {
+                        data["reason"] == json!("dead_daemon_lease")
+                            && data["daemon_lease_id"] == json!("lease-dead")
+                            && data["classification"]["kind"]
+                                == json!("orphaned_after_control_plane_loss")
+                    })
+            }));
+    }
+
+    #[test]
+    fn legacy_unowned_active_job_blocks_dead_lease_reconciliation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let legacy = JobStore::open_without_reconciliation(&path).expect("open legacy store");
+        let legacy_job = legacy.create("runner.exec");
+        legacy.start(legacy_job.id).expect("start legacy job");
+
+        let store = JobStore::open_without_reconciliation(&path).expect("open recovery store");
+        let error = store
+            .reconcile_dead_daemon_lease_jobs("lease-dead")
+            .expect_err("legacy job blocks automatic recovery");
+
+        assert!(error.message.contains("legacy unowned active job"));
+        assert!(error.message.contains(&legacy_job.id.to_string()));
+        assert_eq!(
+            store.get(legacy_job.id).expect("legacy job").status,
+            JobStatus::Running
+        );
+    }
+
+    #[test]
+    fn daemon_job_acceptance_stamps_current_lease_and_old_job_json_remains_readable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("open daemon store")
+            .with_daemon_lease("lease-current".to_string());
+        let job = store.create("runner.exec");
+
+        assert_eq!(job.daemon_lease_id.as_deref(), Some("lease-current"));
+        let mut legacy = serde_json::to_value(&job).expect("serialize job");
+        legacy
+            .as_object_mut()
+            .expect("job object")
+            .remove("daemon_lease_id");
+        let decoded: Job = serde_json::from_value(legacy).expect("read old public job schema");
+        assert!(decoded.daemon_lease_id.is_none());
     }
 
     #[test]
@@ -489,7 +646,7 @@ mod tests {
 
         assert_eq!(
             classification["kind"],
-            json!("unrecoverable_child_after_control_plane_restart")
+            json!("orphaned_after_control_plane_loss")
         );
         assert_eq!(classification["recoverable"], json!(false));
         assert_eq!(
@@ -588,7 +745,7 @@ mod tests {
             event
                 .data
                 .as_ref()
-                .is_some_and(|data| data["reason"] == json!("stale_after_daemon_restart"))
+                .is_some_and(|data| data["reason"] == json!("orphaned_after_control_plane_loss"))
         }));
     }
 
@@ -1017,12 +1174,12 @@ mod tests {
         assert_eq!(stale_jobs[0].status, JobStatus::Failed);
         assert_eq!(
             stale_jobs[0].lifecycle_state.as_deref(),
-            Some("abandoned_after_daemon_restart")
+            Some("orphaned_after_control_plane_loss")
         );
         assert_eq!(stale_jobs[0].retryable, Some(true));
         assert_eq!(
             stale_jobs[0].stale_reason.as_deref(),
-            Some("daemon restarted before the job reached a terminal status")
+            Some("control plane lost before the job reached a terminal status")
         );
     }
 

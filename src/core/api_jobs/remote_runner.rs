@@ -363,6 +363,7 @@ impl JobStore {
             source_snapshot: request.source_snapshot.clone(),
             path_materialization_plan: request.path_materialization_plan.clone(),
             stale_reason: None,
+            daemon_lease_id: self.daemon_lease_id.clone(),
             target_runner_id: Some(request.runner_id.clone()),
             target_project_id: request.project_id.clone(),
             claim_id: None,
