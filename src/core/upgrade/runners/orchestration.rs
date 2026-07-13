@@ -39,6 +39,46 @@ pub fn upgrade_configured_runners(
     ))
 }
 
+pub fn upgrade_configured_runners_with_explicit_source_path(
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    explicit_source_path: bool,
+    runner_targets: &[String],
+    extension_updates: &[ExtensionUpgradeEntry],
+) -> Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)> {
+    if !explicit_source_path {
+        return upgrade_configured_runners(
+            force,
+            method_override,
+            source_path,
+            runner_targets,
+            extension_updates,
+        );
+    }
+
+    let runners = runner_upgrade_targets(runner_targets)?;
+    if runners.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+
+    crate::log_status!(
+        "upgrade",
+        "Updating {} configured runner(s)...",
+        runners.len()
+    );
+    Ok(upgrade_runners_with_executor_and_source_materializer(
+        &runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        runner::exec,
+        runner::status,
+        materialize_explicit_runner_source_path,
+    ))
+}
+
 pub fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Runner>> {
     if !runner_targets.is_empty() {
         return runner_targets

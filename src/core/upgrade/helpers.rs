@@ -199,10 +199,11 @@ pub fn run_upgrade_with_method(
             let (runners_updated, runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
-                runners::upgrade_configured_runners(
+                runners::upgrade_configured_runners_with_explicit_source_path(
                     force,
                     runner_method_override,
                     source_upgrade_path.as_deref(),
+                    source_path.is_some(),
                     runner_targets,
                     &extensions_updated,
                 )?
@@ -250,6 +251,7 @@ pub fn run_upgrade_with_method(
     let (success, new_version, new_build_identity, source_revision) = execute_upgrade(
         install_method,
         source_upgrade_path.as_deref(),
+        source_path.is_some(),
         force,
         previous_build_identity.as_deref(),
     )?;
@@ -267,10 +269,11 @@ pub fn run_upgrade_with_method(
 
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         upgrade_phase("refreshing configured runners");
-        runners::upgrade_configured_runners(
+        runners::upgrade_configured_runners_with_explicit_source_path(
             force,
             runner_method_override,
             source_upgrade_path.as_deref(),
+            source_path.is_some(),
             runner_targets,
             &extensions_updated,
         )?
