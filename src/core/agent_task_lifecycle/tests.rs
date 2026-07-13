@@ -60,11 +60,37 @@ fn submit_plan_persists_queued_status() {
 
         assert_eq!(record.run_id, "run_a");
         assert_eq!(loaded.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            loaded.metadata[crate::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+                ["requested"],
+            crate::core::build_identity::current().display
+        );
+        assert!(
+            loaded.metadata[crate::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+                ["originating"]["pinned_executable"]
+                .as_str()
+                .is_some()
+        );
         assert_eq!(loaded.tasks[0].task_id, "task-a");
         assert_eq!(
             loaded.tasks[0].provider_ref.as_deref(),
             Some("test:fixture")
         );
+    });
+}
+
+#[test]
+fn active_pinned_run_blocks_controller_binary_replacement() {
+    with_isolated_home(|_| {
+        submit_plan(&test_plan(), Some("active-pinned-runtime")).expect("submitted");
+
+        let error = crate::core::upgrade::refuse_upgrade_while_durable_runs_are_active()
+            .expect_err("active durable run must hold its controller runtime");
+
+        assert!(error.message.contains("active-pinned-runtime"));
+        assert!(error
+            .message
+            .contains("refusing to replace the controller binary"));
     });
 }
 

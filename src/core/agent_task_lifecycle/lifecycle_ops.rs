@@ -16,6 +16,8 @@ pub fn submit_plan(
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    metadata[crate::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
+        crate::core::controller_runtime::pin_current()?;
     if let Ok(runner_id) = std::env::var(crate::core::runner::RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             metadata["runner_id"] = json!(runner_id);
@@ -72,6 +74,10 @@ pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    crate::core::controller_runtime::validate_for_mutation(
+        &record.metadata,
+        &crate::core::build_identity::current().display,
+    )?;
     if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -290,6 +296,10 @@ impl TransportProxyRecovery {
 /// record. `None` means the run is a normal scheduler-owned plan.
 pub fn recover_transport_proxy(run_id: &str) -> Result<Option<TransportProxyRecovery>> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    crate::core::controller_runtime::validate_for_mutation(
+        &record.metadata,
+        &crate::core::build_identity::current().display,
+    )?;
     if !is_transport_proxy(&record) {
         return Ok(None);
     }

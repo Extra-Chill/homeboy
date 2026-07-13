@@ -612,6 +612,8 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
+const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
+    "agent-task fanout coordination is controller-owned so durable batch state, worktree ownership, and recovery remain available; generated independent cooks may use their own Lab placement";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerSupportSummary {
@@ -751,13 +753,10 @@ impl Commands {
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                         command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
                     }),
-            }) => LabCommandContract::portable(
+            }) => LabCommandContract::local_only(
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
-                None,
-                true,
-                LAB_NO_EXTRA_CAPABILITIES,
-            )
-            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
+                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
+            ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
@@ -778,13 +777,10 @@ impl Commands {
                                 agent_task::AgentTaskFanoutCookBatchArgs { dry_run: false, .. },
                             ),
                     }),
-            }) => LabCommandContract::portable(
+            }) => LabCommandContract::local_only(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-                None,
-                true,
-                LAB_NO_EXTRA_CAPABILITIES,
-            )
-            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
+                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
+            ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
@@ -1412,6 +1408,42 @@ mod low_noise_polling_tests {
             .expect("no-finalize cook should remain portable");
 
         assert_eq!(contract.portability, LabCommandPortability::Portable);
+    }
+
+    #[test]
+    fn fanout_coordinator_stays_controller_local_while_child_cooks_remain_portable() {
+        let coordinator = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "run-plan",
+            "--input",
+            "fanout.json",
+        ]);
+        let coordinator_contract = coordinator.lab_contract().expect("fanout contract");
+        assert_eq!(
+            coordinator_contract.portability,
+            LabCommandPortability::LocalOnly(AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON)
+        );
+
+        let child = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the assigned task",
+            "--to-worktree",
+            "homeboy@child-cook",
+            "--verify",
+            "cargo test --lib",
+        ]);
+        assert_eq!(
+            child
+                .lab_contract()
+                .expect("child cook contract")
+                .portability,
+            LabCommandPortability::Portable
+        );
     }
 
     #[test]

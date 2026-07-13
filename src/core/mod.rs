@@ -71,6 +71,7 @@ pub mod command_execution_plan;
 pub mod command_invocation;
 pub mod component;
 pub mod context;
+pub(crate) mod controller_runtime;
 pub mod controller_scratch;
 pub mod daemon;
 pub mod db;

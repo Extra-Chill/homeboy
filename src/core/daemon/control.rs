@@ -51,6 +51,7 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 pub fn adopt_orphaned_lease(
     lease_id: &str,
     confirm_pid_dead: bool,
+    expected_pid: Option<u32>,
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     if !confirm_pid_dead {
@@ -64,43 +65,65 @@ pub fn adopt_orphaned_lease(
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
-    let state = status.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "orphan adoption requires a persisted daemon lease",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    if state.lease_id != lease_id {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!(
-                "recorded daemon lease `{}` does not match requested orphan lease `{lease_id}`",
-                state.lease_id
-            ),
-            Some(lease_id.to_string()),
-            Some(vec![
-                "Run `homeboy daemon status` and adopt only its exact dead lease.".to_string(),
-            ]),
-        ));
-    }
-    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!("daemon lease `{lease_id}` is not proven dead"),
-            Some(lease_id.to_string()),
-            Some(vec!["Live or ambiguous daemon ownership is protected; inspect `homeboy daemon status` before retrying.".to_string()]),
-        ));
-    }
-
     let store =
         super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let dead_pid = if let Some(state) = status.state {
+        if state.lease_id != lease_id {
+            return Err(Error::validation_invalid_argument(
+                "lease_id",
+                format!(
+                    "recorded daemon lease `{}` does not match requested orphan lease `{lease_id}`",
+                    state.lease_id
+                ),
+                Some(lease_id.to_string()),
+                None,
+            ));
+        }
+        if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
+            return Err(Error::validation_invalid_argument(
+                "lease_id",
+                format!("daemon lease `{lease_id}` is not proven dead"),
+                Some(lease_id.to_string()),
+                None,
+            ));
+        }
+        state.pid
+    } else {
+        let pid = expected_pid.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "expected_pid",
+                "orphan adoption without a remote lease requires controller-recorded PID evidence",
+                Some(lease_id.to_string()),
+                None,
+            )
+        })?;
+        if pid_is_running(pid) {
+            return Err(Error::validation_invalid_argument(
+                "expected_pid",
+                format!("recorded daemon PID `{pid}` is still running"),
+                Some(lease_id.to_string()),
+                None,
+            ));
+        }
+        if store
+            .daemon_lease_job_diagnostics(lease_id)
+            .matching_count()
+            == 0
+        {
+            return Err(Error::validation_invalid_argument(
+                "lease_id",
+                "no active durable job is owned by the requested lease",
+                Some(lease_id.to_string()),
+                None,
+            ));
+        }
+        pid
+    };
     let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
     let replacement = start_background_unlocked(addr)?;
     Ok(DaemonOrphanAdoptionResult {
         adopted_lease_id: lease_id.to_string(),
-        dead_pid: state.pid,
+        dead_pid,
         active_jobs_terminalized: reconciled.matching_count(),
         retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
