@@ -119,9 +119,8 @@ use super::super::workload::{
 };
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
-    lab_pre_dispatch_failure_message,
-    mirror_agent_task_run_plan_lifecycle, parse_offloaded_agent_task_handoff_from_outputs,
-    sync_inline_agent_task_file,
+    lab_pre_dispatch_failure_message, mirror_agent_task_run_plan_lifecycle,
+    parse_offloaded_agent_task_handoff_from_outputs, sync_inline_agent_task_file,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::fallback::{
