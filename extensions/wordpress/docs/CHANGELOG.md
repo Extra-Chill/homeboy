@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.3] - 2026-07-13
+
+### Fixed
+- support recursive package artifacts
+
 ## [3.24.2] - 2026-07-13
 
 ### Fixed
