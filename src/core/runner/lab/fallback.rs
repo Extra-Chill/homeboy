@@ -53,7 +53,7 @@ pub(super) fn skipped_automatic_run_local_with_overhead(
 pub(super) fn local_execution_denied_error(reason: &str, runner_id: Option<&str>) -> Error {
     let mut hints = vec![
         "Use --runner <runner-id> to offload to Lab.".to_string(),
-        "Remove --lab-only only when local execution on this controller is intentional."
+        "Use --placement local only when local execution on this controller is intentional."
             .to_string(),
     ];
     if let Some(runner_id) = runner_id {
@@ -63,8 +63,8 @@ pub(super) fn local_execution_denied_error(reason: &str, runner_id: Option<&str>
         );
     }
     Error::validation_invalid_argument(
-        "lab_only",
-        format!("Lab-only execution refused local execution: {reason}"),
+        "placement_lab",
+        format!("Lab placement refused local execution: {reason}"),
         runner_id.map(str::to_string),
         Some(hints),
     )
@@ -89,7 +89,7 @@ fn build_lab_replacement_hints(runner_id: Option<&str>) -> Vec<String> {
 pub(super) fn unsupported_build_lab_error(field: &'static str, runner_id: Option<&str>) -> Error {
     Error::validation_invalid_argument(
         field,
-        "homeboy build is not Lab-portable yet; it requires an explicit runner workspace sync and runner exec handoff instead of --runner/--lab-only on build."
+        "homeboy build is not Lab-portable yet; it requires an explicit runner workspace sync and runner exec handoff instead of --runner/--placement lab on build."
             .to_string(),
         runner_id.map(str::to_string),
         Some(build_lab_replacement_hints(runner_id)),

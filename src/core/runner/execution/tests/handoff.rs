@@ -1115,8 +1115,7 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
     assert!(hints
         .iter()
         .any(|hint| hint.contains(&format!("homeboy runner job logs lab {job_id}"))));
-    assert!(!err.message.contains("--force-hot"));
-    assert!(!hints.iter().any(|hint| hint.contains("--allow-local-hot")));
+    assert!(err.message.contains("--placement local"));
 }
 
 #[test]

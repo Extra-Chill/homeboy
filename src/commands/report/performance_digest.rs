@@ -156,7 +156,7 @@ pub struct HostPressureDigest {
     pub severity: String,
     pub command: Option<String>,
     pub warned: Option<bool>,
-    pub force_hot: Option<bool>,
+    pub local_override: Option<bool>,
     pub message: Option<String>,
     pub host: BTreeMap<String, Value>,
 }
@@ -595,7 +595,7 @@ mod helpers {
             severity,
             command: string_value(obj, "command"),
             warned: bool_value(obj, "warned"),
-            force_hot: bool_value(obj, "force_hot"),
+            local_override: bool_value(obj, "local_override"),
             message: string_value(obj, "message"),
             host: object_value(obj, "host").into_iter().collect(),
         })

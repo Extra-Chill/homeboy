@@ -95,13 +95,10 @@ pub use evidence::{
     RemoteArtifactDownload, RunnerJobLogSnapshot,
 };
 pub(crate) use execution::is_internal_control_env;
-#[cfg(test)]
-pub(crate) use execution::set_runner_lab_handoff_active_for_test;
-pub(crate) use execution::{consume_runner_lab_handoff_control_env, runner_lab_handoff_active};
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled_with_progress,
     prepare_daemon_local_process, runner_exec_secret_env_plan, RunnerProcessRequest,
-    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_LAB_HANDOFF_ENV,
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use execution::{
     daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
@@ -125,9 +122,8 @@ pub use homeboy_refresh::{
     RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use lab::{
-    execute_lab_offload, LabJobOverrides, LabLocalExecutionPolicy, LabOffloadCommand,
-    LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
-    LabRunnerSelectionSource,
+    execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
+    LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
 };
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
@@ -529,7 +525,10 @@ impl DefaultLabRunnerCandidate {
     }
 
     fn readiness(&self) -> DefaultLabRunnerReadiness {
-        if !self.capabilities_ready || self.stale_daemon {
+        if !self.capabilities_ready
+            || !self.active_jobs_available
+            || !self.availability().accepts_jobs
+        {
             return DefaultLabRunnerReadiness {
                 eligible: false,
                 score: 0,
@@ -549,9 +548,6 @@ impl DefaultLabRunnerCandidate {
         }
         if self.mode == RunnerTunnelMode::DirectSsh {
             score += 5;
-        }
-        if !self.active_jobs_available {
-            score -= 25;
         }
         score -= self.active_jobs.min(50) as i32;
 
@@ -584,10 +580,7 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready: true,
             };
-            candidate
-                .readiness()
-                .eligible
-                .then(|| candidate.availability())
+            Some(candidate.availability())
         })
         .collect();
     availability.sort_by(|a, b| a.runner_id.cmp(&b.runner_id));
@@ -1529,6 +1522,17 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_excludes_runner_at_capacity() {
+        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        busy.capacity = Some(1);
+        busy.active_jobs = 1;
+
+        let selected = resolve_default_lab_runner_from_candidates(None, vec![busy]);
+
+        assert_eq!(selected, None);
     }
 
     #[test]

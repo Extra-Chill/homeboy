@@ -104,7 +104,6 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
             "resource_policy": {
                 "command": "bench",
                 "severity": "hot",
-                "force_hot": true,
                 "warned": true,
                 "message": "machine is hot",
                 "host": {

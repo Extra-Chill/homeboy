@@ -1306,7 +1306,6 @@ mod tests {
         assert_eq!(
             agent_task_dispatch_requested_run_id(&[
                 "homeboy".to_string(),
-                "--force-hot".to_string(),
                 "agent-task".to_string(),
                 "dispatch".to_string(),
                 "--run-id=dispatch-run".to_string(),
@@ -1337,7 +1336,6 @@ mod tests {
     fn ensure_agent_task_dispatch_run_id_injects_id_before_dispatch_options() {
         let args = vec![
             "homeboy".to_string(),
-            "--force-hot".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--repo".to_string(),
@@ -1348,7 +1346,7 @@ mod tests {
 
         assert!(run_id.starts_with("agent-task-"));
         assert_eq!(out[0], "homeboy");
-        assert_eq!(out[1], "--force-hot");
+        assert_eq!(out[1], "agent-task");
         assert_eq!(out[2], "agent-task");
         assert_eq!(out[3], "cook");
         assert_eq!(out[4], "--run-id");

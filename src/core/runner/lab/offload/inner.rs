@@ -235,7 +235,7 @@ fn lab_runner_exec_options(
     secret_env_names: Vec<String>,
 ) -> RunnerExecOptions {
     env.insert(
-        super::super::super::RUNNER_LAB_HANDOFF_ENV.to_string(),
+        super::super::super::RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
         "1".to_string(),
     );
     env.insert(
@@ -430,9 +430,9 @@ pub(crate) fn exec_lab_context(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if request.local_policy.deny_local_execution() {
+                        if request.placement == crate::cli_surface::Placement::Lab {
                             Err(local_execution_denied_error(&reason, Some(runner_id)))
-                        } else if !request.local_policy.allow_local_fallback() {
+                        } else if !request.allow_local_fallback {
                             Err(selected_runner_fallback_error(
                                 selection,
                                 "Lab offload selected a runner but its daemon did not respond",
@@ -467,7 +467,7 @@ pub(crate) fn exec_lab_context(
                         Some(runner_id.to_string()),
                         Some(vec![
                             format!("Reconnect runner `{runner_id}` before retrying Lab offload."),
-                            "Use --force-hot to run the command locally instead of offloading."
+                            "Use --placement local to run the command locally instead of offloading."
                                 .to_string(),
                         ]),
                     )),
@@ -979,7 +979,7 @@ pub(crate) fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
-                if request.local_policy.deny_local_execution() {
+                if request.placement == crate::cli_surface::Placement::Lab {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 overhead.set_fallback_reason(&reason);
@@ -1033,8 +1033,8 @@ pub(crate) fn run_lab_offload_inner(
                         &runner_status,
                         reason,
                         remediation,
-                        request.local_policy.allow_local_fallback(),
-                        request.local_policy.deny_local_execution(),
+                        request.allow_local_fallback,
+                        request.placement,
                         &overhead,
                     );
                 }

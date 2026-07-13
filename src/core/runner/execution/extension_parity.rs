@@ -1507,7 +1507,6 @@ mod tests {
             "/Users/chubes/Developer/static-site-importer@fix-codebox-validation-provider".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
             "--extension".to_string(),
             "wordpress".to_string(),
             "--rig".to_string(),

@@ -189,6 +189,7 @@ pub(crate) fn prepare_runner_process(
     env.extend(request_env.clone());
     if runner.kind != RunnerKind::Local {
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     }
     let secret_env_plan = runner_exec_secret_env_plan(
@@ -241,6 +242,7 @@ pub(crate) fn prepare_runner_process(
         env = runner_env;
         env.extend(request_env.clone());
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
         env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
         env.extend(resolve_controller_secret_env_for_command(
             &runner.secret_env,
@@ -357,10 +359,11 @@ pub(crate) fn prepare_daemon_local_process(
     runner.env = runner_env.clone();
     env = runner_env;
     env.extend(request_env.clone());
-    // Daemon jobs already execute in the runner namespace. Nested Homeboy
-    // commands must stay local instead of treating the controller's runner
-    // configuration as another Lab offload target.
+    // Daemon jobs are already executing on the selected runner. Keep this
+    // dispatch-only marker out of argv so nested Homeboy commands do not route
+    // themselves a second time.
     env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+    env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
     env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     env.extend(resolve_runner_secret_env_for_plan(
         &runner.secret_env,

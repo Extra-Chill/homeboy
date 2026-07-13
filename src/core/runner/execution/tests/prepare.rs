@@ -170,7 +170,7 @@ fn ssh_runner_prep_preserves_explicit_path() {
 }
 
 #[test]
-fn ssh_runner_prep_preserves_internal_lab_handoff_marker() {
+fn ssh_runner_prep_marks_remote_placement_as_resolved() {
     crate::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {
             runner_id: "lab".to_string(),
@@ -183,7 +183,7 @@ fn ssh_runner_prep_preserves_internal_lab_handoff_marker() {
                 "cook".to_string(),
             ],
             env: std::collections::HashMap::from([(
-                RUNNER_LAB_HANDOFF_ENV.to_string(),
+                RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
                 "1".to_string(),
             )]),
             secret_env_names: Vec::new(),
@@ -201,7 +201,9 @@ fn ssh_runner_prep_preserves_internal_lab_handoff_marker() {
             Some("1")
         );
         assert_eq!(
-            plan.env.get(RUNNER_LAB_HANDOFF_ENV).map(String::as_str),
+            plan.env
+                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(plan.env.get(RUNNER_ID_ENV).map(String::as_str), Some("lab"));
@@ -237,6 +239,7 @@ fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
         .expect("prepare local runner process");
 
         assert!(!plan.env.contains_key(RUNNER_HOSTED_EXEC_ENV));
+        assert!(!plan.env.contains_key(RUNNER_PLACEMENT_RESOLVED_ENV));
         assert!(!plan.env.contains_key(RUNNER_ID_ENV));
     });
 }
@@ -349,7 +352,7 @@ fn runner_prep_allows_declared_sensitive_env() {
 }
 
 #[test]
-fn daemon_prep_preserves_lab_handoff_marker_and_unrelated_runner_side_secret() {
+fn daemon_prep_preserves_placement_marker_and_unrelated_runner_side_secret() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
@@ -373,7 +376,7 @@ fn daemon_prep_preserves_lab_handoff_marker_and_unrelated_runner_side_secret() {
                 "--help".to_string(),
             ],
             env: std::collections::HashMap::from([(
-                RUNNER_LAB_HANDOFF_ENV.to_string(),
+                RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
                 "1".to_string(),
             )]),
             secret_env_names: Vec::new(),
@@ -388,7 +391,9 @@ fn daemon_prep_preserves_lab_handoff_marker_and_unrelated_runner_side_secret() {
 
         assert!(!plan.env.contains_key("OPENAI_API_KEY"));
         assert_eq!(
-            plan.env.get(RUNNER_LAB_HANDOFF_ENV).map(String::as_str),
+            plan.env
+                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
+                .map(String::as_str),
             Some("1")
         );
     });
@@ -528,6 +533,19 @@ fn daemon_local_prep_normalizes_default_path_on_runner_side() {
             plan.env.contains_key("PATH"),
             "daemon-side runner prep should build the default job PATH from the runner host"
         );
+        assert_eq!(
+            plan.env
+                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
+                .map(String::as_str),
+            Some("1"),
+            "daemon jobs must identify their controller-resolved placement"
+        );
+        assert_eq!(
+            plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(plan.env.get(RUNNER_ID_ENV).map(String::as_str), Some("lab"));
+        assert!(!plan.command.iter().any(|arg| arg == "--placement"));
     });
 }
 

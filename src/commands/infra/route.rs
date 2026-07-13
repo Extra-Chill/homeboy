@@ -23,18 +23,13 @@ pub fn route_after_parse(
     normalized_args: &[String],
     output_file: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
-    // A Lab child executes the controller's already-accepted command. It must
-    // never route that command again, regardless of whether the original
-    // request used an explicit runner or automatic Lab selection.
-    if homeboy::core::runner::runner_lab_handoff_active() {
-        return Ok(None);
-    }
-
-    if lab_routing::is_lab_offload_subprocess() {
-        return Ok(None);
-    }
-
-    if cli.runner.is_none() && crate::commands::utils::resource_policy::is_runner_hosted_exec() {
+    // A managed runner executes the controller-selected command once. Explicit
+    // placement is never skipped: it must still enforce Lab routing and local
+    // safety gates even if a caller has inherited marker-like environment.
+    if cli.placement == homeboy::cli_surface::Placement::Auto
+        && (lab_routing::is_lab_offload_subprocess()
+            || crate::commands::utils::resource_policy::is_managed_runner_placement_context())
+    {
         return Ok(None);
     }
 
@@ -140,12 +135,8 @@ pub fn route_after_parse(
             command: lab_command,
             normalized_args: routed_args,
             explicit_runner: cli.runner.as_deref(),
-            force_hot: cli.force_hot,
-            local_policy: runners::LabLocalExecutionPolicy::from_flags(
-                cli.allow_local_hot,
-                cli.allow_local_fallback,
-                cli.lab_only,
-            ),
+            placement: cli.placement,
+            allow_local_fallback: cli.allow_local_fallback,
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             skip_deps_hydration: cli.skip_deps_hydration,
             capture_patch: capture_mutation_patch,
@@ -423,7 +414,7 @@ fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
 
     (concurrency > 1 || task_count > 1).then(|| {
         format!(
-            "HOMEBOY_LOCAL_FANOUT_WARNING: {label} will execute on this controller with concurrency={concurrency}, tasks={task_count}, execution_location=local. Use --runner <runner-id> or --lab-only to prevent local provider fanout."
+            "HOMEBOY_LOCAL_FANOUT_WARNING: {label} will execute on this controller with concurrency={concurrency}, tasks={task_count}, execution_location=local. Use --runner <runner-id> or --placement lab to prevent local provider fanout."
         )
     })
 }
@@ -859,16 +850,16 @@ fn runner_rig_source_management_command(
     let mut command = vec![homeboy_path.to_string()];
     let mut iter = normalized_args.iter().skip(1).peekable();
     while let Some(arg) = iter.next() {
-        if arg == "--runner" || arg == "--output" || arg == "--artifact-root" {
+        if arg == "--runner"
+            || arg == "--output"
+            || arg == "--artifact-root"
+            || arg == "--placement"
+        {
             iter.next();
             continue;
         }
         if arg == "--allow-local-fallback"
             || arg == "--allow-dirty-lab-workspace"
-            || arg == "--allow-local-hot"
-            || arg == "--lab-only"
-            || arg == "--no-local-execution"
-            || arg == "--force-hot"
             || arg == "--detach-after-handoff"
         {
             continue;
@@ -876,6 +867,7 @@ fn runner_rig_source_management_command(
         if arg.starts_with("--runner=")
             || arg.starts_with("--output=")
             || arg.starts_with("--artifact-root=")
+            || arg.starts_with("--placement=")
         {
             continue;
         }
@@ -939,7 +931,7 @@ fn destructive_fuzz_local_execution_error() -> homeboy::core::Error {
         "destructive fuzz refused local controller execution".to_string(),
         Some("--allow-destructive".to_string()),
         Some(vec![
-            "Omit --force-hot/--allow-local-hot or pass --runner <runner-id> to run destructive fuzz on Lab.".to_string(),
+            "Use --placement lab or pass --runner <runner-id> to run destructive fuzz on Lab.".to_string(),
             "Configure a default Lab runner so destructive fuzz offloads automatically.".to_string(),
             "If local execution is absolutely intentional, pass --allow-local-destructive-fuzz together with --allow-destructive.".to_string(),
         ]),
@@ -1383,8 +1375,8 @@ mod tests {
     fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
         let normalized = vec![
             "homeboy",
-            "--force-hot",
-            "--allow-local-hot",
+            "--placement",
+            "local",
             "fuzz",
             "run",
             "component-a",
@@ -1418,8 +1410,8 @@ mod tests {
     fn destructive_fuzz_local_override_is_command_specific_and_explicit() {
         let cli = Cli::parse_from([
             "homeboy",
-            "--force-hot",
-            "--allow-local-hot",
+            "--placement",
+            "local",
             "fuzz",
             "run",
             "component-a",
@@ -1588,57 +1580,20 @@ mod tests {
     }
 
     #[test]
-    fn runner_lab_handoff_keeps_cook_orchestration_on_the_accepting_runner() {
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-        let cases = [
-            vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "implement the fix".to_string(),
-                "--to-worktree".to_string(),
-                "homeboy@cook-routing".to_string(),
-                "--verify".to_string(),
-                "cargo test --locked".to_string(),
-            ],
-            vec![
-                "homeboy".to_string(),
-                "--runner".to_string(),
-                "homeboy-lab".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--prompt".to_string(),
-                "implement the fix".to_string(),
-                "--to-worktree".to_string(),
-                "homeboy@cook-routing".to_string(),
-                "--verify".to_string(),
-                "cargo test --locked".to_string(),
-            ],
-        ];
-
-        homeboy::core::runner::set_runner_lab_handoff_active_for_test(true);
-        for normalized in cases {
-            let cli = Cli::parse_from(&normalized);
-            assert_eq!(
-                route_after_parse(&cli, &normalized, None)
-                    .expect("the accepting runner must not query or dispatch through Lab"),
-                None,
-                "the accepting runner must execute cook locally without a second Lab dispatch"
-            );
-        }
-        homeboy::core::runner::set_runner_lab_handoff_active_for_test(false);
-    }
-
-    #[test]
     fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner() {
         let _env = EnvGuard::set_many(&[
             (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
             (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+            (
+                homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+                Some("1"),
+            ),
+            (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
         ]);
         let normalized = vec![
             "homeboy".to_string(),
-            "--allow-local-hot".to_string(),
+            "--placement".to_string(),
+            "local".to_string(),
             "bench".to_string(),
             "--extension".to_string(),
             "wordpress".to_string(),
@@ -1649,6 +1604,58 @@ mod tests {
             .expect("runner-hosted bench execution should stay local");
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, None),
+            (homeboy::core::runner::RUNNER_ID_ENV, None),
+            (
+                homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+                Some("1"),
+            ),
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let err = crate::test_support::with_isolated_home(|_| {
+            route_after_parse(&cli, &normalized, None)
+                .expect_err("ambient marker must not bypass required Lab placement")
+        });
+
+        assert_ne!(err.code.as_str(), "internal.unexpected");
+    }
+
+    #[test]
+    fn managed_runner_context_bypasses_auto_routing_once() {
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            (homeboy::core::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
+            (
+                homeboy::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+                Some("1"),
+            ),
+            (homeboy::core::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        assert_eq!(
+            route_after_parse(&cli, &normalized, None).expect("managed context"),
+            None
+        );
     }
 
     #[test]
@@ -1913,8 +1920,7 @@ mod tests {
             "homeboy-lab".to_string(),
             "--output=./sources.json".to_string(),
             "--allow-local-fallback".to_string(),
-            "--lab-only".to_string(),
-            "--force-hot".to_string(),
+            "--placement=lab".to_string(),
             "--detach-after-handoff".to_string(),
         ];
 
@@ -2236,7 +2242,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_doctor_supports_runner_lab_only_diagnostic_route() {
+    fn fuzz_doctor_supports_runner_lab_placement_route() {
         let cli = Cli::parse_from([
             "homeboy",
             "fuzz",
@@ -2245,18 +2251,13 @@ mod tests {
             "nodejs",
             "--runner",
             "homeboy-lab",
-            "--lab-only",
+            "--placement",
+            "lab",
         ]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
-            cli.allow_local_hot,
-            cli.allow_local_fallback,
-            cli.lab_only,
-        );
-
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(local_policy.deny_local_execution());
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "fuzz doctor");
         assert!(lab_runner_supports_contract_label(command.hot_label));
         assert!(command.is_portable());
@@ -2487,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_cook_supports_automatic_explicit_and_lab_only_routing() {
+    fn agent_task_cook_supports_automatic_explicit_and_lab_placement_routing() {
         let automatic = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -2520,9 +2521,10 @@ mod tests {
         assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
         assert!(explicit_command.is_portable());
 
-        let lab_only = Cli::parse_from([
+        let lab = Cli::parse_from([
             "homeboy",
-            "--lab-only",
+            "--placement",
+            "lab",
             "agent-task",
             "cook",
             "--prompt",
@@ -2532,16 +2534,11 @@ mod tests {
             "--verify",
             "cargo test --locked",
         ]);
-        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
-            lab_only.allow_local_hot,
-            lab_only.allow_local_fallback,
-            lab_only.lab_only,
-        );
-        assert!(lab_offload_command(&lab_only.command)
+        assert!(lab_offload_command(&lab.command)
             .unwrap()
             .unwrap()
             .is_portable());
-        assert!(local_policy.deny_local_execution());
+        assert_eq!(lab.placement, crate::cli_surface::Placement::Lab);
     }
 
     #[test]
@@ -2566,12 +2563,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_controller_run_from_spec_supports_lab_only_runner_routing() {
+    fn agent_task_controller_run_from_spec_supports_lab_placement_runner_routing() {
         let cli = Cli::parse_from([
             "homeboy",
             "--runner",
             "homeboy-lab",
-            "--lab-only",
+            "--placement",
+            "lab",
             "agent-task",
             "controller",
             "run-from-spec",
@@ -2581,14 +2579,8 @@ mod tests {
         ]);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
-            cli.allow_local_hot,
-            cli.allow_local_fallback,
-            cli.lab_only,
-        );
-
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(local_policy.deny_local_execution());
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(
             command.hot_label,
             "agent-task controller from-spec --resume/run-from-spec/materialize"
@@ -2655,14 +2647,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_only() {
+    fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement() {
         // Isolate from a parallel test leaking the offload-metadata env var,
         // which would otherwise short-circuit route_after_parse as a Lab
         // offload subprocess and return Ok(None) instead of the deny error.
         let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
             "homeboy".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
             "agent-task".to_string(),
             "fanout".to_string(),
             "submit-batch".to_string(),
@@ -2677,12 +2670,12 @@ mod tests {
         assert!(!command.routing_policy.infer_source_path_tools);
 
         let err = route_after_parse(&cli, &normalized, None)
-            .expect_err("fanout submit-batch must not run locally under --lab-only");
+            .expect_err("fanout submit-batch must not run locally under Lab placement");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err
             .message
-            .contains("Lab-only execution refused local execution"));
+            .contains("Lab placement refused local execution"));
         assert!(err.message.contains("automatic Lab offload disabled"));
     }
 
@@ -2692,7 +2685,8 @@ mod tests {
             "homeboy".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
             "agent-task".to_string(),
             "fanout".to_string(),
             "run-plan".to_string(),
@@ -2702,14 +2696,8 @@ mod tests {
         let cli = Cli::parse_from(&normalized);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
-            cli.allow_local_hot,
-            cli.allow_local_fallback,
-            cli.lab_only,
-        );
-
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(local_policy.deny_local_execution());
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
         assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
@@ -2722,7 +2710,8 @@ mod tests {
             "homeboy".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--lab-only".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
             "agent-task".to_string(),
             "fanout".to_string(),
             "cook-batch".to_string(),
@@ -2736,14 +2725,8 @@ mod tests {
         let cli = Cli::parse_from(&normalized);
 
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
-        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
-            cli.allow_local_hot,
-            cli.allow_local_fallback,
-            cli.lab_only,
-        );
-
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(local_policy.deny_local_execution());
+        assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout cook-batch");
         assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);

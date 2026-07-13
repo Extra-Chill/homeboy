@@ -274,7 +274,7 @@ pub(super) fn sync_lab_offload_rigs(
                 Some(rig_id.clone()),
                 Some(vec![
                     output.stderr.trim().to_string(),
-                    "Run the command with --force-hot to execute locally while investigating runner rig setup.".to_string(),
+                    "Run the command with --placement local to execute locally while investigating runner rig setup.".to_string(),
                     format!("Lab source snapshot remote path: {}", primary.remote_path),
                     format!("Selected rig install source: {source}"),
                 ]),

@@ -52,7 +52,7 @@ docs cleanup PR.
 
 | Compatibility surface | Current owner | Current shape | Retirement criteria |
 | --- | --- | --- | --- |
-| Global `--no-local-execution` alias | `src/cli_surface.rs` | Visible alias for `--lab-only`. | Remove after operator docs and automation uniformly use `--lab-only` and no active scripts reference the alias. |
+| Legacy placement aliases | `src/cli_surface.rs` | Rejected parser inputs with targeted migration errors. | None: product policy is zero legacy placement support. |
 | Legacy component fields such as `build_command` | `src/commands/component.rs`, `src/core/extension/build/mod.rs`, `src/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Hidden JSON self-check flags | `src/commands/lint.rs`, `src/commands/test.rs`, `src/commands/review/mod.rs` | Hidden `--self-checks-json`-style command inputs used by internal checks. | Replace with explicit core/test harness contracts, then remove hidden flags once self-check callers are migrated. |
 | Legacy CLI aliases rejected by argument normalization | `src/commands/utils/args.rs` | Rejection tests protect known old aliases from silently routing. | Keep rejection coverage until the aliases are old enough to delete from compatibility messaging. |

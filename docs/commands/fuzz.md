@@ -259,7 +259,7 @@ homeboy fuzz stable plan \
 ```
 
 The output variant is `stable_plan`. It includes `run_commands[]` entries for
-`homeboy fuzz run --lab-only --rig <resolved-rig-id> --workload <id>` with stable
+`homeboy fuzz run --placement lab --rig <resolved-rig-id> --workload <id>` with stable
 run ids shaped as `<prefix>-<stable-id>-<index>-<workload-id>`, plus comparison
 commands for `homeboy runs refs`, `homeboy runs compare`, and `homeboy runs
 hotspots`. Use those comparison commands only after Lab has completed at least two
@@ -374,8 +374,8 @@ provider features. Missing or incomplete proof fails planning/request validation
 it is not downgraded to a compatibility fallback.
 
 Destructive fuzz also refuses local controller execution by default. Use a Lab
-runner by omitting `--force-hot`, configuring a default Lab runner, or passing
-`--runner <runner-id>`. `--force-hot --allow-local-hot` is not enough for
+runner with `--placement auto`, configuring a default Lab runner, or passing
+`--runner <runner-id>`. `--placement local` is not enough for
 destructive fuzz; if local execution is absolutely intentional, pass
 `--allow-local-destructive-fuzz` together with `--allow-destructive`.
 

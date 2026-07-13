@@ -36,7 +36,7 @@ impl BenchLocalExecutionPolicy {
 /// Release gates are the quality-check hot commands (lint/test/audit) whose
 /// routing fidelity matters for validating a release. When a default Lab
 /// runner is configured, silently bypassing Lab routing to run these gates
-/// locally (via `--force-hot --allow-local-hot` or a stale-runner fallback)
+/// locally (through an explicit placement request or a stale-runner fallback)
 /// produces a gate result that is not faithful to the configured runner
 /// policy. This config makes such bypasses fail closed with a clear
 /// diagnostic instead of silently executing locally. See issues #4603 / #4605.

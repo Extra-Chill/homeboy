@@ -78,7 +78,7 @@ fn advertised_origin_ref_for_local_target(
         "trace_compare_target",
         "Lab offload could not inspect origin refs for trace compare target materialization",
         target.to_string(),
-        vec!["Run with --force-hot to execute trace compare locally while investigating remote ref availability.".to_string()],
+        vec!["Use --placement local to execute trace compare locally while investigating remote ref availability.".to_string()],
     )?;
     if refs.is_empty() && is_full_hex_sha(target) {
         return Err(Error::validation_invalid_argument(
@@ -87,7 +87,7 @@ fn advertised_origin_ref_for_local_target(
             Some(target.to_string()),
             Some(vec![
                 "Push the candidate commit to origin or pass an advertised ref such as refs/pull/<id>/head.".to_string(),
-                "Run with --force-hot to execute trace compare locally while investigating remote ref availability.".to_string(),
+                "Use --placement local to execute trace compare locally while investigating remote ref availability.".to_string(),
             ]),
         ));
     }

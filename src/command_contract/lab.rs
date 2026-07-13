@@ -603,90 +603,6 @@ pub fn run_location_index_path(remote_cwd: &str) -> String {
     )
 }
 
-mod local_execution_enums {
-    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case", tag = "mode")]
-    pub enum LabLocalExecutionPolicy {
-        Allow {
-            local_hot: LabLocalHotPolicy,
-            selected_runner_fallback: LabSelectedRunnerFallbackPolicy,
-        },
-        Deny,
-    }
-
-    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum LabLocalHotPolicy {
-        RequireRemoteWhenDefaultRunnerExists,
-        AllowControllerOverride,
-    }
-
-    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum LabSelectedRunnerFallbackPolicy {
-        Deny,
-        AllowControllerFallback,
-    }
-}
-pub use local_execution_enums::*;
-
-impl Default for LabLocalExecutionPolicy {
-    fn default() -> Self {
-        Self::Allow {
-            local_hot: LabLocalHotPolicy::RequireRemoteWhenDefaultRunnerExists,
-            selected_runner_fallback: LabSelectedRunnerFallbackPolicy::Deny,
-        }
-    }
-}
-
-impl LabLocalExecutionPolicy {
-    pub const fn from_flags(
-        allow_local_hot: bool,
-        allow_local_fallback: bool,
-        deny_local_execution: bool,
-    ) -> Self {
-        if deny_local_execution {
-            return Self::Deny;
-        }
-        Self::Allow {
-            local_hot: if allow_local_hot {
-                LabLocalHotPolicy::AllowControllerOverride
-            } else {
-                LabLocalHotPolicy::RequireRemoteWhenDefaultRunnerExists
-            },
-            selected_runner_fallback: if allow_local_fallback {
-                LabSelectedRunnerFallbackPolicy::AllowControllerFallback
-            } else {
-                LabSelectedRunnerFallbackPolicy::Deny
-            },
-        }
-    }
-
-    pub const fn allow_local_hot(self) -> bool {
-        matches!(
-            self,
-            Self::Allow {
-                local_hot: LabLocalHotPolicy::AllowControllerOverride,
-                ..
-            }
-        )
-    }
-
-    pub const fn allow_local_fallback(self) -> bool {
-        matches!(
-            self,
-            Self::Allow {
-                selected_runner_fallback: LabSelectedRunnerFallbackPolicy::AllowControllerFallback,
-                ..
-            }
-        )
-    }
-
-    pub const fn deny_local_execution(self) -> bool {
-        matches!(self, Self::Deny)
-    }
-}
-
 pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
 pub(crate) const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
@@ -1509,7 +1425,8 @@ mod low_noise_polling_tests {
             "homeboy@fix-7964",
             "--runner",
             "homeboy-lab",
-            "--lab-only",
+            "--placement",
+            "lab",
             "--dry-run",
         ]);
 
@@ -1543,7 +1460,7 @@ mod low_noise_polling_tests {
     }
 
     #[test]
-    fn rig_source_management_explains_lab_only_setup_boundary() {
+    fn rig_source_management_explains_lab_setup_boundary() {
         for args in [
             ["homeboy", "rig", "install", "./rig-package"].as_slice(),
             ["homeboy", "rig", "update", "demo-rig"].as_slice(),

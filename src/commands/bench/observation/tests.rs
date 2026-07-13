@@ -972,7 +972,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
         let policy = &run.metadata_json["resource_policy"];
         assert_eq!(policy["command"], "bench");
         assert_eq!(policy["severity"], "hot");
-        assert_eq!(policy["force_hot"], false);
+        assert_eq!(policy["local_override"], false);
         assert_eq!(policy["warned"], true);
         assert_eq!(policy["runner_selection"]["runner_id"], "homeboy-lab");
         assert_eq!(policy["runner_selection"]["reason"], "default_lab_runner");
@@ -989,7 +989,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
 }
 
 #[test]
-fn bench_observation_records_force_hot_bypass() {
+fn bench_observation_records_local_placement_override_with_legacy_evidence() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
         resource_policy::reset_captured_context_for_test();
@@ -1042,9 +1042,12 @@ fn bench_observation_records_force_hot_bypass() {
         let run = store.get_run(&run_id).expect("read run").expect("run");
         let policy = &run.metadata_json["resource_policy"];
         assert_eq!(policy["severity"], "hot");
-        assert_eq!(policy["force_hot"], true);
+        assert_eq!(policy["local_override"], true);
         assert_eq!(policy["warned"], true);
-        assert_eq!(policy["runner_selection"]["reason"], "force_hot_local");
+        assert_eq!(
+            policy["runner_selection"]["reason"],
+            "placement_local_override"
+        );
 
         resource_policy::reset_captured_context_for_test();
     });

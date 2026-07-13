@@ -130,7 +130,7 @@ fn forward_rig_component_path_env_entries(
                 Some(value.clone()),
                 Some(vec![
                     format!("Controller-side value: {value}"),
-                    "Use an existing local checkout/component path so Lab can sync and translate it, unset the variable to use the rig default, or run with --force-hot to keep the check local.".to_string(),
+                    "Use an existing local checkout/component path so Lab can sync and translate it, unset the variable to use the rig default, or use --placement local to keep the check local.".to_string(),
                 ]),
             ));
         };

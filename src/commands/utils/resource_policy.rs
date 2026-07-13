@@ -54,10 +54,9 @@ pub struct ResourcePolicyContext {
     pub command: String,
     /// Overall severity: `ok`, `warm`, or `hot`.
     pub severity: String,
-    /// Whether the user passed `--force-hot` to intentionally bypass the
-    /// warning. When true and severity is non-ok, the warning was suppressed
-    /// from stderr but still recorded here.
-    pub force_hot: bool,
+    /// Requested controller placement. This records an intentional local
+    /// override without preserving deprecated CLI terminology.
+    pub local_override: bool,
     /// Whether a warning was emitted (or would have been) for this run.
     pub warned: bool,
     /// Human-readable warning message produced by the policy, if any.
@@ -117,21 +116,21 @@ pub struct ResourcePolicyHostSnapshot {
 
 impl ResourcePolicyContext {
     /// Build a structured context from a `DoctorOutput`, the matched hot
-    /// command, an optional warning, and whether `--force-hot` was passed.
+    /// command, an optional warning, and whether local placement was explicit.
     pub fn from_evaluation(
         command: HotCommand,
         resources: &DoctorOutput,
         warning: Option<&ResourcePolicyWarning>,
-        force_hot: bool,
+        local_override: bool,
         default_runner: Option<&str>,
         runner_hosted: bool,
     ) -> Self {
         let runner_selection =
-            runner_selection_context(command, force_hot, default_runner, runner_hosted);
+            runner_selection_context(command, local_override, default_runner, runner_hosted);
         Self {
             command: command.label.to_string(),
             severity: severity_str(resources.recommendation).to_string(),
-            force_hot,
+            local_override,
             warned: warning.is_some(),
             message: warning.map(|warning| warning.message.clone()),
             runner_selection,
@@ -164,7 +163,7 @@ impl ResourcePolicyContext {
 
 fn runner_selection_context(
     command: HotCommand,
-    force_hot: bool,
+    local_override: bool,
     default_runner: Option<&str>,
     runner_hosted: bool,
 ) -> ResourcePolicyRunnerSelection {
@@ -174,10 +173,10 @@ fn runner_selection_context(
             reason: "runner_hosted".to_string(),
         };
     }
-    if force_hot {
+    if local_override {
         return ResourcePolicyRunnerSelection {
             runner_id: None,
-            reason: "force_hot_local".to_string(),
+            reason: "placement_local_override".to_string(),
         };
     }
     if command.lab_offload_supported {
@@ -307,12 +306,12 @@ pub fn evaluate_with_runner_hint(
 
 pub fn non_interactive_preflight_error(
     warning: &ResourcePolicyWarning,
-    force_hot: bool,
+    local_override: bool,
     interactive: bool,
     local_hot_rerun_command: Option<String>,
     default_runner: Option<&str>,
 ) -> Option<crate::core::Error> {
-    if force_hot || interactive || is_runner_hosted_exec() {
+    if local_override || interactive || is_runner_hosted_exec() {
         return None;
     }
     if default_runner.is_some() && warning.message.contains("--runner") {
@@ -354,22 +353,23 @@ pub fn rerun_command(
                 rerun.push(runner_id.to_string());
             }
         } else {
-            append_local_hot_overrides(&mut rerun, args);
+            append_local_placement(&mut rerun, args);
         }
     } else {
-        append_local_hot_overrides(&mut rerun, args);
+        append_local_placement(&mut rerun, args);
     }
     rerun.extend(args.iter().skip(1).cloned());
 
     Some(crate::core::engine::shell::quote_args(&rerun))
 }
 
-fn append_local_hot_overrides(rerun: &mut Vec<String>, args: &[String]) {
-    if !args.iter().any(|arg| arg == "--force-hot") {
-        rerun.push("--force-hot".to_string());
-    }
-    if !args.iter().any(|arg| arg == "--allow-local-hot") {
-        rerun.push("--allow-local-hot".to_string());
+fn append_local_placement(rerun: &mut Vec<String>, args: &[String]) {
+    if !args
+        .iter()
+        .any(|arg| arg == "--placement" || arg.starts_with("--placement="))
+    {
+        rerun.push("--placement".to_string());
+        rerun.push("local".to_string());
     }
 }
 
@@ -379,8 +379,33 @@ pub fn is_runner_hosted_exec() -> bool {
         .is_some_and(|value| value == "1")
 }
 
+/// True for the complete environment prepared by a managed remote runner exec.
+///
+/// Environment variables are not cryptographic provenance: a process with
+/// arbitrary environment control can forge them. They are an internal runner
+/// transport boundary, so require all three values emitted by RunnerExecOptions
+/// and daemon job preparation rather than trusting the resolved marker alone.
+pub fn is_managed_runner_placement_context() -> bool {
+    is_runner_hosted_exec()
+        && std::env::var(crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV)
+            .ok()
+            .is_some_and(|value| value == "1")
+        && std::env::var(crate::core::runner::RUNNER_ID_ENV)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
 pub fn clear_runner_hosted_exec() {
     std::env::remove_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+}
+
+/// Remove the private runner-placement transport context after CLI routing.
+/// Child workloads and persisted artifacts must not inherit controller routing
+/// markers once their single placement decision has been consumed.
+pub fn clear_managed_runner_placement_context() {
+    std::env::remove_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+    std::env::remove_var(crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV);
+    std::env::remove_var(crate::core::runner::RUNNER_ID_ENV);
 }
 
 fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>) -> String {
@@ -417,7 +442,7 @@ fn warning_message(
             );
         }
         return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to route this portable command through Lab offload, or use --force-hot to run locally without this warning.",
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to route this portable command through Lab offload, or use --placement local to run locally without this warning.",
             command.label
         );
     }
@@ -426,7 +451,7 @@ fn warning_message(
         "This resource-pressure command does not have a portable Lab offload contract yet.",
     );
     format!(
-        "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {local_only_reason} Use --force-hot to run locally without this warning.",
+        "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} {local_only_reason} Use --placement local to run locally without this warning.",
         command.label
     )
 }
@@ -534,7 +559,7 @@ mod tests {
         .expect("hot machines warn");
         assert_eq!(warning.command, "bench");
         assert_eq!(warning.recommendation, ResourceRecommendation::Hot);
-        assert!(warning.message.contains("--force-hot"));
+        assert!(warning.message.contains("--placement local"));
         assert!(warning.message.contains("--runner <id>"));
         assert!(warning.message.contains("Load average is 9.0"));
 
@@ -568,7 +593,7 @@ mod tests {
         .expect("hot machines warn");
 
         assert!(warning.message.contains("`rig up` stays local"));
-        assert!(warning.message.contains("--force-hot"));
+        assert!(warning.message.contains("--placement local"));
         assert!(!warning.message.contains("--runner <id>"));
     }
 
@@ -691,7 +716,6 @@ mod tests {
         assert!(error.message.contains("Refusing to start `audit`"));
         assert!(error.message.contains("non-interactive shell"));
         assert!(error.message.contains("--runner <id>"));
-        assert!(!error.message.contains("Use --force-hot"));
         assert!(error.details.get("rerun_command").is_none());
     }
 
@@ -739,9 +763,8 @@ mod tests {
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
-            Some("homeboy --force-hot --allow-local-hot review lint --changed-since origin/main")
+            Some("homeboy --placement local review lint --changed-since origin/main")
         );
-        assert!(!error.message.contains("--force-hot --allow-local-hot"));
         assert!(error.message.contains("Lab routing is not offered"));
     }
 
@@ -766,6 +789,8 @@ mod tests {
 
     #[test]
     fn portable_refusal_without_runner_uses_explicit_local_last_resort() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Warm),
@@ -781,7 +806,7 @@ mod tests {
 
         assert_eq!(
             error.details["rerun_command"].as_str(),
-            Some("homeboy --force-hot --allow-local-hot audit")
+            Some("homeboy --placement local audit")
         );
         assert!(error
             .message
@@ -830,7 +855,7 @@ mod tests {
 
         assert_eq!(context.command, "bench");
         assert_eq!(context.severity, "hot");
-        assert!(!context.force_hot);
+        assert!(!context.local_override);
         assert!(context.warned);
         assert!(context
             .message
@@ -855,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn context_records_force_hot_bypass_for_hot_machine() {
+    fn context_records_local_placement_for_hot_machine() {
         let resources = resources(ResourceRecommendation::Hot);
         let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
         let context = ResourcePolicyContext::from_evaluation(
@@ -867,11 +892,11 @@ mod tests {
             false,
         );
 
-        assert!(context.force_hot);
+        assert!(context.local_override);
         assert!(context.warned);
         assert_eq!(context.severity, "hot");
         assert!(context.message.is_some());
-        assert_eq!(context.runner_selection.reason, "force_hot_local");
+        assert_eq!(context.runner_selection.reason, "placement_local_override");
         assert_eq!(context.runner_selection.runner_id, None);
     }
 
@@ -891,7 +916,7 @@ mod tests {
         assert_eq!(context.severity, "ok");
         assert!(!context.warned);
         assert!(context.message.is_none());
-        assert!(!context.force_hot);
+        assert!(!context.local_override);
         assert_eq!(context.runner_selection.reason, "local_no_default_runner");
     }
 
@@ -934,7 +959,7 @@ mod tests {
 
         assert_eq!(value["command"], "bench");
         assert_eq!(value["severity"], "hot");
-        assert_eq!(value["force_hot"], false);
+        assert_eq!(value["local_override"], false);
         assert_eq!(value["warned"], true);
         assert!(value["message"].is_string());
         assert_eq!(value["runner_selection"]["runner_id"], "homeboy-lab");

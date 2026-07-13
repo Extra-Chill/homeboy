@@ -168,7 +168,7 @@ unless the generated plan is edited before `fanout run-plan`.
 
 ## Lab Guardrails
 
-Use global `--lab-only` (alias `--no-local-execution`) with long-running or
+Use global `--placement lab` with long-running or
 patch-producing `agent-task cook` waves that must not execute
 provider processes on the controller. If Lab routing cannot select or prepare a
 runner, Homeboy fails before local execution instead of falling back.
@@ -178,7 +178,7 @@ expected to outlive the local shell. Homeboy returns after the runner daemon
 accepts the job and prints follow/cancel commands instead of waiting for remote
 provider completion.
 
-`--force-hot --allow-local-hot` is safe only when local execution on this
+`--placement local` is safe only when local execution on this
 controller is intentional. For agent-task waves with concurrency greater than 1
 or multiple tasks, Homeboy prints `HOMEBOY_LOCAL_FANOUT_WARNING` before provider
 processes start. Compact `agent-task status` includes `execution_location` as
@@ -254,7 +254,7 @@ Controller spec materialization commands are portable Lab commands:
 `controller from-spec --resume`, `controller run-from-spec`, and
 `controller materialize` auto-select the configured default Lab runner when
 global `--runner` is omitted. Use `--runner <id>` to choose a specific runner, or
-`--force-hot --allow-local-hot` only when controller-machine execution is
+`--placement local` only when controller-machine execution is
 intentional.
 
 ## Internal Bridge
@@ -744,7 +744,7 @@ homeboy runner exec homeboy-lab \
 ```
 
 `runner exec` marks non-local jobs as runner-hosted, so nested `agent-task cook`
-commands pass the non-interactive resource preflight without `--force-hot`.
+commands pass the non-interactive resource preflight without a public placement override.
 
 ## Cook Workspaces
 

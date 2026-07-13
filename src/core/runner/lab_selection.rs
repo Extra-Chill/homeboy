@@ -106,12 +106,26 @@ pub(super) fn fail_if_no_default_runner_accepts_jobs(command: &LabOffloadCommand
     if !command.is_portable() || !command.routing_policy.default_lab_offload {
         return Ok(());
     }
-    let eligible = default_lab_runner_availability()?;
+    fail_if_no_default_runner_accepts_jobs_with(command, default_lab_runner_availability()?)
+}
+
+pub(super) fn fail_if_no_default_runner_accepts_jobs_with(
+    command: &LabOffloadCommand,
+    eligible: Vec<RunnerAvailability>,
+) -> Result<()> {
     if eligible.is_empty()
         || eligible
             .iter()
             .any(|availability| availability.accepts_jobs)
     {
+        return Ok(());
+    }
+
+    // Ordinary auto-routed portable work may remain local when every default
+    // runner is full. A release gate is evidence of the configured Lab policy,
+    // so it must never silently become controller-local merely because capacity
+    // changed after selection.
+    if !command.routing_policy.release_gate {
         return Ok(());
     }
 
@@ -401,7 +415,8 @@ fn automatic_fallback_or_explicit_error(
             Some(selection.runner_id.clone()),
             Some(vec![
                 remediation,
-                "Use --force-hot to run the command locally instead of offloading.".to_string(),
+                "Use --placement local to run the command locally instead of offloading."
+                    .to_string(),
             ]),
         )),
     }
@@ -468,8 +483,7 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
 pub(super) fn resolve_lab_runner_selection(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    force_hot: bool,
-    allow_local_hot: bool,
+    placement: crate::cli_surface::Placement,
 ) -> Result<Option<LabRunnerSelection>> {
     let config = crate::core::defaults::load_config();
     let deny_local_bench = config.bench.local_execution.is_denied();
@@ -477,18 +491,18 @@ pub(super) fn resolve_lab_runner_selection(
         crate::core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
     let default_runner = if explicit_runner.is_none()
         && command.is_portable()
-        && command.routing_policy.default_lab_offload
+        && (command.routing_policy.default_lab_offload
+            || placement == crate::cli_surface::Placement::Lab)
     {
         super::resolve_default_lab_runner()?
     } else {
         None
     };
 
-    resolve_lab_runner_selection_from_default(
+    resolve_lab_runner_selection_from_placement(
         command,
         explicit_runner,
-        force_hot,
-        allow_local_hot,
+        placement,
         deny_local_bench,
         release_gate_local_hot_allowed,
         default_runner,
@@ -496,11 +510,10 @@ pub(super) fn resolve_lab_runner_selection(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn resolve_lab_runner_selection_from_default(
+pub(super) fn resolve_lab_runner_selection_from_placement(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    force_hot: bool,
-    allow_local_hot: bool,
+    placement: crate::cli_surface::Placement,
     deny_local_bench: bool,
     release_gate_local_hot_allowed: bool,
     default_runner: Option<String>,
@@ -523,74 +536,60 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         }));
     }
 
-    if super::runner_lab_handoff_active() {
-        return Ok(None);
-    }
-
-    if allow_local_hot && !force_hot {
+    if placement == crate::cli_surface::Placement::Lab && !command.is_portable() {
         return Err(Error::validation_invalid_argument(
-            "allow_local_hot",
-            format!(
-                "--allow-local-hot only permits an explicit --force-hot local run for portable hot command `{}`; it does not disable automatic Lab offload by itself",
-                command.hot_label
-            ),
-            Some("--allow-local-hot".to_string()),
-            Some(vec![
-                "Use --force-hot --allow-local-hot to keep the command on the controller machine.".to_string(),
-                "Omit --allow-local-hot to let Homeboy choose the configured default Lab runner.".to_string(),
-                "Use --runner <runner-id> to offload to a specific Lab runner.".to_string(),
-            ]),
+            "placement",
+            "--placement lab is unavailable for this local-only command",
+            None,
+            Some(vec![lab_runner_unsupported_hint()]),
         ));
     }
 
-    if !command.routing_policy.default_lab_offload {
+    if !command.routing_policy.default_lab_offload
+        && placement != crate::cli_surface::Placement::Lab
+    {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }
 
-    if force_hot && command.is_portable() && !allow_local_hot {
-        let Some(runner_id) = default_runner.as_ref() else {
-            fail_if_local_bench_denied(command, deny_local_bench)?;
-            return Ok(None);
-        };
-        return Err(Error::validation_invalid_argument(
-            "force_hot",
-            format!(
-                "--force-hot would run portable hot command `{}` locally, but default Lab runner `{runner_id}` is available",
-                command.hot_label
-            ),
-            Some(runner_id.clone()),
-            Some(vec![
-                "Omit --force-hot or pass --runner to offload the command to Lab.".to_string(),
-                "Pass --force-hot --allow-local-hot only when you intentionally want this portable hot command to run on the controller machine.".to_string(),
-            ]),
-        ));
-    }
-
-    // Release-gate routing safety (#4603 / #4605): a force-local bypass
-    // (`--force-hot --allow-local-hot`) for a release gate silently routes the
+    // Release-gate routing safety (#4603 / #4605): local placement for a release gate silently routes the
     // gate to the controller machine instead of the configured Lab runner,
     // producing a gate result that is not faithful to the routing policy. Fail
     // closed with a clear diagnostic unless the operator explicitly opts back
-    // into local-hot via config/env, in which case the override is recorded by
-    // the offload metadata (`force_hot_local_override`).
-    if command.routing_policy.release_gate && force_hot && allow_local_hot {
+    // into local execution via config/env, in which case the override is recorded
+    // by the offload metadata.
+    if command.routing_policy.release_gate && placement == crate::cli_surface::Placement::Local {
         if let Some(runner_id) = default_runner.as_ref() {
             if !release_gate_local_hot_allowed {
                 return Err(release_gate_local_hot_denied_error(
                     format!(
-                        "Release gate `{}` cannot bypass Lab routing with --force-hot --allow-local-hot while default Lab runner `{}` is configured and `/release_gate/local_hot` is `fail_closed`",
+                "Release gate `{}` cannot bypass Lab routing with --placement local while default Lab runner `{}` is configured and `/release_gate/local_hot` is `fail_closed`",
                         command.hot_label, runner_id
                     ),
-                    "force_hot",
+                    "placement",
                 ));
             }
         }
     }
 
-    if force_hot || !command.is_portable() {
+    if placement == crate::cli_surface::Placement::Local || !command.is_portable() {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
+    }
+
+    if placement == crate::cli_surface::Placement::Lab && default_runner.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "placement",
+            format!(
+                "--placement lab requires an eligible Lab runner for `{}`",
+                command.hot_label
+            ),
+            None,
+            Some(vec![
+                "Connect a Lab runner or use --placement local to run on the controller."
+                    .to_string(),
+            ]),
+        ));
     }
 
     if default_runner.is_none() {
@@ -642,7 +641,7 @@ pub(super) fn release_gate_local_hot_denied_error(message: String, field: &str) 
         message,
         Some("fail_closed".to_string()),
         Some(vec![
-            "Run the gate without local-hot flags so the configured Lab runner routing applies.".to_string(),
+            "Run the gate with --placement auto or --placement lab so the configured Lab runner routing applies.".to_string(),
             format!("Reconnect or upgrade a stale runner with `homeboy runner doctor <runner-id>` before retrying the gate."),
             format!("To intentionally run a release gate locally, set `/release_gate/local_hot` to `allowed` in {config_path} (the override is recorded in offload metadata)."),
             format!("For a single invocation, export {env_var}=allowed instead of editing config."),

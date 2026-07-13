@@ -993,7 +993,6 @@ mod tests {
     fn declared_agent_task_secret_env_allows_global_flags_before_agent_task() {
         let names = declared_agent_task_secret_env(&[
             "homeboy".to_string(),
-            "--force-hot".to_string(),
             "agent-task".to_string(),
             "dispatch".to_string(),
             "--secret-env=HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
@@ -1046,7 +1045,6 @@ mod tests {
             "homeboy".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--force-hot".to_string(),
             "trace".to_string(),
             "compare".to_string(),
             "woocommerce-gateway-stripe".to_string(),
@@ -1074,7 +1072,6 @@ mod tests {
                 "homeboy".to_string(),
                 "--runner".to_string(),
                 "homeboy-lab".to_string(),
-                "--force-hot".to_string(),
                 "trace".to_string(),
                 "compare".to_string(),
                 "woocommerce-gateway-stripe".to_string(),

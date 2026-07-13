@@ -4,14 +4,12 @@ use std::collections::HashMap;
 
 use crate::core::plan::HomeboyPlan;
 
-pub use crate::command_contract::LabLocalExecutionPolicy;
-
 pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub force_hot: bool,
-    pub local_policy: LabLocalExecutionPolicy,
+    pub placement: crate::cli_surface::Placement,
+    pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     /// Skip post-materialization dependency hydration for Lab workspace exec
     /// jobs. When true, Homeboy does not run `composer install`/`npm ci`/etc. in

@@ -128,7 +128,6 @@ impl CliRuntime {
     }
 
     fn run_matches(&self, matches: ArgMatches, normalized: Vec<String>) -> std::process::ExitCode {
-        crate::core::runner::consume_runner_lab_handoff_control_env();
         let global = GlobalArgs {};
 
         // Extract --output early so it's available for all code paths (including
@@ -195,7 +194,23 @@ impl CliRuntime {
             }
         }
 
-        match crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref()) {
+        // Capture controller pressure once before placement routing. The route
+        // and persisted evidence reuse this preflight decision rather than
+        // probing the host a second time.
+        let managed_runner_placement = resource_policy::is_managed_runner_placement_context();
+        if let Some(exit_code) = preflight_hot_command(&cli, output_file.as_deref()) {
+            if managed_runner_placement {
+                resource_policy::clear_managed_runner_placement_context();
+            }
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
+
+        let route_result =
+            crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref());
+        if managed_runner_placement {
+            resource_policy::clear_managed_runner_placement_context();
+        }
+        match route_result {
             Ok(None) => {}
             Ok(Some(exit_code)) => {
                 return std::process::ExitCode::from(exit_code_to_u8(exit_code));
@@ -210,10 +225,6 @@ impl CliRuntime {
             cli.artifact_root.clone().or(artifact_root_override),
         );
 
-        if let Some(exit_code) = preflight_hot_command(&cli, output_file.as_deref()) {
-            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-        }
-
         if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
@@ -221,6 +232,8 @@ impl CliRuntime {
         run_startup_update_checks(&cli.command);
 
         let exit_code = crate::core::notification_route::with_current(notification_route, || {
+            #[cfg(test)]
+            record_marker_context_before_run_command();
             commands::output_runtime::run_command(
                 cli.command,
                 command_spec,
@@ -265,6 +278,19 @@ fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
             ))
         }
     }
+}
+
+#[cfg(test)]
+fn record_marker_context_before_run_command() {
+    *marker_context_before_run_command()
+        .lock()
+        .expect("marker test state") = Some(resource_policy::is_managed_runner_placement_context());
+}
+
+#[cfg(test)]
+fn marker_context_before_run_command() -> &'static std::sync::Mutex<Option<bool>> {
+    static STATE: OnceLock<std::sync::Mutex<Option<bool>>> = OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 fn is_top_level_version_request(args: &[String]) -> bool {
@@ -555,11 +581,9 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                 default_lab_runner.as_deref(),
             );
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if runner_hosted {
-                resource_policy::clear_runner_hosted_exec();
-            }
             if let Some(warning) = warning.as_ref() {
-                if !cli.force_hot && !runner_hosted {
+                if !matches!(cli.placement, crate::cli_surface::Placement::Local) && !runner_hosted
+                {
                     eprintln!("{}", warning.message);
                 }
             }
@@ -575,7 +599,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     } else {
                         warning.as_ref()
                     },
-                    cli.force_hot,
+                    matches!(cli.placement, crate::cli_surface::Placement::Local),
                     default_lab_runner.as_deref(),
                     runner_hosted,
                 ),
@@ -583,7 +607,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             if let Some(warning) = warning.as_ref() {
                 if let Some(err) = resource_policy::non_interactive_preflight_error(
                     warning,
-                    cli.force_hot || runner_hosted,
+                    !matches!(cli.placement, crate::cli_surface::Placement::Auto) || runner_hosted,
                     is_interactive_shell(),
                     resource_policy::rerun_command(
                         hot_command,
@@ -1253,5 +1277,42 @@ mod tests {
 
         let (cli, _) = Cli::from_registered_arg_matches(&matches).expect("typed cli");
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn managed_runner_context_clears_before_production_run_command() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let previous = [
+            crate::core::runner::RUNNER_HOSTED_EXEC_ENV,
+            crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV,
+            crate::core::runner::RUNNER_ID_ENV,
+        ]
+        .map(|name| (name, std::env::var(name).ok()));
+        std::env::set_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
+        std::env::set_var(crate::core::runner::RUNNER_PLACEMENT_RESOLVED_ENV, "1");
+        std::env::set_var(crate::core::runner::RUNNER_ID_ENV, "homeboy-lab");
+
+        *marker_context_before_run_command()
+            .lock()
+            .expect("marker test state") = None;
+        let runtime = CliRuntime::new();
+        let exit = runtime.run_from_args(vec!["homeboy".to_string(), "status".to_string()]);
+
+        assert_eq!(exit, std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            *marker_context_before_run_command()
+                .lock()
+                .expect("marker test state"),
+            Some(false),
+            "run_command must not inherit managed placement markers"
+        );
+        assert!(!resource_policy::is_managed_runner_placement_context());
+
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 }

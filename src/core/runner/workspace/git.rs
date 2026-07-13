@@ -68,7 +68,7 @@ fn ensure_clean_git_working_tree(
                 Some(vec![
                     "Commit or stash local changes before remote execution of a --changed-since command."
                         .to_string(),
-                    "Run with --force-hot to execute the changed-since command locally."
+                    "Run with --placement local to execute the changed-since command locally."
                         .to_string(),
                     "Omit --changed-since to use snapshot remote execution for dirty local changes."
                         .to_string(),
@@ -82,7 +82,7 @@ fn ensure_clean_git_working_tree(
             Some("git".to_string()),
             Some(vec![
                 "Commit or stash local changes before git-backed Lab execution.".to_string(),
-                "Run with --force-hot to execute the command locally while the worktree is dirty."
+                "Run with --placement local to execute the command locally while the worktree is dirty."
                     .to_string(),
                 "Use `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot` when materializing a standalone snapshot workspace."
                     .to_string(),
@@ -123,7 +123,7 @@ pub(super) fn materialize_git(
                     changed_since_base.map(str::to_string),
                     Some(vec![
                         "Verify the branch and base commit are pushed to origin.".to_string(),
-                        "Run with --force-hot to execute the changed-since command locally."
+                        "Run with --placement local to execute the changed-since command locally."
                             .to_string(),
                         format!("Remote git error: {}", output.stderr.trim()),
                     ]),

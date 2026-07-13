@@ -8,7 +8,7 @@ fn filter_strips_boolean_flags() {
 }
 
 #[test]
-fn parses_force_hot_after_bench_without_losing_settings() {
+fn parses_placement_after_bench_without_losing_settings() {
     let normalized = crate::commands::utils::args::normalize(
         [
             "homeboy",
@@ -17,7 +17,8 @@ fn parses_force_hot_after_bench_without_losing_settings() {
             "studio-bfb",
             "--iterations",
             "1",
-            "--force-hot",
+            "--placement",
+            "local",
             "--setting",
             "studio_site_build_prompt_variant=astro-docs-content-collection",
         ]
@@ -27,9 +28,9 @@ fn parses_force_hot_after_bench_without_losing_settings() {
     );
 
     let cli = crate::cli_surface::Cli::try_parse_from(normalized)
-        .expect("bench --force-hot --setting should parse");
+        .expect("bench --placement local --setting should parse");
 
-    assert!(cli.force_hot);
+    assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
     let crate::cli_surface::Commands::Bench(args) = cli.command else {
         panic!("expected bench command");
     };
@@ -41,8 +42,8 @@ fn parses_force_hot_after_bench_without_losing_settings() {
         )]
     );
     assert!(
-        !args.run.args.iter().any(|arg| arg == "--force-hot"),
-        "--force-hot must not be forwarded to bench workloads"
+        !args.run.args.iter().any(|arg| arg == "--placement"),
+        "--placement must not be forwarded to bench workloads"
     );
 }
 

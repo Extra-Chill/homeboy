@@ -1128,7 +1128,7 @@ fn rig_component_path_env_extra_workspaces_from_entries(
                 Some(value.clone()),
                 Some(vec![
                     format!("Controller-side value: {value}"),
-                    "Set the variable to an existing checkout/component path before offload, unset it to use the rig default, or run with --force-hot to keep the check local.".to_string(),
+                    "Set the variable to an existing checkout/component path before offload, unset it to use the rig default, or use --placement local to keep the check local.".to_string(),
                 ]),
             ));
         }
@@ -1675,7 +1675,6 @@ mod provider_config_candidate_paths_tests {
     fn agent_task_plan_spec_allows_global_flags_before_agent_task() {
         let args = vec![
             "homeboy".to_string(),
-            "--force-hot".to_string(),
             "agent-task".to_string(),
             "run-plan".to_string(),
             "--plan=@/tmp/plan.json".to_string(),

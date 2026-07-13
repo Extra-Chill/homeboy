@@ -69,7 +69,7 @@ pub(in crate::core::runner) fn preflight_provider_config_paths_materialized_in_a
         Some(vec![
             "Use controller-local paths that exist so Lab can sync and rewrite them to runner paths before dispatch.".to_string(),
             "Remove stale runtime/component/provider-plugin paths from the provider config when the run should use runner-installed defaults.".to_string(),
-            "Run with --force-hot --allow-local-hot only if you intentionally want to bypass Lab offload and execute locally.".to_string(),
+            "Run with --placement local only if you intentionally want to bypass Lab offload and execute locally.".to_string(),
         ]),
     ))
 }

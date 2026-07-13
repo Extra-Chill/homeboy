@@ -159,7 +159,7 @@ fn advertised_origin_ref_for_commit(path: &Path, commit: &str) -> Result<Option<
         "changed_since",
         "Lab offload could not inspect origin refs for changed-since base materialization",
         commit.to_string(),
-        vec!["Run with --force-hot to execute the changed-since command locally while investigating remote ref availability.".to_string()],
+        vec!["Run with --placement local to execute the changed-since command locally while investigating remote ref availability.".to_string()],
     )?;
     Ok(best_advertised_ref(refs))
 }
@@ -182,7 +182,7 @@ fn ensure_local_merge_base(path: &Path, git_ref: &str) -> Result<()> {
         Some(git_ref.to_string()),
         Some(vec![
             format!("Fetch or correct the base ref locally: git fetch origin {git_ref}"),
-            "Run with --force-hot to execute the changed-since command locally.".to_string(),
+            "Run with --placement local to execute the changed-since command locally.".to_string(),
         ]),
     ))
 }
@@ -203,7 +203,7 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
         Some(args.last().copied().unwrap_or_default().to_string()),
         Some(vec![
             "Fetch the base ref locally before using Lab offload.".to_string(),
-            "Run with --force-hot to execute the changed-since command locally.".to_string(),
+            "Run with --placement local to execute the changed-since command locally.".to_string(),
         ]),
     ))
 }
