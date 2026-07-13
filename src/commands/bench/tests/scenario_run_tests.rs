@@ -98,6 +98,61 @@ fn run_selects_single_scenario() {
 }
 
 #[test]
+fn selected_visual_scenario_emits_a_non_empty_comparison_directory() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_registered_component(home, "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            run_args(Some("studio"), Vec::new(), vec!["visual".to_string()]),
+            &GlobalArgs {},
+        )
+        .expect("selected visual bench should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Single(result) => {
+                let mut results = result.results.expect("results");
+                let scenario = results.scenarios.remove(0);
+                let path = scenario.artifacts["visual_comparison_dir"]
+                    .path
+                    .as_deref()
+                    .expect("visual comparison directory path");
+                assert!(!path.trim().is_empty());
+                assert!(std::path::Path::new(path).is_dir());
+            }
+            _ => panic!("expected single output"),
+        }
+    });
+}
+
+#[test]
+fn selected_non_visual_scenario_omits_optional_comparison_artifacts() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_registered_component(home, "studio", component_dir.path());
+
+        let (output, exit_code) = run(
+            run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
+            &GlobalArgs {},
+        )
+        .expect("selected non-visual bench should run");
+
+        assert_eq!(exit_code, 0);
+        match output {
+            BenchOutput::Single(result) => {
+                let mut results = result.results.expect("results");
+                let scenario = results.scenarios.remove(0);
+                assert!(!scenario.artifacts.contains_key("visual_comparison_dir"));
+            }
+            _ => panic!("expected single output"),
+        }
+    });
+}
+
+#[test]
 fn selected_scenario_workload_failure_preserves_runner_error() {
     with_isolated_home(|home| {
         write_failing_bench_extension(home);
