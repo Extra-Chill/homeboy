@@ -627,6 +627,7 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
 pub(super) fn ensure_agent_task_lifecycle_identity_with(
     args: &[String],
     preferred: Option<&str>,
+    preferred_attempt_run_id: Option<&str>,
 ) -> Option<(Vec<String>, String)> {
     let (args, run_id) = ensure_agent_task_dispatch_run_id_with(args, preferred)?;
     let invocation = CommandInvocation::for_subcommand(&args, "agent-task")?;
@@ -638,7 +639,10 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
         return Some((args, attempt_run_id));
     }
 
-    let attempt_run_id = cook_attempt_run_id(&run_id, 1);
+    let attempt_run_id = preferred_attempt_run_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| cook_attempt_run_id(&run_id, 1));
     let args = ArgEditor::new(&args)
         .insert_after(
             action_index,
@@ -1402,13 +1406,36 @@ mod tests {
         ];
 
         let (out, lifecycle_run_id) =
-            ensure_agent_task_lifecycle_identity_with(&args, None).expect("cook identity");
+            ensure_agent_task_lifecycle_identity_with(&args, None, None).expect("cook identity");
 
         assert_eq!(out[3], "--attempt-run-id");
         assert_eq!(out[4], lifecycle_run_id);
         assert_eq!(out[5], "--run-id");
         assert_eq!(out[6], "cook-7970");
         assert!(lifecycle_run_id.starts_with("cook-7970-attempt-1-"));
+    }
+
+    #[test]
+    fn lab_cook_preserves_explicit_attempt_identity_for_drift_detection() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-run-id".to_string(),
+            "unexpected-attempt".to_string(),
+            "--run-id".to_string(),
+            "cook-8009".to_string(),
+        ];
+
+        let (out, lifecycle_run_id) = ensure_agent_task_lifecycle_identity_with(
+            &args,
+            Some("cook-8009"),
+            Some("cook-8009-attempt-1-canonical"),
+        )
+        .expect("cook identity");
+
+        assert_eq!(out, args);
+        assert_eq!(lifecycle_run_id, "unexpected-attempt");
     }
 
     #[test]

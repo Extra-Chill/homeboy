@@ -72,9 +72,12 @@ pub(crate) fn run_runner_resident_lab_offload(
     );
     let remapped_args = inject_agent_task_resolved_provider_policy_in_args(&remapped_args)?;
     let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
-    let (remapped_args, agent_task_run_id) =
-        ensure_agent_task_lifecycle_identity_with(&remapped_args, run_isolation_token.as_deref())
-            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
+    let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
+        &remapped_args,
+        run_isolation_token.as_deref(),
+        None,
+    )
+    .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
     let mut command = vec![homeboy_path.to_string()];
     if remote_output_file.is_some() && !args_contain_output_file(request.normalized_args) {
         command.push("--output".to_string());
