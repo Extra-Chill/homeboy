@@ -38,6 +38,8 @@ fn release_refactor_gate_enables_non_pr_repair_path() {
     assert!(gate_refactor.contains("Only release-blocking commands are repaired"));
     assert!(gate_refactor.contains("autofix-open-pr: 'true'"));
     assert!(gate_refactor.contains("continue-on-error: true"));
+    assert!(gate_refactor.contains("timeout-minutes: 35"));
+    assert!(gate_refactor.contains("execution-timeout-seconds: '1800'"));
 }
 
 #[test]
