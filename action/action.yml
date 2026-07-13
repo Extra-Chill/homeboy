@@ -88,6 +88,10 @@ inputs:
     description: 'Duration window to export Homeboy observations after command execution (e.g. "24h", "7d", "30m"). Export is best-effort and non-fatal.'
     required: false
     default: '24h'
+  execution-timeout-seconds:
+    description: 'Maximum wall-clock time for a Homeboy command or autofix phase. Emits liveness notices and exits with actionable timeout evidence.'
+    required: false
+    default: '1800'
   import-observations:
     description: 'Download and import earlier homeboy-observations artifacts from the same workflow run before command execution. Import is best-effort and non-fatal.'
     required: false
@@ -497,7 +501,8 @@ runs:
         BENCH_REGRESSION_THRESHOLD: ${{ inputs.regression-threshold }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy
-      run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+      run: bash ${{ github.action_path }}/scripts/core/run-with-liveness-timeout.sh "Homeboy commands" bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
 
     - name: Resolve artifact names
       id: artifact-names
@@ -617,7 +622,8 @@ runs:
         AUTOFIX_COMMANDS: ${{ inputs.autofix-commands }}
         AUTOFIX_MAX_COMMITS: ${{ inputs.autofix-max-commits }}
         APP_TOKEN: ${{ inputs.app-token }}
-      run: bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+      run: bash ${{ github.action_path }}/scripts/core/run-with-liveness-timeout.sh "Non-PR autofix" bash ${{ github.action_path }}/scripts/autofix/prepare-autofix-branch.sh
 
     - name: Open non-PR autofix PR
       id: autofix-open-pr
