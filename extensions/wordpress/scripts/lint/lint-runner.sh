@@ -336,7 +336,25 @@ WP_ALTERNATIVES_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-alternatives
 WP_FILESYSTEM_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/wp-filesystem-fixer.php"
 TEXT_DOMAIN_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/text-domain-fixer.php"
 PHPCS_IGNORE_FIXER="${EXTENSION_PATH}/scripts/lint/php-fixers/phpcs-ignore-fixer.php"
-PHPCS_CONFIG="${EXTENSION_PATH}/phpcs.xml.dist"
+PHPCS_CONFIG=""
+COMPONENT_PHPCS_CONFIG=0
+for phpcs_config_name in phpcs.xml .phpcs.xml phpcs.xml.dist .phpcs.xml.dist; do
+    if [ -f "${PLUGIN_PATH}/${phpcs_config_name}" ]; then
+        PHPCS_CONFIG="${PLUGIN_PATH}/${phpcs_config_name}"
+        COMPONENT_PHPCS_CONFIG=1
+        break
+    fi
+done
+PHPCS_CONFIG="${PHPCS_CONFIG:-${EXTENSION_PATH}/phpcs.xml.dist}"
+
+if [ "$COMPONENT_PHPCS_CONFIG" -eq 1 ]; then
+    if [ -x "${PLUGIN_PATH}/vendor/bin/phpcs" ]; then
+        PHPCS_BIN="${PLUGIN_PATH}/vendor/bin/phpcs"
+    fi
+    if [ -x "${PLUGIN_PATH}/vendor/bin/phpcbf" ]; then
+        PHPCBF_BIN="${PLUGIN_PATH}/vendor/bin/phpcbf"
+    fi
+fi
 
 # Validate tools exist
 if [ ! -f "$PHPCS_BIN" ]; then
@@ -350,21 +368,25 @@ if [ ! -f "$PHPCS_CONFIG" ]; then
 fi
 
 # Composer's PHPCS installer can be bypassed in linked extension installs. Keep
-# the runner self-healing so WordPress-Extra and HomeboyWordPress always resolve.
+# the extension binary self-healing so WordPress-Extra and HomeboyWordPress
+# always resolve, but preserve component Composer standards when its binary is
+# selected for a component-owned ruleset.
 PHPCS_STANDARD_PATHS=()
-for phpcs_standard_path in \
-    "${EXTENSION_PATH}/vendor/wp-coding-standards/wpcs" \
-    "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsextra" \
-    "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsutils" \
-    "${EXTENSION_PATH}/HomeboyWordPress"; do
-    if [ -d "$phpcs_standard_path" ]; then
-        PHPCS_STANDARD_PATHS+=("$phpcs_standard_path")
-    fi
-done
+if [ "$PHPCS_BIN" = "${EXTENSION_PATH}/vendor/bin/phpcs" ]; then
+    for phpcs_standard_path in \
+        "${EXTENSION_PATH}/vendor/wp-coding-standards/wpcs" \
+        "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsextra" \
+        "${EXTENSION_PATH}/vendor/phpcsstandards/phpcsutils" \
+        "${EXTENSION_PATH}/HomeboyWordPress"; do
+        if [ -d "$phpcs_standard_path" ]; then
+            PHPCS_STANDARD_PATHS+=("$phpcs_standard_path")
+        fi
+    done
 
-if [ "${#PHPCS_STANDARD_PATHS[@]}" -gt 0 ]; then
-    PHPCS_INSTALLED_PATHS=$(IFS=','; printf '%s' "${PHPCS_STANDARD_PATHS[*]}")
-    "$PHPCS_BIN" --config-set installed_paths "$PHPCS_INSTALLED_PATHS" --quiet > /dev/null 2>&1 || true
+    if [ "${#PHPCS_STANDARD_PATHS[@]}" -gt 0 ]; then
+        PHPCS_INSTALLED_PATHS=$(IFS=','; printf '%s' "${PHPCS_STANDARD_PATHS[*]}")
+        "$PHPCS_BIN" --config-set installed_paths "$PHPCS_INSTALLED_PATHS" --quiet > /dev/null 2>&1 || true
+    fi
 fi
 
 # Auto-detect text domain from plugin/theme header (shared helper)
