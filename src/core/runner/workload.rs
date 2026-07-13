@@ -961,6 +961,29 @@ mod tests {
     }
 
     #[test]
+    fn runner_workload_validation_rejects_remote_workspace_mismatch() {
+        let workload = workload();
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/other-workspace"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &SecretEnvPlan::default(),
+            true,
+        )
+        .expect_err("mismatched remote workspace must fail");
+
+        assert_eq!(
+            err.details["field"],
+            "runner_workload.state.remote_workspace"
+        );
+        assert!(err
+            .to_string()
+            .contains("remote workspace does not match dispatch cwd"));
+    }
+
+    #[test]
     fn runner_workload_validation_rejects_blank_result_refs_plan_id() {
         let mut workload = workload();
         workload.result_refs.plan_id = " ".to_string();
