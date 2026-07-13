@@ -16,8 +16,8 @@ use crate::core::process::pid_is_running;
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    read_status, repair_legacy_lease_for_start, stop_unlocked, DaemonDeadLeaseRecoveryResult,
+    DaemonStaleReasonCode, DaemonStartResult, JobStore, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -43,6 +43,37 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     ensure_running_with_wait(addr, Duration::from_secs(5))
+}
+
+/// Explicitly recover an unreachable daemon whose recorded PID is dead.
+///
+/// Opening the durable store reconciles interrupted jobs before the replacement
+/// daemon can accept work, preserving retryable terminal evidence.
+pub fn recover_dead_lease(addr: &str) -> Result<DaemonDeadLeaseRecoveryResult> {
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    if status.fresh
+        || status.reachable
+        || status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead)
+    {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!(
+                "dead-lease recovery requires an unreachable daemon with a dead PID (fresh={}, reachable={}, reason={:?})",
+                status.fresh, status.reachable, status.freshness.stale_reason_code
+            ),
+            None,
+            Some(vec!["Run `homeboy daemon status` to inspect the recorded lease before replacing it".to_string()]),
+        ));
+    }
+    let jobs = JobStore::open(crate::core::paths::daemon_jobs_file()?)?;
+    let recovered_jobs = jobs.recovered_interrupted_jobs();
+    let daemon = start_background_unlocked(addr)?;
+    Ok(DaemonDeadLeaseRecoveryResult {
+        daemon,
+        recovered_jobs,
+    })
 }
 
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {

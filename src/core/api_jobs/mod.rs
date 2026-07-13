@@ -12,7 +12,7 @@ pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEvent,
-    JobEventKind, JobStatus, RunnerJobLifecycleOwner, RunnerJobSource,
+    JobEventKind, JobStatus, RecoveredInterruptedJob, RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
 #[cfg(test)]
@@ -56,6 +56,29 @@ mod tests {
             JobStatus::Running,
             "status inspection must not reconcile an in-flight daemon job"
         );
+    }
+
+    #[test]
+    fn reopening_persisted_active_job_records_terminal_retryable_recovery() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("open store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        drop(store);
+
+        let recovered = JobStore::open(&path).expect("reopen interrupted store");
+        let job = recovered.get(job.id).expect("recovered job");
+
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(
+            job.stale_reason.as_deref(),
+            Some("daemon restarted before the job reached a terminal status")
+        );
+        assert!(recovered
+            .recovered_interrupted_jobs()
+            .iter()
+            .any(|recovered_job| recovered_job.job_id == job.id.to_string()));
     }
 
     #[test]

@@ -200,11 +200,20 @@ pub(super) fn remove(id: &str) -> CmdResult<RunnerOutput> {
 
 pub(super) fn connect(
     id: &str,
+    force: bool,
     reverse: bool,
     runner_id: Option<String>,
     broker_url: Option<String>,
 ) -> CmdResult<RunnerOutput> {
     let (report, exit_code) = if reverse {
+        if force {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "force",
+                "--force recovery is only supported for direct SSH runner connections",
+                Some(id.to_string()),
+                None,
+            ));
+        }
         let runner_id = runner_id.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "runner",
@@ -219,7 +228,7 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        runner::connect(id)?
+        runner::connect_with_dead_daemon_recovery(id, force)?
     };
     Ok((
         RunnerOutput {

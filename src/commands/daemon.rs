@@ -29,6 +29,11 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
+    /// Reconcile interrupted jobs and replace an unreachable daemon with a dead lease PID
+    RecoverDeadLease {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
     /// Run the local daemon in the foreground
     Serve {
         /// Local bind address. Defaults to an OS-selected loopback port.
@@ -80,6 +85,7 @@ pub struct DaemonArtifactGetArgs {
 pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
+    RecoverDeadLease(daemon::DaemonDeadLeaseRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -107,6 +113,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         }
         DaemonCommand::EnsureRunning { addr } => Ok((
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
+            0,
+        )),
+        DaemonCommand::RecoverDeadLease { addr } => Ok((
+            DaemonOutput::RecoverDeadLease(daemon::recover_dead_lease(&addr)?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),

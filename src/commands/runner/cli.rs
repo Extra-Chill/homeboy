@@ -201,6 +201,10 @@ pub(super) enum RunnerCommand {
         /// Runner ID for direct SSH connect, or controller/broker ID when --reverse is set
         id: String,
 
+        /// Recover an unreachable daemon with a dead lease PID after recording its active jobs as retryable terminal work
+        #[arg(long)]
+        force: bool,
+
         /// Record a runner-initiated reverse tunnel session substrate
         #[arg(long)]
         reverse: bool,

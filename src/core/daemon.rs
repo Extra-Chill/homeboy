@@ -12,7 +12,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
+use crate::core::api_jobs::{
+    JobStatus, JobStore, RecoveredInterruptedJob, RunnerJobLifecycleMetadata,
+};
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
@@ -36,8 +38,8 @@ mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
-    artifact_content_url, ensure_running, fetch_artifact_to_path, start_background,
-    ArtifactFetchOutcome,
+    artifact_content_url, ensure_running, fetch_artifact_to_path, recover_dead_lease,
+    start_background, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -123,6 +125,12 @@ pub struct DaemonStartResult {
     pub address: String,
     pub state_path: String,
     pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonDeadLeaseRecoveryResult {
+    pub daemon: DaemonStartResult,
+    pub recovered_jobs: Vec<RecoveredInterruptedJob>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

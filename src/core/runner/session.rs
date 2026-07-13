@@ -492,6 +492,13 @@ pub struct RunnerConnectReport {
     pub failure_message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunnerRecoveredJob {
+    pub job_id: String,
+    pub durable_run_id: Option<String>,
+    pub evidence_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerStatusReport {
     pub runner_id: String,

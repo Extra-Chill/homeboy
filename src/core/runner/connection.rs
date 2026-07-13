@@ -20,8 +20,8 @@ use crate::core::server::{self, Server, SshClient};
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerTunnelMode,
+    RunnerRecoveredJob, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{broker_auth, broker_http};
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
@@ -46,6 +46,13 @@ struct CliEnvelope {
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_dead_daemon_recovery(runner_id, false)
+}
+
+pub fn connect_with_dead_daemon_recovery(
+    runner_id: &str,
+    force_dead_daemon_recovery: bool,
+) -> Result<(RunnerConnectReport, i32)> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     let homeboy = remote_runner_homeboy_path(&runner, "runner connect")?;
@@ -81,7 +88,12 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let version = identity.version.clone();
 
     let previous_session = read_session(runner_id)?;
-    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref());
+    let daemon = ensure_remote_daemon(
+        &client,
+        homeboy,
+        previous_session.as_ref(),
+        force_dead_daemon_recovery,
+    );
     let Ok(daemon) = daemon else {
         return Ok(failed_connect(
             runner_id,
@@ -91,6 +103,20 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         ));
     };
 
+    let (daemon, recovered_jobs) = daemon;
+    for job in &recovered_jobs {
+        eprintln!(
+            "Recovered dead daemon job {}{}; inspect {}",
+            job.job_id,
+            job.durable_run_id
+                .as_deref()
+                .map(|run_id| format!(" (durable run {run_id})"))
+                .unwrap_or_default(),
+            job.evidence_commands
+                .join(" or ")
+                .replace("<runner-id>", runner_id),
+        );
+    }
     let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
         &server,
         &client,
@@ -992,22 +1018,31 @@ mod remote_daemon {
     pub(super) enum RemoteDaemonConnectAction {
         Reattach,
         Start,
+        RecoverDeadLease,
     }
 
     pub(super) fn ensure_remote_daemon(
         client: &SshClient,
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
-    ) -> std::result::Result<RemoteDaemon, String> {
+        force_dead_daemon_recovery: bool,
+    ) -> std::result::Result<(RemoteDaemon, Vec<RunnerRecoveredJob>), String> {
         let status = remote_daemon_status(client, homeboy)?;
-        match remote_daemon_connect_action(previous_session, &status)? {
+        match remote_daemon_connect_action(previous_session, &status, force_dead_daemon_recovery)? {
             RemoteDaemonConnectAction::Reattach => {
-                return status.daemon.ok_or_else(|| {
-                    "remote daemon reattach selected without a daemon lease".to_string()
-                });
+                return status
+                    .daemon
+                    .map(|daemon| (daemon, Vec::new()))
+                    .ok_or_else(|| {
+                        "remote daemon reattach selected without a daemon lease".to_string()
+                    });
             }
             RemoteDaemonConnectAction::Start => {
                 return remote_daemon_ensure_running(client, homeboy)
+                    .map(|daemon| (daemon, Vec::new()))
+            }
+            RemoteDaemonConnectAction::RecoverDeadLease => {
+                return remote_daemon_recover_dead_lease(client, homeboy)
             }
         }
     }
@@ -1015,15 +1050,19 @@ mod remote_daemon {
     pub(super) fn remote_daemon_connect_action(
         previous_session: Option<&RunnerSession>,
         status: &RemoteDaemonStatus,
+        force_dead_daemon_recovery: bool,
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
         let healthy = status.fresh && status.reachable;
-        if status.active_jobs > 0
-            && !healthy
-            && !remote_daemon_pid_dead_with_owned_lease(previous_session, status)
-        {
+        if status.active_jobs > 0 && !healthy {
+            if force_dead_daemon_recovery
+                && status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+                && !status.reachable
+            {
+                return Ok(RemoteDaemonConnectAction::RecoverDeadLease);
+            }
             return Err(format!(
-                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement",
-                status.active_jobs, status.fresh, status.reachable, status.stale_reason
+                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}); refusing implicit replacement. Inspect `homeboy daemon status` and the daemon job store. To recover only an unreachable daemon with a dead lease PID, run `homeboy runner connect <runner-id> --force`; recovery records affected jobs as terminal retryable evidence before replacement",
+                status.active_jobs, status.fresh, status.reachable, status.stale_reason,
             ));
         }
 
@@ -1058,35 +1097,6 @@ mod remote_daemon {
         }
 
         Ok(RemoteDaemonConnectAction::Start)
-    }
-
-    fn remote_daemon_pid_dead_with_owned_lease(
-        previous_session: Option<&RunnerSession>,
-        status: &RemoteDaemonStatus,
-    ) -> bool {
-        if status.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
-            return false;
-        }
-        let Some(daemon) = status.daemon.as_ref() else {
-            return false;
-        };
-        let Some(lease_id) = daemon.lease_id.as_deref() else {
-            return false;
-        };
-        let Some(session) = previous_session.filter(|session| {
-            session.mode == RunnerTunnelMode::DirectSsh
-                && session.role == RunnerSessionRole::Controller
-        }) else {
-            return true;
-        };
-
-        match session.remote_daemon_lease_id.as_deref() {
-            Some(expected_lease) => expected_lease == lease_id,
-            None => {
-                session.remote_daemon_pid == daemon.pid
-                    && session.remote_daemon_address.as_deref() == Some(daemon.address.as_str())
-            }
-        }
     }
 
     pub(super) fn remote_daemon_status(
@@ -1236,6 +1246,62 @@ mod remote_daemon {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         })
+    }
+
+    fn remote_daemon_recover_dead_lease(
+        client: &SshClient,
+        homeboy: &str,
+    ) -> std::result::Result<(RemoteDaemon, Vec<RunnerRecoveredJob>), String> {
+        let command = format!(
+            "{} daemon recover-dead-lease --addr 127.0.0.1:0",
+            shell::quote_arg(homeboy)
+        );
+        let output = client.execute(&command);
+        if !output.success {
+            return Err(command_failure_message(
+                "remote dead-lease recovery failed",
+                &output,
+            ));
+        }
+        let envelope = parse_envelope(&output.stdout)
+            .map_err(|err| format!("remote dead-lease recovery returned invalid JSON: {}", err))?;
+        if !envelope.success {
+            return Err(format!(
+                "remote dead-lease recovery failed: {}",
+                envelope.error.unwrap_or(Value::Null)
+            ));
+        }
+        let data = envelope
+            .data
+            .ok_or_else(|| "remote dead-lease recovery returned no data".to_string())?;
+        let daemon = data
+            .get("daemon")
+            .ok_or_else(|| "remote dead-lease recovery returned no daemon".to_string())
+            .map(remote_daemon_from_state)?;
+        let recovered_jobs = data
+            .get("recovered_jobs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|job| {
+                let job_id = job.get("job_id")?.as_str()?.to_string();
+                let durable_run_id = job
+                    .get("durable_run_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let mut evidence_commands =
+                    vec![format!("homeboy runner job logs <runner-id> {job_id}")];
+                if let Some(run_id) = durable_run_id.as_deref() {
+                    evidence_commands.push(format!("homeboy runs show {run_id}"));
+                }
+                Some(RunnerRecoveredJob {
+                    job_id,
+                    durable_run_id,
+                    evidence_commands,
+                })
+            })
+            .collect();
+        Ok((daemon, recovered_jobs))
     }
 
     pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
@@ -1509,7 +1575,8 @@ mod tests {
         let session = direct_ssh_session("lease-active");
         let status = remote_daemon_status_for_test(true, true, 1, "lease-active", 4242);
 
-        let action = remote_daemon_connect_action(Some(&session), &status).expect("reattach");
+        let action =
+            remote_daemon_connect_action(Some(&session), &status, false).expect("reattach");
 
         assert_eq!(action, RemoteDaemonConnectAction::Reattach);
         let daemon = status.daemon.expect("daemon");
@@ -1529,7 +1596,7 @@ mod tests {
         let status = remote_daemon_status_for_test(true, true, 0, "lease-tunnel", 4343);
 
         assert_eq!(
-            remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
+            remote_daemon_connect_action(Some(&session), &status, false).expect("reattach"),
             RemoteDaemonConnectAction::Reattach
         );
     }
@@ -1539,7 +1606,7 @@ mod tests {
         let status = remote_daemon_status_for_test(false, true, 0, "lease-stale", 4444);
 
         assert_eq!(
-            remote_daemon_connect_action(None, &status).expect("replace stale daemon"),
+            remote_daemon_connect_action(None, &status, false).expect("replace stale daemon"),
             RemoteDaemonConnectAction::Start
         );
     }
@@ -1555,14 +1622,15 @@ mod tests {
             Some(DaemonStaleReasonCode::VersionMismatch),
         );
 
-        let err = remote_daemon_connect_action(None, &status).expect_err("refuse replacement");
+        let err =
+            remote_daemon_connect_action(None, &status, false).expect_err("refuse replacement");
 
         assert!(err.contains("1 active job(s)"));
         assert!(err.contains("refusing implicit replacement"));
     }
 
     #[test]
-    fn proven_dead_daemon_with_active_jobs_and_matching_lease_routes_to_startup_reconciliation() {
+    fn dead_daemon_with_active_jobs_refuses_implicit_replacement() {
         let session = direct_ssh_session("lease-dead");
         let status = remote_daemon_status_for_test_with_reason(
             false,
@@ -1573,9 +1641,26 @@ mod tests {
             Some(DaemonStaleReasonCode::PidDead),
         );
 
+        let err = remote_daemon_connect_action(Some(&session), &status, false)
+            .expect_err("refuse implicit replacement");
+        assert!(err.contains("1 active job(s)"));
+        assert!(err.contains("--force"));
+    }
+
+    #[test]
+    fn force_recovers_unreachable_dead_daemon_with_active_jobs() {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
         assert_eq!(
-            remote_daemon_connect_action(Some(&session), &status).expect("ensure start"),
-            RemoteDaemonConnectAction::Start
+            remote_daemon_connect_action(None, &status, true).expect("select recovery"),
+            RemoteDaemonConnectAction::RecoverDeadLease
         );
     }
 
@@ -1591,7 +1676,7 @@ mod tests {
             Some(DaemonStaleReasonCode::PidDead),
         );
 
-        let err = remote_daemon_connect_action(Some(&session), &status)
+        let err = remote_daemon_connect_action(Some(&session), &status, false)
             .expect_err("refuse mismatched dead lease");
 
         assert!(err.contains("1 active job(s)"));
@@ -1610,7 +1695,7 @@ mod tests {
         };
 
         assert_eq!(
-            remote_daemon_connect_action(Some(&direct_ssh_session("lease-dead")), &status)
+            remote_daemon_connect_action(Some(&direct_ssh_session("lease-dead")), &status, false)
                 .expect("ensure start"),
             RemoteDaemonConnectAction::Start
         );
@@ -1628,7 +1713,7 @@ mod tests {
         };
 
         assert_eq!(
-            remote_daemon_connect_action(None, &status).expect("ensure start"),
+            remote_daemon_connect_action(None, &status, false).expect("ensure start"),
             RemoteDaemonConnectAction::Start
         );
     }
@@ -1638,8 +1723,8 @@ mod tests {
         let session = direct_ssh_session("lease-recorded");
         let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
 
-        let err =
-            remote_daemon_connect_action(Some(&session), &status).expect_err("lease mismatch");
+        let err = remote_daemon_connect_action(Some(&session), &status, false)
+            .expect_err("lease mismatch");
 
         assert!(err.contains("does not match persisted session lease"));
         assert!(err.contains("refusing to replace"));
@@ -1652,7 +1737,7 @@ mod tests {
         let status = remote_daemon_status_for_test(true, true, 1, "lease-live", 4242);
 
         assert_eq!(
-            remote_daemon_connect_action(Some(&session), &status).expect("adopt live lease"),
+            remote_daemon_connect_action(Some(&session), &status, false).expect("adopt live lease"),
             RemoteDaemonConnectAction::Reattach
         );
     }
@@ -1663,7 +1748,7 @@ mod tests {
         session.remote_daemon_lease_id = None;
         let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 5555);
 
-        assert!(remote_daemon_connect_action(Some(&session), &status)
+        assert!(remote_daemon_connect_action(Some(&session), &status, false)
             .expect_err("identity mismatch")
             .contains("does not match the live daemon PID/address"));
     }

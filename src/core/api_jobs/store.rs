@@ -14,7 +14,7 @@ use super::persistence::{
     validate_transition, write_durable_store, DEFAULT_EVENT_RETENTION_LIMIT,
 };
 use super::remote_runner;
-use super::types::{Job, JobEvent, JobEventKind, JobStatus};
+use super::types::{Job, JobEvent, JobEventKind, JobStatus, RecoveredInterruptedJob};
 use crate::core::error::{Error, Result};
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -262,6 +262,36 @@ impl JobStore {
             })
             .collect();
         jobs.sort_by_key(|job| (job.updated_at_ms, job.job_id.clone()));
+        jobs
+    }
+
+    pub(crate) fn recovered_interrupted_jobs(&self) -> Vec<RecoveredInterruptedJob> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut jobs = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                stored.job.status == JobStatus::Failed
+                    && stored.job.stale_reason.as_deref()
+                        == Some("daemon restarted before the job reached a terminal status")
+            })
+            .map(|stored| RecoveredInterruptedJob {
+                job_id: stored.job.id.to_string(),
+                durable_run_id: stored.events.iter().rev().find_map(|event| {
+                    let data = event.data.as_ref()?;
+                    [
+                        "/durable_run_id",
+                        "/metadata/durable_run_id",
+                        "/metadata/run_id",
+                        "/metadata/record_run_id",
+                    ]
+                    .iter()
+                    .find_map(|pointer| data.pointer(pointer).and_then(Value::as_str))
+                    .map(str::to_string)
+                }),
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| left.job_id.cmp(&right.job_id));
         jobs
     }
 

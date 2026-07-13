@@ -131,10 +131,11 @@ pub fn run(
         )),
         RunnerCommand::Connect {
             id,
+            force,
             reverse,
             reverse_runner,
             broker_url,
-        } => map_registry(connect(&id, reverse, reverse_runner, broker_url)),
+        } => map_registry(connect(&id, force, reverse, reverse_runner, broker_url)),
         RunnerCommand::Status { id } => map_registry(status_mod::status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
         RunnerCommand::RefreshHomeboy {
