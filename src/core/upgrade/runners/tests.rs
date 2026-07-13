@@ -160,8 +160,10 @@ fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
         calls[1].1.as_deref(),
         Some("/home/user/Developer/_lab_workspaces/homeboy-source")
     );
-    assert!(calls[1].0[2].contains("git fetch origin"));
-    assert!(calls[1].0[2].contains("git checkout --detach"));
+    assert!(calls[1].0[2].contains("git rev-parse --verify HEAD"));
+    assert!(!calls[1].0[2].contains("git fetch"));
+    assert!(!calls[1].0[2].contains("git pull"));
+    assert!(!calls[1].0[2].contains("git reset"));
     assert_eq!(
         calls[2].0,
         vec![

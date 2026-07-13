@@ -189,3 +189,27 @@ pub fn materialize_runner_source_path(runner: &Runner, source_path: &Path) -> Re
 
     Ok(output.remote_path)
 }
+
+pub fn materialize_explicit_runner_source_path(
+    runner: &Runner,
+    source_path: &Path,
+) -> Result<String> {
+    let (output, _) = runner::sync_workspace(
+        &runner.id,
+        RunnerWorkspaceSyncOptions {
+            path: source_path.display().to_string(),
+            // An explicit source path is a selected build input, not a remote
+            // branch to refresh. SnapshotGit retains a local Git identity for
+            // the source build without fetching or resetting either checkout.
+            mode: RunnerWorkspaceSyncMode::SnapshotGit,
+            controller_routed_git: false,
+            changed_since_base: None,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
+        },
+    )?;
+
+    Ok(output.remote_path)
+}

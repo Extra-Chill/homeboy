@@ -63,6 +63,7 @@ pub(crate) fn annotate_truncation(detail: &str, capture: &StreamCaptureMetadata)
 pub(crate) fn execute_upgrade(
     method: InstallMethod,
     source_path: Option<&Path>,
+    explicit_source_path: bool,
     force: bool,
     previous_build_identity: Option<&str>,
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>)> {
@@ -88,7 +89,7 @@ pub(crate) fn execute_upgrade(
             let cmd = source_upgrade_command_for_prepared_workspace(
                 &defaults.install_methods.source.upgrade_command,
                 &workspace_root,
-                source_path.is_some(),
+                explicit_source_path,
             )?;
             run_source_upgrade_command(&cmd, &workspace_root, SOURCE_UPGRADE_TIMEOUT)?;
             let replacement_target = active_binary_path().ok();
@@ -731,15 +732,24 @@ fn git_command_stdout(workspace_root: &Path, args: &[&str]) -> Result<String> {
     run_git(workspace_root, args, "prepare source checkout").map(|stdout| stdout.trim().to_string())
 }
 
-const EXPLICIT_SOURCE_GIT_PULL_GUARD: &str = r#"git() {
-  for homeboy_git_arg in "$@"; do
-    if [ "$homeboy_git_arg" = "pull" ]; then
-      echo "Skipping git pull for explicitly selected source checkout"
-      return 0
-    fi
-  done
-  command git "$@"
-}"#;
+const EXPLICIT_SOURCE_GIT_UPDATE_GUARD: &str = r#"HOMEBOY_REAL_GIT="$(command -v git)"
+HOMEBOY_GIT_GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-git-guard.XXXXXX")"
+cat > "$HOMEBOY_GIT_GUARD_DIR/git" <<'HOMEBOY_GIT_GUARD'
+#!/bin/sh
+for homeboy_git_arg in "$@"; do
+  case "$homeboy_git_arg" in
+    pull|fetch|reset)
+      echo "Skipping git $homeboy_git_arg for explicitly selected source checkout"
+      exit 0
+      ;;
+  esac
+done
+exec "$HOMEBOY_REAL_GIT" "$@"
+HOMEBOY_GIT_GUARD
+chmod 700 "$HOMEBOY_GIT_GUARD_DIR/git"
+export HOMEBOY_REAL_GIT
+PATH="$HOMEBOY_GIT_GUARD_DIR:$PATH"
+export PATH"#;
 
 fn source_upgrade_command_for_prepared_workspace(
     upgrade_command: &str,
@@ -757,7 +767,7 @@ fn source_upgrade_command_for_prepared_workspace(
     }
 
     Ok(format!(
-        "{EXPLICIT_SOURCE_GIT_PULL_GUARD}\n\n{upgrade_command}"
+        "{EXPLICIT_SOURCE_GIT_UPDATE_GUARD}\n\n(\n{upgrade_command}\n)\nhomeboy_upgrade_status=$?\nrm -rf \"$HOMEBOY_GIT_GUARD_DIR\"\nexit $homeboy_upgrade_status"
     ))
 }
 
@@ -1948,7 +1958,8 @@ mod tests {
             true,
         )
         .expect("explicit source command");
-        assert!(command.contains("Skipping git pull for explicitly selected source checkout"));
+        assert!(command
+            .contains("Skipping git $homeboy_git_arg for explicitly selected source checkout"));
     }
 
     #[test]
@@ -2028,9 +2039,10 @@ mod tests {
         )
         .expect("source command");
 
-        assert!(command.contains("Skipping git pull for explicitly selected source checkout"));
-        assert!(command.contains("command git \"$@\""));
-        assert!(command.ends_with("git pull --ff-only\ncargo build --release"));
+        assert!(command
+            .contains("Skipping git $homeboy_git_arg for explicitly selected source checkout"));
+        assert!(command.contains("HOMEBOY_GIT_GUARD_DIR"));
+        assert!(command.contains("git pull --ff-only\ncargo build --release"));
     }
 
     #[test]
@@ -2052,8 +2064,44 @@ mod tests {
         )
         .expect("source command");
 
-        assert!(command.contains("Skipping git pull for explicitly selected source checkout"));
-        assert!(command.ends_with("git pull --ff-only\ncargo build --release"));
+        assert!(command
+            .contains("Skipping git $homeboy_git_arg for explicitly selected source checkout"));
+        assert!(command.contains("git pull --ff-only\ncargo build --release"));
+    }
+
+    #[test]
+    fn explicit_source_upgrade_runs_build_phase_without_upstream_on_local_branch_or_detached_head()
+    {
+        for detached in [false, true] {
+            let checkout = source_workspace_with_package_name("homeboy");
+            git(checkout.path(), &["init", "--initial-branch", "local-only"]);
+            git(
+                checkout.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            git(checkout.path(), &["config", "user.name", "Homeboy Test"]);
+            git(checkout.path(), &["add", "."]);
+            git(checkout.path(), &["commit", "-m", "initial"]);
+            if detached {
+                git(checkout.path(), &["switch", "--detach", "HEAD"]);
+            }
+
+            let build_marker = checkout.path().join("build-phase");
+            let upgrade_command = format!(
+                "set -e\ngit fetch origin\ngit reset --hard origin/main\nsh -c 'git pull --ff-only'\nprintf built > {}",
+                shell_quote_path(&build_marker)
+            );
+            let command = source_upgrade_command_for_prepared_workspace(
+                &upgrade_command,
+                checkout.path(),
+                true,
+            )
+            .expect("explicit source command");
+
+            run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5))
+                .expect("guarded upgrade command reaches build phase");
+            assert_eq!(std::fs::read_to_string(build_marker).unwrap(), "built");
+        }
     }
 
     #[test]
