@@ -271,9 +271,34 @@ pub(crate) fn apply_runner_job_terminal_state(
             task.state = task_state;
         }
     }
+    let runner_identity = record
+        .runner_id()
+        .zip(record.runner_job_id())
+        .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
+    let agent_task_run_id = record.run_id.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_job_status".to_string(), json!(status));
     metadata.insert("runner_job_events".to_string(), json!(events));
+    if let Some((runner_id, runner_job_id)) = runner_identity {
+        metadata.insert(
+            "runner_execution_record".to_string(),
+            serde_json::to_value(
+                crate::core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                    &runner_job_id,
+                    &runner_id,
+                    "daemon",
+                    if status == crate::core::api_jobs::JobStatus::Succeeded {
+                        0
+                    } else {
+                        1
+                    },
+                )
+                .with_job_id(&runner_job_id)
+                .with_agent_task_run_id(agent_task_run_id),
+            )
+            .unwrap_or(Value::Null),
+        );
+    }
     metadata.insert(
         "retryable".to_string(),
         json!(run_state != AgentTaskRunState::Succeeded),
@@ -354,6 +379,26 @@ pub struct DetachedLabRunRecord<'a> {
     pub remote_command: &'a [String],
 }
 
+#[derive(Debug, Clone)]
+pub struct LabOffloadProxyPlan<'a> {
+    pub run_id: &'a str,
+    pub runner_id: &'a str,
+    pub remote_workspace: &'a str,
+    pub remote_command: &'a [String],
+}
+
+/// Persist the controller-owned parent before handing an agent-task workload to
+/// a Lab. The runner owns child execution; this record owns the stable local
+/// identity and is reconciled from that child once it is accepted.
+pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<AgentTaskRunRecord> {
+    record_lab_offload_proxy(
+        &input.run_id,
+        input.runner_id,
+        input.remote_workspace,
+        input.remote_command,
+    )
+}
+
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
     let plan = detached_lab_plan(&run_id, &input);
@@ -370,6 +415,27 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         }
         Err(error) => return Err(error),
     };
+    if matches!(
+        record.state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    ) {
+        // A retry of the controller-side handoff must not resurrect a terminal
+        // proxy. Its child identity is immutable once terminal state is known.
+        if record.runner_id() == Some(input.runner_id)
+            && record.runner_job_id() == Some(input.runner_job_id)
+        {
+            return Ok(record);
+        }
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run '{}' is already terminal", record.run_id),
+            Some(record.run_id),
+            None,
+        ));
+    }
     record.updated_at = Some(now_timestamp());
     set_run_state(&mut record, AgentTaskRunState::Running);
     update_lifecycle_heartbeat(&mut record);
@@ -387,9 +453,86 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         json!(input.remote_workspace),
     );
     metadata.insert("remote_command".to_string(), json!(input.remote_command));
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(
+            crate::core::runner_execution_envelope::RunnerExecutionRecord::in_flight(
+                input.runner_job_id,
+                input.runner_id,
+                "daemon",
+            )
+            .with_job_id(input.runner_job_id)
+            .with_agent_task_run_id(&run_id),
+        )
+        .unwrap_or(Value::Null),
+    );
     metadata.insert("retryable".to_string(), json!(true));
     metadata.remove("stale_running");
     metadata.remove("stale_running_reason");
+    store::write_record(&record)?;
+    Ok(record)
+}
+
+fn record_lab_offload_proxy(
+    requested_run_id: &str,
+    runner_id: &str,
+    remote_workspace: &str,
+    remote_command: &[String],
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(requested_run_id);
+    let input = DetachedLabRunRecord {
+        run_id: &run_id,
+        runner_id,
+        // This placeholder is removed immediately below. Keeping construction
+        // centralized lets the proxy and bound child share one plan shape.
+        runner_job_id: "unbound",
+        remote_workspace,
+        remote_command,
+    };
+    let mut plan = detached_lab_plan(&run_id, &input);
+    let task = &mut plan.tasks[0];
+    if let Some(inputs) = task.inputs.as_object_mut() {
+        inputs.remove("runner_job_id");
+    }
+    task.source_refs.clear();
+    if let Some(materialization) = task.workspace.materialization.as_object_mut() {
+        materialization.remove("runner_job_id");
+    }
+    if let Some(metadata) = task.metadata.as_object_mut() {
+        metadata.remove("runner_job_id");
+    }
+    if let Some(metadata) = plan.metadata.as_object_mut() {
+        metadata.remove("runner_job_id");
+    }
+    let mut record = match store::read_record(&run_id) {
+        Ok(record) => record,
+        Err(error)
+            if error.code == ErrorCode::InternalJsonError
+                && store::record_lacks_typed_metadata(&run_id)? =>
+        {
+            submit_plan(&plan, Some(&run_id))?
+        }
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+            submit_plan(&plan, Some(&run_id))?
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
+    metadata.insert("runner_id".to_string(), json!(runner_id));
+    metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
+    metadata.insert("remote_command".to_string(), json!(remote_command));
+    metadata.insert("retryable".to_string(), json!(true));
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(
+            crate::core::runner_execution_envelope::RunnerExecutionRecord::planned(
+                &run_id, runner_id, "daemon",
+            )
+            .with_agent_task_run_id(&run_id),
+        )
+        .unwrap_or(Value::Null),
+    );
     store::write_record(&record)?;
     Ok(record)
 }

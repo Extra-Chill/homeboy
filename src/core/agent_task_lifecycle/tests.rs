@@ -109,6 +109,129 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 }
 
 #[test]
+fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        let planned = record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "agent-task-controller-proxy",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("controller proxy recorded before handoff");
+
+        assert_eq!(planned.state, AgentTaskRunState::Queued);
+        assert!(planned.metadata.get("runner_job_id").is_none());
+        assert!(load_plan("agent-task-controller-proxy")
+            .expect("proxy plan")
+            .tasks[0]
+            .inputs
+            .get("runner_job_id")
+            .is_none());
+        assert_eq!(
+            planned.metadata["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert_eq!(
+            logs("agent-task-controller-proxy")
+                .expect("logs resolve")
+                .events
+                .len(),
+            1
+        );
+
+        let running = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-controller-proxy",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted child binds proxy");
+        assert_eq!(running.state, AgentTaskRunState::Running);
+        assert_eq!(running.metadata["runner_job_id"], "job-123");
+        assert_eq!(
+            running.metadata["runner_execution_record"]["status"],
+            "running"
+        );
+    });
+}
+
+#[test]
+fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-terminal-proxy",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-456",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut record = status("agent-task-terminal-proxy").expect("status");
+        apply_runner_job_terminal_state(
+            &mut record,
+            crate::core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
+        store::write_record(&record).expect("terminal record");
+
+        let retry = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-terminal-proxy",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-456",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("same child handoff is idempotent");
+        assert_eq!(retry.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            retry.metadata["runner_execution_record"]["status"],
+            "succeeded"
+        );
+        assert_eq!(
+            retry.metadata["runner_execution_record"]["job_id"],
+            "job-456"
+        );
+    });
+}
+
+#[test]
+fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "agent-task-handoff-failure",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("planned proxy");
+        let plan = load_plan("agent-task-handoff-failure").expect("proxy plan");
+        record_pre_execution_failure(
+            "agent-task-handoff-failure",
+            &plan,
+            "lab_handoff",
+            &Error::internal_unexpected("runner rejected handoff"),
+        )
+        .expect("handoff failure recorded");
+
+        let record = status("agent-task-handoff-failure").expect("terminal status");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "lab_handoff"
+        );
+    });
+}
+
+#[test]
 fn detached_runner_failure_transitions_parent_and_task_terminal() {
     let plan = test_plan();
     let mut record = AgentTaskRunRecord {

@@ -348,6 +348,20 @@ pub(crate) fn exec_lab_context(
         .overhead
         .record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
 
+    // Persist the controller parent before the daemon accepts a child. This is
+    // intentionally before `exec`: a controller timeout must leave status and
+    // logs resolvable without reading the runner's private lifecycle store.
+    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_planned(
+            agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id,
+                runner_id,
+                remote_workspace: &remote_cwd,
+                remote_command: &context.remote_command,
+            },
+        )?;
+    }
+
     let remote_exec_started = std::time::Instant::now();
     let exec_result = exec(
         runner_id,
@@ -362,7 +376,25 @@ pub(crate) fn exec_lab_context(
             if let Some(workspace) = context.materialized_workspace.as_mut() {
                 workspace.preserve();
             }
-            if let Some(health) = runner_daemon_health_failure(&err) {
+            let health = runner_daemon_health_failure(&err);
+            if health
+                .as_ref()
+                .and_then(|health| health.job_id.as_deref())
+                .is_none()
+            {
+                if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                    // The controller parent already exists, so a failed handoff
+                    // must terminalize it rather than leave a queued ghost.
+                    let plan = agent_task_lifecycle::load_plan(run_id)?;
+                    agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "lab_handoff",
+                        &err,
+                    )?;
+                }
+            }
+            if let Some(health) = health {
                 let reason = health.reason.clone();
                 context.plan = with_step(
                     context.plan,
