@@ -21,7 +21,9 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskProviderRotationPolicy,
     AgentTaskRetryPolicy, AgentTaskScheduler,
 };
-use crate::core::agent_task_service::{aggregate_exit_code, AgentTaskRunResult};
+use crate::core::agent_task_service::{
+    aggregate_exit_code, terminal_run_result, AgentTaskRunResult,
+};
 use crate::core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
@@ -223,6 +225,13 @@ where
         return Ok(AgentTaskRunResult {
             value: dispatch_report(submitted, None, true, backend_selection),
             exit_code: 0,
+        });
+    }
+
+    if let Some(result) = terminal_run_result(&run_id)? {
+        return Ok(AgentTaskRunResult {
+            value: dispatch_report(submitted, Some(result.value), false, backend_selection),
+            exit_code: result.exit_code,
         });
     }
 

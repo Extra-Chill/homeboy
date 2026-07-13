@@ -108,6 +108,9 @@ pub fn run_submitted_with_timeout<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
+    if let Some(result) = terminal_run_result(&run_id)? {
+        return Ok(result);
+    }
     if let Some(recovery) = agent_task_lifecycle::recover_transport_proxy(&run_id)? {
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
@@ -148,6 +151,9 @@ pub fn resume<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<Agent
 where
     E: AgentTaskExecutorAdapter,
 {
+    if let Some(result) = terminal_run_result(&run_id)? {
+        return Ok(result);
+    }
     if let Some(recovery) = agent_task_lifecycle::recover_transport_proxy(&run_id)? {
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
@@ -159,6 +165,40 @@ where
     }
     agent_task_lifecycle::mark_resuming(&run_id)?;
     run_claimed(run_id, executor)
+}
+
+/// Return durable terminal evidence instead of attempting to transition a
+/// completed child run back into execution during controller reconciliation.
+pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
+    let record = agent_task_lifecycle::status(run_id)?;
+    if !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    ) {
+        return Ok(None);
+    }
+
+    let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id).map_err(|_| {
+        Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "agent-task run '{}' is terminal with state {:?} but has no durable aggregate evidence",
+                record.run_id, record.state
+            ),
+            Some(record.run_id.clone()),
+            Some(vec![format!(
+                "retry the child with: homeboy agent-task retry {} --run",
+                record.run_id
+            )]),
+        )
+    })?;
+    Ok(Some(AgentTaskRunResult {
+        exit_code: aggregate_exit_code(&aggregate),
+        value: aggregate,
+    }))
 }
 
 pub fn retry(
