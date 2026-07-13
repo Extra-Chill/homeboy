@@ -94,6 +94,14 @@ pub enum DaemonStaleReasonCode {
     TransportUnreachable,
 }
 
+/// Whether the daemon lease data is sufficient for an explicit recovery action.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonRecoveryEvidence {
+    ProvenDead,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonRepairStep {
     pub code: String,
@@ -108,6 +116,14 @@ pub struct DaemonFreshnessReport {
     pub restartable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_evidence: Option<DaemonRecoveryEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adoption_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -527,6 +543,10 @@ fn freshness_report_from_validation(
         stale_reason_code: validation.stale_reason_code,
         restartable,
         lease_id: state.map(|state| state.lease_id.clone()),
+        pid: state.map(|state| state.pid),
+        recovery_evidence: None,
+        ownership_evidence: None,
+        adoption_command: None,
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         runtime_paths: state.map(|state| state.runtime_paths.clone()),
         active_jobs,

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
-use crate::core::daemon::DaemonStaleReasonCode;
+use crate::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::http_api::RunSummary;
@@ -285,7 +285,8 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
-    let daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
+    let daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
+        .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
@@ -392,6 +393,31 @@ fn runner_daemon_freshness(
         session.homeboy_build_identity.as_deref().unwrap_or(""),
     )
     .ok())
+}
+
+/// Preserve remote lease evidence when the controller-side daemon HTTP tunnel is unavailable.
+fn remote_daemon_recovery_freshness(
+    runner_id: &str,
+    runner: &Runner,
+) -> Option<DaemonFreshnessReport> {
+    if runner.kind != RunnerKind::Ssh {
+        return None;
+    }
+    let homeboy = match remote_runner_homeboy_path(runner, "runner status") {
+        Ok(homeboy) => homeboy,
+        Err(error) => return Some(unavailable_recovery_freshness(error.message)),
+    };
+    let (_, _, client) = match resolve_ssh_runner(runner) {
+        Ok(Some(connection)) => connection,
+        Ok(None) => return None,
+        Err(error) => return Some(unavailable_recovery_freshness(error.message)),
+    };
+    match remote_daemon_status(&client, homeboy) {
+        Ok(status) => Some(remote_daemon_recovery_freshness_from_status(
+            runner_id, &status,
+        )),
+        Err(error) => Some(unavailable_recovery_freshness(error)),
+    }
 }
 
 fn active_runner_job_source(session: &RunnerSession) -> Option<RunnerActiveJobSource> {
@@ -838,6 +864,10 @@ fn remote_daemon_disconnect_command(homeboy: &str, remote_daemon_pid: Option<u32
 
 mod remote_daemon {
     use super::*;
+    use crate::core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
+    use std::time::Duration;
+
+    pub(super) const REMOTE_DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
     pub(super) fn resolve_ssh_runner(
         runner: &Runner,
@@ -1003,6 +1033,74 @@ mod remote_daemon {
         pub(super) active_jobs: usize,
     }
 
+    pub(super) fn remote_daemon_recovery_freshness_from_status(
+        runner_id: &str,
+        status: &RemoteDaemonStatus,
+    ) -> DaemonFreshnessReport {
+        let daemon = status.daemon.as_ref();
+        let lease_id = daemon.and_then(|daemon| daemon.lease_id.clone());
+        let pid = daemon.and_then(|daemon| daemon.pid);
+        let proven_dead = status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+            && lease_id.is_some()
+            && pid.is_some();
+        let ownership_evidence = if proven_dead {
+            Some(format!(
+                "remote daemon status over SSH proved PID {} is dead for lease `{}`",
+                pid.expect("proven dead PID"),
+                lease_id.as_deref().expect("proven dead lease")
+            ))
+        } else {
+            Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
+        };
+        let adoption_command = proven_dead.then(|| {
+            format!(
+                "homeboy runner connect {} --adopt-orphan-lease {} --confirm-pid-dead",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(lease_id.as_deref().expect("proven dead lease"))
+            )
+        });
+        DaemonFreshnessReport {
+            fresh: status.fresh,
+            stale_reason_code: status.stale_reason_code,
+            restartable: false,
+            lease_id,
+            pid,
+            recovery_evidence: Some(if proven_dead {
+                DaemonRecoveryEvidence::ProvenDead
+            } else {
+                DaemonRecoveryEvidence::Unavailable
+            }),
+            ownership_evidence,
+            adoption_command,
+            binary_hash: None,
+            runtime_paths: None,
+            active_jobs: status.active_jobs,
+            repair_plan: Vec::new(),
+        }
+    }
+
+    pub(super) fn unavailable_recovery_freshness(
+        error: impl Into<String>,
+    ) -> DaemonFreshnessReport {
+        DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(DaemonStaleReasonCode::TransportUnreachable),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
+            ownership_evidence: Some(format!(
+                "remote daemon recovery evidence unavailable: {}",
+                error.into()
+            )),
+            adoption_command: None,
+            binary_hash: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            repair_plan: Vec::new(),
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(super) enum RemoteDaemonConnectAction {
         Reattach,
@@ -1089,7 +1187,7 @@ mod remote_daemon {
         homeboy: &str,
     ) -> std::result::Result<RemoteDaemonStatus, String> {
         let command = format!("{} daemon status", shell::quote_arg(homeboy));
-        let output = client.execute(&command);
+        let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
         if !output.success {
             return Err(command_failure_message(
                 "remote daemon status failed",
@@ -1625,6 +1723,73 @@ mod tests {
 
         assert!(err.contains("refusing implicit replacement"));
         assert!(err.contains("--adopt-orphan-lease"));
+    }
+
+    #[test]
+    fn remote_dead_lease_recovery_exposes_exact_adoption_command() {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            1,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+        assert_eq!(recovery.lease_id.as_deref(), Some("lease-dead"));
+        assert_eq!(recovery.pid, Some(4545));
+        assert_eq!(recovery.active_jobs, 1);
+        assert_eq!(
+            recovery.recovery_evidence,
+            Some(crate::core::daemon::DaemonRecoveryEvidence::ProvenDead)
+        );
+        assert_eq!(
+            recovery.adoption_command.as_deref(),
+            Some("homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead")
+        );
+    }
+
+    #[test]
+    fn remote_status_without_reason_is_evidence_unavailable_and_non_adoptable() {
+        let status = remote_daemon_status_for_test(false, false, 1, "lease-unknown", 4545);
+
+        let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+        assert_eq!(recovery.lease_id.as_deref(), Some("lease-unknown"));
+        assert_eq!(recovery.pid, Some(4545));
+        assert_eq!(recovery.active_jobs, 1);
+        assert_eq!(
+            recovery.recovery_evidence,
+            Some(crate::core::daemon::DaemonRecoveryEvidence::Unavailable)
+        );
+        assert!(recovery.adoption_command.is_none());
+    }
+
+    #[test]
+    fn unavailable_remote_recovery_is_fail_closed() {
+        let recovery = unavailable_recovery_freshness("remote command timed out");
+
+        assert_eq!(
+            recovery.stale_reason_code,
+            Some(DaemonStaleReasonCode::TransportUnreachable)
+        );
+        assert_eq!(
+            recovery.recovery_evidence,
+            Some(crate::core::daemon::DaemonRecoveryEvidence::Unavailable)
+        );
+        assert!(recovery.lease_id.is_none());
+        assert!(recovery.pid.is_none());
+        assert!(recovery.adoption_command.is_none());
+    }
+
+    #[test]
+    fn remote_daemon_status_probe_has_a_bounded_deadline() {
+        assert_eq!(
+            remote_daemon::REMOTE_DAEMON_STATUS_TIMEOUT,
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
