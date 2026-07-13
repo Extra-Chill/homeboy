@@ -43,6 +43,7 @@ pub struct LabRoutingRequest<'a> {
     /// Controller-local `--output` path forwarded to the offload executor so the
     /// durable agent-task run id can be persisted before long execution (#5684).
     pub local_output_file: Option<&'a str>,
+    pub durable_agent_task_plan: Option<&'a crate::core::agent_task_scheduler::AgentTaskPlan>,
     pub job_overrides: runners::LabJobOverrides,
 }
 
@@ -67,6 +68,7 @@ pub(crate) fn route_lab_offload(
         output_file_requested: request.output_file_requested,
         read_only_polling: request.read_only_polling,
         local_output_file: request.local_output_file,
+        durable_agent_task_plan: request.durable_agent_task_plan,
         job_overrides: request.job_overrides,
     })
 }
@@ -521,6 +523,7 @@ fn execute_lab_offload_with_timeout(
     let output_file_requested = request.output_file_requested;
     let read_only_polling = request.read_only_polling;
     let local_output_file = request.local_output_file.map(str::to_string);
+    let durable_agent_task_plan = request.durable_agent_task_plan.cloned();
     let job_overrides = request.job_overrides;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -538,6 +541,7 @@ fn execute_lab_offload_with_timeout(
             output_file_requested,
             read_only_polling,
             local_output_file: local_output_file.as_deref(),
+            durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             job_overrides,
         });
         let _ = tx.send(result);
@@ -724,6 +728,7 @@ mod tests {
             output_file_requested: false,
             read_only_polling: false,
             local_output_file: None,
+            durable_agent_task_plan: None,
             job_overrides: runners::LabJobOverrides::default(),
         })
         .unwrap();
@@ -1024,6 +1029,7 @@ mod tests {
                 output_file_requested: false,
                 read_only_polling: false,
                 local_output_file: None,
+                durable_agent_task_plan: None,
                 job_overrides: runners::LabJobOverrides::default(),
             },
             None,

@@ -669,6 +669,9 @@ pub struct LabOffloadProxyPlan<'a> {
     pub runner_id: &'a str,
     pub remote_workspace: &'a str,
     pub remote_command: &'a [String],
+    /// The user task plan, materialized on the controller before the temporary
+    /// runner handoff is recorded.
+    pub durable_plan: Option<&'a AgentTaskPlan>,
 }
 
 /// Persist the controller-owned parent before handing an agent-task workload to
@@ -680,6 +683,7 @@ pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<Agen
         input.runner_id,
         input.remote_workspace,
         input.remote_command,
+        input.durable_plan,
     )
 }
 
@@ -691,10 +695,16 @@ pub fn record_lab_offload_phase(
     remote_workspace: Option<&str>,
     source_checkout: Option<&Value>,
     provider_rotation: Option<&Value>,
+    durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
     let placeholder_workspace = remote_workspace.unwrap_or("pending");
-    let mut record =
-        record_lab_offload_proxy(requested_run_id, runner_id, placeholder_workspace, &[])?;
+    let mut record = record_lab_offload_proxy(
+        requested_run_id,
+        runner_id,
+        placeholder_workspace,
+        &[],
+        durable_plan,
+    )?;
     record.updated_at = Some(now_timestamp());
     let metadata = record.ensure_metadata_object();
     metadata.insert("phase".to_string(), json!(phase));
@@ -791,6 +801,7 @@ fn record_lab_offload_proxy(
     runner_id: &str,
     remote_workspace: &str,
     remote_command: &[String],
+    durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(requested_run_id);
     let input = DetachedLabRunRecord {
@@ -823,10 +834,10 @@ fn record_lab_offload_proxy(
             if error.code == ErrorCode::InternalJsonError
                 && store::record_lacks_typed_metadata(&run_id)? =>
         {
-            submit_plan(&plan, Some(&run_id))?
+            submit_plan(durable_plan.unwrap_or(&plan), Some(&run_id))?
         }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-            submit_plan(&plan, Some(&run_id))?
+            submit_plan(durable_plan.unwrap_or(&plan), Some(&run_id))?
         }
         Err(error) => return Err(error),
     };
@@ -953,6 +964,26 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
             crate::core::notification_route::NOTIFICATION_ROUTE_METADATA_KEY.to_string(),
             serde_json::to_value(route).expect("notification route is serializable"),
         );
+    }
+    let retry_origin = [
+        "runner_id",
+        "runner_job_id",
+        "remote_workspace",
+        "remote_command",
+        "runner_execution_record",
+        "pre_execution_failure",
+        "runner_job_events",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        source
+            .metadata
+            .get(key)
+            .map(|value| (key.to_string(), value.clone()))
+    })
+    .collect::<serde_json::Map<_, _>>();
+    if !retry_origin.is_empty() {
+        metadata.insert("retry_origin".to_string(), Value::Object(retry_origin));
     }
     metadata.insert("retry_of".to_string(), json!(source.run_id));
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));

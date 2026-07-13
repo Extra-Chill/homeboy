@@ -308,6 +308,7 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
                 runner_id: "lab",
                 remote_workspace: "/srv/homeboy/project",
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("planned controller proxy");

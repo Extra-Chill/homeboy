@@ -30,6 +30,9 @@ pub struct LabOffloadRequest<'a> {
     /// run id immediately (before long-running provider execution starts) so the
     /// handle survives a local shell timeout/interruption (#5684).
     pub local_output_file: Option<&'a str>,
+    /// The controller-materialized task plan to retain if this offload creates
+    /// a durable agent-task record before the runner accepts its child job.
+    pub durable_agent_task_plan: Option<&'a crate::core::agent_task_scheduler::AgentTaskPlan>,
     pub job_overrides: LabJobOverrides,
 }
 

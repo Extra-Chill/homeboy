@@ -2052,6 +2052,7 @@ mod tests {
                 output_file_requested: false,
                 read_only_polling: false,
                 local_output_file: None,
+                durable_agent_task_plan: None,
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
