@@ -3,6 +3,7 @@ use crate::core::engine::shell::quote_path;
 use crate::core::error::{Error, Result};
 use crate::core::git::{run_git, run_git_output};
 use crate::core::stream_capture::StreamCaptureMetadata;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -84,6 +85,7 @@ pub(crate) fn execute_upgrade(
         InstallMethod::Source => {
             let workspace_root = resolve_source_workspace(source_path)?;
             let source_revision = prepare_source_workspace_for_upgrade(&workspace_root)?;
+            let built_binary = source_built_binary_path(&workspace_root);
 
             // Execute the upgrade command from defaults
             let cmd = source_upgrade_command_for_prepared_workspace(
@@ -98,6 +100,7 @@ pub(crate) fn execute_upgrade(
             // It has already returned a precise error for non-zero exits.
             return complete_source_upgrade(
                 workspace_root,
+                built_binary,
                 replacement_target.as_deref(),
                 method,
                 force,
@@ -174,6 +177,7 @@ pub(crate) fn execute_upgrade(
 
 fn complete_source_upgrade(
     workspace_root: PathBuf,
+    built_binary: PathBuf,
     replacement_target: Option<&Path>,
     method: InstallMethod,
     force: bool,
@@ -184,7 +188,7 @@ fn complete_source_upgrade(
         Error::internal_unexpected("active binary path unavailable for source upgrade install")
     })?;
     upgrade_phase("installing source-built binary");
-    install_source_built_binary(&workspace_root, replacement_target)?;
+    install_source_built_binary(&built_binary, replacement_target)?;
     upgrade_phase("verifying installed source binary");
 
     let (_verified_version, active_binary) = verify_upgrade_with_retry(
@@ -200,7 +204,7 @@ fn complete_source_upgrade(
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary.and_then(|info| info.build_identity);
     let success = verify_source_install_with_retry(
-        Some(&workspace_root),
+        Some(&built_binary),
         VERIFY_READBACK_ATTEMPTS,
         VERIFY_READBACK_DELAY,
         std::thread::sleep,
@@ -212,6 +216,7 @@ fn complete_source_upgrade(
         new_version.as_deref(),
         new_build_identity.as_deref(),
         Some(&workspace_root),
+        Some(&built_binary),
         Some(replacement_target),
     ) {
         return Err(error);
@@ -298,6 +303,7 @@ fn source_swap_failure(
     new_version: Option<&str>,
     new_build_identity: Option<&str>,
     source_workspace: Option<&Path>,
+    built_binary: Option<&Path>,
     replacement_target: Option<&Path>,
 ) -> Option<Error> {
     if method != InstallMethod::Source || success {
@@ -308,7 +314,8 @@ fn source_swap_failure(
         .or(new_version)
         .unwrap_or("an unverifiable version");
 
-    let diagnostics = source_swap_failure_diagnostics(source_workspace, replacement_target);
+    let diagnostics =
+        source_swap_failure_diagnostics(source_workspace, built_binary, replacement_target);
     let mut error = Error::internal_unexpected(format!(
         "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
     ))
@@ -347,24 +354,28 @@ struct SourceSwapFailureDiagnostics {
 
 fn source_swap_failure_diagnostics(
     source_workspace: Option<&Path>,
+    built_binary: Option<&Path>,
     replacement_target: Option<&Path>,
 ) -> SourceSwapFailureDiagnostics {
     let active_path = replacement_target
         .map(Path::to_path_buf)
         .or_else(|| active_binary_path().ok());
-    source_swap_failure_diagnostics_for_paths(source_workspace, active_path.as_deref())
+    source_swap_failure_diagnostics_for_paths(
+        source_workspace,
+        built_binary,
+        active_path.as_deref(),
+    )
 }
 
 fn source_swap_failure_diagnostics_for_paths(
     source_workspace: Option<&Path>,
+    built_binary: Option<&Path>,
     active_path: Option<&Path>,
 ) -> SourceSwapFailureDiagnostics {
-    let built_binary = source_workspace.map(|path| path.join("target/release/homeboy"));
     let active_path_text = active_path.map(display_path).unwrap_or_else(|| {
         "unresolved (command -v homeboy and current executable unavailable)".to_string()
     });
     let built_binary_text = built_binary
-        .as_deref()
         .map(display_path)
         .unwrap_or_else(|| "unresolved (source workspace unavailable)".to_string());
     let replacement_path_text = active_path
@@ -374,23 +385,20 @@ fn source_swap_failure_diagnostics_for_paths(
         .map(binary_replacement_permission_context)
         .unwrap_or_else(|| "active binary path unresolved; cannot inspect writability".to_string());
 
-    let copy_command = built_binary
-        .as_deref()
-        .zip(active_path)
-        .map(|(built, active)| {
-            let prefix = if replacement_target_may_be_writable(active) {
-                "install"
-            } else {
-                "sudo install"
-            };
-            format!(
-                "{prefix} -m 0755 {} {}",
-                shell_quote_path(built),
-                shell_quote_path(active)
-            )
-        });
+    let copy_command = built_binary.zip(active_path).map(|(built, active)| {
+        let prefix = if replacement_target_may_be_writable(active) {
+            "install"
+        } else {
+            "sudo install"
+        };
+        format!(
+            "{prefix} -m 0755 {} {}",
+            shell_quote_path(built),
+            shell_quote_path(active)
+        )
+    });
 
-    let built_binary_command = built_binary.as_deref().map(|built| {
+    let built_binary_command = built_binary.map(|built| {
         let mut command = format!(
             "{} upgrade --method source --source-path {} --force",
             shell_quote_path(built),
@@ -463,8 +471,7 @@ fn replacement_target_may_be_writable(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-fn install_source_built_binary(source_workspace: &Path, replacement_target: &Path) -> Result<()> {
-    let built_binary = source_workspace.join("target/release/homeboy");
+fn install_source_built_binary(built_binary: &Path, replacement_target: &Path) -> Result<()> {
     let parent = replacement_target.parent().ok_or_else(|| {
         Error::internal_io(
             format!(
@@ -476,7 +483,7 @@ fn install_source_built_binary(source_workspace: &Path, replacement_target: &Pat
     })?;
     let temp_target = parent.join(format!(".homeboy-upgrade.{}.tmp", std::process::id()));
 
-    std::fs::copy(&built_binary, &temp_target).map_err(|e| {
+    std::fs::copy(built_binary, &temp_target).map_err(|e| {
         Error::internal_io(
             format!(
                 "copy {} to {} failed: {}",
@@ -951,7 +958,7 @@ pub(crate) fn upgrade_verification_result(
 }
 
 fn verify_source_install_with_retry<S>(
-    source_workspace: Option<&Path>,
+    built_binary: Option<&Path>,
     attempts: u32,
     delay: Duration,
     mut sleep: S,
@@ -961,7 +968,7 @@ where
 {
     let attempts = attempts.max(1);
     for attempt in 0..attempts {
-        if source_install_matches_shell_resolved_binary(source_workspace).unwrap_or(false) {
+        if source_install_matches_shell_resolved_binary(built_binary).unwrap_or(false) {
             return true;
         }
 
@@ -973,22 +980,45 @@ where
     false
 }
 
-fn source_install_matches_shell_resolved_binary(source_workspace: Option<&Path>) -> Result<bool> {
-    let Some(source_workspace) = source_workspace else {
+fn source_install_matches_shell_resolved_binary(built_binary: Option<&Path>) -> Result<bool> {
+    let Some(built_binary) = built_binary else {
         return Ok(false);
     };
     let active_binary = active_binary_path()?;
 
-    source_install_matches_binary_path(source_workspace, &active_binary)
+    source_install_matches_binary_path(built_binary, &active_binary)
 }
 
-fn source_install_matches_binary_path(
-    source_workspace: &Path,
-    active_binary: &Path,
-) -> Result<bool> {
-    let built_binary = source_workspace.join("target/release/homeboy");
+fn source_install_matches_binary_path(built_binary: &Path, active_binary: &Path) -> Result<bool> {
+    binary_files_match(built_binary, active_binary)
+}
 
-    binary_files_match(&built_binary, active_binary)
+/// Cargo resolves a relative CARGO_TARGET_DIR from its current working directory.
+/// Source upgrades run Cargo from the source workspace, so use that same base here.
+fn source_built_binary_path(workspace_root: &Path) -> PathBuf {
+    source_built_binary_path_for_target_dir(
+        workspace_root,
+        env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )
+}
+
+fn source_built_binary_path_for_target_dir(
+    workspace_root: &Path,
+    cargo_target_dir: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    let target_dir = cargo_target_dir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+
+    target_dir.join("release/homeboy")
 }
 
 fn binary_files_match(left: &Path, right: &Path) -> Result<bool> {
@@ -1298,15 +1328,49 @@ mod tests {
             "identity-only verification cannot prove same-version source replacement"
         );
         assert!(
-            !source_install_matches_binary_path(&source, &active).expect("compare binaries"),
+            !source_install_matches_binary_path(&built, &active).expect("compare binaries"),
             "same-version stale active binary must not verify"
         );
 
         std::fs::copy(&built, &active).expect("install built binary");
 
         assert!(
-            source_install_matches_binary_path(&source, &active).expect("compare binaries"),
+            source_install_matches_binary_path(&built, &active).expect("compare binaries"),
             "source upgrade only verifies after the active binary is the built artifact"
+        );
+    }
+
+    #[test]
+    fn source_built_binary_path_uses_source_local_target_by_default() {
+        let workspace = Path::new("/workspace/homeboy");
+
+        assert_eq!(
+            source_built_binary_path_for_target_dir(workspace, None),
+            workspace.join("target/release/homeboy")
+        );
+    }
+
+    #[test]
+    fn source_built_binary_path_uses_absolute_cargo_target_dir() {
+        let workspace = Path::new("/workspace/homeboy");
+        let target_dir = Path::new("/shared/cargo-target");
+
+        assert_eq!(
+            source_built_binary_path_for_target_dir(workspace, Some(target_dir.as_os_str())),
+            target_dir.join("release/homeboy")
+        );
+    }
+
+    #[test]
+    fn source_built_binary_path_resolves_relative_cargo_target_dir_from_workspace() {
+        let workspace = Path::new("/workspace/homeboy");
+
+        assert_eq!(
+            source_built_binary_path_for_target_dir(
+                workspace,
+                Some(std::ffi::OsStr::new("shared/target"))
+            ),
+            workspace.join("shared/target/release/homeboy")
         );
     }
 
@@ -1539,6 +1603,7 @@ mod tests {
             Some("0.247.5"),
             Some("homeboy 0.247.5+old"),
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/src/homeboy/target/release/homeboy")),
             Some(Path::new("/active/homeboy")),
         )
         .expect("unverified source swap must surface an error");
@@ -1574,6 +1639,7 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/src/homeboy/target/release/homeboy")),
             None,
         )
         .expect("unverified source swap must surface an error");
@@ -1589,6 +1655,7 @@ mod tests {
             None,
             None,
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/src/homeboy/target/release/homeboy")),
             None,
         )
         .expect("unverified source swap must surface an error");
@@ -1605,6 +1672,7 @@ mod tests {
                 Some("0.249.0"),
                 None,
                 Some(Path::new("/src/homeboy")),
+                Some(Path::new("/src/homeboy/target/release/homeboy")),
                 None,
             )
             .is_none(),
@@ -1622,6 +1690,7 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/src/homeboy/target/release/homeboy")),
             None,
         )
         .is_none());
@@ -1631,6 +1700,7 @@ mod tests {
             Some("0.247.5"),
             None,
             Some(Path::new("/src/homeboy")),
+            Some(Path::new("/src/homeboy/target/release/homeboy")),
             None,
         )
         .is_none());
@@ -1650,6 +1720,7 @@ mod tests {
             Some("0.255.8"),
             Some("homeboy 0.255.8+old"),
             Some(&source),
+            Some(&source.join("target/release/homeboy")),
             Some(&target),
         )
         .expect("unverified source swap must surface an error");
@@ -1681,7 +1752,8 @@ mod tests {
         std::fs::write(&active, "old").expect("active");
         std::fs::write(&built, "new").expect("built");
 
-        let diagnostics = source_swap_failure_diagnostics_for_paths(Some(&source), Some(&active));
+        let diagnostics =
+            source_swap_failure_diagnostics_for_paths(Some(&source), Some(&built), Some(&active));
 
         assert_eq!(diagnostics.active_path, active.display().to_string());
         assert_eq!(diagnostics.built_binary_path, built.display().to_string());
@@ -1708,6 +1780,23 @@ mod tests {
     }
 
     #[test]
+    fn source_swap_failure_diagnostics_report_effective_cargo_target_binary() {
+        let source = Path::new("/src/homeboy");
+        let built = Path::new("/shared/cargo-target/release/homeboy");
+        let active = Path::new("/bin/homeboy");
+
+        let diagnostics =
+            source_swap_failure_diagnostics_for_paths(Some(source), Some(built), Some(active));
+
+        assert_eq!(diagnostics.built_binary_path, built.display().to_string());
+        assert!(diagnostics
+            .copy_command
+            .as_deref()
+            .expect("copy command")
+            .contains("'/shared/cargo-target/release/homeboy'"));
+    }
+
+    #[test]
     fn install_source_built_binary_replaces_active_target() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("source");
@@ -1719,7 +1808,7 @@ mod tests {
         std::fs::write(&built, "new homeboy").expect("built binary");
         std::fs::write(&active, "old homeboy").expect("active binary");
 
-        install_source_built_binary(&source, &active).expect("install source binary");
+        install_source_built_binary(&built, &active).expect("install source binary");
 
         assert_eq!(
             std::fs::read_to_string(&active).expect("active"),
@@ -1743,7 +1832,7 @@ mod tests {
         std::fs::write(&built, "new homeboy").expect("built binary");
         std::fs::write(&active, "old homeboy").expect("active binary");
 
-        install_source_built_binary(&source, &active).expect("install source binary");
+        install_source_built_binary(&built, &active).expect("install source binary");
 
         let mode = std::fs::metadata(&active)
             .expect("active metadata")
@@ -1763,7 +1852,8 @@ mod tests {
         let active = target_dir.join("homeboy");
         std::fs::write(&active, "old homeboy").expect("active binary");
 
-        let err = install_source_built_binary(&source, &active).expect_err("missing build fails");
+        let built = source.join("target/release/homeboy");
+        let err = install_source_built_binary(&built, &active).expect_err("missing build fails");
 
         let details = err.details.to_string();
         assert!(details.contains("target/release/homeboy"));
