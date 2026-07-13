@@ -540,6 +540,11 @@ impl RunnerExecutionRecord {
         self
     }
 
+    pub fn with_agent_task_run_id(mut self, agent_task_run_id: impl Into<String>) -> Self {
+        self.agent_task_run_id = Some(agent_task_run_id.into());
+        self
+    }
+
     pub fn with_artifact_refs(
         mut self,
         artifact_refs: impl IntoIterator<Item = RunnerExecutionArtifactRef>,

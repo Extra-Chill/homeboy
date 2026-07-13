@@ -3,6 +3,50 @@
 use super::support::*;
 
 #[test]
+fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
+    with_temp_home(|| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        agent_task_lifecycle::record_lab_offload_planned(
+            homeboy::core::agent_tasks::lifecycle::LabOffloadProxyPlan {
+                run_id: "run-cli-controller-proxy",
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            },
+        )
+        .expect("controller proxy persisted");
+
+        let (status_value, status_exit) = status(StatusArgs {
+            run_id: "run-cli-controller-proxy".to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: true,
+        })
+        .expect("controller status resolves");
+        let (logs_value, logs_exit) = logs(StatusArgs {
+            run_id: "run-cli-controller-proxy".to_string(),
+            bridge: false,
+            since_cursor: None,
+            full: false,
+        })
+        .expect("controller logs resolve");
+
+        assert_eq!(status_exit, 0);
+        assert_eq!(logs_exit, 0);
+        assert_eq!(status_value["state"], "queued");
+        assert_eq!(
+            status_value["metadata"]["runner_execution_record"]["status"],
+            "planned"
+        );
+        assert_eq!(logs_value["run_id"], "run-cli-controller-proxy");
+    });
+}
+
+#[test]
 fn submit_run_status_reports_terminal_state() {
     with_temp_home(|| {
         let plan = AgentTaskPlan::new(
