@@ -37,6 +37,14 @@ pub struct CleanupArgs {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub exclude: Vec<CleanupCategoryArg>,
 
+    /// Override the configured terminal-run retention window for this invocation.
+    #[arg(long, value_name = "DAYS")]
+    pub older_than_days: Option<i64>,
+
+    /// Override the configured maximum number of persisted artifacts inspected.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<i64>,
+
     #[command(subcommand)]
     pub command: Option<CleanupCommand>,
 }
@@ -180,9 +188,20 @@ pub struct CleanupInventoryOutput {
     pub skipped_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
+    pub retention: CleanupRetentionManifest,
     pub categories: Vec<CleanupInventoryCategory>,
     #[serde(rename = "_homeboy_actionable")]
     pub actionable: CommandActionableMetadata,
+}
+
+/// Stable, serialized policy snapshot for a cleanup plan or apply result.
+#[derive(Debug, Serialize)]
+pub struct CleanupRetentionManifest {
+    pub schema: &'static str,
+    pub terminal_run_days: i64,
+    pub runtime_tmp_days: u64,
+    pub limit: i64,
+    pub terminal_run_guard: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +298,17 @@ const REMOTE_LAB_WORKSPACES_METADATA: CleanupInventoryCategoryMetadata =
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
+    let configured = defaults::load_config().retention;
+    let terminal_run_days = args.older_than_days.unwrap_or(configured.terminal_run_days);
+    let limit = args.limit.unwrap_or(configured.limit);
+    if terminal_run_days < 0 || limit < 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "retention",
+            "--older-than-days must be zero or greater and --limit must be positive",
+            None,
+            None,
+        ));
+    }
     let mut categories = Vec::new();
 
     if selected.includes(CleanupCategoryArg::RepoArtifacts) {
@@ -317,13 +347,14 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         let persisted =
             runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
                 apply,
-                older_than_days: 30,
+                older_than_days: terminal_run_days,
                 run_id: None,
                 kind: None,
                 artifact_type: None,
                 run_kind: None,
                 component_id: None,
-                limit: 1000,
+                limit,
+                terminal_only: true,
             })?;
         let resources = runs_resources(RunsResourcesArgs {
             cleanup_plan: true,
@@ -364,7 +395,12 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
-        let output = engine::temp::cleanup_runtime_tmp(apply, 7, None, 1000)?;
+        let output = engine::temp::cleanup_runtime_tmp(
+            apply,
+            configured.runtime_tmp_days,
+            None,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        )?;
         categories.push(category_from_output(
             RUNTIME_TMP_METADATA,
             apply,
@@ -407,6 +443,13 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         skipped_count,
         estimated_bytes,
         reclaimed_bytes,
+        retention: CleanupRetentionManifest {
+            schema: "homeboy/retention-manifest/v1",
+            terminal_run_days,
+            runtime_tmp_days: configured.runtime_tmp_days,
+            limit,
+            terminal_run_guard: true,
+        },
         categories,
         actionable,
     })
