@@ -289,6 +289,7 @@ mod tests {
             new_version: Some("0.228.7".to_string()),
             previous_build_identity: None,
             new_build_identity: None,
+            source_revision: None,
             upgraded: true,
             message: "Upgraded to 0.228.7".to_string(),
             restart_required: false,

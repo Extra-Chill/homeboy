@@ -226,6 +226,7 @@ pub fn run_upgrade_with_method(
                 new_version: Some(previous_version),
                 previous_build_identity,
                 new_build_identity: None,
+                source_revision: None,
                 upgraded: false,
                 message: source_drift
                     .as_ref()
@@ -246,7 +247,7 @@ pub fn run_upgrade_with_method(
     }
 
     // Execute the upgrade
-    let (success, new_version, new_build_identity) = execute_upgrade(
+    let (success, new_version, new_build_identity, source_revision) = execute_upgrade(
         install_method,
         source_upgrade_path.as_deref(),
         force,
@@ -291,6 +292,7 @@ pub fn run_upgrade_with_method(
         new_version: new_version.clone(),
         previous_build_identity,
         new_build_identity: new_build_identity.clone(),
+        source_revision,
         upgraded: success,
         message: if success {
             if let Some(identity) = &new_build_identity {

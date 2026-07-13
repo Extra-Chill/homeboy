@@ -63,6 +63,10 @@ pub struct UpgradeResult {
     pub previous_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_build_identity: Option<String>,
+    /// Immutable Git commit used for a source build, when the source checkout
+    /// is a Git worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
     pub upgraded: bool,
     pub message: String,
     pub restart_required: bool,
