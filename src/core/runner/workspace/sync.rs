@@ -183,6 +183,7 @@ pub fn sync_workspace(
                 &local_path,
                 options.changed_since_base.as_deref(),
                 options.git_fetch_refs.clone(),
+                options.controller_routed_git,
             )?;
             let remote_path = deterministic_remote_path(
                 workspace_root,

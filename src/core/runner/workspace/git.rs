@@ -14,7 +14,50 @@ pub(super) fn git_snapshot(
     local_path: &Path,
     changed_since_base: Option<&str>,
     git_fetch_refs: Vec<String>,
+    controller_routed_git: bool,
 ) -> Result<GitSnapshot> {
+    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
+    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|branch| branch != "HEAD");
+    if !controller_routed_git {
+        ensure_clean_git_working_tree(local_path, changed_since_base)?;
+    }
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])?;
+    if remote_url.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "remote.origin.url",
+            "git workspace sync requires remote.origin.url",
+            None,
+            None,
+        ));
+    }
+    if controller_routed_git
+        || branch.is_none()
+        || super::super::source_materialization::requires_controller_routed_workspace_sync(
+            &remote_url,
+        )
+    {
+        let refs = controller_bundle_refs(&head, changed_since_base, &git_fetch_refs);
+        repair_controller_bundle_commit_closure(local_path, &refs)?;
+    }
+    if controller_routed_git {
+        ensure_clean_git_working_tree(local_path, changed_since_base)?;
+    }
+
+    Ok(GitSnapshot {
+        remote_url,
+        head,
+        branch,
+        changed_since_base: changed_since_base.map(str::to_string),
+        git_fetch_refs,
+    })
+}
+
+fn ensure_clean_git_working_tree(
+    local_path: &Path,
+    changed_since_base: Option<&str>,
+) -> Result<()> {
     let status = git_output(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
         if changed_since_base.is_some() {
@@ -46,26 +89,7 @@ pub(super) fn git_snapshot(
             ]),
         ));
     }
-    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
-    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok()
-        .filter(|branch| branch != "HEAD");
-    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])?;
-    if remote_url.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "remote.origin.url",
-            "git workspace sync requires remote.origin.url",
-            None,
-            None,
-        ));
-    }
-    Ok(GitSnapshot {
-        remote_url,
-        head,
-        branch,
-        changed_since_base: changed_since_base.map(str::to_string),
-        git_fetch_refs,
-    })
+    Ok(())
 }
 
 pub(super) fn materialize_git(
@@ -196,7 +220,16 @@ pub(super) fn materialize_git_from_controller_bundle(
 /// use the source checkout's authenticated transport.
 fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
     let mut object_list = Command::new("git")
-        .args(["rev-list", "--objects", "--no-object-names"])
+        // A stale commit graph can name promisor objects that do not exist in
+        // the local database. Walk the repaired closure from real objects so
+        // Git can use the controller's promisor transport when needed.
+        .args([
+            "-c",
+            "core.commitGraph=false",
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+        ])
         .args(refs)
         .current_dir(local_path)
         .stdout(Stdio::piped())
@@ -254,6 +287,72 @@ fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Resu
     }
 
     Ok(())
+}
+
+fn repair_controller_bundle_commit_closure(local_path: &Path, refs: &[String]) -> Result<()> {
+    if let Some(remote) = promisor_remote(local_path)? {
+        refetch_controller_bundle_commits(local_path, &remote, refs)?;
+    }
+    Ok(())
+}
+
+/// Rebuild the selected commit and tree closure before asking Git to walk it.
+/// A commit graph can retain entries for promisor objects that are no longer in
+/// the local object database, in which case `rev-list` cannot trigger its own
+/// lazy fetch.
+fn refetch_controller_bundle_commits(
+    local_path: &Path,
+    remote: &str,
+    refs: &[String],
+) -> Result<()> {
+    let output = Command::new("git")
+        .args(["fetch", "--refetch", "--no-tags", "--filter=blob:none"])
+        .arg(remote)
+        .args(refs)
+        .current_dir(local_path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("refetch controller git bundle commits".to_string()),
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "refetch controller git bundle commits failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    )))
+}
+
+fn promisor_remote(local_path: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["config", "--get-regexp", r"^remote\..*\.promisor$"])
+        .current_dir(local_path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read git promisor remote".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let remote = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(char::is_whitespace)?;
+            if value.trim() != "true" {
+                return None;
+            }
+            key.strip_prefix("remote.")?.strip_suffix(".promisor")
+        })
+        .map(str::to_string);
+    Ok(remote)
 }
 
 fn controller_bundle_refs(

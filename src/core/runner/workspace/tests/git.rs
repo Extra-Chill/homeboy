@@ -32,6 +32,15 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
         fs::write(author.path().join("file.txt"), "head\n").expect("write head file");
         git(author.path(), &["add", "."]);
         git(author.path(), &["commit", "-m", "head"]);
+        let head = git_output(author.path(), &["rev-parse", "HEAD"]).expect("head revision");
+        git(author.path(), &["checkout", "-b", "unrelated", &base]);
+        fs::write(author.path().join("unrelated.txt"), "unrelated\n")
+            .expect("write unrelated file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "unrelated"]);
+        let unrelated =
+            git_output(author.path(), &["rev-parse", "HEAD"]).expect("unrelated revision");
+        git(author.path(), &["checkout", &head]);
         git(
             author.path(),
             &[
@@ -41,7 +50,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 &format!("file://{}", origin.path().display()),
             ],
         );
-        git(author.path(), &["push", "origin", "main"]);
+        git(author.path(), &["push", "origin", "main", "unrelated"]);
         git(
             source.path(),
             &[
@@ -60,6 +69,14 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             .contains(&format!("?{base_blob}")),
             "the partial source fixture must omit the base-only blob"
         );
+        git(
+            source.path(),
+            &[
+                "fetch",
+                "origin",
+                "refs/heads/unrelated:refs/remotes/origin/unrelated",
+            ],
+        );
         git(source.path(), &["remote", "rename", "origin", "controller"]);
         git(
             source.path(),
@@ -70,7 +87,31 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 "https://github.example.invalid/example-org/private-source.git",
             ],
         );
-
+        git(source.path(), &["commit-graph", "write", "--reachable"]);
+        assert!(
+            source
+                .path()
+                .join(".git/objects/info/commit-graph")
+                .exists(),
+            "the fixture must retain a commit graph after its objects are removed"
+        );
+        remove_local_packs(source.path());
+        assert!(
+            git_without_lazy_fetch(
+                source.path(),
+                &["cat-file", "-e", &format!("{base}^{{commit}}")]
+            )
+            .is_err(),
+            "the fixture must leave a commit-graph entry whose object is absent locally"
+        );
+        assert!(
+            git_without_lazy_fetch(
+                source.path(),
+                &["cat-file", "-e", &format!("{unrelated}^{{commit}}")],
+            )
+            .is_err(),
+            "the fixture must leave unrelated promisor objects absent locally"
+        );
         crate::core::runner::create(
             &format!(
                 r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
@@ -144,7 +185,45 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             .contains(&format!("?{base_blob}")),
             "the controller must hydrate the promised object before bundling"
         );
+        assert!(
+            git_without_lazy_fetch(
+                source.path(),
+                &["cat-file", "-e", &format!("{unrelated}^{{commit}}")],
+            )
+            .is_err(),
+            "the controller must not hydrate unrelated refs"
+        );
+        assert!(
+            git_without_lazy_fetch(
+                remote,
+                &["cat-file", "-e", &format!("{unrelated}^{{commit}}")]
+            )
+            .is_err(),
+            "the runner bundle must not include unrelated refs"
+        );
     });
+}
+
+fn remove_local_packs(path: &Path) {
+    let pack_dir = path.join(".git/objects/pack");
+    for entry in fs::read_dir(pack_dir).expect("read object pack directory") {
+        let entry = entry.expect("read object pack entry");
+        fs::remove_file(entry.path()).expect("remove local object pack entry");
+    }
+}
+
+fn git_without_lazy_fetch(path: &Path, args: &[&str]) -> std::result::Result<(), String> {
+    let output = Command::new("git")
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .current_dir(path)
+        .output()
+        .expect("run git without lazy fetch");
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| String::from_utf8_lossy(&output.stderr).to_string())
 }
 
 #[test]
@@ -602,7 +681,7 @@ fn git_materialization_override_is_noisy_but_allows_reset() {
 fn dirty_git_sync_without_changed_since_reports_supported_remediation() {
     let source = super::dirty_git_repo();
 
-    let err = match git_snapshot(source.path(), None, Vec::new()) {
+    let err = match git_snapshot(source.path(), None, Vec::new(), false) {
         Ok(_) => panic!("dirty git sync should fail"),
         Err(err) => err,
     };
@@ -625,7 +704,7 @@ fn dirty_git_sync_without_changed_since_reports_supported_remediation() {
 fn dirty_changed_since_git_sync_explains_snapshot_is_unavailable() {
     let source = super::dirty_git_repo();
 
-    let err = match git_snapshot(source.path(), Some("abc123"), Vec::new()) {
+    let err = match git_snapshot(source.path(), Some("abc123"), Vec::new(), false) {
         Ok(_) => panic!("dirty changed-since git sync should fail"),
         Err(err) => err,
     };
