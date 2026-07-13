@@ -861,7 +861,11 @@ homeboy_global_flags() {
   local flags=""
 
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    flags="${flags}--force-hot --allow-local-hot "
+    if homeboy_supports_placement; then
+      flags="${flags}--placement local "
+    else
+      flags="${flags}--force-hot --allow-local-hot "
+    fi
   fi
 
   # --output is a global flag and must appear before the subcommand
@@ -871,6 +875,20 @@ homeboy_global_flags() {
   fi
 
   printf '%s' "${flags}"
+}
+
+# The action preflights this after selecting the binary. Keep this fallback for
+# direct script consumers and cache the probe within a shell process.
+homeboy_supports_placement() {
+  if [ -z "${HOMEBOY_ACTION_SUPPORTS_PLACEMENT+x}" ]; then
+    if homeboy --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+      HOMEBOY_ACTION_SUPPORTS_PLACEMENT=true
+    else
+      HOMEBOY_ACTION_SUPPORTS_PLACEMENT=false
+    fi
+  fi
+
+  [ "${HOMEBOY_ACTION_SUPPORTS_PLACEMENT}" = "true" ]
 }
 
 build_run_command() {

@@ -66,6 +66,7 @@ export HOMEBOY_CI_RESULTS_ARTIFACT="homeboy-ci-results-data-machine-audit"
 export HOMEBOY_OBSERVATIONS_ARTIFACT="homeboy-observations-data-machine-audit"
 export GITHUB_RUN_URL="https://github.com/Extra-Chill/homeboy-action/actions/runs/123"
 export GITHUB_ACTIONS="true"
+export HOMEBOY_ACTION_SUPPORTS_PLACEMENT="true"
 export SCOPE_MODE="changed"
 export SCOPE_BASE_REF="origin/main"
 export DIGEST_FILE=""
@@ -86,7 +87,7 @@ assert_contains "${SECTION_BODY}" "https://github.com/Extra-Chill/homeboy-action
 assert_not_contains "${SECTION_BODY}" ":x: **audit** _(changed files only)_" "legacy per-command audit block skipped"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner autofix=applied — 2 file(s) fixed via lint" "autofix banner passed to core"
 assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--banner binary-source=fallback release binary (source build failed)" "binary-source banner passed to core"
-assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--force-hot --allow-local-hot review data-machine" "review report opts into hot-runner execution in GitHub Actions"
+assert_contains "$(cat "${HOMEBOY_REVIEW_CALL_LOG}")" "--placement local review data-machine" "review report opts into local placement in GitHub Actions"
 
 export HOMEBOY_REVIEW_OUTPUT_MODE="custom"
 build_section_body

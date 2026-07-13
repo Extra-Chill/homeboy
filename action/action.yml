@@ -384,6 +384,10 @@ runs:
         SOURCE_BUILT: ${{ steps.source-build.outputs.built }}
       run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
+    - name: Detect Homeboy placement support
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/setup/detect-homeboy-placement.sh
+
     - name: Install extension
       if: steps.read-config.outputs.portable-extension != ''
       shell: bash

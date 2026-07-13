@@ -92,54 +92,55 @@ assert_equals \
   "review lint keeps path with changed-since"
 
 GITHUB_ACTIONS="true"
+HOMEBOY_ACTION_SUPPORTS_PLACEMENT="true"
 assert_equals \
-  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review audit data-machine --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local --output /tmp/workspace/out.json review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "GitHub Actions initial audit opts into hot-runner execution"
+  "GitHub Actions initial audit selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "GitHub Actions lint opts into hot-runner execution"
+  "GitHub Actions lint selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot review test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local review test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "test" "${COMPONENT}" "${WORKSPACE}")" \
-  "GitHub Actions test opts into hot-runner execution"
+  "GitHub Actions test selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local --output /tmp/workspace/out.json review lint data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review lint" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "GitHub Actions review lint opts into hot-runner execution"
+  "GitHub Actions review lint selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot review test data-machine --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local review test data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review test" "${COMPONENT}" "${WORKSPACE}")" \
-  "GitHub Actions review test opts into hot-runner execution"
+  "GitHub Actions review test selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review build data-machine --path /tmp/workspace" \
+  "homeboy --placement local --output /tmp/workspace/out.json review build data-machine --path /tmp/workspace" \
   "$(build_run_command "review build" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "GitHub Actions build opts into hot-runner execution"
+  "GitHub Actions build selects local placement"
 
 HOMEBOY_DIFFERENTIAL_GATING="true"
 assert_equals \
-  "homeboy --force-hot --allow-local-hot --output /tmp/workspace/out.json review test data-machine --path /tmp/workspace" \
+  "homeboy --placement local --output /tmp/workspace/out.json review test data-machine --path /tmp/workspace" \
   "$(build_run_command "review test" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
-  "GitHub Actions differential baseline test opts into hot-runner execution"
+  "GitHub Actions differential baseline test selects local placement"
 unset HOMEBOY_DIFFERENTIAL_GATING
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot review audit data-machine --baseline --path /tmp/workspace --changed-since origin/main" \
+  "homeboy --placement local review audit data-machine --baseline --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit --baseline" "${COMPONENT}" "${WORKSPACE}")" \
-  "GitHub Actions autofix baseline update opts into hot-runner execution"
+  "GitHub Actions autofix baseline update selects local placement"
 
 assert_equals \
-  "homeboy --force-hot --allow-local-hot review data-machine --path /tmp/workspace --report=pr-comment --changed-since origin/main" \
+  "homeboy --placement local review data-machine --path /tmp/workspace --report=pr-comment --changed-since origin/main" \
   "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
-  "GitHub Actions report retry opts into hot-runner execution"
+  "GitHub Actions report retry selects local placement"
 
-unset GITHUB_ACTIONS
+unset GITHUB_ACTIONS HOMEBOY_ACTION_SUPPORTS_PLACEMENT
 
 assert_equals \
   "homeboy review test data-machine --path /tmp/workspace --changed-since origin/main" \
