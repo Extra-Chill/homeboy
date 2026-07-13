@@ -121,6 +121,7 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
+            durable_plan: None,
         })
         .expect("controller proxy recorded before handoff");
 
@@ -162,6 +163,55 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.plan_id = "materialized-cook-plan".to_string();
+        plan.tasks[0].instructions = "implement the original user task".to_string();
+        plan.tasks[0].workspace.root = Some("/materialized/worktree".to_string());
+        let record = record_lab_offload_phase(
+            "failed-lab-cook",
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("controller records user plan before pending handoff");
+        let persisted = load_plan(&record.run_id).expect("persisted user plan");
+        record_pre_execution_failure(
+            &record.run_id,
+            &persisted,
+            "lab_handoff",
+            &Error::internal_unexpected("runner daemon restarted"),
+        )
+        .expect("terminal handoff failure");
+
+        let retry = retry(&record.run_id, Some("failed-lab-cook-retry")).expect("retry record");
+        let recovered = load_plan(&retry.run_id).expect("recovered plan");
+
+        assert_eq!(recovered, plan);
+        assert_eq!(
+            recovered.tasks[0].workspace.root.as_deref(),
+            Some("/materialized/worktree")
+        );
+        assert!(!serde_json::to_string(&recovered)
+            .expect("plan json")
+            .contains("pending"));
+        assert_eq!(retry.metadata["retry_origin"]["runner_id"], "homeboy-lab");
+        assert_eq!(
+            retry.metadata["retry_origin"]["remote_workspace"],
+            "pending"
+        );
+        assert_eq!(
+            retry.metadata["retry_origin"]["pre_execution_failure"]["phase"],
+            "lab_handoff"
+        );
+    });
+}
+
+#[test]
 fn controller_proxy_records_pre_execution_phase_progress() {
     with_isolated_home(|_| {
         let source = json!({
@@ -175,6 +225,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             None,
             Some(&source),
             Some(&json!({"entries": [{"model": "openai/gpt-5.6-terra"}]})),
+            None,
         )
         .expect("materialization phase persisted");
 
@@ -194,6 +245,7 @@ fn controller_proxy_records_pre_execution_phase_progress() {
             "hydrating",
             Some("/runner/workspace/repo"),
             Some(&source),
+            None,
             None,
         )
         .expect("hydration phase persisted");
@@ -519,6 +571,7 @@ fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() 
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
+            durable_plan: None,
         })
         .expect("planned proxy");
         let plan = load_plan("agent-task-handoff-failure").expect("proxy plan");
@@ -549,6 +602,7 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
             runner_id: "homeboy-lab",
             remote_workspace: "/runner/workspace/repo",
             remote_command: &command,
+            durable_plan: None,
         })
         .expect("planned proxy");
         let job_id = "00000000-0000-0000-0000-000000000123";

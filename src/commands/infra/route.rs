@@ -94,6 +94,15 @@ pub fn route_after_parse(
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
         .unwrap_or(normalized_args);
+    let cook_plan = if lab_command.is_some() && inferred_runner_id.is_some() {
+        materialize_agent_task_cook_plan(cli)?
+    } else {
+        None
+    };
+    let durable_agent_task_plan = retry_handoff
+        .as_ref()
+        .map(|handoff| &handoff.plan)
+        .or(cook_plan.as_ref());
     let observer = lab_dispatch_observer(cli, normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
@@ -143,6 +152,7 @@ pub fn route_after_parse(
                 .lab_route_contract()?
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
+            durable_agent_task_plan,
             job_overrides,
         },
         inferred_runner_id.as_deref(),
@@ -180,6 +190,27 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// Materialize a cook's scheduler plan on the controller before the Lab
+/// handoff. The handoff record is transport state; this plan is the durable
+/// user task a later retry must execute.
+fn materialize_agent_task_cook_plan(
+    cli: &Cli,
+) -> homeboy::core::Result<Option<homeboy::core::agent_tasks::scheduler::AgentTaskPlan>> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+    let mut dispatch = cook.dispatch.clone();
+    if dispatch.prompt.is_none() {
+        dispatch.prompt = cook.goal.clone();
+    }
+    let request =
+        homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan(&request).map(Some)
 }
 
 fn lab_route_dispatch_timeout(

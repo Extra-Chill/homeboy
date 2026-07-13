@@ -366,6 +366,7 @@ pub(crate) fn exec_lab_context(
                 runner_id,
                 remote_workspace: &remote_cwd,
                 remote_command: &context.remote_command,
+                durable_plan: request.durable_agent_task_plan,
             },
         )?;
     }
@@ -826,6 +827,7 @@ pub(crate) fn run_lab_offload_inner(
             None,
             Some(&source_checkout),
             Some(&provider_rotation),
+            request.durable_agent_task_plan,
         )?;
     }
     let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
@@ -1036,6 +1038,7 @@ pub(crate) fn run_lab_offload_inner(
             Some(&remote_cwd),
             Some(&source_checkout),
             Some(&provider_rotation),
+            request.durable_agent_task_plan,
         )?;
     }
     let cleanup_policy = if agent_task_run_id.is_some() {
@@ -1078,6 +1081,7 @@ pub(crate) fn run_lab_offload_inner(
             Some(&remote_cwd),
             Some(&source_checkout),
             Some(&provider_rotation),
+            request.durable_agent_task_plan,
         )?;
     }
 

@@ -16,6 +16,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
                 runner_id: "homeboy-lab",
                 remote_workspace: "/runner/workspace/repo",
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("controller proxy persisted");
@@ -56,6 +57,7 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("controller proxy persisted");
@@ -99,6 +101,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("controller proxy persisted");
@@ -191,6 +194,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
                 remote_command: &command,
+                durable_plan: None,
             },
         )
         .expect("controller proxy persisted");
