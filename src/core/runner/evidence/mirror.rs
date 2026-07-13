@@ -302,6 +302,35 @@ pub(super) fn mirror_job_run(
     if let Some(event) = agent_task_lifecycle_event {
         lab["agent_task_lifecycle_event"] = event;
     }
+    if let Some(run_id) = run_id {
+        if store
+            .get_run(run_id)?
+            .is_some_and(|existing| existing.metadata_json.get("agent_task_run").is_some())
+        {
+            crate::core::agent_task_lifecycle::record_detached_lab_run(
+                crate::core::agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: &runner.id,
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: cwd,
+                    remote_command: command,
+                },
+            )?;
+            let mut metadata_json = store
+                .get_run(run_id)?
+                .ok_or_else(|| {
+                    Error::internal_unexpected(format!(
+                        "agent-task run {run_id} disappeared while mirroring Lab evidence"
+                    ))
+                })?
+                .metadata_json;
+            metadata_json["lab"] = lab;
+            if let Some(notification_route) = notification_route {
+                notification_route.insert_into_metadata(&mut metadata_json);
+            }
+            return store.update_run_metadata(run_id, metadata_json);
+        }
+    }
     let run = RunRecord {
         id: run_id
             .map(str::to_string)

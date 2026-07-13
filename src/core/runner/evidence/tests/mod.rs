@@ -294,6 +294,89 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
 }
 
 #[test]
+fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
+    crate::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        crate::core::agent_task_lifecycle::record_lab_offload_planned(
+            crate::core::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: "agent-task-lab-mirror",
+                runner_id: "lab",
+                remote_workspace: "/srv/homeboy/project",
+                remote_command: &command,
+            },
+        )
+        .expect("planned controller proxy");
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+        };
+
+        mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            Some("agent-task-lab-mirror"),
+            None,
+        )
+        .expect("mirror Lab job");
+        let terminal_job = Job {
+            status: JobStatus::Succeeded,
+            finished_at_ms: Some(1_700_000_002_000),
+            ..job.clone()
+        };
+        let run = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/srv/homeboy/project",
+            &command,
+            &terminal_job,
+            &[],
+            &json!({"exit_code": 0}),
+            Some("agent-task-lab-mirror"),
+            None,
+        )
+        .expect("mirror terminal Lab job");
+        let lifecycle = crate::core::agent_task_lifecycle::status("agent-task-lab-mirror")
+            .expect("typed lifecycle remains readable");
+
+        assert_eq!(run.kind, "agent-task");
+        assert!(run.metadata_json.get("agent_task_run").is_some());
+        assert_eq!(lifecycle.metadata["runner_id"], "lab");
+        assert_eq!(lifecycle.metadata["runner_job_id"], job_id.to_string());
+        assert_eq!(
+            run.metadata_json["lab"]["remote_job"]["id"],
+            job_id.to_string()
+        );
+    });
+}
+
+#[test]
 fn test_mirrored_patch_result_reports_accessible_artifact_token() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
