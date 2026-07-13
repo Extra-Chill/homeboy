@@ -165,6 +165,12 @@ pub fn run_upgrade_with_method(
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
+    let promotion_lease = crate::core::runtime_promotion::acquire(
+        "controller upgrade",
+        source_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "active controller".to_string()),
+    )?;
     let install_method = method_override.unwrap_or_else(detect_install_method);
     let previous_version = current_version().to_string();
     let previous_build_identity = Some(build_identity::current().display);
@@ -248,6 +254,7 @@ pub fn run_upgrade_with_method(
     }
 
     // Execute the upgrade
+    promotion_lease.assert_generation()?;
     let (success, new_version, new_build_identity, source_revision) = execute_upgrade(
         install_method,
         source_upgrade_path.as_deref(),
@@ -267,6 +274,7 @@ pub fn run_upgrade_with_method(
         (vec![], vec![])
     };
 
+    promotion_lease.assert_generation()?;
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
         upgrade_phase("refreshing configured runners");
         runners::upgrade_configured_runners_with_explicit_source_path(

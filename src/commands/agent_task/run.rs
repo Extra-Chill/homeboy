@@ -112,6 +112,8 @@ where
         })?
         .to_string();
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
+    // Keep this cook on one runtime generation through provider work and PR finalization.
+    let _runtime_generation = homeboy::core::runtime_promotion::pin_cook_generation(&cook_id)?;
     let title = args
         .title
         .clone()

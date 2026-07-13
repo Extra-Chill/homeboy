@@ -14,6 +14,11 @@ pub fn daemon_state_file() -> Result<PathBuf> {
     Ok(daemon_state_dir()?.join("state.json"))
 }
 
+/// Machine-global coordination directory for Homeboy runtime binary promotion.
+pub fn runtime_promotion_dir() -> Result<PathBuf> {
+    Ok(homeboy_data()?.join("runtime-promotion"))
+}
+
 /// Daemon durable job state file (~/.config/homeboy/daemon/jobs.json).
 pub fn daemon_jobs_file() -> Result<PathBuf> {
     Ok(daemon_state_dir()?.join("jobs.json"))
