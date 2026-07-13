@@ -18,8 +18,7 @@ use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked,
     DaemonLeaselessOrphanReconciliationResult, DaemonMissingLeaseRecoveryResult,
-    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.

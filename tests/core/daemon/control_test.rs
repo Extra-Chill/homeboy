@@ -223,6 +223,7 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
         stale_reason: None,
         state: None,
         state_path: "/fake/daemon-state.json".to_string(),
+        state_identity: "lease-missing-test-state".to_string(),
     }
 }
 

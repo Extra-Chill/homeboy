@@ -49,6 +49,9 @@ enum DaemonCommand {
         /// Confirm the endpoint is unreachable and the lease metadata is absent
         #[arg(long)]
         confirm_lease_missing: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
     /// Explicitly reconcile a lease-less orphan job store after no-owner proof
     ReconcileLeaselessOrphans {
         /// Confirm the daemon control plane was lost and the store may be terminalized

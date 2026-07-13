@@ -219,7 +219,6 @@ pub(super) fn connect(
         ));
     }
     if recover_missing_lease_state.is_some() && !confirm_lease_missing {
-    if recover_missing_lease_state.is_some() && !confirm_lease_missing {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "confirm_lease_missing",
             "--recover-missing-lease-state requires --confirm-lease-missing",
@@ -275,7 +274,11 @@ pub(super) fn connect(
         if reconcile_leaseless_orphans {
             runner::connect_with_leaseless_orphan_reconciliation(id)?
         } else {
-            runner::connect_with_recovery(id, adopt_orphan_lease.as_deref(), recover_missing_lease_state.as_deref())?
+            runner::connect_with_recovery(
+                id,
+                adopt_orphan_lease.as_deref(),
+                recover_missing_lease_state.as_deref(),
+            )?
         }
     };
     Ok((
