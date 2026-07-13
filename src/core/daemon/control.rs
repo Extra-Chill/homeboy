@@ -93,7 +93,8 @@ pub fn adopt_orphaned_lease(
         ));
     }
 
-    let store = super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
     let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
     let replacement = start_background_unlocked(addr)?;
     Ok(DaemonOrphanAdoptionResult {
@@ -106,7 +107,8 @@ pub fn adopt_orphaned_lease(
 }
 
 fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {
-    let store = super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
     store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
     Ok(())
 }
