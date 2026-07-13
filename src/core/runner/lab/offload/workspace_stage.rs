@@ -419,7 +419,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         &remote_cwd,
     );
     let (remapped_args, agent_task_run_id) =
-        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
+        ensure_agent_task_lifecycle_identity_with(&remapped_args, run_isolation_token.as_deref())
             .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
     let remote_output_file = request

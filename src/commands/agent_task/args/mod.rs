@@ -463,6 +463,11 @@ pub struct AgentTaskCookArgs {
     #[command(flatten)]
     pub dispatch: DispatchArgs,
 
+    /// First-attempt lifecycle id injected by a controller when execution is
+    /// handed to a runner.
+    #[arg(long, hide = true)]
+    pub attempt_run_id: Option<String>,
+
     /// Repo-cooking goal. Alias for the dispatch prompt when --prompt is omitted.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,

@@ -142,6 +142,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                         resolved_provider_policy: None,
                     },
                 },
+                attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
@@ -167,11 +168,10 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
         assert_eq!(exit_code, 1);
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
         assert_eq!(value["cook_id"], "cook-missing-provider");
-        assert_ne!(value["latest_run_id"], "cook-missing-provider");
-        assert!(value["latest_run_id"]
-            .as_str()
-            .expect("latest run id")
-            .starts_with("cook-missing-provider-attempt-1-"));
+        assert_eq!(
+            value["latest_run_id"],
+            "cook-missing-provider-attempt-1-controller"
+        );
         assert_eq!(
             value["history_run_ids"].as_array().expect("history").len(),
             1
@@ -321,6 +321,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                         resolved_provider_policy: None,
                     },
                 },
+                attempt_run_id: None,
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
                 provider_command: Some(format!("sh {}", provider.display())),
