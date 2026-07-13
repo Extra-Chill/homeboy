@@ -7,7 +7,6 @@ use std::process::Command;
 
 use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
 use super::execution::{execute_upgrade, resolve_source_workspace};
-use super::planning::resolve_binary_on_path;
 use super::runners;
 use super::services;
 use super::types::*;
@@ -259,12 +258,14 @@ pub fn run_upgrade_with_method(
     // This prevents CI/local extension version drift that causes baseline
     // mismatches and inconsistent audit findings.
     let (extensions_updated, extensions_skipped) = if upgrade_completed && !skip_extensions {
+        upgrade_phase("refreshing installed extensions");
         update_all_extensions()
     } else {
         (vec![], vec![])
     };
 
     let (runners_updated, runners_skipped) = if upgrade_completed && !skip_runners {
+        upgrade_phase("refreshing configured runners");
         runners::upgrade_configured_runners(
             force,
             runner_method_override,
@@ -309,7 +310,10 @@ pub fn run_upgrade_with_method(
         } else {
             "Upgrade command completed but active binary version could not be verified".to_string()
         },
-        restart_required: success && matches!(install_method, InstallMethod::Source),
+        // Source replacement updates the on-disk executable, but this command
+        // exits immediately afterwards. Re-execing only `--version` skips the
+        // normal completion path and provides no lifecycle benefit.
+        restart_required: false,
         extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
         extensions_updated,
         extensions_skipped,
@@ -318,6 +322,12 @@ pub fn run_upgrade_with_method(
         services_restarted,
         services_pending_restart,
     })
+}
+
+// Upgrade output must remain visible when a controller captures stdout/stderr.
+// `log_status!` intentionally only writes to an interactive terminal.
+fn upgrade_phase(phase: &str) {
+    eprintln!("[upgrade] {phase}");
 }
 
 /// Restart declared binary-resident services after a successful binary swap.
@@ -738,31 +748,6 @@ fn source_drift_recovery_command(
     }
 
     parts.join(" ")
-}
-
-#[cfg(not(unix))]
-pub fn restart_with_new_binary() {
-    log_status!("upgrade", "Please restart homeboy to use the new version.");
-}
-
-#[cfg(unix)]
-pub fn restart_with_new_binary() -> ! {
-    use std::os::unix::process::CommandExt;
-
-    // After an upgrade, std::env::current_exe() reads /proc/self/exe which
-    // points to the *deleted* old binary inode. Resolve the fresh binary from
-    // $PATH instead so we exec into the newly-installed version.
-    let binary = resolve_binary_on_path()
-        .unwrap_or_else(|| std::env::current_exe().expect("Failed to get current executable path"));
-
-    let err = Command::new(&binary).arg("--version").exec();
-
-    // exec() only returns on error — fall back to a clean exit instead of panicking
-    eprintln!(
-        "Warning: could not restart automatically ({}). Please run `homeboy --version` to confirm the upgrade.",
-        err
-    );
-    std::process::exit(0);
 }
 
 #[cfg(test)]

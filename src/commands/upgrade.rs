@@ -90,26 +90,6 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     // the JSON payload (only ever rediscovered via `homeboy self status`).
     warn_degraded_runners(&result);
 
-    // If upgrade succeeded and restart is needed, do it
-    if result.upgraded && result.restart_required && !args.no_restart {
-        // Print the result first so the user sees it
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "success": true,
-                "data": json
-            }))
-            .unwrap_or_default()
-        );
-
-        // Restart into new binary
-        #[cfg(unix)]
-        upgrade::restart_with_new_binary();
-
-        #[cfg(not(unix))]
-        homeboy::log_status!("upgrade", "Please restart homeboy to use the new version.");
-    }
-
     Ok((json, upgrade_exit_code(&result, !args.runners.is_empty())))
 }
 

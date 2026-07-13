@@ -18,6 +18,7 @@ use super::types::InstallMethod;
 /// capped with truncation metadata. Mirrors the bounded-capture pattern used by
 /// `agent_task_promotion` / runner exec captures (#5297).
 const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
+const SOURCE_UPGRADE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveBinaryInfo {
@@ -66,13 +67,6 @@ pub(crate) fn execute_upgrade(
     previous_build_identity: Option<&str>,
 ) -> Result<(bool, Option<String>, Option<String>)> {
     let defaults = defaults::load_defaults();
-    let mut source_workspace_root = None;
-    let source_replacement_target = if method == InstallMethod::Source {
-        active_binary_path().ok()
-    } else {
-        None
-    };
-
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
@@ -89,20 +83,24 @@ pub(crate) fn execute_upgrade(
         InstallMethod::Source => {
             let workspace_root = resolve_source_workspace(source_path)?;
             prepare_source_workspace_for_upgrade(&workspace_root)?;
-            source_workspace_root = Some(workspace_root.clone());
 
             // Execute the upgrade command from defaults
             let cmd = source_upgrade_command_for_prepared_workspace(
                 &defaults.install_methods.source.upgrade_command,
                 &workspace_root,
             )?;
-            Command::new("sh")
-                .args(["-c", &cmd])
-                .current_dir(&workspace_root)
-                .output()
-                .map_err(|e| {
-                    Error::internal_io(e.to_string(), Some("run source upgrade".to_string()))
-                })?
+            run_source_upgrade_command(&cmd, &workspace_root, SOURCE_UPGRADE_TIMEOUT)?;
+            let replacement_target = active_binary_path().ok();
+            // Source command output is streamed to the invoking process so
+            // controller timeouts can distinguish a build from a stalled run.
+            // It has already returned a precise error for non-zero exits.
+            return complete_source_upgrade(
+                workspace_root,
+                replacement_target.as_deref(),
+                method,
+                force,
+                previous_build_identity,
+            );
         }
         InstallMethod::Binary => {
             let cmd = &defaults.install_methods.binary.upgrade_command;
@@ -139,16 +137,6 @@ pub(crate) fn execute_upgrade(
         return Err(upgrade_failure_error(method, &error_detail));
     }
 
-    if method == InstallMethod::Source {
-        let workspace_root = source_workspace_root.as_deref().ok_or_else(|| {
-            Error::internal_unexpected("source workspace unavailable after source upgrade build")
-        })?;
-        let replacement_target = source_replacement_target.as_deref().ok_or_else(|| {
-            Error::internal_unexpected("active binary path unavailable for source upgrade install")
-        })?;
-        install_source_built_binary(workspace_root, replacement_target)?;
-    }
-
     // The upgrade command above succeeded, so the new binary is already on
     // disk. Reading the version back can race the just-replaced binary (atomic
     // rename not yet observable on PATH, stale resolution, the process failing
@@ -156,7 +144,7 @@ pub(crate) fn execute_upgrade(
     // false-negative `upgraded: false` / `new_version: null` on a successful
     // upgrade. Retry the read-back until it reports a verifiable version before
     // giving up. See issue #3463.
-    let (mut success, active_binary) = verify_upgrade_with_retry(
+    let (success, active_binary) = verify_upgrade_with_retry(
         method,
         force,
         current_version(),
@@ -170,15 +158,6 @@ pub(crate) fn execute_upgrade(
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary.and_then(|info| info.build_identity);
 
-    if method == InstallMethod::Source {
-        success = verify_source_install_with_retry(
-            source_workspace_root.as_deref(),
-            VERIFY_READBACK_ATTEMPTS,
-            VERIFY_READBACK_DELAY,
-            std::thread::sleep,
-        );
-    }
-
     // A source upgrade's command is responsible for swapping the freshly built
     // artifact into the active binary on disk. When that command exits 0 but the
     // read-back proves the active binary is unchanged, the swap silently
@@ -187,18 +166,120 @@ pub(crate) fn execute_upgrade(
     // Reporting a soft `upgraded: false` "completed" here lets operators
     // believe the roll-forward succeeded. Fail loudly with an actionable reason
     // so urgent source fixes are not silently dropped (#5772).
+    Ok((success, new_version, new_build_identity))
+}
+
+fn complete_source_upgrade(
+    workspace_root: PathBuf,
+    replacement_target: Option<&Path>,
+    method: InstallMethod,
+    force: bool,
+    previous_build_identity: Option<&str>,
+) -> Result<(bool, Option<String>, Option<String>)> {
+    let replacement_target = replacement_target.ok_or_else(|| {
+        Error::internal_unexpected("active binary path unavailable for source upgrade install")
+    })?;
+    upgrade_phase("installing source-built binary");
+    install_source_built_binary(&workspace_root, replacement_target)?;
+    upgrade_phase("verifying installed source binary");
+
+    let (_verified_version, active_binary) = verify_upgrade_with_retry(
+        method,
+        force,
+        current_version(),
+        previous_build_identity,
+        VERIFY_READBACK_ATTEMPTS,
+        VERIFY_READBACK_DELAY,
+        || active_binary_info().ok().flatten(),
+        std::thread::sleep,
+    );
+    let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
+    let new_build_identity = active_binary.and_then(|info| info.build_identity);
+    let success = verify_source_install_with_retry(
+        Some(&workspace_root),
+        VERIFY_READBACK_ATTEMPTS,
+        VERIFY_READBACK_DELAY,
+        std::thread::sleep,
+    );
+
     if let Some(error) = source_swap_failure(
         method,
         success,
         new_version.as_deref(),
         new_build_identity.as_deref(),
-        source_workspace_root.as_deref(),
-        source_replacement_target.as_deref(),
+        Some(&workspace_root),
+        Some(replacement_target),
     ) {
         return Err(error);
     }
 
+    upgrade_phase("source binary installation verified");
     Ok((success, new_version, new_build_identity))
+}
+
+fn upgrade_phase(phase: &str) {
+    eprintln!("[upgrade] {phase}");
+}
+
+fn run_source_upgrade_command(
+    command: &str,
+    workspace_root: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    upgrade_phase("building source workspace");
+    let mut child_command = Command::new("sh");
+    child_command
+        .args(["-c", command])
+        .current_dir(workspace_root)
+        .stdin(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        child_command.process_group(0);
+    }
+    let mut child = child_command
+        .spawn()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("run source upgrade".to_string())))?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(upgrade_failure_error(
+                    InstallMethod::Source,
+                    &format!("source upgrade command exited with {}", status),
+                ));
+            }
+            Ok(None) if start.elapsed() >= timeout => {
+                terminate_upgrade_child(&mut child);
+                return Err(Error::internal_io(
+                    format!(
+                        "source upgrade timed out after {}s; child process group was terminated",
+                        timeout.as_secs()
+                    ),
+                    Some("run source upgrade".to_string()),
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                terminate_upgrade_child(&mut child);
+                return Err(Error::internal_io(
+                    e.to_string(),
+                    Some("wait for source upgrade".to_string()),
+                ));
+            }
+        }
+    }
+}
+
+fn terminate_upgrade_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Detect a source upgrade whose command exited successfully but left the
@@ -1007,6 +1088,48 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "homeboy 0.247.5");
         assert_eq!(String::from_utf8_lossy(&output.stderr), "warn");
+    }
+
+    #[test]
+    fn source_upgrade_command_returns_after_same_binary_success() {
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        run_source_upgrade_command(
+            "printf 'built same-version binary\\n'",
+            workspace.path(),
+            Duration::from_secs(1),
+        )
+        .expect("source command completes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let pid_file = workspace.path().join("child.pid");
+        let command = format!("sleep 30 & echo $! > {}; wait", shell_quote_path(&pid_file));
+
+        let err = run_source_upgrade_command(&command, workspace.path(), Duration::from_millis(50))
+            .expect_err("long-running source command times out");
+        assert!(
+            err.details.to_string().to_lowercase().contains("timed out"),
+            "unexpected timeout error: {err:?}"
+        );
+
+        let child_pid = std::fs::read_to_string(&pid_file)
+            .expect("background child pid")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric pid");
+        // The shell is the process-group leader and timeout termination must
+        // remove its background child as well as reap the direct child.
+        for _ in 0..40 {
+            if unsafe { libc::kill(child_pid, 0) } != 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("source-upgrade child must not be orphaned");
     }
 
     #[test]
