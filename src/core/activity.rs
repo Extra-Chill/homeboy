@@ -62,6 +62,19 @@ pub struct ActivityEvidenceRef {
     pub uri: String,
 }
 
+/// A store-specific view retained with the canonical activity item so state
+/// reconciliation remains inspectable without returning duplicate work items.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivitySourceProjection {
+    pub source_store: String,
+    pub id: String,
+    pub state: ActivityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityItem {
     pub id: String,
@@ -85,6 +98,8 @@ pub struct ActivityItem {
     pub artifacts: Vec<ActivityEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<ActivityEvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_projections: Vec<ActivitySourceProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<ActivityNextAction>,
 }
@@ -212,8 +227,10 @@ struct ActivityCollector {
 }
 
 impl ActivityCollector {
-    fn insert(&mut self, item: ActivityItem) {
-        let key = dedupe_key(&item);
+    fn insert(&mut self, mut item: ActivityItem) {
+        let projection = source_projection(&item);
+        append_source_projection(&mut item.source_projections, projection);
+        let key = canonical_identity(&item);
         self.items
             .entry(key)
             .and_modify(|existing| merge_item(existing, &item))
@@ -231,20 +248,63 @@ impl ActivityCollector {
     }
 }
 
-fn dedupe_key(item: &ActivityItem) -> String {
-    if let Some(run_id) = &item.refs.run_id {
-        return format!("run:{run_id}");
+fn canonical_identity(item: &ActivityItem) -> String {
+    // Lifecycle records own agent-task state. Their durable id is also the
+    // observation run id, so normalize both projections onto that one identity.
+    if item.source_store == "agent-task.lifecycle" {
+        return format!("run:{}", item.id);
     }
     if let Some(agent_task_run_id) = &item.refs.agent_task_run_id {
-        return format!("agent-task:{agent_task_run_id}");
+        return format!("run:{agent_task_run_id}");
+    }
+    if let Some(run_id) = &item.refs.run_id {
+        return format!("run:{run_id}");
     }
     if let Some(job_id) = &item.refs.runner_job_id {
         return format!("runner-job:{job_id}");
     }
-    item.id.clone()
+    format!("item:{}", item.id)
 }
 
 fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
+    if source_precedence(incoming) > source_precedence(existing)
+        || (source_precedence(incoming) == source_precedence(existing)
+            && incoming.updated_at > existing.updated_at)
+    {
+        let mut replacement = incoming.clone();
+        merge_refs(&mut replacement, existing);
+        append_unique(&mut replacement.artifacts, &existing.artifacts);
+        append_unique(&mut replacement.evidence, &existing.evidence);
+        append_actions(&mut replacement.next_actions, &existing.next_actions);
+        append_source_projections(
+            &mut replacement.source_projections,
+            &existing.source_projections,
+        );
+        *existing = replacement;
+        return;
+    }
+
+    merge_refs(existing, incoming);
+    append_unique(&mut existing.artifacts, &incoming.artifacts);
+    append_unique(&mut existing.evidence, &incoming.evidence);
+    append_actions(&mut existing.next_actions, &incoming.next_actions);
+    append_source_projections(
+        &mut existing.source_projections,
+        &incoming.source_projections,
+    );
+}
+
+fn source_precedence(item: &ActivityItem) -> u8 {
+    match item.source_store.as_str() {
+        "agent-task.lifecycle" => 4,
+        "runner.session" => 3,
+        "daemon.jobs-json" => 2,
+        "observation.sqlite" => 1,
+        _ => 0,
+    }
+}
+
+fn merge_refs(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.refs.run_id.is_none() {
         existing.refs.run_id = incoming.refs.run_id.clone();
     }
@@ -263,14 +323,36 @@ fn merge_item(existing: &mut ActivityItem, incoming: &ActivityItem) {
     if existing.runner.transport.is_none() {
         existing.runner.transport = incoming.runner.transport.clone();
     }
-    if is_active(incoming.state)
-        || (!is_active(existing.state) && incoming.updated_at > existing.updated_at)
-    {
-        existing.state = incoming.state.clone();
+}
+
+fn source_projection(item: &ActivityItem) -> ActivitySourceProjection {
+    ActivitySourceProjection {
+        source_store: item.source_store.clone(),
+        id: item.id.clone(),
+        state: item.state,
+        updated_at: item.updated_at.clone(),
+        finished_at: item.finished_at.clone(),
     }
-    append_unique(&mut existing.artifacts, &incoming.artifacts);
-    append_unique(&mut existing.evidence, &incoming.evidence);
-    append_actions(&mut existing.next_actions, &incoming.next_actions);
+}
+
+fn append_source_projection(
+    target: &mut Vec<ActivitySourceProjection>,
+    incoming: ActivitySourceProjection,
+) {
+    if !target.iter().any(|projection| {
+        projection.source_store == incoming.source_store && projection.id == incoming.id
+    }) {
+        target.push(incoming);
+    }
+}
+
+fn append_source_projections(
+    target: &mut Vec<ActivitySourceProjection>,
+    incoming: &[ActivitySourceProjection],
+) {
+    for projection in incoming {
+        append_source_projection(target, projection.clone());
+    }
 }
 
 fn append_unique(target: &mut Vec<ActivityEvidenceRef>, incoming: &[ActivityEvidenceRef]) {
@@ -384,6 +466,7 @@ mod observation {
             },
             artifacts,
             evidence: Vec::new(),
+            source_projections: Vec::new(),
             next_actions: actions_for_observation_run(&run.id, state_from_run_status(&run.status)),
         })
     }
@@ -481,6 +564,7 @@ mod agent_tasks {
                     uri: evidence.uri,
                 })
                 .collect(),
+            source_projections: Vec::new(),
             next_actions: actions_for_agent_task(&record.run_id, state),
         }
     }
@@ -564,6 +648,7 @@ mod daemon_jobs {
                 })
                 .collect(),
             evidence: Vec::new(),
+            source_projections: Vec::new(),
             next_actions: actions_for_job(None, &job_id, state),
         })
     }
@@ -657,6 +742,7 @@ mod runner_sessions {
             },
             artifacts: Vec::new(),
             evidence: Vec::new(),
+            source_projections: Vec::new(),
             next_actions: actions_for_runner_job(&job.runner_id, &job.job_id, state),
         }
     }
@@ -706,6 +792,7 @@ mod tests {
             },
             artifacts: Vec::new(),
             evidence: Vec::new(),
+            source_projections: Vec::new(),
             next_actions: vec![action("show", format!("homeboy runs show {id}"))],
         }
     }
@@ -724,6 +811,48 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].refs.run_id.as_deref(), Some("run-1"));
         assert_eq!(items[0].refs.runner_job_id.as_deref(), Some("job-1"));
+    }
+
+    #[test]
+    fn agent_task_lifecycle_is_authoritative_over_observation_and_runner_projections() {
+        let mut collector = ActivityCollector::default();
+
+        let mut observation = item("agent-task-1", ActivityState::Running);
+        observation.kind = "agent-task".to_string();
+        observation.source_store = "observation.sqlite".to_string();
+        collector.insert(observation);
+
+        let mut runner = item("runner-job-1", ActivityState::Running);
+        runner.source_store = "runner.session".to_string();
+        runner.refs.run_id = Some("agent-task-1".to_string());
+        runner.refs.runner_job_id = Some("runner-job-1".to_string());
+        collector.insert(runner);
+
+        let mut lifecycle = item("agent-task-1", ActivityState::Queued);
+        lifecycle.kind = "agent-task".to_string();
+        lifecycle.source_store = "agent-task.lifecycle".to_string();
+        lifecycle.refs.run_id = None;
+        lifecycle.refs.agent_task_run_id = Some("agent-task-1".to_string());
+        collector.insert(lifecycle);
+
+        let items = collector.items(ActivityScope::All, 10);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "agent-task-1");
+        assert_eq!(items[0].source_store, "agent-task.lifecycle");
+        assert_eq!(items[0].state, ActivityState::Queued);
+        assert_eq!(
+            items[0]
+                .source_projections
+                .iter()
+                .map(|projection| (projection.source_store.as_str(), projection.state))
+                .collect::<Vec<_>>(),
+            vec![
+                ("agent-task.lifecycle", ActivityState::Queued),
+                ("runner.session", ActivityState::Running),
+                ("observation.sqlite", ActivityState::Running),
+            ]
+        );
     }
 
     #[test]
