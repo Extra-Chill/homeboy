@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/release.yml"
+CI_WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
 RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
 README="${ROOT_DIR}/README.md"
 COMMENT_SECTIONS="${ROOT_DIR}/scripts/pr/comment/sections.sh"
@@ -55,6 +56,16 @@ assert_count() {
 assert_not_contains '^  create-release:' "${WORKFLOW}" "release workflow has no duplicate GitHub Release job"
 assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not shell out to gh release create"
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
+
+# GitHub-hosted workflow dependencies must use published action majors (#275).
+assert_count 'actions/checkout@v4' '3' "${CI_WORKFLOW}" "reusable CI workflow uses checkout v4 for every checkout"
+assert_count 'actions/create-github-app-token@v2' '1' "${CI_WORKFLOW}" "reusable CI workflow uses app-token v2"
+assert_not_contains 'actions/checkout@v6' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable checkout v6"
+assert_not_contains 'actions/create-github-app-token@v3' "${CI_WORKFLOW}" "reusable CI workflow does not use unavailable app-token v3"
+assert_count 'actions/checkout@v4' '3' "${WORKFLOW}" "release workflow uses checkout v4 for every checkout"
+assert_count 'actions/create-github-app-token@v2' '1' "${WORKFLOW}" "release workflow uses app-token v2"
+assert_not_contains 'actions/checkout@v6' "${WORKFLOW}" "release workflow does not use unavailable checkout v6"
+assert_not_contains 'actions/create-github-app-token@v3' "${WORKFLOW}" "release workflow does not use unavailable app-token v3"
 
 assert_contains 'uses: ./' "${WORKFLOW}" "release workflow uses checked-out action code for self-release"
 assert_not_contains 'Extra-Chill/homeboy-action@v2' "${WORKFLOW}" "release workflow is not bootstrapped from the stale floating v2 channel"

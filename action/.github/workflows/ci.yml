@@ -190,7 +190,7 @@ jobs:
     if: inputs.build-command != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -316,7 +316,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -352,7 +352,7 @@ jobs:
           fi
 
       - name: Check out Homeboy Action
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: Extra-Chill/homeboy-action
           ref: ${{ inputs.action-ref }}
@@ -360,7 +360,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v2
         continue-on-error: true
         with:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
