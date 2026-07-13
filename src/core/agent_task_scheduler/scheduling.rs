@@ -31,6 +31,7 @@ impl AgentTaskScheduleSupport {
     pub(super) fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
+        quarantined: &[QuarantinedTask],
         completed_by_task: &HashMap<String, AgentTaskOutcome>,
         output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
         per_executor_concurrency: &HashMap<String, usize>,
@@ -45,7 +46,7 @@ impl AgentTaskScheduleSupport {
 
             // An existing workspace is mutable executor state. Keep one task at
             // a time in that directory so a commit range belongs to one task.
-            if workspace_is_busy(&task.request, running) {
+            if workspace_is_busy(task, running, quarantined) {
                 return false;
             }
 
@@ -497,6 +498,7 @@ impl AgentTaskScheduleSupport {
     pub(super) fn backpressure_kind(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
+        quarantined: &[QuarantinedTask],
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
@@ -537,8 +539,8 @@ impl AgentTaskScheduleSupport {
             return "resource_budget";
         }
 
-        if workspace_is_busy(&task.request, running) {
-            return "workspace_concurrency";
+        if workspace_is_busy(task, running, quarantined) {
+            return "workspace_quarantined";
         }
 
         "scheduler_capacity"
@@ -565,25 +567,28 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn expire_timed_out_tasks<E>(
         running: &mut Vec<RunningTask>,
+        quarantined: &mut Vec<QuarantinedTask>,
         outcomes: &mut Vec<AgentTaskOutcome>,
         events: &mut Vec<AgentTaskProgressEvent>,
         executor: &E,
     ) where
         E: AgentTaskExecutorAdapter,
     {
-        for task in running.iter_mut() {
-            if task.timed_out {
-                continue;
-            }
-            let timed_out = task
+        let mut index = 0;
+        while index < running.len() {
+            let timed_out = running[index]
                 .timeout_ms
-                .map(|timeout_ms| task.started_at.elapsed() > timeout_with_grace(timeout_ms))
+                .map(|timeout_ms| {
+                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
+                })
                 .unwrap_or(false);
 
             if !timed_out {
+                index += 1;
                 continue;
             }
 
+            let task = running.remove(index);
             executor.cancel(&task.task_id);
             let outcome = Self::timeout_outcome(
                 task.task_id.clone(),
@@ -598,7 +603,9 @@ impl AgentTaskScheduleSupport {
                 outcome.summary.clone(),
             ));
             outcomes.push(outcome);
-            task.timed_out = true;
+            quarantined.push(QuarantinedTask {
+                workspace_key: task.workspace_key,
+            });
         }
     }
 
@@ -1350,43 +1357,67 @@ impl AgentTaskScheduleSupport {
     }
 }
 
-fn workspace_is_busy(request: &AgentTaskRequest, running: &[RunningTask]) -> bool {
-    let Some(workspace) = workspace_key(request) else {
+fn workspace_is_busy(
+    task: &ScheduledTask,
+    running: &[RunningTask],
+    quarantined: &[QuarantinedTask],
+) -> bool {
+    let Some(workspace) = task.workspace_key.as_deref() else {
         return false;
     };
     running
         .iter()
-        .filter_map(|task| workspace_key(&task.request))
+        .filter_map(|task| task.workspace_key.as_deref())
+        .chain(
+            quarantined
+                .iter()
+                .filter_map(|task| task.workspace_key.as_deref()),
+        )
         .any(|running_workspace| running_workspace == workspace)
 }
 
-pub(super) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
-    let root = request.workspace.root.as_deref()?;
-    let git_identity = Command::new("git")
-        .args([
-            "-C",
-            root,
-            "rev-parse",
-            "--show-toplevel",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])
-        .output();
-    if let Ok(output) = git_identity {
-        if output.status.success() {
-            let identity = String::from_utf8_lossy(&output.stdout);
-            let mut lines = identity.lines();
-            if let (Some(top_level), Some(common_dir)) = (lines.next(), lines.next()) {
-                return Some(format!("git:{top_level}:{common_dir}"));
+impl AgentTaskScheduleSupport {
+    pub(super) fn workspace_is_quarantined(
+        task: &ScheduledTask,
+        quarantined: &[QuarantinedTask],
+    ) -> bool {
+        let Some(workspace) = task.workspace_key.as_deref() else {
+            return false;
+        };
+        quarantined
+            .iter()
+            .filter_map(|task| task.workspace_key.as_deref())
+            .any(|quarantined_workspace| quarantined_workspace == workspace)
+    }
+
+    pub(super) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
+        let root = request.workspace.root.as_deref()?;
+        let git_identity = Command::new("git")
+            .args([
+                "-C",
+                root,
+                "rev-parse",
+                "--show-toplevel",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ])
+            .output();
+        if let Ok(output) = git_identity {
+            if output.status.success() {
+                let identity = String::from_utf8_lossy(&output.stdout);
+                let mut lines = identity.lines();
+                if let (Some(top_level), Some(common_dir)) = (lines.next(), lines.next()) {
+                    return Some(format!("git:{top_level}:{common_dir}"));
+                }
             }
         }
+        Some(format!(
+            "path:{}",
+            std::fs::canonicalize(root)
+                .unwrap_or_else(|_| Path::new(root).to_path_buf())
+                .display()
+        ))
     }
-    Some(format!(
-        "path:{}",
-        std::fs::canonicalize(root)
-            .unwrap_or_else(|_| Path::new(root).to_path_buf())
-            .display()
-    ))
 }
 
 pub(super) fn select_artifact_payload(

@@ -101,6 +101,7 @@ where
                     AgentTaskScheduleSupport::apply_rotation_policy_limits(&mut request, policy);
                 }
                 ScheduledTask {
+                    workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                     request,
                     attempt: 1,
                     rotation_index: 0,
@@ -109,6 +110,7 @@ where
             })
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
+        let mut quarantined: Vec<QuarantinedTask> = Vec::new();
         let mut outcomes = Vec::new();
         let mut completed_by_task: HashMap<String, AgentTaskOutcome> = HashMap::new();
         let mut events = Vec::new();
@@ -216,6 +218,7 @@ where
                 let Some(next_index) = AgentTaskScheduleSupport::next_dispatchable_index(
                     &queued,
                     &running,
+                    &quarantined,
                     &completed_by_task,
                     &output_dependencies,
                     &plan.options.per_executor_concurrency,
@@ -224,6 +227,22 @@ where
                 ) else {
                     if running.is_empty() {
                         if let Some(task) = queued.pop_front() {
+                            if AgentTaskScheduleSupport::workspace_is_quarantined(
+                                &task,
+                                &quarantined,
+                            ) {
+                                AgentTaskScheduleSupport::block_and_record_scheduled_task(
+                                    &task,
+                                    "workspace_quarantined",
+                                    "task workspace remains quarantined after a timed-out executor"
+                                        .to_string(),
+                                    &mut backpressure,
+                                    &mut events,
+                                    &mut outcomes,
+                                    &mut blocked_count,
+                                );
+                                continue;
+                            }
                             if let Some(message) =
                                 AgentTaskScheduleSupport::waiting_for_task_dependencies(
                                     &task,
@@ -284,6 +303,7 @@ where
                             AgentTaskScheduleSupport::backpressure_kind(
                                 &queued,
                                 &running,
+                                &quarantined,
                                 &plan.options.per_executor_concurrency,
                                 &plan.options.per_model_concurrency,
                                 &plan.options.resource_budget,
@@ -352,6 +372,7 @@ where
                 running.push(RunningTask {
                     task_id: task_id.clone(),
                     request: request.clone(),
+                    workspace_key: scheduled.workspace_key,
                     executor_key,
                     model_key: model_key(&request),
                     resource_units: task_resource_units(&request, &plan.options.resource_budget),
@@ -361,7 +382,6 @@ where
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     task_base_sha,
-                    timed_out: false,
                 });
 
                 thread::spawn(move || {
@@ -376,6 +396,7 @@ where
 
             AgentTaskScheduleSupport::expire_timed_out_tasks(
                 &mut running,
+                &mut quarantined,
                 &mut outcomes,
                 &mut events,
                 self.executor.as_ref(),
@@ -387,7 +408,6 @@ where
 
             let wait_timeout = running
                 .iter()
-                .filter(|task| !task.timed_out)
                 .filter_map(|task| {
                     task.timeout_ms
                         .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
@@ -413,11 +433,6 @@ where
                     let Some(running_task) = running_task else {
                         continue;
                     };
-                    // A timed-out task has already produced its terminal
-                    // outcome; its late completion only releases ownership.
-                    if running_task.timed_out {
-                        continue;
-                    }
                     let mut outcome = result.outcome;
                     if let Err(error) = harvest_committed_patch(&mut outcome, &running_task) {
                         outcome = committed_harvest_failure(outcome, error);
@@ -450,6 +465,7 @@ where
                             Some("retry queued".to_string()),
                         ));
                         queued.push_back(ScheduledTask {
+                            workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                             request,
                             attempt: next_attempt,
                             rotation_index: running_task.rotation_index,
@@ -497,6 +513,7 @@ where
                                 )),
                             ));
                             queued.push_back(ScheduledTask {
+                                workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                                 request,
                                 attempt: next_attempt,
                                 rotation_index: running_task.rotation_index + 1,
@@ -562,6 +579,7 @@ where
 #[derive(Debug, Clone)]
 struct ScheduledTask {
     request: AgentTaskRequest,
+    workspace_key: Option<String>,
     attempt: u32,
     /// Rotation entries already consumed for this task (0 = original executor).
     rotation_index: usize,
@@ -573,6 +591,7 @@ struct ScheduledTask {
 struct RunningTask {
     task_id: String,
     request: AgentTaskRequest,
+    workspace_key: Option<String>,
     executor_key: String,
     model_key: Option<String>,
     resource_units: u32,
@@ -586,8 +605,10 @@ struct RunningTask {
     /// Workspace HEAD captured immediately before the executor runs. It bounds
     /// any committed patch candidate to this dispatch attempt.
     task_base_sha: Option<String>,
-    /// Timed-out executor threads retain workspace ownership until completion.
-    timed_out: bool,
+}
+
+struct QuarantinedTask {
+    workspace_key: Option<String>,
 }
 
 struct TaskResult {
@@ -875,7 +896,7 @@ mod committed_harvest_tests {
     use super::*;
 
     #[test]
-    fn metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
+    fn git_metadata_failure_after_patch_creation_preserves_the_patch_artifact() {
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.artifacts.push(committed_patch_artifact(
             Path::new("artifacts/committed.patch"),
@@ -885,13 +906,12 @@ mod committed_harvest_tests {
             Vec::new(),
         ));
 
-        let failed = committed_harvest_failure(
-            outcome,
-            HarvestError::ArtifactWrite {
-                path: PathBuf::from("artifacts/committed.patch"),
-                message: "disk full".to_string(),
-            },
-        );
+        let error = git_output(
+            Path::new("artifacts/committed.patch"),
+            &["log", "--format=%H", "base..HEAD"],
+        )
+        .expect_err("metadata command fails after patch attachment");
+        let failed = committed_harvest_failure(outcome, error);
 
         assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
         assert_eq!(failed.artifacts[0].id, "committed-changes");
@@ -903,9 +923,8 @@ mod committed_harvest_tests {
             evidence.uri == "homeboy://agent-task/committed-harvest-preflight"
         }));
         assert!(failed.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "agent_task.committed_harvest_artifact_failed"
-                && diagnostic.data["operation"] == "write"
-                && diagnostic.data["error"] == "disk full"
+            diagnostic.class == "agent_task.committed_harvest_git_failed"
+                && diagnostic.data["command"] == "git log --format=%H base..HEAD"
         }));
     }
 }
