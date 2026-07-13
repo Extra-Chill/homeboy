@@ -594,54 +594,10 @@ fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    run_git_command(workspace_root, &["fetch", "origin"])?;
+    // A caller-selected source path is an immutable build input. In particular,
+    // worktree branches may be local-only or detached and must not be rewritten
+    // to an origin branch before the source build or runner materialization.
     ensure_clean_source_workspace(workspace_root)?;
-
-    let Some(default_branch) = origin_default_branch(workspace_root)? else {
-        if git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])?
-            && git_command_success(
-                workspace_root,
-                &[
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "--symbolic-full-name",
-                    "@{upstream}",
-                ],
-            )?
-        {
-            run_git_command(workspace_root, &["pull", "--ff-only"])?;
-            return Ok(());
-        }
-
-        return Err(Error::validation_invalid_argument(
-            "source_path",
-            "Cannot determine origin default branch for source checkout",
-            Some(workspace_root.display().to_string()),
-            None,
-        )
-        .with_hint("Ensure the source checkout has an origin remote with a HEAD ref."));
-    };
-
-    let origin_ref = format!("origin/{default_branch}");
-    if !git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])? {
-        run_git_command(workspace_root, &["checkout", "--detach", &origin_ref])?;
-        return Ok(());
-    }
-
-    let current_branch = git_command_stdout(workspace_root, &["branch", "--show-current"])?;
-    if current_branch.trim() != default_branch {
-        run_git_command(workspace_root, &["checkout", "--detach", &origin_ref])?;
-        return Ok(());
-    }
-
-    run_git_command(
-        workspace_root,
-        &["branch", "--set-upstream-to", &origin_ref, &default_branch],
-    )?;
-    run_git_command(
-        workspace_root,
-        &["pull", "--ff-only", "origin", &default_branch],
-    )
 }
 
 fn ensure_clean_source_workspace(workspace_root: &Path) -> Result<()> {
@@ -659,36 +615,6 @@ fn ensure_clean_source_workspace(workspace_root: &Path) -> Result<()> {
     .with_hint("Commit, stash, or discard local changes before running source upgrade."))
 }
 
-fn origin_default_branch(workspace_root: &Path) -> Result<Option<String>> {
-    let remote_head = git_command_stdout_optional(
-        workspace_root,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
-    )?;
-    if let Some(branch) = remote_head
-        .as_deref()
-        .and_then(|head| head.trim().strip_prefix("origin/"))
-        .filter(|branch| !branch.is_empty())
-    {
-        return Ok(Some(branch.to_string()));
-    }
-
-    let ls_remote =
-        git_command_stdout_optional(workspace_root, &["ls-remote", "--symref", "origin", "HEAD"])?;
-    Ok(ls_remote.and_then(|output| {
-        output.lines().find_map(|line| {
-            line.strip_prefix("ref: refs/heads/")
-                .and_then(|rest| rest.split_whitespace().next())
-                .filter(|branch| !branch.is_empty())
-                .map(str::to_string)
-        })
-    }))
-}
-
 fn git_command_success(workspace_root: &Path, args: &[&str]) -> Result<bool> {
     Ok(
         run_git_output(workspace_root, args, "prepare source checkout")?
@@ -699,21 +625,6 @@ fn git_command_success(workspace_root: &Path, args: &[&str]) -> Result<bool> {
 
 fn git_command_stdout(workspace_root: &Path, args: &[&str]) -> Result<String> {
     run_git(workspace_root, args, "prepare source checkout").map(|stdout| stdout.trim().to_string())
-}
-
-fn git_command_stdout_optional(workspace_root: &Path, args: &[&str]) -> Result<Option<String>> {
-    let output = run_git_output(workspace_root, args, "prepare source checkout")?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
-}
-
-fn run_git_command(workspace_root: &Path, args: &[&str]) -> Result<()> {
-    run_git(workspace_root, args, "prepare source checkout").map(|_| ())
 }
 
 const DETACHED_SOURCE_GIT_PULL_GUARD: &str = r#"git() {
@@ -1748,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn source_upgrade_preparation_resets_detached_checkout_to_origin_default() {
+    fn source_upgrade_preparation_preserves_detached_checkout_identity() {
         let remote = tempfile::tempdir().expect("remote tempdir");
         git(
             remote.path(),
@@ -1794,9 +1705,7 @@ mod tests {
         prepare_source_workspace_for_upgrade(checkout.path()).expect("prepare detached checkout");
 
         let prepared_head = git_stdout(checkout.path(), &["rev-parse", "HEAD"]);
-        let origin_head = git_stdout(checkout.path(), &["rev-parse", "origin/main"]);
-        assert_ne!(prepared_head, stale_head);
-        assert_eq!(prepared_head, origin_head);
+        assert_eq!(prepared_head, stale_head);
         assert_eq!(
             git_stdout(checkout.path(), &["branch", "--show-current"]),
             ""
@@ -1804,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn source_upgrade_preparation_detaches_worktree_when_default_branch_checked_out_elsewhere() {
+    fn source_upgrade_preparation_preserves_local_only_worktree_branch() {
         let remote = tempfile::tempdir().expect("remote tempdir");
         git(
             remote.path(),
@@ -1868,15 +1777,16 @@ mod tests {
             "test setup should reproduce branch ownership failure"
         );
 
+        let source_head = git_stdout(&source_worktree, &["rev-parse", "HEAD"]);
         prepare_source_workspace_for_upgrade(&source_worktree).expect("prepare source worktree");
 
         assert_eq!(
             git_stdout(&source_worktree, &["branch", "--show-current"]),
-            ""
+            "feature-upgrade-source"
         );
         assert_eq!(
             git_stdout(&source_worktree, &["rev-parse", "HEAD"]),
-            git_stdout(&source_worktree, &["rev-parse", "origin/main"])
+            source_head
         );
     }
 

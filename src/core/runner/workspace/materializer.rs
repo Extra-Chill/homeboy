@@ -240,7 +240,7 @@ fn dest_child_path(path: &str) -> String {
 fn git_checkout_command(head: &str, branch: Option<&str>) -> String {
     if let Some(branch) = branch {
         format!(
-            "git -C \"$tmp\" checkout -B {branch} {head} && git -C \"$tmp\" config branch.{branch}.remote origin && git -C \"$tmp\" config branch.{branch}.merge refs/heads/{branch}",
+            "git -C \"$tmp\" checkout -B {branch} {head}",
             branch = shell::quote_arg(branch),
             head = shell::quote_arg(head),
         )
