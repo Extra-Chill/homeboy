@@ -16,6 +16,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
     case bench = "Bench"
     case lab = "Lab"
+    case agentTasks = "Agent Tasks"
     case runHistory = "Run History"
     case release = "Release"
     case rigs = "Rigs"
@@ -36,6 +37,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .deployer: return "arrow.up.to.line"
         case .bench: return "speedometer"
         case .lab: return "desktopcomputer.and.arrow.down"
+        case .agentTasks: return "point.3.connected.trianglepath.dotted"
         case .runHistory: return "clock.arrow.circlepath"
         case .release: return "tag"
         case .rigs: return "shippingbox.and.arrow.backward"
@@ -61,7 +63,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
             return true
         case .settings:
             return true
-        case .deployer, .bench, .lab, .runHistory, .release, .rigs, .stackManager, .git, .quality:
+        case .deployer, .bench, .lab, .agentTasks, .runHistory, .release, .rigs, .stackManager, .git, .quality:
             return hasComponents
         case .remoteFileEditor, .remoteLogViewer:
             return hasRemoteTarget
@@ -132,6 +134,8 @@ struct ContentView: View {
                 .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
             HomeboyLabView()
                 .opacity(selectedItem == .coreTool(.lab) ? 1 : 0)
+            AgentTasksView()
+                .opacity(selectedItem == .coreTool(.agentTasks) ? 1 : 0)
             RunHistoryView()
                 .opacity(selectedItem == .coreTool(.runHistory) ? 1 : 0)
             ReleaseWorkflowView()

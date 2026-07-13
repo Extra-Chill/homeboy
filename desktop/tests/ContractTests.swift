@@ -22,6 +22,7 @@ let aggregateFiles = [
     "RunHistoryContractTests.swift",
     "StackGitAPIAuthContractTests.swift",
     "QualityAuditReviewTriageContractTests.swift",
+    "AgentTaskContractTests.swift",
     "ContractTestRunner.swift",
 
 ].map { testsDir.appendingPathComponent($0).path }

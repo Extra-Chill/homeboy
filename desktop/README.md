@@ -18,6 +18,11 @@ Homeboy Desktop connects to your servers and shows you a unified view of all you
 
 ### Built-in Tools
 
+**Agent Tasks** — Mission control for durable, headless Homeboy agent-task runs
+- Creates queueable or immediate plans from goals, source refs, workspace, provider, concurrency, attempts, and policy
+- Renders Homeboy-owned status, fanout cells, events, artifacts, diagnostics, replay bundles, and PR evidence
+- Uses Homeboy's promotion dry-run and verification contract; Desktop never applies patches itself
+
 **Deployer** — Push code to any server with a click
 - One-click deployment of plugins, themes, and packages
 - Version comparison (see what's outdated before you deploy)
