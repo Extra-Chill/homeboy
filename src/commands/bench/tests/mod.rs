@@ -54,7 +54,7 @@ if [ -n "$HOMEBOY_BENCH_EXTRA_WORKLOADS" ]; then
   done
   IFS="$old_ifs"
 else
-  all_scenarios="in-tree slow"
+  all_scenarios="in-tree slow visual"
 fi
 
 # Rig-declared workload selection is owned by Homeboy core because the core
@@ -76,8 +76,14 @@ JSON
 
 comma=""
 for scenario in $selected; do
+  artifacts=""
+  if [ "$scenario" = "visual" ]; then
+    visual_comparison_dir="$HOMEBOY_BENCH_RESULTS_FILE.visual-comparisons/$scenario"
+    mkdir -p "$visual_comparison_dir"
+    artifacts=", \"artifacts\": { \"visual_comparison_dir\": { \"path\": \"$visual_comparison_dir\", \"type\": \"directory\" } }"
+  fi
   cat >> "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
-    $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0, "warmup_iterations": ${HOMEBOY_BENCH_WARMUP_ITERATIONS:--1} } }
+    $comma{ "id": "$scenario", "iterations": ${HOMEBOY_BENCH_ITERATIONS:-0}, "metrics": { "p95_ms": 1.0, "warmup_iterations": ${HOMEBOY_BENCH_WARMUP_ITERATIONS:--1} }$artifacts }
 JSON
   comma=",
 "
