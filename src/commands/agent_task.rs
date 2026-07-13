@@ -35,8 +35,9 @@ pub use args::{
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
-    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, ReplayProviderBoundaryArgs,
-    RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
+    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs,
+    VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -78,6 +79,9 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
+        AgentTaskCommand::PromotionProvider(provider_args) => {
+            run::promotion_provider(provider_args)
+        }
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),

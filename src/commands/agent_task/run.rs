@@ -2,6 +2,7 @@
 //! resume, and retry.
 
 use serde_json::Value;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -14,7 +15,10 @@ use homeboy::core::agent_tasks::scheduler::{
 use homeboy::core::agent_tasks::service as agent_task_service;
 
 use super::super::CmdResult;
-use super::args::{AgentTaskCookArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs, SubmitArgs};
+use super::args::{
+    AgentTaskCookArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs,
+    SubmitArgs,
+};
 
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
@@ -34,6 +38,31 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 
 pub(super) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
+    let mut request = String::new();
+    std::io::stdin()
+        .read_to_string(&mut request)
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("read agent-task promotion provider request".to_string()),
+            )
+        })?;
+    homeboy::core::agent_task_promotion::apply_materialized_workspace_patch(
+        Path::new(&args.workspace),
+        &request,
+    )
+    .and_then(|response| {
+        serde_json::from_str(&response).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize agent-task promotion provider response".to_string()),
+            )
+        })
+    })
+    .map(|value| (value, 0))
 }
 
 pub(super) fn run_cook_with_executor<E>(args: AgentTaskCookArgs, executor: E) -> CmdResult<Value>
