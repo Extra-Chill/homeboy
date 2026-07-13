@@ -986,6 +986,16 @@ mod committed_harvest_tests {
         .expect_err("metadata command fails after the real patch is attached");
         let patch_path = outcome.artifacts[0].path.clone().expect("patch path");
         assert!(Path::new(&patch_path).is_file());
+        let patch = std::fs::read_to_string(&patch_path).expect("read attached patch");
+        assert!(!patch.trim().is_empty());
+        assert!(patch.contains("diff --git a/file.txt b/file.txt"));
+        assert!(patch.contains("-base\n"));
+        assert!(patch.contains("+committed change"));
+        assert_eq!(
+            outcome.artifacts[0].size_bytes,
+            Some(patch.len() as u64),
+            "artifact size must match the written patch"
+        );
         let failed = committed_harvest_failure(outcome, error);
 
         assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
