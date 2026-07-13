@@ -204,6 +204,28 @@ if [ ! -f "$PHPSTAN_BIN" ]; then
     exit 0
 fi
 
+# Integrity guard (homeboy-extensions#2233): a corrupted/truncated phpstan.phar
+# makes Phar::loadPhar() throw a fatal ("manifest cannot be larger than 100 MB")
+# that kills the whole lint gate with an opaque PHP error instead of a clean
+# skip. Probing with `--version` is the cheapest check that loads the phar
+# manifest, so a failing probe means the binary is unusable. Returns 0 when the
+# binary starts and non-zero otherwise.
+homeboy_phpstan_probe() {
+    "$1" --version >/dev/null 2>&1
+}
+
+if ! homeboy_phpstan_probe "$PHPSTAN_BIN"; then
+    echo "Warning: PHPStan binary at $PHPSTAN_BIN failed to start (likely a corrupted phpstan.phar)."
+    echo "         Skipping PHPStan static analysis. Reinstall the wordpress extension"
+    echo "         (run \`composer install\` in the extension directory) to refresh the phar."
+    echo "         See homeboy-extensions#2233 for background."
+    exit 0
+fi
+
+if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+    echo "DEBUG: PHPStan probe ok: $("$PHPSTAN_BIN" --version 2>&1 | head -1)"
+fi
+
 if [ ! -f "$PHPSTAN_DEFAULT_CONFIG" ]; then
     echo "Warning: phpstan.neon.dist not found at $PHPSTAN_DEFAULT_CONFIG, skipping static analysis"
     exit 0
