@@ -470,6 +470,9 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
     let state: DaemonState = match serde_json::from_str(&content) {
         Ok(state) => state,
         Err(error) => {
+            if let Some(validation) = validate_dead_legacy_lease(path, &content)? {
+                return Ok(validation);
+            }
             return Ok(DaemonLeaseValidation {
                 running: false,
                 fresh: false,
@@ -542,6 +545,42 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         stale_reason_code: None,
         invalid_pid: None,
     })
+}
+
+/// A pre-schema lease has no identity, so it can never be adopted. When both
+/// of its ownership signals are absent, treat it as missing metadata and use
+/// the state-and-job snapshot recovery flow instead of asking for an
+/// unavailable lease ID.
+fn validate_dead_legacy_lease(path: &Path, content: &str) -> Result<Option<DaemonLeaseValidation>> {
+    let legacy: LegacyDaemonState = match serde_json::from_str(content) {
+        Ok(legacy) => legacy,
+        Err(_) => return Ok(None),
+    };
+    if legacy.state_path != path.display().to_string() {
+        return Ok(None);
+    }
+    let endpoint: SocketAddr = match legacy.address.parse::<SocketAddr>() {
+        Ok(endpoint) if endpoint.ip().is_loopback() => endpoint,
+        _ => return Ok(None),
+    };
+    if pid_is_running(legacy.pid)
+        || TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_ok()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(DaemonLeaseValidation {
+        state: None,
+        running: false,
+        fresh: false,
+        reachable: false,
+        stale_reason: Some(
+            "legacy daemon lease has no schema or lease identity; owner PID and endpoint are unavailable"
+                .to_string(),
+        ),
+        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+        invalid_pid: Some(legacy.pid),
+    }))
 }
 
 fn stale_lease(
@@ -1716,6 +1755,11 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
             "refusing to write daemon lease with unsupported schema `{}`",
             state.schema
         )));
+    }
+    if state.lease_id.trim().is_empty() {
+        return Err(Error::internal_unexpected(
+            "refusing to write daemon lease without a lease ID",
+        ));
     }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
