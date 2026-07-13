@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
@@ -36,7 +36,8 @@ mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
-    artifact_content_url, fetch_artifact_to_path, start_background, ArtifactFetchOutcome,
+    artifact_content_url, ensure_running, fetch_artifact_to_path, start_background,
+    ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -152,7 +153,7 @@ impl DaemonLeaseIdentity {
 }
 
 #[derive(Debug)]
-struct DaemonOperationLock {
+pub(super) struct DaemonOperationLock {
     path: PathBuf,
 }
 
@@ -368,12 +369,13 @@ pub fn read_status() -> Result<DaemonStatus> {
     let path = state_path()?;
     let state_path = path.display().to_string();
     let validation = validate_lease_file(&path)?;
+    let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
 
     Ok(DaemonStatus {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
         reachable: validation.reachable,
-        freshness: freshness_report_from_validation(&validation, 0),
+        freshness: freshness_report_from_validation(&validation, active_jobs),
         stale_reason: validation.stale_reason,
         state: validation.state,
         state_path,
@@ -1717,6 +1719,40 @@ fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
     })?;
     Ok(DaemonOperationLock { path })
+}
+
+/// `ensure-running` is idempotent, so a concurrent caller can wait briefly for
+/// the first caller to publish its daemon lease instead of failing spuriously.
+/// Destructive lifecycle operations continue using the fail-fast acquisition.
+pub(super) fn acquire_daemon_operation_lock_for_ensure(
+    wait: Duration,
+) -> Result<DaemonOperationLock> {
+    const RETRY: Duration = Duration::from_millis(50);
+    let deadline = Instant::now() + wait;
+    loop {
+        match acquire_daemon_operation_lock() {
+            Ok(lock) => return Ok(lock),
+            Err(err)
+                if err
+                    .message
+                    .contains("daemon lifecycle operation already in progress")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(RETRY);
+            }
+            Err(err)
+                if err
+                    .message
+                    .contains("daemon lifecycle operation already in progress") =>
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "timed out after {}s waiting for daemon ensure-running lifecycle lock; another caller may still be starting the daemon",
+                    wait.as_secs()
+                )));
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 impl Drop for DaemonOperationLock {

@@ -40,6 +40,25 @@ mod tests {
     }
 
     #[test]
+    fn active_count_reads_durable_jobs_without_reconciling_them() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("open store");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+
+        assert_eq!(
+            JobStore::active_count_at_path(&path).expect("active count"),
+            1
+        );
+        assert_eq!(
+            store.get(job.id).expect("job remains present").status,
+            JobStatus::Running,
+            "status inspection must not reconcile an in-flight daemon job"
+        );
+    }
+
+    #[test]
     fn test_create_with_source_snapshot() {
         let store = JobStore::default();
         let snapshot =

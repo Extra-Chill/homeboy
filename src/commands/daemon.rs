@@ -24,6 +24,11 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
+    /// Return the current live daemon or start one when no live daemon exists
+    EnsureRunning {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
     /// Run the local daemon in the foreground
     Serve {
         /// Local bind address. Defaults to an OS-selected loopback port.
@@ -74,6 +79,7 @@ pub struct DaemonArtifactGetArgs {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DaemonOutput {
     Start(DaemonStartResult),
+    EnsureRunning(DaemonStartResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -99,6 +105,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         DaemonCommand::Start { addr } => {
             Ok((DaemonOutput::Start(daemon::start_background(&addr)?), 0))
         }
+        DaemonCommand::EnsureRunning { addr } => Ok((
+            DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
+            0,
+        )),
         DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
