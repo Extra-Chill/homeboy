@@ -94,6 +94,15 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
         assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
         assert_eq!(loaded.metadata["runner_job_id"], "job-123");
         assert!(loaded.metadata.get("stale_running").is_none());
+        assert!(loaded.lifecycle.heartbeat.is_some());
+        assert_eq!(
+            loaded
+                .lifecycle
+                .heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.last_seen_at.as_str()),
+            loaded.updated_at.as_deref()
+        );
         assert_eq!(log.events.len(), 1);
         assert!(artifacts.evidence_refs.is_empty());
     });
@@ -1166,6 +1175,14 @@ fn status_marks_running_run_without_owner_as_stale() {
             loaded.metadata["stale_running_reason"],
             "missing_runner_pid"
         );
+        assert_eq!(loaded.metadata["provider_boundary"]["status"], "absent");
+
+        // Read-side reconciliation persists the classification, so repeated
+        // status reads converge instead of reviving a ghost run as active.
+        let persisted = store::read_record("run-stale-missing-owner").expect("persisted record");
+        assert_eq!(persisted.metadata["stale_running"], json!(true));
+        let repeated = status("run-stale-missing-owner").expect("repeated status loaded");
+        assert_eq!(repeated.metadata["stale_running"], json!(true));
     });
 }
 
