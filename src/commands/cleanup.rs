@@ -50,6 +50,7 @@ pub enum CleanupCategoryArg {
     RunnerDownloads,
     RemoteLabWorkspaces,
     RuntimeTmp,
+    ControllerScratch,
 }
 
 #[derive(Subcommand)]
@@ -276,6 +277,14 @@ const REMOTE_LAB_WORKSPACES_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runner workspace prune <runner> --apply --passes 10",
     };
 
+const CONTROLLER_SCRATCH_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "controller_scratch",
+        include_arg: "controller-scratch",
+        dry_run_command: "homeboy cleanup --include controller-scratch",
+        apply_command: "homeboy cleanup --include controller-scratch --apply",
+    };
+
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
@@ -373,6 +382,20 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             output.skipped_count,
             output.totals.planned_size_bytes,
             output.totals.removed_size_bytes,
+            output,
+        )?);
+    }
+
+    if selected.includes(CleanupCategoryArg::ControllerScratch) {
+        let output = homeboy::core::controller_scratch::cleanup(apply)?;
+        categories.push(category_from_output(
+            CONTROLLER_SCRATCH_METADATA,
+            apply,
+            output.candidate_count,
+            output.applied_count,
+            output.skipped_count,
+            output.estimated_bytes,
+            output.reclaimed_bytes,
             output,
         )?);
     }
