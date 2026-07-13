@@ -103,6 +103,7 @@ pub(super) fn redact_runner_exec_json(
         Value::Object(object) => Value::Object(
             object
                 .iter()
+                .filter(|(key, _)| !super::is_internal_control_env(key))
                 .map(|(key, value)| {
                     (
                         key.clone(),

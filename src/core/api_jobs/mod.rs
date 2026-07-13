@@ -1418,6 +1418,10 @@ mod tests {
         request
             .env
             .insert("TOKEN_A".to_string(), "secret".to_string());
+        request.env.insert(
+            crate::core::runner::RUNNER_LAB_HANDOFF_ENV.to_string(),
+            "1".to_string(),
+        );
         request.secret_env_names = vec!["TOKEN_A".to_string()];
         request.secret_env_plan = SecretEnvPlan::from_secret_env_names(["TOKEN_B".to_string()]);
         request.require_paths = vec!["/srv/extrachill/cache".to_string()];
@@ -1438,6 +1442,9 @@ mod tests {
         assert_eq!(dispatch.command, vec!["sh", "-c", "printf ok"]);
         assert_eq!(dispatch.cwd.as_deref(), Some("/srv/extrachill"));
         assert_eq!(dispatch.env["PUBLIC_VALUE"], "visible");
+        assert!(!dispatch
+            .env
+            .contains_key(crate::core::runner::RUNNER_LAB_HANDOFF_ENV));
         assert_eq!(dispatch.require_paths, vec!["/srv/extrachill/cache"]);
         assert!(dispatch.source_snapshot.is_some());
         assert_eq!(
@@ -1454,6 +1461,10 @@ mod tests {
         assert_eq!(lifecycle.active_child_count, Some(2));
         assert_eq!(lifecycle.active_cell_count, Some(3));
         assert_eq!(envelope.result_refs.run_id.as_deref(), Some("run-123"));
+        assert!(!request
+            .public_metadata()
+            .env
+            .contains_key(crate::core::runner::RUNNER_LAB_HANDOFF_ENV));
     }
 
     #[test]

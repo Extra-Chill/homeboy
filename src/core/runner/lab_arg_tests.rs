@@ -36,6 +36,35 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
 }
 
 #[test]
+fn lab_offload_preserves_global_option_values_and_passthrough_force_hot() {
+    let input = args(&[
+        "homeboy",
+        "--runner-env",
+        "HOMEBOY_TEST_MARKER=1",
+        "agent-task",
+        "cook",
+        "--",
+        "--force-hot",
+    ]);
+
+    let rewritten = rewrite_lab_offload_args(&input, "/runner/workspaces/homeboy", &[], None);
+
+    assert_eq!(
+        rewritten,
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "--runner-env",
+            "HOMEBOY_TEST_MARKER=1",
+            "agent-task",
+            "cook",
+            "--",
+            "--force-hot",
+        ])
+    );
+}
+
+#[test]
 fn maps_command_output_path_to_runner_output_path() {
     let input = args(&[
         "homeboy",

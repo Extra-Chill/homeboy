@@ -94,10 +94,14 @@ pub use evidence::{
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path, runner_job_log_snapshot,
     RemoteArtifactDownload, RunnerJobLogSnapshot,
 };
+pub(crate) use execution::is_internal_control_env;
+#[cfg(test)]
+pub(crate) use execution::set_runner_lab_handoff_active_for_test;
+pub(crate) use execution::{consume_runner_lab_handoff_control_env, runner_lab_handoff_active};
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled_with_progress,
     prepare_daemon_local_process, runner_exec_secret_env_plan, RunnerProcessRequest,
-    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_LAB_HANDOFF_ENV,
 };
 pub use execution::{
     daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,

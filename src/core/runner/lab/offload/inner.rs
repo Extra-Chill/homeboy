@@ -231,9 +231,13 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
 
 fn lab_runner_exec_options(
     context: &LabDispatchExecutionContext<'_>,
-    env: std::collections::HashMap<String, String>,
+    mut env: std::collections::HashMap<String, String>,
     secret_env_names: Vec<String>,
 ) -> RunnerExecOptions {
+    env.insert(
+        super::super::super::RUNNER_LAB_HANDOFF_ENV.to_string(),
+        "1".to_string(),
+    );
     RunnerExecOptions {
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,

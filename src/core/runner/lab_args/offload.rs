@@ -100,7 +100,10 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
-    let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
+    let has_force_hot = args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--force-hot");
     let preserve_runner_arg = is_extension_dev_run(args);
     while let Some(arg) = iter.next() {
         if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
@@ -312,7 +315,10 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
-    let has_force_hot = args.iter().any(|arg| arg == "--force-hot");
+    let has_force_hot = args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--force-hot");
     while let Some(arg) = iter.next() {
         if arg == EXPLICIT_PASSTHROUGH_SENTINEL {
             continue;

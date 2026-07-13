@@ -156,7 +156,11 @@ impl RemoteRunnerJobRequest {
             operation: request.operation,
             command: request.command,
             cwd: request.cwd,
-            env: request.env,
+            env: request
+                .env
+                .into_iter()
+                .filter(|(name, _)| !crate::core::runner::is_internal_control_env(name))
+                .collect(),
             source_snapshot: request.source_snapshot,
             require_paths: request.require_paths,
         });
@@ -194,6 +198,9 @@ impl RemoteRunnerJobRequest {
 
     pub(crate) fn public_metadata(&self) -> Self {
         let mut public = self.clone();
+        public
+            .env
+            .retain(|name, _| !crate::core::runner::is_internal_control_env(name));
         let mut secret_env_name_values = self.secret_env_plan.secret_env_names();
         secret_env_name_values.extend(self.secret_env_names.clone());
         let secret_env_names = secret_env_name_values
