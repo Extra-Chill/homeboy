@@ -230,6 +230,10 @@ pub fn plan_homeboy_binary_refresh(
 pub fn refresh_homeboy_binary(
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    let promotion_lease = crate::core::runtime_promotion::acquire(
+        "runner binary promotion",
+        options.runner_id.clone(),
+    )?;
     let plan = plan_homeboy_binary_refresh(&options)?;
     // A refresh owns the lease it observed before changing the runner binary.
     // If its local session disappears during that transition, reconnect can
@@ -271,6 +275,7 @@ pub fn refresh_homeboy_binary(
         HomeboyBinaryRefreshMode::Select { .. } => vec!["bash".to_string()],
     };
 
+    promotion_lease.assert_generation()?;
     let (exec_output, exit_code) = exec(
         &plan.runner_id,
         RunnerExecOptions::raw_command(vec![
@@ -305,6 +310,7 @@ pub fn refresh_homeboy_binary(
         ));
     }
 
+    promotion_lease.assert_generation()?;
     let identity = parse_identity(&exec_output.stdout)?;
     let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
     let updated_fields = match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
@@ -315,6 +321,7 @@ pub fn refresh_homeboy_binary(
     let mut daemon_refreshed = false;
     let interrupted_job_ids;
     if options.reconnect {
+        promotion_lease.assert_generation()?;
         let active_jobs = active_jobs_before_daemon_replacement(&plan.runner_id)?;
         interrupted_job_ids = protect_active_jobs_before_reconnect(
             &plan.runner_id,
