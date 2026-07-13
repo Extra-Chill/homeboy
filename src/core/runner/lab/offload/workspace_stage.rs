@@ -395,29 +395,6 @@ fn prepare_lab_offload_workspace_stage_inner(
             synced_entry.step_id,
         );
     }
-    let late_path_input_workspaces = lab_path_input_extra_workspaces(
-        &remapped_args,
-        contract.workload.as_ref(),
-        Path::new(&synced.local_path),
-    )?;
-    let late_synced_path_settings = sync_extra_lab_workspaces(
-        runner_id,
-        &synced.local_path,
-        late_path_input_workspaces,
-        &mut workspace_mapping,
-    )?;
-    if !late_synced_path_settings.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_late_path_settings", "lab.sync_late_path_settings")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", late_synced_path_settings.len())
-                        .json("workspaces", &late_synced_path_settings),
-                )
-                .build(),
-        );
-    }
     let path_materialization_plan = workspace_path_materialization_plan(
         &workspace_mapping,
         PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
