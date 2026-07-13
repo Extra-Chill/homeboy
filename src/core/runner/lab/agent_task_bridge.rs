@@ -1413,6 +1413,42 @@ mod tests {
         assert_eq!(out[5], "--run-id");
         assert_eq!(out[6], "cook-7970");
         assert!(lifecycle_run_id.starts_with("cook-7970-attempt-1-"));
+
+        let (staged_args, staged_lifecycle_run_id) =
+            ensure_agent_task_lifecycle_identity_with(&out, None, None)
+                .expect("staged cook identity");
+
+        assert_eq!(staged_args, out);
+        assert_eq!(staged_lifecycle_run_id, lifecycle_run_id);
+    }
+
+    #[test]
+    fn lab_cook_staging_preserves_generated_durable_lifecycle_identity() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+        ];
+
+        let (pre_acceptance_args, pre_acceptance_run_id) =
+            ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8005"), None)
+                .expect("pre-acceptance cook identity");
+        let (staged_args, staged_run_id) = ensure_agent_task_lifecycle_identity_with(
+            &pre_acceptance_args,
+            Some("other-token"),
+            None,
+        )
+        .expect("staged cook identity");
+
+        assert!(pre_acceptance_run_id.starts_with("cook-8005-attempt-1-"));
+        assert_eq!(staged_run_id, pre_acceptance_run_id);
+        assert_eq!(staged_args, pre_acceptance_args);
+        assert_eq!(
+            agent_task_dispatch_requested_run_id(&staged_args),
+            Some("cook-8005".to_string())
+        );
     }
 
     #[test]

@@ -45,6 +45,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
+    lifecycle_args: &[String],
     preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
     // Capture the orchestration facts known *before* staging so any
@@ -57,7 +58,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         runner_id,
         &source_path.display().to_string(),
     )
-    .with_ref_base(lab_offload_changed_since_ref(request.normalized_args));
+    .with_ref_base(lab_offload_changed_since_ref(lifecycle_args));
 
     prepare_lab_offload_workspace_stage_inner(
         request,
@@ -69,6 +70,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         command_prefix_argv,
         runner_workspace_root,
         run_isolation_token,
+        lifecycle_args,
         preferred_attempt_run_id,
     )
     .map_err(|error| enrich_lab_cannot_proceed_error(error, &context))
@@ -85,17 +87,15 @@ fn prepare_lab_offload_workspace_stage_inner(
     command_prefix_argv: &[String],
     runner_workspace_root: Option<&str>,
     run_isolation_token: Option<String>,
+    lifecycle_args: &[String],
     preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
-    let sync_mode = lab_workspace_sync_mode(
-        contract.workspace_mode_policy,
-        request.normalized_args,
-        source_path,
-    )?;
+    let sync_mode =
+        lab_workspace_sync_mode(contract.workspace_mode_policy, lifecycle_args, source_path)?;
     let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
-        prepare_git_lab_offload_changed_since(request.normalized_args, source_path)?
+        prepare_git_lab_offload_changed_since(lifecycle_args, source_path)?
     } else {
-        preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
+        preflight_lab_offload_changed_since(lifecycle_args, sync_mode)?
     };
     let mut git_fetch_refs = changed_since_preflight.git_fetch_refs.clone();
     for git_ref in
@@ -1458,6 +1458,9 @@ mod tests {
             "--verify".to_string(),
             "cargo test --lib".to_string(),
         ];
+        let (args, lifecycle_run_id) =
+            ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8005"), None)
+                .expect("pre-acceptance lifecycle identity");
 
         let command = build_lab_offload_remote_command(
             &["/runner/bin/homeboy".to_string()],
@@ -1478,6 +1481,10 @@ mod tests {
                 "/runner/bin/homeboy",
                 "agent-task",
                 "cook",
+                "--attempt-run-id",
+                lifecycle_run_id.as_str(),
+                "--run-id",
+                "cook-8005",
                 "--to-worktree",
                 "homeboy@fix-7913",
                 "--verify",
@@ -2150,6 +2157,7 @@ mod tests {
                 &["homeboy".to_string()],
                 Some(&runner_workspace_root),
                 None,
+                &args,
                 None,
             );
             std::env::set_var("PATH", prior_path);
@@ -2234,7 +2242,7 @@ mod tests {
                 "--verify".to_string(),
                 "cargo check".to_string(),
             ];
-            let (_, canonical_attempt_id) =
+            let (lifecycle_args, canonical_attempt_id) =
                 ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8009"), None)
                     .expect("canonical cook attempt id");
             let request = LabOffloadRequest {
@@ -2276,6 +2284,7 @@ mod tests {
                 &["homeboy".to_string()],
                 Some(&runner_workspace_root),
                 Some("cook-8009".to_string()),
+                &lifecycle_args,
                 Some(&canonical_attempt_id),
             )
             .expect("managed worktree stage");
