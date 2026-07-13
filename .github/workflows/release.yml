@@ -346,6 +346,7 @@ jobs:
   gate-refactor:
     name: Auto-refactor
     continue-on-error: true
+    timeout-minutes: 35
     needs:
       - check
       - gate-build
@@ -399,6 +400,7 @@ jobs:
           autofix: 'true'
           autofix-mode: always
           autofix-open-pr: 'true'
+          execution-timeout-seconds: '1800'
           app-token: ${{ steps.app-token.outputs.token }}
 
   release-quality-policy:
