@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.1] - 2026-07-13
+
+### Fixed
+- respect component PHPCS toolchains
+
 ## [3.24.0] - 2026-07-13
 
 ### Added
