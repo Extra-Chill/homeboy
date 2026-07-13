@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.283.1] - 2026-07-13
+
+### Fixed
+- preserve explicit source upgrades without upstream
+- bound release auto-refactor
+- accept explicit source checkouts without upstream
+- bound and report source upgrades
+
 ## [0.283.0] - 2026-07-13
 
 ### Added
