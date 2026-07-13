@@ -11,6 +11,7 @@ mod apply;
 mod promote;
 mod types;
 
+pub use apply::apply_materialized_workspace_patch;
 pub use promote::promote;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,

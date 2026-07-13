@@ -250,6 +250,9 @@ pub enum AgentTaskCommand {
     Review(ReviewArgs),
     /// Review: promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
+    /// Internal adapter that applies a promotion patch to an already materialized workspace.
+    #[command(hide = true)]
+    PromotionProvider(PromotionProviderArgs),
     /// Review: finalize a green cook run into a review-ready pull request.
     FinalizePr(FinalizePrArgs),
     /// Review: convert deterministic gate results into a cook retry or stop decision.
@@ -514,6 +517,13 @@ pub struct AgentTaskCookArgs {
         value_name = "TEXT"
     )]
     pub ai_used_for: String,
+}
+
+#[derive(Args, Debug)]
+pub struct PromotionProviderArgs {
+    /// Materialized Git workspace that receives the promotion patch.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: String,
 }
 
 #[derive(Args, Debug)]

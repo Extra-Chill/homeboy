@@ -48,6 +48,68 @@ pub(crate) const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
 pub(crate) const AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA: &str =
     "homeboy/agent-task-promotion-apply-response/v1";
 
+/// Apply a promotion-provider request to an already materialized Git workspace.
+///
+/// Lab uses this adapter after it has safely staged the target workspace on the
+/// runner, so promotion stays within the runner without requiring a controller
+/// workspace provider.
+pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) -> Result<String> {
+    let request: AgentTaskPromotionApplyRequest =
+        serde_json::from_str(request_json).map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some("agent-task promotion provider request".to_string()),
+                None,
+            )
+        })?;
+    if request.schema != AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "promotion_provider.request.schema",
+            format!(
+                "expected {}, got {}",
+                AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, request.schema
+            ),
+            None,
+            None,
+        ));
+    }
+    validate_provider_workspace_path(workspace)?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["apply", "--whitespace=nowarn", &request.patch_path])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("apply agent-task promotion patch".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "promotion_provider.patch",
+            format!(
+                "could not apply promotion patch in {}: {}",
+                workspace.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(request.patch_path),
+            None,
+        ));
+    }
+    serde_json::to_string(&AgentTaskPromotionApplyResponse {
+        schema: AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA.to_string(),
+        workspace_path: workspace.display().to_string(),
+        command_evidence: Vec::new(),
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize promotion provider response".to_string()),
+        )
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) schema: String,

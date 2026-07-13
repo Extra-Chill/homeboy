@@ -410,6 +410,14 @@ fn prepare_lab_offload_workspace_stage_inner(
     );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
+    // The target worktree is already materialized on the runner. Give detached
+    // cooks a local adapter so promotion, gates, and finalization stay on that
+    // workspace instead of requiring a controller-side provider command.
+    let remapped_args = inject_materialized_promotion_provider(
+        remapped_args,
+        command_prefix_argv.first().map(String::as_str),
+        &remote_cwd,
+    );
     let (remapped_args, agent_task_run_id) =
         ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
             .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
@@ -639,6 +647,41 @@ fn build_lab_offload_remote_command(
     let remote_args = inject_required_extension_args(remote_args, &plan.command_extensions);
     command.extend(remote_args.into_iter().skip(1));
     command
+}
+
+fn inject_materialized_promotion_provider(
+    mut args: Vec<String>,
+    homeboy_path: Option<&str>,
+    workspace: &str,
+) -> Vec<String> {
+    let Some(agent_task_index) = args.iter().position(|arg| arg == "agent-task") else {
+        return args;
+    };
+    if args
+        .get(agent_task_index + 1)
+        .is_none_or(|arg| arg != "cook")
+        || args
+            .iter()
+            .any(|arg| arg == "--provider-command" || arg.starts_with("--provider-command="))
+    {
+        return args;
+    }
+    let Some(homeboy_path) = homeboy_path.filter(|path| !path.trim().is_empty()) else {
+        return args;
+    };
+
+    let insert_at = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(
+        insert_at..insert_at,
+        [
+            "--provider-command".to_string(),
+            format!("{homeboy_path} agent-task promotion-provider --workspace {workspace}"),
+        ],
+    );
+    args
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1400,6 +1443,67 @@ mod tests {
                 "--rig".to_string(),
                 "wordpress-fixture".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn detached_cook_gets_materialized_workspace_promotion_provider() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@fix-7913".to_string(),
+            "--verify".to_string(),
+            "cargo test --lib".to_string(),
+        ];
+
+        let command = build_lab_offload_remote_command(
+            &["/runner/bin/homeboy".to_string()],
+            &inject_materialized_promotion_provider(
+                args,
+                Some("/runner/bin/homeboy"),
+                "/runner/workspaces/homeboy",
+            ),
+            "/runner/workspaces/homeboy",
+            &[],
+            None,
+            &command_plan(&[]),
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "/runner/bin/homeboy",
+                "--force-hot",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "homeboy@fix-7913",
+                "--verify",
+                "cargo test --lib",
+                "--provider-command",
+                "/runner/bin/homeboy agent-task promotion-provider --workspace /runner/workspaces/homeboy",
+            ]
+        );
+    }
+
+    #[test]
+    fn detached_cook_preserves_explicit_promotion_provider() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--provider-command=custom-provider".to_string(),
+        ];
+
+        assert_eq!(
+            inject_materialized_promotion_provider(
+                args.clone(),
+                Some("/runner/bin/homeboy"),
+                "/runner/workspaces/homeboy",
+            ),
+            args
         );
     }
 

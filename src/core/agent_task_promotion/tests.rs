@@ -174,6 +174,48 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
+fn materialized_workspace_promotion_adapter_applies_patch_and_returns_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    git(&workspace, &["init"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join("src.txt"), "old\n").expect("write source");
+    git(&workspace, &["add", "src.txt"]);
+    git(&workspace, &["commit", "-m", "initial"]);
+    let patch = temp.path().join("changes.patch");
+    std::fs::write(
+        &patch,
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    .expect("write patch");
+
+    let response = super::apply_materialized_workspace_patch(
+        &workspace,
+        &serde_json::json!({
+            "schema": AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+            "to_workspace": "homeboy@fix-7913",
+            "patch_path": patch,
+            "changed_files": ["src.txt"]
+        })
+        .to_string(),
+    )
+    .expect("adapter applies patch");
+    let response: Value = serde_json::from_str(&response).expect("adapter response JSON");
+
+    assert_eq!(
+        response["schema"],
+        AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA
+    );
+    assert_eq!(response["workspace_path"], workspace.display().to_string());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src.txt")).unwrap(),
+        "new\n"
+    );
+}
+
+#[test]
 fn validate_patch_extracts_safe_changed_files() {
     let patch = normalize_promotion_patch(VALID_PATCH, "repo@promoted-task").expect("valid patch");
 
