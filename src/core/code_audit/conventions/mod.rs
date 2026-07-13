@@ -366,9 +366,6 @@ pub enum AuditFinding {
     /// Two directories contain overlapping file names with high content similarity.
     /// Indicates a copy-paste module that was never consolidated.
     ShadowModule,
-    /// Multiple structs define the same field group — candidates for extraction
-    /// into a shared type and flattening/embedding.
-    RepeatedFieldPattern,
     /// Inline array/object literal shape (ordered keys + value kinds) appears
     /// many times across the codebase — candidate for extraction into a helper
     /// constructor (e.g. `error_envelope($error, $message)`).
