@@ -63,7 +63,9 @@ use super::super::execution::{
     runner_exec_failure_context_from_output, runner_exec_failure_context_remediation_hint,
     DaemonJobHandoffState,
 };
-use super::super::lab_apply::apply_lab_offload_patch;
+use super::super::lab_apply::{
+    apply_lab_offload_patch, apply_lab_promotion_patch, PromotionPatchIntent,
+};
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args,
     inject_agent_task_resolved_provider_policy_in_args, lab_at_file_specs, lab_offload_source_path,

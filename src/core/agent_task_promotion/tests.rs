@@ -1189,3 +1189,37 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
         "provider-stderr"
     );
 }
+
+#[test]
+fn provider_response_overflow_is_terminated_with_bounded_evidence() {
+    let request = AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: "target-workspace".to_string(),
+        patch_path: "changes.patch".to_string(),
+        changed_files: vec!["src/lib.rs".to_string()],
+        dry_run: false,
+    };
+
+    let error = run_provider_command(
+        &CommandInvocation {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "yes response | head -c 1048577".to_string(),
+            ],
+            ..Default::default()
+        },
+        &request,
+    )
+    .expect_err("oversized provider response rejected");
+
+    assert!(error.message.contains("response exceeded"));
+    assert_eq!(
+        error.details["command_evidence"]["stdout"]
+            .as_str()
+            .expect("bounded stdout")
+            .len(),
+        65_536
+    );
+    assert_eq!(error.details["command_evidence"]["truncated"], true);
+}
