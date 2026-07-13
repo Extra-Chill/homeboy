@@ -410,9 +410,9 @@ fn prepare_lab_offload_workspace_stage_inner(
     );
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
-    // The target worktree is already materialized on the runner. Give detached
-    // cooks a local adapter so promotion, gates, and finalization stay on that
-    // workspace instead of requiring a controller-side provider command.
+    // The target worktree is already materialized on the runner. Give portable
+    // cooks and promotions a local adapter so applying patches and verification
+    // stay on that workspace instead of requiring a controller-side provider.
     let remapped_args = inject_materialized_promotion_provider(
         remapped_args,
         command_prefix_argv.first().map(String::as_str),
@@ -657,12 +657,12 @@ fn inject_materialized_promotion_provider(
     let Some(agent_task_index) = args.iter().position(|arg| arg == "agent-task") else {
         return args;
     };
-    if args
-        .get(agent_task_index + 1)
-        .is_none_or(|arg| arg != "cook")
-        || args
-            .iter()
-            .any(|arg| arg == "--provider-command" || arg.starts_with("--provider-command="))
+    if !matches!(
+        args.get(agent_task_index + 1).map(String::as_str),
+        Some("cook" | "promote")
+    ) || args
+        .iter()
+        .any(|arg| arg == "--provider-command" || arg.starts_with("--provider-command="))
     {
         return args;
     }
@@ -1505,6 +1505,45 @@ mod tests {
             ),
             args
         );
+    }
+
+    #[test]
+    fn runner_only_promotion_uses_materialized_target_adapter_for_dry_run_and_apply() {
+        for dry_run in [true, false] {
+            let mut args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "promote".to_string(),
+                "/runner/artifacts/detached/aggregate.json".to_string(),
+                "--to-worktree".to_string(),
+                "homeboy@fix-7964".to_string(),
+            ];
+            if dry_run {
+                args.push("--dry-run".to_string());
+            } else {
+                args.extend(["--verify".to_string(), "cargo test --lib".to_string()]);
+            }
+
+            let command = build_lab_offload_remote_command(
+                &["/runner/bin/homeboy".to_string()],
+                &inject_materialized_promotion_provider(
+                    args,
+                    Some("/runner/bin/homeboy"),
+                    "/runner/workspaces/homeboy-fix-7964",
+                ),
+                "/runner/workspaces/homeboy-fix-7964",
+                &[],
+                None,
+                &command_plan(&[]),
+            );
+
+            assert!(command.contains(&"/runner/artifacts/detached/aggregate.json".to_string()));
+            assert!(command.windows(2).any(|args| args == [
+                "--provider-command",
+                "/runner/bin/homeboy agent-task promotion-provider --workspace /runner/workspaces/homeboy-fix-7964",
+            ]));
+            assert!(!command.iter().any(|arg| arg.contains("/Users/")));
+        }
     }
 
     #[test]
