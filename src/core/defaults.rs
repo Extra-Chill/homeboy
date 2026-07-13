@@ -198,6 +198,10 @@ impl Default for WorktreeProviderKind {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderCommands {
+    /// Targeted handle lookup. Each `{handle}` argument is replaced with the
+    /// requested handle. The result uses `list_result_mapping` and may contain one item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
