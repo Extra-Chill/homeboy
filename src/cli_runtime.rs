@@ -128,6 +128,7 @@ impl CliRuntime {
     }
 
     fn run_matches(&self, matches: ArgMatches, normalized: Vec<String>) -> std::process::ExitCode {
+        crate::core::runner::consume_runner_lab_handoff_control_env();
         let global = GlobalArgs {};
 
         // Extract --output early so it's available for all code paths (including

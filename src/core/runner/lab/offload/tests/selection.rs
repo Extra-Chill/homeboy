@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::runner::set_runner_lab_handoff_active_for_test;
 
 #[test]
 fn lab_runner_selection_keeps_explicit_runner_precedence() {
@@ -253,6 +254,41 @@ fn lab_runner_selection_allow_local_hot_overrides_default_runner_gate() {
     )
     .expect("selection")
     .is_none());
+}
+
+#[test]
+fn lab_runner_selection_does_not_reoffload_runner_handoffs() {
+    set_runner_lab_handoff_active_for_test(true);
+
+    let agent_task = resolve_lab_runner_selection_from_default(
+        &portable_lab_command("agent-task cook"),
+        None,
+        false,
+        false,
+        false,
+        false,
+        Some("lab-default".to_string()),
+    );
+    let release_gate = resolve_lab_runner_selection_from_default(
+        &release_gate_lab_command("release-gate"),
+        None,
+        false,
+        false,
+        false,
+        false,
+        Some("lab-default".to_string()),
+    );
+
+    set_runner_lab_handoff_active_for_test(false);
+
+    assert!(
+        agent_task.expect("agent task selection").is_none(),
+        "agent task stays on the accepting runner"
+    );
+    assert!(
+        release_gate.expect("release gate selection").is_none(),
+        "release gate stays on the accepting runner"
+    );
 }
 
 #[test]

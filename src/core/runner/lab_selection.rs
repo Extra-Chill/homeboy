@@ -523,6 +523,10 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         }));
     }
 
+    if super::runner_lab_handoff_active() {
+        return Ok(None);
+    }
+
     if allow_local_hot && !force_hot {
         return Err(Error::validation_invalid_argument(
             "allow_local_hot",
