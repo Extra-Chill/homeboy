@@ -89,11 +89,8 @@ pub(crate) fn run_runner_resident_lab_offload(
     );
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
-    let execution_context = LabExecutionContext::new(
-        runner_workspace_root.to_string(),
-        None,
-        runner_resident_path_materialization_plan(runner_workspace_root, &source_syncs),
-    );
+    let path_materialization_plan =
+        runner_resident_path_materialization_plan(runner_workspace_root, &source_syncs);
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
@@ -118,8 +115,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         "command_paths": "runner_side",
     });
     lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&execution_context.path_materialization_plan)
-            .unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(
         &contract.secret_env_sources,
@@ -137,9 +133,9 @@ pub(crate) fn run_runner_resident_lab_offload(
             runner_mode: status_tunnel_mode(runner_status).metadata_value(),
             assignment_source: selection.source.metadata_value(),
             status: "offloaded",
-            remote_workspace: Some(&execution_context.remote_cwd),
+            remote_workspace: Some(runner_workspace_root),
             fallback_reason: None,
-            workspace_mapping_ref: execution_context.workspace_mapping_ref(),
+            workspace_mapping_ref: path_materialization_plan.mapping_ref(),
             proof_id: None,
         },
         &command,
@@ -148,8 +144,10 @@ pub(crate) fn run_runner_resident_lab_offload(
         runner_workload_agent_task_from_command(&command, agent_task_run_id.as_deref());
     runner_workload.required_secrets.secret_env_plan = secret_env_handoff.secret_env_plan.clone();
     lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
-    let path_remaps =
-        path_remaps_from_workspace_mapping(&[], Some(&source_path), Some(runner_workspace_root));
+    let path_remaps = path_remaps_from_materialization_plan(
+        &path_materialization_plan,
+        Some((&source_path, runner_workspace_root)),
+    );
     lab_metadata["runner_workload"] =
         serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
 
@@ -179,7 +177,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         }],
         secret_env_handoff,
         source_snapshot: None,
-        path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
+        path_materialization_plan: Some(path_materialization_plan),
         capability_preflight: None,
         provider_preflight: None,
         path_remaps,
@@ -272,10 +270,11 @@ mod tests {
             "FIXTURE_ROOT".to_string(),
             fixture_root.display().to_string(),
         )]);
-        let path_remaps = path_remaps_from_workspace_mapping(
-            &[],
-            Some(&source),
-            Some("/srv/homeboy/_lab_workspaces/homeboy"),
+        let plan =
+            runner_resident_path_materialization_plan("/srv/homeboy/_lab_workspaces/homeboy", &[]);
+        let path_remaps = path_remaps_from_materialization_plan(
+            &plan,
+            Some((&source, "/srv/homeboy/_lab_workspaces/homeboy")),
         );
 
         let err = preflight_lab_offload_remote_dispatch_paths(

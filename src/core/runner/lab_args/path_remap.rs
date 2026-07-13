@@ -18,6 +18,15 @@ pub(in crate::core::runner) struct LabPathRemap {
     pub remote: String,
 }
 
+impl From<crate::core::runner_execution_envelope::PathMaterializationPathRemap> for LabPathRemap {
+    fn from(remap: crate::core::runner_execution_envelope::PathMaterializationPathRemap) -> Self {
+        Self {
+            local: remap.local_path,
+            remote: remap.remote_path,
+        }
+    }
+}
+
 /// Order remap pairs most-specific-first so a longer local prefix wins over a
 /// shorter one it is nested under (and, for equal-length locals, the longer
 /// remote wins). Every Lab arg rewriter must remap against this ordering so the

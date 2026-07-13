@@ -3,8 +3,6 @@
 use std::collections::HashMap;
 
 use crate::core::plan::HomeboyPlan;
-use crate::core::runner_execution_envelope::PathMaterializationPlan;
-use crate::core::source_snapshot::SourceSnapshot;
 
 pub use crate::command_contract::LabLocalExecutionPolicy;
 
@@ -33,31 +31,6 @@ pub struct LabOffloadRequest<'a> {
     /// handle survives a local shell timeout/interruption (#5684).
     pub local_output_file: Option<&'a str>,
     pub job_overrides: LabJobOverrides,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LabExecutionContext {
-    pub(crate) remote_cwd: String,
-    pub(crate) source_snapshot: Option<SourceSnapshot>,
-    pub(crate) path_materialization_plan: PathMaterializationPlan,
-}
-
-impl LabExecutionContext {
-    pub(crate) fn new(
-        remote_cwd: impl Into<String>,
-        source_snapshot: Option<SourceSnapshot>,
-        path_materialization_plan: PathMaterializationPlan,
-    ) -> Self {
-        Self {
-            remote_cwd: remote_cwd.into(),
-            source_snapshot,
-            path_materialization_plan,
-        }
-    }
-
-    pub(crate) fn workspace_mapping_ref(&self) -> Option<&'static str> {
-        (!self.path_materialization_plan.entries.is_empty()).then_some("path_materialization_plan")
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

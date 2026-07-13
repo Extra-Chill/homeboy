@@ -973,12 +973,6 @@ pub(crate) fn run_lab_offload_inner(
         runtime_overlay_metadata,
     } = workspace_stage;
     plan = next_plan;
-    let execution_context = LabExecutionContext::new(
-        remote_cwd.clone(),
-        Some(source_snapshot.clone()),
-        path_materialization_plan,
-    );
-
     let cleanup_policy = if agent_task_run_id.is_some() {
         WorkspaceCleanupPolicy::PreserveAlways
     } else {
@@ -1053,8 +1047,7 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&execution_context.path_materialization_plan)
-            .unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -1108,7 +1101,7 @@ pub(crate) fn run_lab_offload_inner(
             status: "offloaded",
             remote_workspace: Some(&remote_cwd),
             fallback_reason: None,
-            workspace_mapping_ref: execution_context.workspace_mapping_ref(),
+            workspace_mapping_ref: path_materialization_plan.mapping_ref(),
             proof_id: lab_metadata
                 .get("proof")
                 .and_then(|proof| proof.get("id"))
@@ -1153,10 +1146,9 @@ pub(crate) fn run_lab_offload_inner(
         .filter(|(name, value)| env_delta_before_secret_handoff.get(*name) != Some(*value))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    let path_remaps = path_remaps_from_workspace_mapping(
-        &workspace_mapping,
-        Some(&source_path),
-        Some(&remote_cwd),
+    let path_remaps = path_remaps_from_materialization_plan(
+        &path_materialization_plan,
+        Some((&source_path, &remote_cwd)),
     );
     exec_lab_context(LabDispatchExecutionContext {
         request: &request,
@@ -1194,7 +1186,7 @@ pub(crate) fn run_lab_offload_inner(
         ],
         secret_env_handoff,
         source_snapshot: Some(source_snapshot),
-        path_materialization_plan: Some(execution_context.path_materialization_plan.clone()),
+        path_materialization_plan: Some(path_materialization_plan),
         capability_preflight,
         provider_preflight: Some(LabProviderPreflightContext {
             command_prefix_argv: command_prefix.argv,
