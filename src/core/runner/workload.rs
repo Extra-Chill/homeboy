@@ -44,24 +44,33 @@ pub(crate) fn build_runner_workload_for_dispatched_command(
     input: RunnerWorkloadBuildInput<'_>,
     dispatched_command: &[String],
 ) -> RunnerWorkload {
-    let command_label = runner_workload_command_label_from_dispatched_command(dispatched_command)
-        .unwrap_or_else(|| input.command.hot_label.to_string());
-    build_runner_workload_with_command_label(input, command_label)
+    let identity = dispatched_command_identity(dispatched_command)
+        .unwrap_or_else(|| RunnerWorkloadCommandIdentity::from_label(input.command.hot_label));
+    build_runner_workload_with_command_identity(input, identity)
 }
 
 fn build_runner_workload_with_command_label(
     input: RunnerWorkloadBuildInput<'_>,
     command_label: String,
 ) -> RunnerWorkload {
+    build_runner_workload_with_command_identity(
+        input,
+        RunnerWorkloadCommandIdentity::from_label(&command_label),
+    )
+}
+
+fn build_runner_workload_with_command_identity(
+    input: RunnerWorkloadBuildInput<'_>,
+    identity: RunnerWorkloadCommandIdentity,
+) -> RunnerWorkload {
     let workspace_mapping_ref = input.workspace_mapping_ref.map(str::to_string);
-    let command_family = RunnerWorkloadCommandFamily::from_command_label(&command_label);
-    let required_secret_categories = required_secret_categories(&command_label);
+    let required_secret_categories = required_secret_categories(&identity.label);
     RunnerWorkload {
         schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
         workload_id: format!("{}.runner_workload", input.plan.id),
         kind: RunnerWorkloadKind {
-            command_label,
-            command_family,
+            command_label: identity.label,
+            command_family: identity.family,
         },
         agent_task: None,
         notification_route: crate::core::notification_route::current(),
@@ -106,11 +115,30 @@ fn build_runner_workload_with_command_label(
     }
 }
 
-fn runner_workload_command_label_from_dispatched_command(command: &[String]) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerWorkloadCommandIdentity {
+    label: String,
+    family: RunnerWorkloadCommandFamily,
+}
+
+impl RunnerWorkloadCommandIdentity {
+    fn from_label(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            family: RunnerWorkloadCommandFamily::from_command_label(label),
+        }
+    }
+}
+
+/// Parse the dispatched argv through the CLI contract so target positionals do
+/// not become part of a command label.
+fn dispatched_command_identity(command: &[String]) -> Option<RunnerWorkloadCommandIdentity> {
     let argv = cli_argv_from_dispatched_command(command)?;
     let cli = Cli::try_parse_from(argv).ok()?;
     let route_contract = cli.command.lab_route_contract().ok()??;
-    Some(route_contract.command.hot_label.to_string())
+    Some(RunnerWorkloadCommandIdentity::from_label(
+        route_contract.command.hot_label,
+    ))
 }
 
 fn cli_argv_from_dispatched_command(command: &[String]) -> Option<Vec<String>> {
@@ -328,6 +356,49 @@ fn validate_runner_workload_command_present(command: &[String]) -> Result<()> {
 }
 
 fn validate_runner_workload_command(workload: &RunnerWorkload, command: &[String]) -> Result<()> {
+    if let Some(dispatched_identity) = dispatched_command_identity(command) {
+        return validate_runner_workload_command_identity(workload, dispatched_identity);
+    }
+
+    // Some direct runner validations use incomplete argv that cannot be parsed
+    // as a full CLI invocation. Preserve their strict label validation rather
+    // than accepting an unrecognized command.
+    validate_runner_workload_command_fallback(workload, command)
+}
+
+fn validate_runner_workload_command_identity(
+    workload: &RunnerWorkload,
+    dispatched_identity: RunnerWorkloadCommandIdentity,
+) -> Result<()> {
+    if dispatched_identity.label != workload.kind.command_label {
+        return Err(workload_error(
+            "runner_workload.kind.command_label",
+            format!(
+                "runner workload command label `{}` does not match dispatched command `{}`",
+                workload.kind.command_label, dispatched_identity.label
+            ),
+        ));
+    }
+
+    if dispatched_identity.family != RunnerWorkloadCommandFamily::Unknown
+        && dispatched_identity.family != workload.kind.command_family
+    {
+        return Err(workload_error(
+            "runner_workload.kind.command_family",
+            format!(
+                "runner workload command family `{:?}` does not match dispatched command family `{:?}`",
+                workload.kind.command_family, dispatched_identity.family
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_runner_workload_command_fallback(
+    workload: &RunnerWorkload,
+    command: &[String],
+) -> Result<()> {
     let command_args = dispatch_workload_command_args(command);
     if command_args.is_empty() {
         return Err(workload_error(
@@ -692,6 +763,24 @@ mod tests {
                 expected_family: RunnerWorkloadCommandFamily::Unknown,
             },
             Case {
+                name: "runtime refresh target positional",
+                argv: vec![
+                    "/srv/homeboy/bin/homeboy",
+                    "--force-hot",
+                    "runtime",
+                    "refresh",
+                    "wp-codebox",
+                    "--source",
+                    "https://github.com/Automattic/wp-codebox.git",
+                    "--ref",
+                    "df634b9330be1f055df22fbe6d473a8ee88022ad",
+                    "--runner",
+                    "homeboy-lab",
+                ],
+                expected_label: "runtime refresh",
+                expected_family: RunnerWorkloadCommandFamily::Workspace,
+            },
+            Case {
                 name: "resident-path command",
                 argv: vec![
                     "/srv/homeboy/bin/homeboy",
@@ -853,7 +942,7 @@ mod tests {
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
+            &["homeboy".to_string(), "test".to_string()],
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
@@ -969,6 +1058,68 @@ mod tests {
         )
         .expect_err("drifted command label must fail");
         assert_eq!(err.details["field"], "runner_workload.kind.command_label");
+    }
+
+    #[test]
+    fn runner_workload_validation_uses_runtime_refresh_command_identity() {
+        let plan = plan();
+        let command = command();
+        let dispatched_command = [
+            "homeboy",
+            "--force-hot",
+            "runtime",
+            "refresh",
+            "wp-codebox",
+            "--source",
+            "https://github.com/Automattic/wp-codebox.git",
+            "--ref",
+            "df634b9330be1f055df22fbe6d473a8ee88022ad",
+            "--runner",
+            "homeboy-lab",
+        ]
+        .map(str::to_string);
+        let workload = build_runner_workload_for_dispatched_command(
+            RunnerWorkloadBuildInput {
+                plan: &plan,
+                command: &command,
+                capture_patch: true,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+                runner_id: "lab-a",
+                runner_mode: "direct_ssh",
+                assignment_source: "explicit",
+                status: "offloaded",
+                remote_workspace: Some("/srv/homeboy/work"),
+                fallback_reason: None,
+                workspace_mapping_ref: None,
+                proof_id: None,
+            },
+            &dispatched_command,
+        );
+
+        assert_eq!(workload.kind.command_label, "runtime refresh");
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &dispatched_command,
+            &SecretEnvPlan::default(),
+            true,
+        )
+        .expect("runtime refresh target positional must not alter the command identity");
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &SecretEnvPlan::default(),
+            true,
+        )
+        .expect_err("a genuinely different dispatched command must fail");
+        assert_eq!(err.details["field"], "runner_workload.kind.command_label");
+        assert!(err.message.contains("runtime refresh"));
+        assert!(err.message.contains("trace"));
     }
 
     #[test]
