@@ -25,7 +25,7 @@ pub(super) fn resolve_exact_ref(
 ) -> Result<ExactRefIdentity> {
     validate_component_source(component)?;
     let source_root = source_root(component)?;
-    let resolution = resolve_commit(&source_root, requested_ref, &component.id)?;
+    let resolution = resolve_commit(&source_root, requested_ref, component)?;
     Ok(ExactRefIdentity {
         requested_ref: requested_ref.to_string(),
         resolved_sha: resolution.sha,
@@ -208,7 +208,7 @@ struct ResolvedCommit {
 fn resolve_commit(
     source_root: &Path,
     requested_ref: &str,
-    component_id: &str,
+    component: &Component,
 ) -> Result<ResolvedCommit> {
     if requested_ref.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -231,24 +231,27 @@ fn resolve_commit(
         });
     }
 
-    resolve_remote_commit(source_root, requested_ref, component_id)
+    resolve_remote_commit(source_root, requested_ref, component)
 }
 
 fn resolve_remote_commit(
     source_root: &Path,
     requested_ref: &str,
-    component_id: &str,
+    component: &Component,
 ) -> Result<ResolvedCommit> {
+    let component_id = &component.id;
     let remote = git::resolve_default_remote(source_root);
-    if git::remote_url(source_root, &remote).is_none() {
+    let Some(remote_url) = git::remote_url(source_root, &remote) else {
         return Err(unresolvable_ref(requested_ref, source_root, component_id));
-    }
+    };
+    let transport_env = component_transport_env(component, &remote_url);
 
     if is_full_sha(requested_ref) {
-        if git::run_git(
+        if git::run_git_with_env(
             source_root,
             &["fetch", "--no-tags", &remote, requested_ref],
             "fetch exact deploy SHA",
+            &transport_env,
         )
         .is_ok()
         {
@@ -271,17 +274,24 @@ fn resolve_remote_commit(
                     mode: "remote_sha".to_string(),
                 });
             }
-            return Err(unresolvable_ref(requested_ref, source_root, component_id));
+            return Err(identity_mismatch(requested_ref, component_id));
         }
     }
 
-    let remote_ref = resolve_named_remote_ref(source_root, &remote, requested_ref, component_id)?;
-    git::run_git(
+    let remote_ref = resolve_named_remote_ref(
+        source_root,
+        &remote,
+        requested_ref,
+        component_id,
+        &transport_env,
+    )?;
+    git::run_git_with_env(
         source_root,
         &["fetch", "--no-tags", &remote, &remote_ref],
         "fetch named exact deploy ref",
+        &transport_env,
     )
-    .map_err(|_| remote_transport_error(&remote, component_id))?;
+    .map_err(|err| remote_transport_error(&remote, component_id, &err))?;
     let sha = git::run_git(
         source_root,
         &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
@@ -290,6 +300,9 @@ fn resolve_remote_commit(
     .map_err(|_| unresolvable_ref(requested_ref, source_root, component_id))?
     .trim()
     .to_string();
+    if is_full_sha(requested_ref) && !sha.eq_ignore_ascii_case(requested_ref) {
+        return Err(identity_mismatch(requested_ref, component_id));
+    }
     Ok(ResolvedCommit {
         sha,
         source: format!("remote:{remote}"),
@@ -302,17 +315,29 @@ fn resolve_named_remote_ref(
     remote: &str,
     requested_ref: &str,
     component_id: &str,
+    transport_env: &[(String, String)],
 ) -> Result<String> {
-    let output = git::run_git(
+    let args = if is_full_sha(requested_ref) {
+        vec!["ls-remote", "--refs", remote]
+    } else {
+        vec!["ls-remote", "--refs", remote, requested_ref]
+    };
+    let output = git::run_git_with_env(
         source_root,
-        &["ls-remote", "--refs", remote, requested_ref],
+        &args,
         "query named exact deploy ref",
+        transport_env,
     )
-    .map_err(|_| remote_transport_error(remote, component_id))?;
+    .map_err(|err| remote_transport_error(remote, component_id, &err))?;
     let candidates: Vec<&str> = output
         .lines()
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .filter(|reference| remote_ref_matches(reference, requested_ref))
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .filter_map(|(sha, reference)| {
+            let reference = reference.trim();
+            (is_full_sha(requested_ref) && sha.eq_ignore_ascii_case(requested_ref)
+                || remote_ref_matches(reference, requested_ref))
+            .then_some(reference)
+        })
         .collect();
     match candidates.as_slice() {
         [reference] => Ok((*reference).to_string()),
@@ -327,6 +352,30 @@ fn resolve_named_remote_ref(
             None,
         )),
     }
+}
+
+fn component_transport_env(component: &Component, remote_url: &str) -> Vec<(String, String)> {
+    remote_host(remote_url)
+        .map(|host| crate::core::git::github_cli_env(&host, &component.github))
+        .unwrap_or_default()
+}
+
+fn remote_host(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let authority = remote_url
+        .strip_prefix("https://")
+        .or_else(|| remote_url.strip_prefix("http://"))
+        .or_else(|| remote_url.strip_prefix("ssh://"))
+        .or_else(|| remote_url.split_once('@').map(|(_, value)| value))?;
+    let host = authority
+        .split('@')
+        .next_back()?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?
+        .trim();
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 fn remote_ref_matches(reference: &str, requested_ref: &str) -> bool {
@@ -353,15 +402,68 @@ fn unresolvable_ref(requested_ref: &str, source_root: &Path, component_id: &str)
     )
 }
 
-fn remote_transport_error(remote: &str, component_id: &str) -> Error {
+fn identity_mismatch(requested_ref: &str, component_id: &str) -> Error {
     Error::validation_invalid_argument(
         "ref",
         format!(
-            "Unable to query declared Git remote '{}' for component '{}'. Check the remote URL and configured Git authentication.",
-            remote, component_id
+            "Declared Git remote resolved exact SHA '{}' to a different commit for component '{}'",
+            requested_ref, component_id
         ),
         None,
+        Some(vec![
+            "Use the immutable commit SHA returned by the repository, then retry the deploy."
+                .to_string(),
+        ]),
+    )
+}
+
+fn remote_transport_error(remote: &str, component_id: &str, error: &Error) -> Error {
+    let detail = error
+        .details
+        .get("stderr")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let message = if [
+        "authentication",
+        "authorization",
+        "could not read username",
+        "terminal prompts disabled",
+        "http 401",
+        "http 403",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+    {
+        format!(
+            "Git authentication failed while querying declared remote '{}' for component '{}'",
+            remote, component_id
+        )
+    } else if [
+        "could not resolve host",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "proxy",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+    {
+        format!(
+            "Git connectivity failed while querying declared remote '{}' for component '{}'",
+            remote, component_id
+        )
+    } else {
+        format!(
+            "Unable to query declared Git remote '{}' for component '{}'",
+            remote, component_id
+        )
+    };
+    Error::validation_invalid_argument(
+        "ref",
+        message,
         None,
+        Some(vec!["Check the remote URL, configured Git authentication, and transport proxy settings. Git credentials are not included in this error.".to_string()]),
     )
 }
 
@@ -394,6 +496,48 @@ mod tests {
                 .resolved_sha,
             sha
         );
+    }
+
+    #[test]
+    fn remote_host_supports_https_and_ssh_transports() {
+        assert_eq!(
+            remote_host("https://git.example.test/owner/repo.git"),
+            Some("git.example.test".to_string())
+        );
+        assert_eq!(
+            remote_host("ssh://git@git.example.test:2222/owner/repo.git"),
+            Some("git.example.test".to_string())
+        );
+        assert_eq!(
+            remote_host("git@git.example.test:owner/repo.git"),
+            Some("git.example.test".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_ref_transport_uses_component_host_policy_without_exposing_values() {
+        let mut component = Component::default();
+        component.github.hosts.insert(
+            "git.example.test".to_string(),
+            crate::core::component::GithubHostConfig {
+                proxy: Some("socks5://127.0.0.1:9911".to_string()),
+                env: std::collections::HashMap::from([(
+                    "GIT_ASKPASS".to_string(),
+                    "/private/credential-helper".to_string(),
+                )]),
+            },
+        );
+
+        let env = component_transport_env(&component, "https://git.example.test/acme/repo.git");
+
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "socks5://127.0.0.1:9911".to_string()
+        )));
+        assert!(env.contains(&(
+            "GIT_ASKPASS".to_string(),
+            "/private/credential-helper".to_string()
+        )));
     }
 
     #[test]
@@ -506,7 +650,9 @@ mod tests {
         );
         let transport =
             resolve_exact_ref(&component, "also-missing").expect_err("transport failure");
-        assert!(transport.message.contains("configured Git authentication"));
+        assert!(transport
+            .message
+            .contains("Unable to query declared Git remote"));
         assert!(transport.message.contains("remote 'origin'"));
     }
 

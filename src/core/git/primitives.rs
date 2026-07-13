@@ -89,7 +89,20 @@ pub fn is_workdir_clean_or_not_git(path: &Path) -> bool {
 
 /// Run a git command in a repository and return stdout.
 pub fn run_git(git_root: &Path, args: &[&str], context: &str) -> Result<String> {
-    let output = run_git_output(git_root, args, context)?;
+    run_git_with_env(git_root, args, context, &[])
+}
+
+/// Run Git with an explicit transport environment.
+///
+/// The inherited process environment remains available, so repository-level
+/// credential helpers, URL rewrites, and SSH configuration keep working.
+pub fn run_git_with_env(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+) -> Result<String> {
+    let output = run_git_output_with_env(git_root, args, context, env)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -118,24 +131,38 @@ pub fn run_git_output(
     args: &[&str],
     context: &str,
 ) -> Result<std::process::Output> {
-    Command::new("git")
+    run_git_output_with_env(git_root, args, context, &[])
+}
+
+/// Execute Git with component-scoped transport settings without including
+/// environment values in the resulting command diagnostics.
+pub fn run_git_output_with_env(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+) -> Result<std::process::Output> {
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(git_root)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            Error::git_command_failed_with_details(
-                git_failure_message(context, &e.to_string()),
-                GitCommandFailedDetails {
-                    command: git_command_display(args),
-                    cwd: git_cwd_display(git_root),
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    io_error: Some(e.to_string()),
-                },
-            )
-        })
+        .stdin(std::process::Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().map_err(|e| {
+        Error::git_command_failed_with_details(
+            git_failure_message(context, &e.to_string()),
+            GitCommandFailedDetails {
+                command: git_command_display(args),
+                cwd: git_cwd_display(git_root),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                io_error: Some(e.to_string()),
+            },
+        )
+    })
 }
 
 /// Stage all changes in a repository.
