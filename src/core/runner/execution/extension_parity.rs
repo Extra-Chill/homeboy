@@ -550,15 +550,28 @@ fn runner_extension_materialization_request(
     let local_revision = extension::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
-    let source = extension::resolve_source_url(extension_id).map_err(|err| {
-        controller_extension_metadata_required_error(
-            runner_id,
-            homeboy_path,
-            extension_id,
-            &local_revision,
-            err,
-        )
-    })?;
+    let source = match extension::resolve_source_url(extension_id) {
+        Ok(source) => source,
+        Err(source_error) => {
+            let local_path = extension::extension_path(extension_id);
+            let local_path = local_path.canonicalize().ok().filter(|path| path.is_dir());
+            let Some(local_path) = local_path else {
+                return Err(controller_extension_metadata_required_error(
+                    runner_id,
+                    homeboy_path,
+                    extension_id,
+                    &local_revision,
+                    source_error,
+                ));
+            };
+
+            return Ok(RunnerExtensionMaterializationRequest {
+                id: extension_id.to_string(),
+                revision: local_revision,
+                source: RunnerExtensionMaterializationSource::ControllerSnapshot { local_path },
+            });
+        }
+    };
     let materialization_source =
         if let Some(local_source_path) = controller_local_source_path(&source.url) {
             RunnerExtensionMaterializationSource::ControllerSnapshot {
@@ -1122,10 +1135,10 @@ mod tests {
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_extension_ready,
-        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
-        validate_runner_extension_revision, validate_runner_extension_settings,
-        ExtensionParityPlan, ExtensionParityPlanStep,
+        runner_extension_materialization_request, runner_extension_sync_command,
+        validate_extension_ready, validate_runner_extension_core_compatibility,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings, ExtensionParityPlan, ExtensionParityPlanStep,
     };
     use crate::test_support::with_isolated_home;
 
@@ -2002,6 +2015,39 @@ mod tests {
             controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
             Some(local_source.as_path())
         );
+    }
+
+    #[test]
+    fn parity_auto_sync_snapshots_installed_extension_when_source_metadata_is_missing() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/rust");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("rust.json"),
+                r#"{"name":"Rust","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            fs::write(extension_dir.join("lint-runner.sh"), "#!/bin/sh\n")
+                .expect("extension source");
+            fs::write(extension_dir.join(".source-revision"), "abc123\n")
+                .expect("extension revision");
+
+            let request = runner_extension_materialization_request(
+                "homeboy-lab",
+                "homeboy",
+                "rust",
+                Error::internal_unexpected("stale extension parity".to_string()),
+            )
+            .expect("missing provenance falls back to a controller snapshot");
+
+            assert_eq!(request.id, "rust");
+            assert_eq!(request.revision, "abc123");
+            assert!(matches!(
+                request.source,
+                RunnerExtensionMaterializationSource::ControllerSnapshot { ref local_path }
+                    if local_path == &extension_dir.canonicalize().expect("canonical extension dir")
+            ));
+        });
     }
 
     #[test]
