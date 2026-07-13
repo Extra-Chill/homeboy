@@ -12,6 +12,9 @@ export { createRunId } from './artifact-context.mjs';
 export { redactText, sanitizeArtifactFile, sanitizeArtifactValue, sanitizeUrl } from './redaction.mjs';
 
 const DEFAULT_SETTINGS_PREFIX = 'HOMEBOY_SETTINGS_';
+const RUNNER_PROGRESS_LINE_PREFIX = 'HOMEBOY_RUNNER_PROGRESS ';
+const RUNNER_PROGRESS_SCHEMA = 'homeboy/runner-progress/v1';
+const RUNNER_PROGRESS_FIELDS = new Set(['schema', 'phase', 'current_item', 'completed', 'total', 'metadata']);
 
 export function settings(env = process.env) {
     try {
@@ -125,6 +128,7 @@ export function runCommand(command, args = [], options = {}) {
         let settled = false;
         let stdout = '';
         let stderr = '';
+        let stdoutLineRemainder = '';
         const child = spawn(command, args, {
             cwd: options.cwd || process.env.HOMEBOY_COMPONENT_PATH || process.cwd(),
             env: { ...process.env, ...(options.env || {}) },
@@ -142,7 +146,16 @@ export function runCommand(command, args = [], options = {}) {
             : undefined;
 
         child.stdout?.on('data', (chunk) => {
-            stdout += String(chunk);
+            const output = String(chunk);
+            stdout += output;
+            stdoutLineRemainder += output;
+            const lines = stdoutLineRemainder.split('\n');
+            stdoutLineRemainder = lines.pop();
+            for (const line of lines) {
+                if (isCanonicalRunnerProgressLine(line)) {
+                    process.stdout.write(`${line}\n`);
+                }
+            }
         });
         child.stderr?.on('data', (chunk) => {
             stderr += String(chunk);
@@ -173,6 +186,49 @@ export function runCommand(command, args = [], options = {}) {
             resolve(returned);
         });
     });
+}
+
+function isCanonicalRunnerProgressLine(line) {
+    if (!line.startsWith(RUNNER_PROGRESS_LINE_PREFIX)) return false;
+
+    let envelope;
+    try {
+        envelope = JSON.parse(line.slice(RUNNER_PROGRESS_LINE_PREFIX.length));
+    } catch {
+        return false;
+    }
+
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) return false;
+    if (Object.keys(envelope).some((field) => !RUNNER_PROGRESS_FIELDS.has(field))) return false;
+    if (envelope.schema !== RUNNER_PROGRESS_SCHEMA) return false;
+    if (!isValidProgressString(envelope.phase, 2048)) return false;
+    if (!isValidProgressString(envelope.current_item, 8192)) return false;
+    if (!isValidProgressCount(envelope.completed) || !isValidProgressCount(envelope.total)) return false;
+    if (
+        Number.isSafeInteger(envelope.completed)
+        && Number.isSafeInteger(envelope.total)
+        && envelope.completed > envelope.total
+    ) {
+        return false;
+    }
+
+    return envelope.phase !== undefined && envelope.phase !== null
+        || envelope.current_item !== undefined && envelope.current_item !== null
+        || envelope.completed !== undefined && envelope.completed !== null
+        || envelope.total !== undefined && envelope.total !== null
+        || envelope.metadata !== undefined && envelope.metadata !== null;
+}
+
+function isValidProgressString(value, maxBytes) {
+    return value === undefined
+        || value === null
+        || (typeof value === 'string' && value.trim() !== '' && Buffer.byteLength(value) <= maxBytes);
+}
+
+function isValidProgressCount(value) {
+    return value === undefined
+        || value === null
+        || (Number.isSafeInteger(value) && value >= 0);
 }
 
 export function runNode(args, options = {}) {
