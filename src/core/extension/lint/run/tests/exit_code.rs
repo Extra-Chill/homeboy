@@ -55,12 +55,13 @@ fn failed_producer_amid_warnings_forces_failure() {
 
 #[test]
 fn crashed_zero_finding_producer_remains_failure() {
-    let producer_summaries = vec![
-        FindingProducerSummary::new("phpstan", "error").finding_count(0),
-    ];
+    let producer_summaries = vec![FindingProducerSummary::new("phpstan", "error").finding_count(0)];
     let runner_exit_code = normalize_empty_finding_exit_code(1, false, &[], &producer_summaries);
 
-    assert_eq!(normalize_producer_exit_code(runner_exit_code, &producer_summaries), 1);
+    assert_eq!(
+        normalize_producer_exit_code(runner_exit_code, &producer_summaries),
+        1
+    );
 }
 
 #[test]
