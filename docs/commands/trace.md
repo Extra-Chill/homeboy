@@ -4,8 +4,11 @@ Capture black-box behavioral traces for a component by executing declared
 scenarios. Trace runners write a JSON evidence envelope plus optional artifacts
 under the Homeboy run directory.
 
-Use `trace` when Homeboy owns scenario execution and assertions. Use `observe`
-for passive timeline capture against an already-running target.
+Use `trace` when Homeboy owns scenario execution and assertions. Rig-owned
+trace workloads can compose passive `TraceProbeConfig` capture without a second
+collector. The legacy `observe` command translates its flags into that same
+typed Trace contract for passive timeline capture against an already-running
+target.
 
 ## Usage
 
