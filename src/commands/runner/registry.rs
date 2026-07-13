@@ -207,6 +207,8 @@ pub(super) fn connect(
     confirm_pid_dead: bool,
     recover_missing_lease_state: Option<String>,
     confirm_lease_missing: bool,
+    reconcile_leaseless_orphans: bool,
+    confirm_control_plane_lost: bool,
 ) -> CmdResult<RunnerOutput> {
     if adopt_orphan_lease.is_some() && !confirm_pid_dead {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -227,10 +229,21 @@ pub(super) fn connect(
             ]),
         ));
     }
-    if adopt_orphan_lease.is_some() && recover_missing_lease_state.is_some() {
+    if reconcile_leaseless_orphans && !confirm_control_plane_lost {
         return Err(homeboy::core::Error::validation_invalid_argument(
-            "recover_missing_lease_state",
-            "choose either exact lease adoption or missing-lease recovery",
+            "confirm_control_plane_lost",
+            "--reconcile-leaseless-orphans requires --confirm-control-plane-lost",
+            None,
+            None,
+        ));
+    }
+    if (adopt_orphan_lease.is_some() && recover_missing_lease_state.is_some())
+        || (reconcile_leaseless_orphans
+            && (adopt_orphan_lease.is_some() || recover_missing_lease_state.is_some()))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "choose one exact-lease adoption, missing-lease recovery, or lease-less reconciliation path",
             None,
             None,
         ));
@@ -258,11 +271,15 @@ pub(super) fn connect(
             broker_url,
         })?
     } else {
-        runner::connect_with_recovery(
-            id,
-            adopt_orphan_lease.as_deref(),
-            recover_missing_lease_state.as_deref(),
-        )?
+        if reconcile_leaseless_orphans {
+            runner::connect_with_leaseless_orphan_reconciliation(id)?
+        } else {
+            runner::connect_with_recovery(
+                id,
+                adopt_orphan_lease.as_deref(),
+                recover_missing_lease_state.as_deref(),
+            )?
+        }
     };
     Ok((
         RunnerOutput {

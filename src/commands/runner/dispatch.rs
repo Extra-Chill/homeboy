@@ -138,6 +138,8 @@ pub fn run(
             confirm_pid_dead,
             recover_missing_lease_state,
             confirm_lease_missing,
+            reconcile_leaseless_orphans,
+            confirm_control_plane_lost,
         } => map_registry(connect(
             &id,
             reverse,
@@ -147,6 +149,8 @@ pub fn run(
             confirm_pid_dead,
             recover_missing_lease_state,
             confirm_lease_missing,
+            reconcile_leaseless_orphans,
+            confirm_control_plane_lost,
         )),
         RunnerCommand::Status { id } => map_registry(status_mod::status(id.as_deref())),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
