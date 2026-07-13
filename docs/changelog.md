@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.283.0] - 2026-07-13
+
+### Added
+- stream structured runner workload progress
+
+### Fixed
+- return source workspace preparation result
+- persist controller agent-task offload runs
+- promote agent-committed cook changes
+- preserve refresh build failure evidence
+
 ## [0.282.1] - 2026-07-13
 
 ### Changed
