@@ -2,6 +2,26 @@ fn release_workflow() -> &'static str {
     include_str!("../.github/workflows/release.yml")
 }
 
+fn release_quality_policy_script() -> &'static str {
+    include_str!("../.github/release-quality-policy.sh")
+}
+
+fn release_quality_policy(
+    blocking_commands: &str,
+    audit_result: &str,
+    lint_result: &str,
+    test_result: &str,
+) -> std::process::Output {
+    std::process::Command::new("bash")
+        .arg(".github/release-quality-policy.sh")
+        .env("BLOCKING_COMMANDS", blocking_commands)
+        .env("AUDIT_RESULT", audit_result)
+        .env("LINT_RESULT", lint_result)
+        .env("TEST_RESULT", test_result)
+        .output()
+        .expect("release quality policy should run")
+}
+
 fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -51,13 +71,28 @@ fn release_quality_policy_defaults_to_lint_and_test_blocking() {
     let policy = job_section(release_workflow(), "release-quality-policy");
 
     assert!(policy.contains("BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}"));
+    assert!(policy.contains("bash .github/release-quality-policy.sh"));
     assert!(policy.contains(
         "AUDIT_RESULT: ${{ needs.gate-audit.outputs.audit-result || needs.gate-audit.result }}"
     ));
-    assert!(policy.contains("check_command audit"));
-    assert!(policy.contains("check_command lint"));
-    assert!(policy.contains("check_command test"));
-    assert!(policy.contains("Command ${command} is tracked but not release-blocking"));
+    assert!(release_quality_policy_script().contains("check_command audit"));
+    assert!(release_quality_policy_script().contains("check_command lint"));
+    assert!(release_quality_policy_script().contains("check_command test"));
+    assert!(release_quality_policy_script()
+        .contains("Command ${command} is tracked but not release-blocking"));
+}
+
+#[test]
+fn release_quality_policy_blocks_review_test_failures_and_allows_passing_gates() {
+    let failed = release_quality_policy("review lint,review test", "failure", "success", "failure");
+
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stdout)
+        .contains("Release-blocking command test finished with result: failure"));
+
+    let passed = release_quality_policy("review lint,review test", "failure", "success", "success");
+
+    assert!(passed.status.success());
 }
 
 #[test]

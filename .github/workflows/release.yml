@@ -421,35 +421,7 @@ jobs:
           LINT_RESULT: ${{ needs.gate-lint.result }}
           TEST_RESULT: ${{ needs.gate-test.result }}
         run: |
-          set -euo pipefail
-
-          normalized="$(printf '%s' "${BLOCKING_COMMANDS}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-          blocking=",${normalized},"
-          failed=0
-
-          check_command() {
-            local command="$1"
-            local result="$2"
-
-            if [[ "${blocking}" == *",${command},"* ]]; then
-              if [ "${result}" = "success" ]; then
-                echo "::notice::Release-blocking command ${command} passed"
-              else
-                echo "::error::Release-blocking command ${command} finished with result: ${result}"
-                failed=1
-              fi
-            else
-              echo "::notice::Command ${command} is tracked but not release-blocking (result: ${result})"
-            fi
-          }
-
-          check_command audit "${AUDIT_RESULT}"
-          check_command lint "${LINT_RESULT}"
-          check_command test "${TEST_RESULT}"
-
-          if [ "${failed}" -ne 0 ]; then
-            exit 1
-          fi
+          bash .github/release-quality-policy.sh
 
   # ── Step 4: Version bump + changelog + tag ──
   prepare:
