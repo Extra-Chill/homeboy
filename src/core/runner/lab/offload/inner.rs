@@ -238,6 +238,10 @@ fn lab_runner_exec_options(
         super::super::super::RUNNER_LAB_HANDOFF_ENV.to_string(),
         "1".to_string(),
     );
+    env.insert(
+        "HOMEBOY_LAB_RUNNER_ID".to_string(),
+        context.runner_id.to_string(),
+    );
     RunnerExecOptions {
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,

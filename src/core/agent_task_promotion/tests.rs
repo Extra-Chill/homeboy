@@ -44,6 +44,7 @@ struct FakePromotionWorkspaceProvider {
         AgentTaskGateVisibility,
         AgentTaskGateRevealPolicy,
     )>,
+    verify_exit_code: i32,
 }
 
 impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -89,7 +90,7 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         Ok(AgentTaskGateReport::new(
             format!("gate-{index}"),
             vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
-            0,
+            self.verify_exit_code,
             String::new(),
             String::new(),
             None,
@@ -756,6 +757,50 @@ fn promote_applies_patch_with_fake_workspace_provider() {
         report.deterministic_gates[1].visibility,
         AgentTaskGateVisibility::Private
     );
+}
+
+#[test]
+fn promote_verification_failure_keeps_the_applied_target_recoverable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree_path = temp.path().join("fresh-managed-target");
+    std::fs::create_dir(&worktree_path).expect("create target");
+    git(&worktree_path, &["init"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(worktree_path.clone()),
+        verify_exit_code: 1,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("runner-only-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "homeboy@fix-7964".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["false".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+        },
+        &mut provider,
+    )
+    .expect("verification failure is a recoverable promotion report");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert!(report.status.patch_promoted());
+    assert_eq!(report.target.path.as_deref(), worktree_path.to_str());
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+    assert_eq!(report.operator_notification.status, "blocked");
 }
 
 #[test]

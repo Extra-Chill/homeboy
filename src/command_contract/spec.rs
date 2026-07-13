@@ -73,6 +73,7 @@ impl CommandSafetySpec {
 pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
     "not declared as Lab-routable in the command registry";
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
+pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
 pub(crate) const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/run-from-spec/materialize";
 pub(crate) const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
@@ -249,6 +250,11 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
         message_label: "agent-task cook/run-plan",
         hint_label: "agent-task cook/run-plan",
+    },
+    CommandLabSupportSummary {
+        contract_labels: &[AGENT_TASK_PROMOTE_LAB_LABEL],
+        message_label: AGENT_TASK_PROMOTE_LAB_LABEL,
+        hint_label: AGENT_TASK_PROMOTE_LAB_LABEL,
     },
     CommandLabSupportSummary {
         contract_labels: &[

@@ -26,10 +26,11 @@ use super::spec::{
     AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL, AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
     AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL, AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
     AGENT_TASK_FANOUT_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
-    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
-    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, COMMAND_SPECS, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL,
-    LINT_LAB_LABEL, REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
-    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    AGENT_TASK_PROMOTE_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL,
+    AGENT_TASK_STATUS_LAB_LABEL, AUDIT_LAB_LABEL, BENCH_LAB_LABEL, COMMAND_SPECS,
+    FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL,
+    TRACE_LAB_LABEL,
 };
 
 pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
@@ -818,6 +819,14 @@ impl Commands {
             )
             .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
             Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Promote(_),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_PROMOTE_LAB_LABEL,
+                None,
+                false,
+                LAB_NO_EXTRA_CAPABILITIES,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
@@ -1475,6 +1484,33 @@ mod low_noise_polling_tests {
             .expect("no-finalize cook should remain portable");
 
         assert_eq!(contract.portability, LabCommandPortability::Portable);
+    }
+
+    #[test]
+    fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "promote",
+            "/runner/artifacts/aggregate.json",
+            "--to-worktree",
+            "homeboy@fix-7964",
+            "--runner",
+            "homeboy-lab",
+            "--lab-only",
+            "--dry-run",
+        ]);
+
+        let contract = command
+            .lab_contract()
+            .expect("promote contract should support Lab offload");
+
+        assert_eq!(contract.hot_label, AGENT_TASK_PROMOTE_LAB_LABEL);
+        assert_eq!(contract.portability, LabCommandPortability::Portable);
+        assert_eq!(
+            contract.workspace_mode_policy,
+            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+        );
     }
 
     #[test]

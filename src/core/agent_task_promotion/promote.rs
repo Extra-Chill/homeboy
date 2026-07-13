@@ -31,7 +31,19 @@ use super::types::{
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
-    promote_with_provider(options, &mut provider)
+    let mut report = promote_with_provider(options, &mut provider)?;
+    if let Ok(runner_id) = std::env::var("HOMEBOY_LAB_RUNNER_ID") {
+        if !runner_id.trim().is_empty() {
+            report.provenance["lab_offload"] = json!({
+                "runner_id": runner_id,
+                "source_aggregate": report.source.path,
+                "source_artifact": report.patch_artifact.path,
+                "target_worktree": report.to_worktree,
+                "target_workspace": report.target.path,
+            });
+        }
+    }
+    Ok(report)
 }
 
 pub(crate) fn promote_with_provider(
