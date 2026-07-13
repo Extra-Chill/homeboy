@@ -921,7 +921,7 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
     }
     if report.stale_runner_job_count > 0 {
         hints.push(format!(
-            "Runner `{}` has {} stale runner job(s) that are no longer active. Inspect stale_runner_jobs before retrying affected durable runs.",
+            "Runner `{}` has {} stale runner job(s) that are no longer active. Inspect each durable run with its listed agent-task status command, then retry only recoverable work.",
             report.runner_id, report.stale_runner_job_count
         ));
     }
@@ -982,6 +982,28 @@ pub(super) fn runner_status_operator_commands(
         .iter()
         .chain(report.stale_runner_jobs.iter())
     {
+        if job.lifecycle_state.as_deref() == Some("recoverable_orphan") {
+            if let Some(run_id) = job.durable_run_id.as_deref() {
+                commands.push(RunnerOperatorCommand {
+                    scope: "agent_task_status",
+                    runner_id: report.runner_id.clone(),
+                    job_id: None,
+                    command: format!("homeboy agent-task status {run_id} --full"),
+                    description:
+                        "Inspect the durable orphaned agent-task run and its preserved evidence."
+                            .to_string(),
+                });
+                commands.push(RunnerOperatorCommand {
+                    scope: "agent_task_retry",
+                    runner_id: report.runner_id.clone(),
+                    job_id: None,
+                    command: format!("homeboy agent-task retry {run_id}"),
+                    description: "Create a fresh durable attempt after reviewing the orphaned run."
+                        .to_string(),
+                });
+            }
+            continue;
+        }
         commands.push(RunnerOperatorCommand {
             scope: "job_logs",
             runner_id: report.runner_id.clone(),
