@@ -50,6 +50,9 @@ pub(super) fn connect_remote_daemon(
     match daemon_freshness_report(&local_url, expected_version, expected_identity) {
         Ok(report) if report.fresh => Ok((local_port, tunnel_pid, local_url, daemon)),
         Ok(report) if repair_or_fail(&report).is_ok() => {
+            if let Err(error) = super::daemon_replacement_blocker(runner_id, &local_url) {
+                return Err(failed_after_tunnel(tunnel_pid, error.message));
+            }
             if let Some(pid) = tunnel_pid {
                 terminate_pid(pid);
             }

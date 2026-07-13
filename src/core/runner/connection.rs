@@ -330,6 +330,74 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     })
 }
 
+/// Query the daemon job store before an operation replaces its process.
+/// Controller observation may classify child runs as recoverable orphans, but
+/// those inferred records are not authoritative enough to interrupt a daemon.
+pub(super) fn active_jobs_before_daemon_replacement(
+    runner_id: &str,
+) -> Result<Vec<ActiveRunnerJobSummary>> {
+    let report = status(runner_id)?;
+    if !report.connected {
+        return Ok(Vec::new());
+    }
+    if report.active_job_state != RunnerActiveJobState::Available {
+        let mut error = Error::validation_invalid_argument(
+            "reconnect",
+            format!(
+                "runner `{runner_id}` is connected but its active daemon jobs could not be listed; refusing to replace the daemon"
+            ),
+            Some(runner_id.to_string()),
+            Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+        );
+        error.details["active_job_state"] = serde_json::json!(report.active_job_state);
+        return Err(error);
+    }
+    Ok(report.active_jobs)
+}
+
+pub(super) fn daemon_replacement_blocker(runner_id: &str, local_url: &str) -> Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
+    let data = daemon_get(&client, local_url, "/jobs")?;
+    let body = data.get("body").cloned().ok_or_else(|| {
+        Error::internal_unexpected("daemon jobs response missing data.body".to_string())
+    })?;
+    let jobs = parse_runner_jobs(
+        &body,
+        "active_runner_jobs",
+        "parse active runner jobs before daemon replacement",
+        runner_id,
+        RunnerJobSource::Daemon,
+    )?;
+    let job_ids = jobs.into_iter().map(|job| job.job_id).collect::<Vec<_>>();
+    if job_ids.is_empty() {
+        return Ok(());
+    }
+    let follow_commands = job_ids
+        .iter()
+        .map(|job_id| {
+            format!(
+                "homeboy runner job logs {} {} --follow",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(job_id)
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut error = Error::validation_invalid_argument(
+        "connect",
+        format!(
+            "runner `{runner_id}` has active daemon jobs: {}. Refusing to replace the daemon",
+            job_ids.join(", ")
+        ),
+        Some(runner_id.to_string()),
+        Some(follow_commands),
+    );
+    error.details["active_job_ids"] = serde_json::json!(job_ids);
+    Err(error)
+}
+
 fn runner_daemon_freshness(
     runner: &Runner,
     session: Option<&RunnerSession>,
