@@ -297,68 +297,73 @@ pub fn record_remote_dispatch_failure(
         aggregate.events = events_for_outcomes(&aggregate.outcomes);
     }
 
-    let (mut record, remote_run_id, remote_plan_path, remote_aggregate_path) =
-        if let Some(record_value) = envelope.get("record") {
-            let mut record: AgentTaskRunRecord = serde_json::from_value(record_value.clone())
-                .map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some("parse offloaded agent-task dispatch record".to_string()),
-                    )
-                })?;
-            let remote_run_id = record.run_id.clone();
-            let remote_plan_path = record.plan_path.clone();
-            let remote_aggregate_path = record.aggregate_path.clone();
-            let plan = store::read_plan_path(&record.plan_path).unwrap_or_else(|_| {
-                synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
+    let (
+        mut record,
+        remote_run_id,
+        remote_plan_path,
+        remote_aggregate_path,
+        needs_atomic_terminal_commit,
+    ) = if let Some(record_value) = envelope.get("record") {
+        let mut record: AgentTaskRunRecord =
+            serde_json::from_value(record_value.clone()).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse offloaded agent-task dispatch record".to_string()),
+                )
+            })?;
+        let remote_run_id = record.run_id.clone();
+        let remote_plan_path = record.plan_path.clone();
+        let remote_aggregate_path = record.aggregate_path.clone();
+        let plan = store::read_plan_path(&record.plan_path).unwrap_or_else(|_| {
+            synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
+        });
+        record.run_id = run_id.clone();
+        record.plan_path = store::write_plan(&run_id, &plan)?.display().to_string();
+        apply_aggregate_to_record(
+            &mut record,
+            &plan,
+            &aggregate,
+            store::aggregate_path(&run_id)?.display().to_string(),
+        );
+        (
+            record,
+            remote_run_id,
+            remote_plan_path,
+            remote_aggregate_path,
+            true,
+        )
+    } else {
+        let remote_run_id = envelope
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or(failure.identity.run_id)
+            .to_string();
+        let remote_plan_path = envelope
+            .get("plan_path")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                envelope
+                    .get("plan_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&aggregate.plan_id)
+                    .to_string()
             });
-            record.run_id = run_id.clone();
-            record.plan_path = store::write_plan(&run_id, &plan)?.display().to_string();
-            apply_aggregate_to_record(
-                &mut record,
-                &plan,
-                &aggregate,
-                store::write_aggregate(&run_id, &aggregate)?
-                    .display()
-                    .to_string(),
-            );
-            (
-                record,
-                remote_run_id,
-                remote_plan_path,
-                remote_aggregate_path,
-            )
-        } else {
-            let remote_run_id = envelope
-                .get("run_id")
-                .and_then(Value::as_str)
-                .unwrap_or(failure.identity.run_id)
-                .to_string();
-            let remote_plan_path = envelope
-                .get("plan_path")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    envelope
-                        .get("plan_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&aggregate.plan_id)
-                        .to_string()
-                });
-            let remote_aggregate_path = envelope
-                .get("aggregate_path")
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
-            let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
-            let mut record = submit_plan(&plan, Some(&run_id))?;
-            record_aggregate(&mut record, &plan, &aggregate)?;
-            (
-                record,
-                remote_run_id,
-                remote_plan_path,
-                remote_aggregate_path,
-            )
-        };
+        let remote_aggregate_path = envelope
+            .get("aggregate_path")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
+        let mut record = submit_plan(&plan, Some(&run_id))?;
+        record_aggregate(&mut record, &plan, &aggregate)?;
+        (
+            record,
+            remote_run_id,
+            remote_plan_path,
+            remote_aggregate_path,
+            false,
+        )
+    };
 
     let provider_run_ids: Vec<String> = record
         .provider_handles
@@ -388,7 +393,11 @@ pub fn record_remote_dispatch_failure(
     );
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 
-    store::write_record(&record)?;
+    if needs_atomic_terminal_commit {
+        store::write_aggregate_and_record(&record, &aggregate)?;
+    } else {
+        store::write_record(&record)?;
+    }
     Ok(Some(record))
 }
 
@@ -518,7 +527,7 @@ pub(crate) fn record_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let aggregate_path = store::write_aggregate(&record.run_id, aggregate)?;
+    let aggregate_path = store::aggregate_path(&record.run_id)?;
     apply_aggregate_to_record(
         record,
         plan,
@@ -530,7 +539,7 @@ pub(crate) fn record_aggregate(
         &aggregate.outcomes,
     )?;
     crate::core::controller_scratch::finalize_run(&record.run_id)?;
-    store::write_record(record)?;
+    store::write_aggregate_and_record(record, aggregate)?;
     Ok(record.clone())
 }
 
