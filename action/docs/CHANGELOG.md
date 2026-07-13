@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.13] - 2026-07-13
+
+### Fixed
+- adapt action to Homeboy placement contract
+
 ## [2.8.12] - 2026-07-13
 
 ### Fixed
