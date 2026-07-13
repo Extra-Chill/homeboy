@@ -1,5 +1,7 @@
 use super::super::*;
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 #[test]
 fn resolve_repo_prefers_triage_remote_without_losing_source_repo() {
@@ -22,6 +24,52 @@ fn resolve_repo_prefers_triage_remote_without_losing_source_repo() {
     let source = resolved.source_repo.expect("source repo differs");
     assert_eq!(source.owner, "example-org");
     assert_eq!(source.repo, "wordpress-playground");
+}
+
+#[test]
+fn dedupe_resolves_a_shared_fork_parent_once() {
+    let refs = ["one", "two"]
+        .into_iter()
+        .map(|id| {
+            ComponentRef::new(
+                id.to_string(),
+                format!("/tmp/{id}"),
+                Some("https://github.com/example/fork.git".to_string()),
+                None,
+                format!("component:{id}"),
+            )
+        })
+        .collect();
+    let calls = AtomicUsize::new(0);
+    let (resolved, unresolved) = resolve_and_dedupe_refs_with_parent_resolver(refs, |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "upstream".to_string(),
+            repo: "repo".to_string(),
+        }))
+    });
+    assert!(unresolved.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].0.sources.len(), 2);
+}
+
+#[test]
+fn batch_scheduler_limits_concurrency_and_preserves_order() {
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let values = (0..9).collect::<Vec<_>>();
+    let result = run_batched(&values, |value| {
+        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(current, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(10));
+        active.fetch_sub(1, Ordering::SeqCst);
+        *value
+    });
+    assert_eq!(result, values);
+    assert!(peak.load(Ordering::SeqCst) <= 4);
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
 }
 
 #[test]

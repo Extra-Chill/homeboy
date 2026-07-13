@@ -13,7 +13,10 @@ use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
 use super::download::{content_disposition_filename, download_remote_artifact};
-use super::mirror::{mirror_job_run, mirrored_patch_result, primary_mirrored_run};
+use super::mirror::{
+    bounded_remote_events, mirror_job_run, mirrored_patch_result, primary_mirrored_run,
+    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+};
 use super::tokens::{
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact, runner_artifact_token,
     RemoteArtifactToken,
@@ -240,6 +243,31 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
             Some("trace-matrix-summary")
         );
     });
+}
+
+#[test]
+fn mirrored_remote_events_keep_lifecycle_summary_without_stream_payloads() {
+    let job_id = Uuid::new_v4();
+    let events = (0..(MIRRORED_REMOTE_EVENT_LIMIT + 5))
+        .map(|sequence| JobEvent {
+            sequence: sequence as u64,
+            job_id,
+            kind: JobEventKind::Result,
+            timestamp_ms: 1_700_000_000_000,
+            message: Some("m".repeat(MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT + 100)),
+            data: Some(json!({ "unbounded": "x".repeat(1024 * 1024) })),
+        })
+        .collect::<Vec<_>>();
+    let bounded = bounded_remote_events(&events);
+
+    assert_eq!(bounded.len(), MIRRORED_REMOTE_EVENT_LIMIT);
+    assert_eq!(bounded[0]["sequence"], 5);
+    assert!(bounded.iter().all(|event| event.get("data").is_none()));
+    assert!(bounded.iter().all(|event| {
+        event["message"]
+            .as_str()
+            .is_some_and(|message| message.len() == MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT)
+    }));
 }
 
 #[test]

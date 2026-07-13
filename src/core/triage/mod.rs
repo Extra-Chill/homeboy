@@ -58,9 +58,9 @@ mod test_reexports {
     pub(super) use super::report::{
         build_actions, dedupe_refs_by_repo, fetch_component_report, issue_bucket,
         parse_github_parent_repo, parse_issue, parse_issue_numbers, parse_issues, parse_linked_prs,
-        parse_prs, resolve_priority_labels, resolve_repo, resolve_repo_with_parent_resolver,
-        resolve_target_components, summarize, summarize_ci_readiness, summarize_unresolved,
-        DEFAULT_PRIORITY_LABELS,
+        parse_prs, resolve_and_dedupe_refs_with_parent_resolver, resolve_priority_labels,
+        resolve_repo, resolve_repo_with_parent_resolver, resolve_target_components, run_batched,
+        summarize, summarize_ci_readiness, summarize_unresolved, DEFAULT_PRIORITY_LABELS,
     };
     pub(super) use super::types::ComponentRef;
 }
