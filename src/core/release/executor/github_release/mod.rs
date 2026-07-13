@@ -21,7 +21,10 @@ pub(crate) use run::run_github_release;
 // `gh` availability/auth/existence probes are reused by the sibling `tagging`
 // step to gate tag-availability preflight, so they are part of the module's
 // non-test surface.
-pub(crate) use gh_cli::{gh_is_authenticated, gh_is_available, gh_release_exists};
+pub(crate) use gh_cli::{
+    gh_failure_detail, gh_is_authenticated, gh_is_available, gh_release_exists,
+    gh_release_metadata, github_release_upload_timeout, run_gh_command, verify_release_assets,
+};
 
 // Re-exports consumed by the in-crate test suites — both this module's own
 // `tests/` and the parent `executor` module's tests, which reference these via

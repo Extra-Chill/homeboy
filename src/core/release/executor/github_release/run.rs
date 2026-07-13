@@ -18,6 +18,10 @@ use super::results::{
     create_failed_result, not_created_result, skipped_result, upload_failed_result,
     upload_success_result,
 };
+use super::{
+    gh_failure_detail, gh_release_metadata, github_release_upload_timeout, run_gh_command,
+    verify_release_assets,
+};
 
 /// Create a GitHub Release for the just-pushed tag.
 ///
@@ -171,29 +175,75 @@ pub(crate) fn run_github_release(
         }
         upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
 
-        let upload_output = gh_command(&github, &component.github, &upload_args)
-            .output()
-            .map_err(|e| {
-                Error::internal_io(
-                    format!("Failed to invoke gh: {}", e),
-                    Some("gh release upload".to_string()),
-                )
-            })?;
+        let upload_output = run_gh_command(
+            gh_command(&github, &component.github, &upload_args),
+            github_release_upload_timeout(),
+        );
 
-        if !upload_output.status.success() {
-            let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
+        if upload_output.timed_out || upload_output.exit_code != Some(0) {
+            let detail = gh_failure_detail("gh release upload", &upload_output);
+            let stderr = upload_output.stderr;
+            let stdout = upload_output.stdout;
             let repair = repair_commands(None, None);
-            log_status!("release", "✗ `gh release upload` failed: {}", stderr.trim());
+            log_status!("release", "✗ {}: {}", detail, stderr.trim());
             log_repair_commands(&repair);
             return Ok(upload_failed_result(
                 &tag,
                 &github,
                 stdout,
                 stderr,
+                upload_output.exit_code,
+                upload_output.timed_out,
                 artifact_paths.len(),
                 repair,
             ));
+        }
+
+        let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(upload_failed_result(
+                    &tag,
+                    &github,
+                    String::new(),
+                    error,
+                    None,
+                    false,
+                    artifact_paths.len(),
+                    repair_commands(None, None),
+                ))
+            }
+        };
+        if let Err(error) = verify_release_assets(&artifact_paths, &metadata.assets) {
+            return Ok(upload_failed_result(
+                &tag,
+                &github,
+                String::new(),
+                error,
+                None,
+                false,
+                artifact_paths.len(),
+                repair_commands(None, None),
+            ));
+        }
+        if metadata.is_draft {
+            let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+            let publish_output = run_gh_command(
+                gh_command(&github, &component.github, &publish_args),
+                github_release_upload_timeout(),
+            );
+            if publish_output.timed_out || publish_output.exit_code != Some(0) {
+                return Ok(upload_failed_result(
+                    &tag,
+                    &github,
+                    publish_output.stdout,
+                    publish_output.stderr,
+                    publish_output.exit_code,
+                    publish_output.timed_out,
+                    artifact_paths.len(),
+                    repair_commands(None, None),
+                ));
+            }
         }
 
         return Ok(upload_success_result(&tag, &github, artifact_paths.len()));

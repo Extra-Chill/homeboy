@@ -5,7 +5,9 @@ use crate::core::release::types::ReleaseStepResult;
 
 use super::super::{step_failed, step_success};
 use super::notes::GitHubReleaseBody;
-use super::repair::{repair_data, repair_hints, GitHubReleaseRepairCommands};
+use super::repair::{
+    existing_draft_repair_hints, repair_data, repair_hints, GitHubReleaseRepairCommands,
+};
 
 /// A successful but no-op result for an idempotent retry where the GitHub
 /// Release object already exists. The release exists, so this is `Success`.
@@ -121,6 +123,8 @@ pub(crate) fn upload_failed_result(
     github: &GitHubRepo,
     stdout: String,
     stderr: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
     artifact_count: usize,
     repair: GitHubReleaseRepairCommands,
 ) -> ReleaseStepResult {
@@ -134,12 +138,16 @@ pub(crate) fn upload_failed_result(
         "repo": github.repo,
         "stdout": stdout,
         "stderr": stderr.clone(),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
         "artifact_count": artifact_count,
         "repair": repair_data(&repair),
     });
 
     let detail = stderr.trim();
-    let error = if detail.is_empty() {
+    let error = if timed_out {
+        format!("`gh release upload` timed out for {}", tag)
+    } else if detail.is_empty() {
         format!("`gh release upload` failed for {}", tag)
     } else {
         format!("`gh release upload` failed for {}: {}", tag, detail)
@@ -150,7 +158,7 @@ pub(crate) fn upload_failed_result(
         "github.release",
         Some(data),
         Some(error),
-        repair_hints(&repair),
+        existing_draft_repair_hints(&repair),
     )
 }
 
