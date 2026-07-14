@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.6] - 2026-07-14
+
+### Fixed
+- materialize retry primary checkout on Lab
+- preserve live child jobs during lease recovery
+- isolate provider rotation attempt worktrees
+
 ## [0.284.5] - 2026-07-14
 
 ### Changed
