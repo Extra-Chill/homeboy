@@ -2915,6 +2915,7 @@ esac
         .expect("sample recovery")
     }
 
+    #[test]
     fn lost_local_session_refuses_unreachable_daemon_with_active_jobs() {
         let status = remote_daemon_status_for_test_with_reason(
             false,
