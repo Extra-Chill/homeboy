@@ -559,9 +559,8 @@ fn verify_materialized_identity(
     }
     let source_sha = source_sha_from_output(stdout)
         .ok_or_else(|| "materialized refresh did not report its resolved source SHA".to_string())?;
+    let identity = identity.get("data").unwrap_or(identity);
     let built_commit = identity
-        .get("data")
-        .unwrap_or(identity)
         .get("git_commit")
         .and_then(Value::as_str)
         .ok_or_else(|| "materialized refresh identity did not report git_commit".to_string())?;
@@ -570,14 +569,25 @@ fn verify_materialized_identity(
             "materialized refresh built identity commit `{built_commit}` does not match resolved ref `{source_sha}`"
         ));
     }
-    if identity
-        .get("data")
-        .unwrap_or(identity)
-        .get("git_dirty")
-        .and_then(Value::as_bool)
-        != Some(false)
-    {
-        return Err("materialized refresh identity is not a clean build".to_string());
+    match identity.get("git_dirty").and_then(Value::as_bool) {
+        Some(false) => {}
+        Some(true) => return Err("materialized refresh identity is not a clean build".to_string()),
+        None => {
+            let version = identity
+                .get("version")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "materialized refresh identity without git_dirty did not report version"
+                        .to_string()
+                })?;
+            let expected_display = format!("homeboy {version}+{built_commit}");
+            if identity.get("display").and_then(Value::as_str) != Some(&expected_display) {
+                return Err(
+                    "materialized refresh identity without git_dirty is not a canonical clean build"
+                        .to_string(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1582,6 +1592,101 @@ mod tests {
         .expect_err("a different built commit must not be selected");
 
         assert!(error.contains("does not match resolved ref"));
+    }
+
+    #[test]
+    fn materialized_identity_accepts_production_clean_envelope_without_dirty_metadata() {
+        let plan = ssh_bootstrap_plan();
+        let source_sha = "18915b824fdf";
+        let identity = serde_json::json!({
+            "success": true,
+            "data": {
+                "version": "0.284.1",
+                "git_commit": source_sha,
+                "display": "homeboy 0.284.1+18915b824fdf"
+            }
+        });
+
+        verify_materialized_identity(
+            &plan,
+            &format!("HOMEBOY_REFRESH_SOURCE_SHA={source_sha}\n"),
+            &identity,
+        )
+        .expect("production clean identity is accepted");
+    }
+
+    #[test]
+    fn materialized_identity_accepts_explicit_clean_state() {
+        let plan = ssh_bootstrap_plan();
+        let identity = serde_json::json!({
+            "data": { "git_commit": "abc123", "git_dirty": false }
+        });
+
+        verify_materialized_identity(&plan, "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n", &identity)
+            .expect("explicitly clean identity is accepted");
+    }
+
+    #[test]
+    fn materialized_identity_rejects_explicit_dirty_state() {
+        let plan = ssh_bootstrap_plan();
+        let identity = serde_json::json!({
+            "data": { "git_commit": "abc123", "git_dirty": true }
+        });
+
+        let error =
+            verify_materialized_identity(&plan, "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n", &identity)
+                .expect_err("explicitly dirty identity is rejected");
+
+        assert!(error.contains("not a clean build"));
+    }
+
+    #[test]
+    fn materialized_identity_rejects_dirty_display_when_state_is_unknown() {
+        let plan = ssh_bootstrap_plan();
+
+        for display in [
+            "homeboy 0.284.1+abc123-dirty",
+            "homeboy 0.284.1+abc123 (dirty)",
+        ] {
+            let identity = serde_json::json!({
+                "data": {
+                    "version": "0.284.1",
+                    "git_commit": "abc123",
+                    "display": display
+                }
+            });
+            let error = verify_materialized_identity(
+                &plan,
+                "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n",
+                &identity,
+            )
+            .expect_err("dirty display is rejected");
+
+            assert!(error.contains("not a canonical clean build"));
+        }
+    }
+
+    #[test]
+    fn materialized_identity_requires_commit_and_matching_source_sha() {
+        let plan = ssh_bootstrap_plan();
+        let missing_commit = serde_json::json!({
+            "data": { "git_dirty": false }
+        });
+        let missing_error = verify_materialized_identity(
+            &plan,
+            "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n",
+            &missing_commit,
+        )
+        .expect_err("commit is required");
+        assert!(missing_error.contains("did not report git_commit"));
+
+        let mismatch = serde_json::json!({
+            "data": { "git_commit": "def456", "git_dirty": false }
+        });
+        let mismatch_error =
+            verify_materialized_identity(&plan, "HOMEBOY_REFRESH_SOURCE_SHA=abc123\n", &mismatch)
+                .expect_err("source SHA mismatch is rejected");
+        assert!(mismatch_error.contains("does not match resolved ref"));
     }
 
     #[test]
