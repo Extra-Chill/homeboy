@@ -252,6 +252,8 @@ fn release_deployment_config(
         skip_deps_hydration: false,
         expected_version: expected_version.map(str::to_string),
         no_pull: false,
+        allow_stale_source: false,
+        allow_downgrade: false,
         head: false,
         requested_ref: None,
         tagged: false,
