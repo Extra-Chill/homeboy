@@ -1,3 +1,4 @@
+use clap::Parser;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
@@ -86,6 +87,15 @@ pub fn route_after_parse(
     } else {
         None
     };
+
+    if let Some(exit_code) = run_split_placement_cook(
+        cli,
+        normalized_args,
+        output_file,
+        inferred_runner_id.as_deref(),
+    )? {
+        return Ok(Some(exit_code));
+    }
 
     let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_retry_handoff(cli, normalized_args)?
@@ -201,6 +211,117 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// Cook owns controller-local target resolution, promotion, gates, retries, and
+/// finalization. Its provider attempt is the only portable unit: a materialized
+/// typed run-plan that mirrors its aggregate and artifacts back into the same
+/// durable attempt record before this controller resumes.
+fn run_split_placement_cook(
+    cli: &Cli,
+    _normalized_args: &[String],
+    output_file: Option<&str>,
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<i32>> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+
+    let plan = materialize_agent_task_cook_plan(cli)?.expect("cook plan");
+    let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize Lab cook attempt plan".to_string()),
+        )
+    })?;
+    let cook_id = cook
+        .dispatch
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+    let attempt_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, 1);
+    let provider_args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        serialized_plan.clone(),
+        "--record-run-id".to_string(),
+        attempt_run_id.clone(),
+    ];
+    let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
+        Error::validation_invalid_argument(
+            "agent-task cook",
+            format!("build Lab provider attempt: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let provider_command = lab_offload_command(&provider_cli.command)?;
+    let source_path = homeboy::core::agent_tasks::service::source_worktree_path(
+        cook.dispatch.cwd.clone(),
+        cook.dispatch.workspace.clone(),
+    );
+    let outcome = lab_routing::dispatch_lab_offload(
+        LabRoutingRequest {
+            command: provider_command,
+            normalized_args: &provider_args,
+            explicit_runner: Some(runner_id),
+            placement: homeboy::cli_surface::Placement::Lab,
+            allow_local_fallback: cli.allow_local_fallback,
+            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+            skip_deps_hydration: cli.skip_deps_hydration,
+            capture_patch: false,
+            mutation_flag: None,
+            timeout: None,
+            active_run_id: Some(&attempt_run_id),
+            detach_after_handoff: false,
+            output_file_requested: false,
+            read_only_polling: false,
+            local_output_file: None,
+            durable_agent_task_plan: Some(&plan),
+            source_path: source_path.as_deref(),
+            job_overrides: lab_job_overrides(cli)?,
+        },
+        Some(runner_id),
+        Box::new(NoopLabDispatchObserver),
+    )?;
+    let LabRouteOutcome::Offloaded(remote) = outcome else {
+        return Ok(None);
+    };
+    if remote.exit_code != 0 {
+        if !remote.stderr.is_empty() {
+            eprint!("{}", remote.stderr);
+        }
+        print!("{}", remote.stdout);
+        return Ok(Some(remote.exit_code));
+    }
+
+    let mut controller = cook.clone();
+    controller.dispatch.run_id = Some(cook_id);
+    controller.attempt_run_id = Some(attempt_run_id);
+    controller.attempt_plan = Some(serialized_plan);
+    let (value, exit_code) = crate::commands::agent_task::run::run_cook(controller)?;
+    let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize controller-owned cook result".to_string()),
+        )
+    })?;
+    if let Some(path) = output_file {
+        write_output_file(path, &stdout)?;
+    }
+    if !remote.stderr.is_empty() {
+        eprint!("{}", remote.stderr);
+    }
+    print!("{stdout}");
+    Ok(Some(exit_code))
 }
 
 /// Transfer the exact controller-compiled cook plan rather than asking the

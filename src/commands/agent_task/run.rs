@@ -37,7 +37,7 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
     value
 }
 
-pub(super) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
@@ -108,10 +108,25 @@ where
             )
         })?;
         let plan = agent_task_service::read_plan(attempt_plan)?;
-        // Submit the controller-compiled plan before provider execution. The
-        // durable record and its plan are therefore visible together to the
-        // runner-side cook loop and handoff observers.
-        agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
+        // A Lab provider attempt mirrors its typed aggregate into this
+        // controller-owned record before the coordinator resumes. Never run it
+        // again locally: promotion, gates, retries, and finalization consume the
+        // durable result below.
+        let has_terminal_handoff =
+            agent_task_lifecycle::status(&run_id)
+                .ok()
+                .is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        agent_task_lifecycle::AgentTaskRunState::Succeeded
+                            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                            | agent_task_lifecycle::AgentTaskRunState::Failed
+                            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    )
+                });
+        if !has_terminal_handoff {
+            agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
+        }
         run_id
     } else {
         let (dispatch_value, _dispatch_exit) =

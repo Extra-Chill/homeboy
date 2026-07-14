@@ -306,7 +306,7 @@ pub struct CompileLoopArgs {
     pub definition: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct AgentTaskCookArgs {
     #[command(flatten)]
     pub dispatch: DispatchArgs,
