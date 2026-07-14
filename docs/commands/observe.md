@@ -1,6 +1,8 @@
 # homeboy observe
 
-Passively observe a running system and persist evidence in the observation store as run kind `observe`.
+Compatibility entry point for passive Trace capture. It persists evidence in the
+observation store as run kind `observe` while delegating capture to Homeboy's
+typed Trace probe contract.
 
 ## Usage
 
@@ -17,7 +19,9 @@ homeboy observe <component> --duration 60s --probe '{"type":"http.egress","host"
 
 `observe` is a passive producer. It samples or tails a system that is already
 running and persists timeline evidence. It does not drive a scenario, assert
-behavior, attach to privileged OS probes, or own target lifecycle.
+behavior, attach to privileged OS probes, or own target lifecycle. Its legacy
+flags are translated into `TraceProbeConfig`, the same contract used by
+rig-owned trace workloads, so capture behavior is implemented once.
 
 Use `trace` when Homeboy should execute a declared scenario, collect
 runner-owned artifacts, and evaluate assertions. Use `observe` when the target is
@@ -66,3 +70,11 @@ homeboy runs artifacts <run-id>
 ```
 
 Use `observe` to gather live evidence before encoding a deterministic `homeboy trace` workload with assertions.
+
+## Migration Status
+
+The command remains as a narrow adapter because its public JSON response and
+`runs list --kind observe` identity are documented and consumed by command
+contracts. Passive capture itself is now owned by Trace. A follow-up can remove
+this command after a first-class passive Trace CLI preserves those consumer
+contracts or publishes an explicit migration for run-kind and JSON consumers.

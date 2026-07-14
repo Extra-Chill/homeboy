@@ -18,6 +18,7 @@ mod generic_runner;
 mod overlay;
 mod overlay_lock;
 pub mod parsing;
+mod passive;
 mod preflight;
 mod preview;
 pub mod probes;
@@ -47,6 +48,7 @@ pub use parsing::{
     TraceStatus,
 };
 pub use parsing::{TraceAssertionStatus, TraceResults, TraceSpanDefinition, TraceSpanResult};
+pub use passive::PassiveTraceCapture;
 pub use preview::{TracePreviewMetadata, TracePublicPreviewSession};
 pub use probes::{ActiveTraceProbes, TraceProbeConfig};
 pub use report::{
