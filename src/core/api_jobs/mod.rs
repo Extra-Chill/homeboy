@@ -11,8 +11,8 @@ pub use remote_runner::{
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
-    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics,
-    DaemonMissingLeaseJobDiagnostics, Job, JobClaimMetadata, JobEvent, JobEventKind, JobStatus,
+    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics, Job,
+    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanJobDiagnostics,
     RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
@@ -586,38 +586,61 @@ mod tests {
     }
 
     #[test]
-    fn missing_lease_recovery_terminalizes_unowned_active_jobs_with_retryable_evidence() {
+    fn leaseless_recovery_retains_recorded_outcomes_and_refuses_lease_owned_jobs() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("jobs.json");
-        let store = JobStore::open_without_reconciliation(&path).expect("open store");
-        let job = store.create("runner.exec");
-        store.start(job.id).expect("start job");
+        let legacy = JobStore::open_without_reconciliation(&path).expect("open legacy store");
+        let succeeded = legacy.create("runner.exec");
+        legacy.start(succeeded.id).expect("start succeeded job");
+        legacy
+            .append_event(
+                succeeded.id,
+                JobEventKind::Result,
+                None,
+                Some(json!({ "exit_code": 0 })),
+            )
+            .expect("record result");
+        let unfinished = legacy.create("runner.exec");
+        legacy.start(unfinished.id).expect("start unfinished job");
 
-        let recovered = JobStore::open_without_reconciliation(&path)
-            .expect("open recovery store")
-            .reconcile_missing_daemon_lease_jobs("sha256:inspected-state")
-            .expect("recover missing lease");
-
-        assert_eq!(recovered.terminalized_job_ids, vec![job.id]);
-        let reopened = JobStore::open_without_reconciliation(&path).expect("reopen store");
-        let terminal = reopened.get(job.id).expect("terminal job");
-        assert_eq!(terminal.status, JobStatus::Failed);
-        assert!(
-            terminal.stale_reason.is_some(),
-            "failed job remains retryable"
+        let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
+        let diagnostics = recovery
+            .reconcile_leaseless_orphan_jobs()
+            .expect("reconcile legacy jobs");
+        assert_eq!(diagnostics.reconciled_count(), 2);
+        assert!(diagnostics.reconciled_job_ids.contains(&succeeded.id));
+        assert!(diagnostics.reconciled_job_ids.contains(&unfinished.id));
+        assert_eq!(
+            recovery.get(succeeded.id).expect("succeeded").status,
+            JobStatus::Succeeded
         );
-        assert!(reopened
-            .events(job.id)
+        assert_eq!(
+            recovery.get(unfinished.id).expect("unfinished").status,
+            JobStatus::Failed
+        );
+        assert!(recovery
+            .events(unfinished.id)
             .expect("events")
             .iter()
-            .any(|event| {
-                event.kind == JobEventKind::Error
-                    && event.data.as_ref().is_some_and(|data| {
-                        data["reason"] == json!("missing_daemon_lease")
-                            && data["state_identity"] == json!("sha256:inspected-state")
-                            && data["retryable"] == json!(true)
-                    })
-            }));
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["reason"] == json!("leaseless_orphan_reconciliation"))));
+
+        let leased = JobStore::open_without_reconciliation(&path)
+            .expect("open leased store")
+            .with_daemon_lease("lease-owned".to_string());
+        let leased_job = leased.create("runner.exec");
+        leased.start(leased_job.id).expect("start leased job");
+        let error = JobStore::open_without_reconciliation(&path)
+            .expect("open refusing recovery")
+            .reconcile_leaseless_orphan_jobs()
+            .expect_err("lease-owned job must fail closed");
+        assert!(error.message.contains("have daemon leases"));
+        assert_eq!(
+            leased.get(leased_job.id).expect("leased job").status,
+            JobStatus::Running
+        );
     }
 
     #[test]

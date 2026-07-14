@@ -37,8 +37,7 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    reconcile_leaseless_orphan_store, recover_missing_lease_state, start_background,
-    ArtifactFetchOutcome,
+    reconcile_leaseless_orphans, start_background, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -82,7 +81,7 @@ pub struct DaemonStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<DaemonState>,
     pub state_path: String,
-    /// Snapshot identity for explicit recovery when the daemon lease is absent.
+    /// Identity of the lease and durable queue observed by status callers.
     pub state_identity: String,
 }
 
@@ -139,7 +138,7 @@ pub struct DaemonFreshnessReport {
     pub repair_plan: Vec<DaemonRepairStep>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonStartResult {
     pub pid: u32,
     pub address: String,
@@ -156,15 +155,19 @@ pub struct DaemonOrphanAdoptionResult {
     pub replacement: DaemonStartResult,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DaemonMissingLeaseRecoveryResult {
-    pub recovered_state_identity: String,
-    pub terminalized_job_ids: Vec<String>,
-    pub durable_run_ids: Vec<String>,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonLeaselessRecoveryResult {
+    pub affected_job_ids: Vec<Uuid>,
+    pub affected_job_count: usize,
+    pub evidence_snapshot_path: String,
+    pub ownership_proof: Vec<String>,
     pub retry_guidance: String,
     pub replacement: DaemonStartResult,
 }
 
+/// Compatibility result for the local reconciliation helper used by lifecycle
+/// tests. The CLI uses `DaemonLeaselessRecoveryResult`, which includes the
+/// structured ownership evidence returned by remote recovery.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonLeaselessOrphanReconciliationResult {
     pub snapshot_path: String,
@@ -205,6 +208,14 @@ impl DaemonLeaseIdentity {
 #[derive(Debug)]
 pub(super) struct DaemonOperationLock {
     path: PathBuf,
+}
+
+/// Held by the serving daemon for its entire lifetime. Unlike the short
+/// lifecycle marker, this is an advisory OS lock so a crashed process releases
+/// ownership without requiring unsafe stale-file deletion.
+#[derive(Debug)]
+pub(super) struct DaemonOwnerLock {
+    file: File,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -434,16 +445,16 @@ pub fn read_status() -> Result<DaemonStatus> {
     })
 }
 
-/// Identifies the lease file and durable queue observed by `daemon status`.
-/// The recovery command recomputes it under the lifecycle lock before mutating.
 fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
-    fn update_file(hasher: &mut Sha256, label: &[u8], path: &Path) -> Result<()> {
+    let mut hasher = Sha256::new();
+    for (label, path) in [
+        (b"daemon-state\0".as_slice(), state_path),
+        (b"daemon-jobs\0".as_slice(), jobs_path),
+    ] {
         hasher.update(label);
-        hasher.update(path.as_os_str().as_encoded_bytes());
         match fs::read(path) {
             Ok(bytes) => {
                 hasher.update([1]);
-                hasher.update((bytes.len() as u64).to_le_bytes());
                 hasher.update(bytes);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
@@ -454,12 +465,7 @@ fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> 
                 ))
             }
         }
-        Ok(())
     }
-
-    let mut hasher = Sha256::new();
-    update_file(&mut hasher, b"daemon-state\0", state_path)?;
-    update_file(&mut hasher, b"daemon-jobs\0", jobs_path)?;
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
@@ -481,9 +487,6 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
     let state: DaemonState = match serde_json::from_str(&content) {
         Ok(state) => state,
         Err(error) => {
-            if let Some(validation) = validate_dead_legacy_lease(path, &content)? {
-                return Ok(validation);
-            }
             return Ok(DaemonLeaseValidation {
                 running: false,
                 fresh: false,
@@ -556,42 +559,6 @@ fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> {
         stale_reason_code: None,
         invalid_pid: None,
     })
-}
-
-/// A pre-schema lease has no identity, so it can never be adopted. When both
-/// of its ownership signals are absent, treat it as missing metadata and use
-/// the state-and-job snapshot recovery flow instead of asking for an
-/// unavailable lease ID.
-fn validate_dead_legacy_lease(path: &Path, content: &str) -> Result<Option<DaemonLeaseValidation>> {
-    let legacy: LegacyDaemonState = match serde_json::from_str(content) {
-        Ok(legacy) => legacy,
-        Err(_) => return Ok(None),
-    };
-    if legacy.state_path != path.display().to_string() {
-        return Ok(None);
-    }
-    let endpoint: SocketAddr = match legacy.address.parse::<SocketAddr>() {
-        Ok(endpoint) if endpoint.ip().is_loopback() => endpoint,
-        _ => return Ok(None),
-    };
-    if pid_is_running(legacy.pid)
-        || TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_ok()
-    {
-        return Ok(None);
-    }
-
-    Ok(Some(DaemonLeaseValidation {
-        state: None,
-        running: false,
-        fresh: false,
-        reachable: false,
-        stale_reason: Some(
-            "legacy daemon lease has no schema or lease identity; owner PID and endpoint are unavailable"
-                .to_string(),
-        ),
-        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
-        invalid_pid: Some(legacy.pid),
-    }))
 }
 
 fn stale_lease(
@@ -757,19 +724,22 @@ pub fn serve_with_analysis_runner<R>(addr: SocketAddr, analysis_runner: R) -> Re
 where
     R: AnalysisJobRunner,
 {
+    let owner_lock = acquire_daemon_owner_lock()?;
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
-    serve_listener_with_analysis_runner(listener, analysis_runner)
+    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock)
 }
 
 #[cfg(test)]
 pub(crate) fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
-    serve_listener_with_analysis_runner(listener, UnsupportedAnalysisJobRunner)
+    let owner_lock = acquire_daemon_owner_lock()?;
+    serve_listener_with_analysis_runner_locked(listener, UnsupportedAnalysisJobRunner, owner_lock)
 }
 
-fn serve_listener_with_analysis_runner<R>(
+fn serve_listener_with_analysis_runner_locked<R>(
     listener: TcpListener,
     analysis_runner: R,
+    _owner_lock: DaemonOwnerLock,
 ) -> Result<DaemonState>
 where
     R: AnalysisJobRunner,
@@ -1490,6 +1460,23 @@ fn daemon_job_store() -> &'static JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn owner_lock_blocks_a_second_owner_without_lease_or_listener_evidence() {
+        with_isolated_home(|_| {
+            let first = try_acquire_daemon_owner_lock()
+                .expect("acquire owner lock")
+                .expect("first owner");
+            assert!(try_acquire_daemon_owner_lock()
+                .expect("probe owner lock")
+                .is_none());
+            drop(first);
+            assert!(try_acquire_daemon_owner_lock()
+                .expect("reacquire owner lock")
+                .is_some());
+        });
+    }
 
     #[test]
     fn exec_request_run_ref_metadata_prefers_lifecycle_run_id() {
@@ -1767,11 +1754,6 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
             state.schema
         )));
     }
-    if state.lease_id.trim().is_empty() {
-        return Err(Error::internal_unexpected(
-            "refusing to write daemon lease without a lease ID",
-        ));
-    }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;
@@ -1858,6 +1840,67 @@ fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
     })?;
     Ok(DaemonOperationLock { path })
+}
+
+pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
+    let state = state_path()?;
+    let parent = state.parent().ok_or_else(|| {
+        Error::internal_io(
+            "daemon state path has no parent directory",
+            Some("lock daemon owner".to_string()),
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(parent.join("owner.lock"))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open daemon owner lock".to_string()),
+            )
+        })?;
+    #[cfg(unix)]
+    unsafe {
+        if libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        ) != 0
+        {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock daemon owner".to_string()),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = &file;
+    Ok(Some(DaemonOwnerLock { file }))
+}
+
+fn acquire_daemon_owner_lock() -> Result<DaemonOwnerLock> {
+    try_acquire_daemon_owner_lock()?.ok_or_else(|| {
+        Error::internal_unexpected("daemon owner lock is held by a live or starting daemon")
+    })
+}
+
+impl Drop for DaemonOwnerLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+    }
 }
 
 /// `ensure-running` is idempotent, so a concurrent caller can wait briefly for

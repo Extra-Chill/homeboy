@@ -243,6 +243,48 @@ fn artifact_content_url_builds_encoded_daemon_byte_alias() {
 }
 
 #[test]
+fn leaseless_snapshot_uses_the_exact_bytes_opened_for_reconciliation() {
+    with_isolated_home(|home| {
+        let path = home.path().join("jobs.json");
+        let raw = br#"{"jobs":[]}"#;
+        std::fs::write(&path, raw).expect("write store");
+        let snapshot = super::snapshot_job_store(&path, raw).expect("snapshot");
+        assert_eq!(std::fs::read(snapshot).expect("read snapshot"), raw);
+        assert!(super::super::JobStore::open_without_reconciliation_from_bytes(&path, raw).is_ok());
+    });
+}
+
+#[test]
+fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
+    with_isolated_home(|_| {
+        let state_path = crate::core::paths::daemon_state_file().expect("state path");
+        let mut state = fake_daemon_state(fake_daemon(999_999, "lease-dead"));
+        state.state_path = state_path.display().to_string();
+        std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state parent");
+        std::fs::write(&state_path, serde_json::to_vec(&state).expect("state json"))
+            .expect("state");
+
+        let jobs_path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&jobs_path)
+            .expect("store")
+            .with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        let before = std::fs::read(&jobs_path).expect("store bytes");
+        let owner = super::super::try_acquire_daemon_owner_lock()
+            .expect("owner lock")
+            .expect("owner acquired");
+
+        let error = super::adopt_orphaned_lease("lease-dead", true, "127.0.0.1:0")
+            .expect_err("owner lock blocks adoption");
+        assert!(error.message.contains("owner lock is held"));
+        assert_eq!(std::fs::read(&jobs_path).expect("store bytes"), before);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        drop(owner);
+    });
+}
+
+#[test]
 fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
     with_isolated_home(|home| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -350,6 +392,28 @@ fn ensure_running_concurrent_callers_converge_on_same_daemon() {
         assert_eq!(first.pid, second.pid);
         assert_eq!(first.lease_id, second.lease_id);
         assert_eq!(first.address, second.address);
+        assert_eq!(state.lock().expect("state").starts, 1);
+    });
+}
+
+#[test]
+fn locked_start_operations_publish_once_and_converge_concurrent_callers() {
+    with_isolated_home(|_| {
+        let daemon = fake_daemon(4242, "lease-published");
+        let state = Arc::new(Mutex::new(FakeEnsureState::default()));
+        let barrier = Arc::new(Barrier::new(3));
+        let first = locked_start_with_fake_operations(
+            Arc::clone(&barrier),
+            Arc::clone(&state),
+            daemon.clone(),
+        );
+        let second =
+            locked_start_with_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon);
+        barrier.wait();
+        let first = first.join().expect("first start").expect("first result");
+        let second = second.join().expect("second start").expect("second result");
+        assert_eq!(first.pid, second.pid);
+        assert_eq!(first.lease_id, second.lease_id);
         assert_eq!(state.lock().expect("state").starts, 1);
     });
 }
@@ -516,6 +580,49 @@ fn ensure_with_fake_operations(
                 state.starts += 1;
                 state.daemon = Some(daemon.clone());
                 Ok(daemon)
+            },
+        )
+    })
+}
+
+fn locked_start_with_fake_operations(
+    barrier: Arc<Barrier>,
+    state: Arc<Mutex<FakeEnsureState>>,
+    daemon: super::DaemonStartResult,
+) -> std::thread::JoinHandle<crate::core::error::Result<super::DaemonStartResult>> {
+    std::thread::spawn(move || {
+        barrier.wait();
+        let read_state = Arc::clone(&state);
+        let start_state = Arc::clone(&state);
+        let daemon_pid = daemon.pid;
+        super::ensure_running_with_operations(
+            Duration::from_secs(1),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            move || {
+                Ok(fake_status(
+                    read_state.lock().expect("state").daemon.clone(),
+                    false,
+                ))
+            },
+            move |pid| pid == daemon_pid,
+            move || {
+                let publish_state = Arc::clone(&start_state);
+                super::start_or_return_live_with_operations(
+                    || {
+                        Ok(fake_status(
+                            start_state.lock().expect("state").daemon.clone(),
+                            false,
+                        ))
+                    },
+                    || Ok(Some(())),
+                    || Ok(()),
+                    move || {
+                        let mut state = publish_state.lock().expect("state");
+                        state.starts += 1;
+                        state.daemon = Some(daemon.clone());
+                        Ok(daemon)
+                    },
+                )
             },
         )
     })

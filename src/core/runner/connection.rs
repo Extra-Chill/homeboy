@@ -6,11 +6,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
-use crate::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use crate::core::daemon::{
+    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode,
+};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::http_api::RunSummary;
@@ -27,6 +29,7 @@ use super::{broker_auth, broker_http};
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
+const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -45,17 +48,34 @@ struct CliEnvelope {
     error: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RunnerLeaseEvidence {
-    schema: String,
-    runner_id: String,
-    lease_id: String,
-    pid: u32,
-    observed_at: String,
+pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption(runner_id, None, false)
 }
 
-pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None)
+/// Connect using an explicit dead-lease or missing-lease selector. A
+/// lease-less store is handled by its dedicated operator-confirmed path.
+pub fn connect_with_recovery(
+    runner_id: &str,
+    orphan_lease_id: Option<&str>,
+    missing_lease_state_identity: Option<&str>,
+) -> Result<(RunnerConnectReport, i32)> {
+    if missing_lease_state_identity.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "recover_missing_lease_state",
+            "missing-lease recovery requires the explicit remote recovery command",
+            missing_lease_state_identity.map(str::to_string),
+            None,
+        ));
+    }
+    connect_with_orphan_adoption(runner_id, orphan_lease_id, false)
+}
+
+/// Reconnect after the explicit lease-less recovery transaction has terminalized
+/// the unowned store and started its replacement daemon.
+pub fn connect_with_leaseless_orphan_reconciliation(
+    runner_id: &str,
+) -> Result<(RunnerConnectReport, i32)> {
+    connect_with_orphan_adoption(runner_id, None, true)
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -63,16 +83,7 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
-) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_recovery(runner_id, orphan_lease_id, None)
-}
-
-/// Connect while explicitly selecting either an exact dead lease or an exact
-/// missing-lease status snapshot. Ordinary reconnects supply neither selector.
-pub fn connect_with_recovery(
-    runner_id: &str,
-    orphan_lease_id: Option<&str>,
-    missing_lease_state_identity: Option<&str>,
+    reconcile_leaseless_orphans: bool,
 ) -> Result<(RunnerConnectReport, i32)> {
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
@@ -113,16 +124,48 @@ pub fn connect_with_recovery(
         ));
     };
     let version = identity.version.clone();
-
     let previous_session = read_session(runner_id)?;
-    let daemon = ensure_remote_daemon(
-        &client,
-        homeboy,
-        previous_session.as_ref(),
-        orphan_lease_id,
-        missing_lease_state_identity,
-        runner_id,
-    );
+
+    let mut leaseless_recovery = None;
+    if reconcile_leaseless_orphans {
+        let recovery_addr = previous_session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_address.as_deref())
+            .filter(|address| parse_loopback_daemon_addr(address).is_ok())
+            .unwrap_or("127.0.0.1:0");
+        let command = format!(
+            "{} daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
+            shell::quote_arg(homeboy),
+            shell::quote_arg(recovery_addr),
+        );
+        let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+        if !recovery.success {
+            let message = leaseless_recovery_failure_message(&recovery);
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                message,
+            ));
+        }
+        let envelope = parse_envelope(&recovery.stdout).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse lease-less daemon recovery".to_string()),
+            )
+        })?;
+        if !envelope.success {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                "remote lease-less daemon recovery returned an error envelope".to_string(),
+            ));
+        }
+        leaseless_recovery = Some(decode_leaseless_recovery(envelope.data)?);
+    }
+
+    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
     let Ok(daemon) = daemon else {
         return Ok(failed_connect(
             runner_id,
@@ -185,6 +228,7 @@ pub fn connect_with_recovery(
             homeboy_version: Some(session.homeboy_version.clone()),
             homeboy_build_identity: session.homeboy_build_identity.clone(),
             session_path: Some(session_path.display().to_string()),
+            leaseless_recovery,
             failure_kind: None,
             failure_message: None,
         },
@@ -192,50 +236,27 @@ pub fn connect_with_recovery(
     ))
 }
 
-/// Reconnect through the explicit lease-less recovery command, then persist the
-/// replacement daemon session using the ordinary connection transaction.
-pub fn connect_with_leaseless_orphan_reconciliation(
-    runner_id: &str,
-) -> Result<(RunnerConnectReport, i32)> {
-    let runner = load(runner_id)?;
-    let Some((_server_id, _server, client)) = resolve_ssh_runner(&runner)? else {
-        return connect(runner_id);
-    };
-    let homeboy = remote_runner_homeboy_path(&runner, "runner lease-less orphan reconciliation")?;
-    let command = format!(
-        "{} daemon reconcile-leaseless-orphans --confirm-control-plane-lost --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy)
-    );
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            format!(
-                "remote lease-less orphan reconciliation failed: {}",
-                command_failure_message("remote daemon reconciliation failed", &output)
-            ),
-            None,
-            None,
-        ));
+fn decode_leaseless_recovery(data: Option<Value>) -> Result<DaemonLeaselessRecoveryResult> {
+    serde_json::from_value(data.ok_or_else(|| {
+        Error::internal_unexpected("remote lease-less daemon recovery returned no data")
+    })?)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("decode lease-less daemon recovery".to_string()),
+        )
+    })
+}
+
+fn leaseless_recovery_failure_message(output: &crate::core::server::CommandOutput) -> String {
+    if output.timed_out {
+        format!(
+            "remote lease-less daemon recovery timed out after {}s; inspect `homeboy daemon status` on the runner before retrying",
+            REMOTE_LEASELESS_RECOVERY_TIMEOUT.as_secs()
+        )
+    } else {
+        command_failure_message("remote lease-less daemon recovery failed", output)
     }
-    let envelope =
-        parse_json_from_mixed_stdout::<CliEnvelope>(&output.stdout).map_err(|error| {
-            Error::internal_unexpected(format!(
-                "remote lease-less orphan reconciliation returned invalid JSON: {error}"
-            ))
-        })?;
-    if !envelope.success {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            format!(
-                "remote lease-less orphan reconciliation failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ),
-            None,
-            None,
-        ));
-    }
-    connect(runner_id)
 }
 
 pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
@@ -303,6 +324,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             homeboy_version: Some(session.homeboy_version),
             homeboy_build_identity: session.homeboy_build_identity,
             session_path: Some(session_path.display().to_string()),
+            leaseless_recovery: None,
             failure_kind: None,
             failure_message: None,
         },
@@ -1103,7 +1125,6 @@ mod remote_daemon {
         pub(super) fresh: bool,
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
-        pub(super) state_identity: Option<String>,
     }
 
     pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -1185,11 +1206,8 @@ mod remote_daemon {
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
         orphan_lease_id: Option<&str>,
-        missing_lease_state_identity: Option<&str>,
-        runner_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
         let status = remote_daemon_status(client, homeboy)?;
-        persist_runner_lease_evidence(runner_id, &status).map_err(|error| error.message)?;
         if let Some(lease_id) = orphan_lease_id {
             if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
                 && status
@@ -1200,40 +1218,6 @@ mod remote_daemon {
             {
                 return remote_daemon_adopt_orphan(client, homeboy, lease_id);
             }
-            let evidence = read_runner_lease_evidence(runner_id, lease_id)
-                .map_err(|error| error.message)?
-                .or_else(|| runner_session_lease_evidence(previous_session, runner_id, lease_id));
-            if let Some(evidence) = evidence {
-                if let Some(pid) = durable_evidence_pid_for_adoption(&status, &evidence, lease_id) {
-                    if !remote_pid_is_dead(client, pid)? {
-                        return Err(format!(
-                            "controller-recorded daemon PID `{pid}` is not proven dead; refusing orphan adoption"
-                        ));
-                    }
-                    return remote_daemon_adopt_orphan_with_pid(client, homeboy, lease_id, pid);
-                }
-            }
-        }
-        if let Some(state_identity) = missing_lease_state_identity {
-            if status.stale_reason_code == Some(DaemonStaleReasonCode::LeaseMissing)
-                && status.daemon.is_none()
-                && !status.reachable
-                && status.active_jobs > 0
-                && status.state_identity.as_deref() == Some(state_identity)
-            {
-                return remote_daemon_recover_missing_lease(client, homeboy, state_identity);
-            }
-        }
-        if status.stale_reason_code == Some(DaemonStaleReasonCode::LeaseMissing)
-            && status.daemon.is_none()
-            && !status.reachable
-            && status.active_jobs > 0
-        {
-            return Err(missing_lease_recovery_guidance(
-                runner_id,
-                status.active_jobs,
-                status.state_identity.as_deref().unwrap_or("<unavailable>"),
-            ));
         }
         match remote_daemon_connect_action(previous_session, &status)? {
             RemoteDaemonConnectAction::Reattach => {
@@ -1371,10 +1355,6 @@ mod remote_daemon {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
-                state_identity: data
-                    .get("state_identity")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
             });
         }
         let Some(state) = data.get("state") else {
@@ -1391,10 +1371,6 @@ mod remote_daemon {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
-                state_identity: data
-                    .get("state_identity")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
             });
         };
         Ok(RemoteDaemonStatus {
@@ -1407,10 +1383,6 @@ mod remote_daemon {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
-            state_identity: data
-                .get("state_identity")
-                .and_then(Value::as_str)
-                .map(str::to_string),
         })
     }
 
@@ -1491,25 +1463,7 @@ mod remote_daemon {
         homeboy: &str,
         lease_id: &str,
     ) -> std::result::Result<RemoteDaemon, String> {
-        remote_daemon_adopt_orphan_with_pid_option(client, homeboy, lease_id, None)
-    }
-
-    fn remote_daemon_adopt_orphan_with_pid(
-        client: &SshClient,
-        homeboy: &str,
-        lease_id: &str,
-        expected_pid: u32,
-    ) -> std::result::Result<RemoteDaemon, String> {
-        remote_daemon_adopt_orphan_with_pid_option(client, homeboy, lease_id, Some(expected_pid))
-    }
-
-    fn remote_daemon_adopt_orphan_with_pid_option(
-        client: &SshClient,
-        homeboy: &str,
-        lease_id: &str,
-        expected_pid: Option<u32>,
-    ) -> std::result::Result<RemoteDaemon, String> {
-        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id, expected_pid);
+        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id);
         let output = client.execute(&command);
         if !output.success {
             return Err(command_failure_message(
@@ -1548,162 +1502,12 @@ mod remote_daemon {
         })
     }
 
-    fn remote_daemon_recover_missing_lease(
-        client: &SshClient,
-        homeboy: &str,
-        state_identity: &str,
-    ) -> std::result::Result<RemoteDaemon, String> {
-        let command = format!(
-            "{} daemon recover-missing-lease --state-identity {} --confirm-lease-missing --addr 127.0.0.1:0",
-            shell::quote_arg(homeboy),
-            shell::quote_arg(state_identity),
-        );
-        let output = client.execute(&command);
-        if !output.success {
-            return Err(command_failure_message(
-                "remote daemon missing-lease recovery failed",
-                &output,
-            ));
-        }
-        let envelope = parse_envelope(&output.stdout).map_err(|err| {
-            format!("remote daemon missing-lease recovery returned invalid JSON: {err}")
-        })?;
-        if !envelope.success {
-            return Err(format!(
-                "remote daemon missing-lease recovery failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ));
-        }
-        let data = envelope
-            .data
-            .ok_or_else(|| "remote daemon missing-lease recovery returned no data".to_string())?;
-        let replacement = data.get("replacement").ok_or_else(|| {
-            "remote daemon missing-lease recovery returned no replacement lease".to_string()
-        })?;
-        Ok(remote_daemon_from_state(replacement))
-    }
-
-    pub(super) fn missing_lease_recovery_guidance(
-        runner_id: &str,
-        active_jobs: usize,
-        state_identity: &str,
-    ) -> String {
+    pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
         format!(
-            "remote daemon has {active_jobs} active job(s) with missing lease metadata; refusing implicit replacement. Recover only the inspected state with `homeboy runner connect {} --recover-missing-lease-state {} --confirm-lease-missing`",
-            shell::quote_arg(runner_id),
-            shell::quote_arg(state_identity),
-        )
-    }
-
-    pub(super) fn remote_daemon_adopt_orphan_command(
-        homeboy: &str,
-        lease_id: &str,
-        expected_pid: Option<u32>,
-    ) -> String {
-        let expected_pid = expected_pid
-            .map(|pid| format!(" --expected-pid {pid}"))
-            .unwrap_or_default();
-        format!(
-            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead{} --addr 127.0.0.1:0",
+            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead --addr 127.0.0.1:0",
             shell::quote_arg(homeboy),
             shell::quote_arg(lease_id),
-            expected_pid,
         )
-    }
-
-    fn remote_pid_is_dead(client: &SshClient, pid: u32) -> std::result::Result<bool, String> {
-        let command = format!(
-            "if kill -0 {pid} 2>/dev/null; then exit 1; fi; observed=$(ps -p {pid} -o pid= 2>/dev/null | tr -d '[:space:]'); case \"$observed\" in *[0-9]*) exit 2;; esac; exit 0"
-        );
-        let output = client.execute(&format!("sh -c {}", shell::quote_arg(&command)));
-        match output.exit_code {
-            0 => Ok(true),
-            1 => Ok(false),
-            _ => Err("remote PID liveness probe was inconclusive".to_string()),
-        }
-    }
-
-    pub(super) fn persist_runner_lease_evidence(
-        runner_id: &str,
-        status: &RemoteDaemonStatus,
-    ) -> Result<()> {
-        let Some(daemon) = status.daemon.as_ref() else {
-            return Ok(());
-        };
-        let (Some(lease_id), Some(pid)) = (daemon.lease_id.as_deref(), daemon.pid) else {
-            return Ok(());
-        };
-        let path = paths::runner_lease_evidence_file(runner_id, lease_id)?;
-        let parent = path.parent().expect("lease evidence has parent");
-        std::fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("create runner lease evidence".to_string()),
-            )
-        })?;
-        let evidence = RunnerLeaseEvidence {
-            schema: "homeboy/runner-lease-evidence/v1".to_string(),
-            runner_id: runner_id.to_string(),
-            lease_id: lease_id.to_string(),
-            pid,
-            observed_at: Utc::now().to_rfc3339(),
-        };
-        let body = serde_json::to_vec_pretty(&evidence)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        std::fs::write(path, body).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write runner lease evidence".to_string()),
-            )
-        })
-    }
-
-    pub(super) fn read_runner_lease_evidence(
-        runner_id: &str,
-        lease_id: &str,
-    ) -> Result<Option<RunnerLeaseEvidence>> {
-        let path = paths::runner_lease_evidence_file(runner_id, lease_id)?;
-        let Ok(body) = std::fs::read_to_string(path) else {
-            return Ok(None);
-        };
-        let evidence = serde_json::from_str::<RunnerLeaseEvidence>(&body).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("read runner lease evidence".to_string()),
-            )
-        })?;
-        Ok((evidence.runner_id == runner_id && evidence.lease_id == lease_id).then_some(evidence))
-    }
-
-    pub(super) fn durable_evidence_pid_for_adoption(
-        status: &RemoteDaemonStatus,
-        evidence: &RunnerLeaseEvidence,
-        requested_lease_id: &str,
-    ) -> Option<u32> {
-        (status.daemon.is_none()
-            && status.active_jobs > 0
-            && evidence.lease_id == requested_lease_id)
-            .then_some(evidence.pid)
-    }
-
-    fn runner_session_lease_evidence(
-        session: Option<&RunnerSession>,
-        runner_id: &str,
-        lease_id: &str,
-    ) -> Option<RunnerLeaseEvidence> {
-        let session = session.filter(|session| {
-            session.mode == RunnerTunnelMode::DirectSsh
-                && session.role == RunnerSessionRole::Controller
-                && session.runner_id == runner_id
-                && session.remote_daemon_lease_id.as_deref() == Some(lease_id)
-        })?;
-        Some(RunnerLeaseEvidence {
-            schema: "homeboy/runner-lease-evidence/v1".to_string(),
-            runner_id: runner_id.to_string(),
-            lease_id: lease_id.to_string(),
-            pid: session.remote_daemon_pid?,
-            observed_at: session.connected_at.clone(),
-        })
     }
 
     pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {
@@ -1889,6 +1693,7 @@ mod session_store {
                 homeboy_version: None,
                 homeboy_build_identity: None,
                 session_path: Some(session_path.display().to_string()),
+                leaseless_recovery: None,
                 failure_kind: Some(failure_kind),
                 failure_message: Some(failure_message),
             },
@@ -1970,43 +1775,6 @@ mod tests {
         });
 
         assert_eq!(remote_daemon_active_jobs(&status), 2);
-    }
-
-    #[test]
-    fn durable_lease_evidence_survives_remote_state_loss_for_exact_adoption_only() {
-        test_support::with_isolated_home(|_| {
-            let observed = remote_daemon_status_for_test_with_reason(
-                false,
-                false,
-                1,
-                "lease-observed",
-                846_192,
-                Some(DaemonStaleReasonCode::PidDead),
-            );
-            persist_runner_lease_evidence("homeboy-lab", &observed)
-                .expect("persist controller-owned evidence");
-            let evidence = read_runner_lease_evidence("homeboy-lab", "lease-observed")
-                .expect("read evidence")
-                .expect("exact lease evidence retained");
-            let unavailable = RemoteDaemonStatus {
-                daemon: None,
-                stale_reason: Some("remote state unavailable".to_string()),
-                stale_reason_code: None,
-                fresh: false,
-                reachable: false,
-                active_jobs: 1,
-                state_identity: None,
-            };
-
-            assert_eq!(
-                durable_evidence_pid_for_adoption(&unavailable, &evidence, "lease-observed"),
-                Some(846_192)
-            );
-            assert_eq!(
-                durable_evidence_pid_for_adoption(&unavailable, &evidence, "lease-other"),
-                None
-            );
-        });
     }
 
     #[test]
@@ -2157,46 +1925,40 @@ mod tests {
     }
 
     #[test]
-    fn missing_lease_with_active_jobs_prescribes_exact_recovery_command() {
-        let status = RemoteDaemonStatus {
-            daemon: None,
-            stale_reason: Some("daemon lease is missing".to_string()),
-            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
-            fresh: false,
-            reachable: false,
-            active_jobs: 1,
-            state_identity: Some("sha256:inspected-state".to_string()),
-        };
-
-        let error = remote_daemon_connect_action(None, &status)
-            .expect_err("default path must still refuse missing lease recovery");
-        assert!(error.contains("refusing implicit replacement"));
-
-        let guidance = missing_lease_recovery_guidance("runner-1", 1, "sha256:inspected-state");
-        assert!(guidance.contains("homeboy runner connect runner-1"));
-        assert!(guidance.contains("--recover-missing-lease-state sha256:inspected-state"));
-        assert!(guidance.contains("--confirm-lease-missing"));
+    fn remote_leaseless_recovery_decodes_and_propagates_report() {
+        let envelope = parse_envelope(
+            r#"{"success":true,"data":{
+            "affected_job_ids": [],
+            "affected_job_count": 0,
+            "evidence_snapshot_path": "/evidence/jobs.snapshot",
+            "ownership_proof": ["owner lock acquired"],
+            "retry_guidance": "retry",
+            "replacement": {
+                "pid": 42,
+                "address": "127.0.0.1:7421",
+                "state_path": "/state.json",
+                "lease_id": "lease-new"
+            }
+        }}"#,
+        )
+        .expect("parse daemon envelope");
+        let recovery = decode_leaseless_recovery(envelope.data).expect("decode recovery report");
+        assert_eq!(recovery.replacement.lease_id, "lease-new");
+        assert_eq!(recovery.evidence_snapshot_path, "/evidence/jobs.snapshot");
+        assert_eq!(recovery.ownership_proof, vec!["owner lock acquired"]);
     }
 
     #[test]
-    fn dead_missing_schema_lease_prescribes_exact_adoption_command() {
-        let status = remote_daemon_status_for_test_with_reason(
-            false,
-            false,
-            1,
-            "lease-from-pre-schema-state",
-            4242,
-            Some(DaemonStaleReasonCode::PidDead),
-        );
-
-        let error = remote_daemon_connect_action(None, &status)
-            .expect_err("default reconnect must preserve the active job");
-
-        assert!(error.contains("lease_id=lease-from-pre-schema-state"));
-        assert!(error.contains("active_job_count=1"));
-        assert!(
-            error.contains("--adopt-orphan-lease lease-from-pre-schema-state --confirm-pid-dead")
-        );
+    fn remote_leaseless_recovery_timeout_is_actionable() {
+        let message = leaseless_recovery_failure_message(&crate::core::server::CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            exit_code: 124,
+            timed_out: true,
+            child_resource: None,
+        });
+        assert!(message.contains("daemon status"));
     }
 
     #[test]
@@ -2218,7 +1980,7 @@ mod tests {
 
     #[test]
     fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
-        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", None);
+        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead");
 
         assert!(command.contains("daemon adopt-orphan"));
         assert!(command.contains("--lease-id 'lease dead'"));
@@ -2253,7 +2015,6 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
-            state_identity: None,
         };
 
         assert_eq!(
@@ -2272,7 +2033,6 @@ mod tests {
             fresh: false,
             reachable: false,
             active_jobs: 0,
-            state_identity: None,
         };
 
         assert_eq!(
@@ -2920,7 +2680,6 @@ mod tests {
             fresh,
             reachable,
             active_jobs,
-            state_identity: None,
         }
     }
 }
