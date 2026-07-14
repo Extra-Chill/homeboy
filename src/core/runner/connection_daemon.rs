@@ -23,13 +23,19 @@ struct DaemonVersionResponse {
     raw_body: String,
 }
 
+#[derive(Debug)]
+struct DaemonHealthReport {
+    freshness: DaemonFreshnessReport,
+    pid: Option<u32>,
+}
+
 pub(super) fn connect_remote_daemon(
     server: &Server,
     _client: &SshClient,
     _homeboy: &str,
     daemon: RemoteDaemon,
-    expected_version: &str,
-    expected_identity: &str,
+    _expected_version: &str,
+    _expected_identity: &str,
     runner_id: &str,
     session_path: &Path,
 ) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
@@ -46,24 +52,39 @@ pub(super) fn connect_remote_daemon(
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
-    match daemon_freshness_report(&local_url, expected_version, expected_identity) {
-        Ok(report) if report.fresh && report.lease_id == daemon.lease_id => {
+    match daemon_health_report(&local_url) {
+        Ok(report) if health_identity_matches(&report, &daemon) => {
             Ok((local_port, tunnel_pid, local_url, daemon))
         }
-        Ok(report) if report.fresh => Err(failed_after_tunnel(
-            tunnel_pid,
-            format!(
-                "remote daemon lease changed before tunnel validation (expected {:?}, got {:?}); refusing to write session",
-                daemon.lease_id, report.lease_id
-            ),
-        )),
-        Ok(report) if report.lease_id == daemon.lease_id => Ok((local_port, tunnel_pid, local_url, daemon)),
         Ok(report) => Err(failed_after_tunnel(
             tunnel_pid,
-            format!("remote daemon health lease changed or is unavailable: {:?}", report.lease_id),
+            format!(
+                "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
+                daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
+                active_job_recovery_guidance(&daemon),
+            ),
         )),
         Err(message) => Err(failed_after_tunnel(tunnel_pid, message)),
     }
+}
+
+fn active_job_recovery_guidance(daemon: &RemoteDaemon) -> String {
+    daemon
+        .inspected_freshness
+        .as_ref()
+        .filter(|report| report.active_jobs > 0)
+        .map(|report| format!(
+            "; {} active job(s) were not replaced. Inspect `homeboy daemon status` and use explicit active-job recovery guidance before retrying",
+            report.active_jobs
+        ))
+        .unwrap_or_default()
+}
+
+fn health_identity_matches(report: &DaemonHealthReport, daemon: &RemoteDaemon) -> bool {
+    report.freshness.lease_id == daemon.lease_id
+        // Older daemons did not return their PID from /health. Their live PID
+        // was independently verified by bounded remote daemon status above.
+        && report.pid.is_none_or(|pid| Some(pid) == daemon.pid)
 }
 
 fn open_daemon_tunnel(
@@ -188,34 +209,55 @@ pub(super) fn daemon_http_freshness(
     daemon_freshness_report(local_url, expected_version, expected_identity)
 }
 
-fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionResponse, String> {
+fn daemon_http_body_at(
+    local_url: &str,
+    endpoint: &str,
+) -> std::result::Result<DaemonVersionResponse, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
         .map_err(|err| format!("build daemon HTTP client: {err}"))?;
     let response = client
-        .get(format!("{}/version", local_url.trim_end_matches('/')))
+        .get(format!("{}/{}", local_url.trim_end_matches('/'), endpoint))
         .send()
-        .map_err(|err| format!("query remote daemon version: {err}"))?;
+        .map_err(|err| format!("query remote daemon {endpoint}: {err}"))?;
     let status_code = response.status().as_u16();
     let body_text = response
         .text()
-        .map_err(|err| format!("read remote daemon version response: {err}"))?;
+        .map_err(|err| format!("read remote daemon {endpoint} response: {err}"))?;
     let body: Value = parse_json_from_mixed_stdout(&body_text).map_err(|err| {
         format!(
-            "parse remote daemon version response: {err}; raw body: {}",
+            "parse remote daemon {endpoint} response: {err}; raw body: {}",
             response_body_excerpt(&body_text)
         )
     })?;
     if status_code >= 400 {
         return Err(format!(
-            "remote daemon version request failed with HTTP {}: {}",
+            "remote daemon {endpoint} request failed with HTTP {}: {}",
             status_code, body
         ));
     }
     Ok(DaemonVersionResponse {
         body,
         raw_body: body_text,
+    })
+}
+
+fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionResponse, String> {
+    daemon_http_body_at(local_url, "version")
+}
+
+fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthReport, String> {
+    let response = daemon_http_body_at(local_url, "health")?;
+    let freshness = daemon_freshness_from_body(&response.body).ok_or_else(|| {
+        format!(
+            "remote daemon health response did not include freshness; raw body: {}",
+            response_body_excerpt(&response.raw_body)
+        )
+    })?;
+    Ok(DaemonHealthReport {
+        freshness,
+        pid: daemon_pid_from_body(&response.body),
     })
 }
 
@@ -390,4 +432,78 @@ fn daemon_lease_id_from_body(body: &Value) -> Option<&str> {
     body.pointer("/lease/lease_id")
         .and_then(Value::as_str)
         .or_else(|| body.pointer("/data/lease/lease_id").and_then(Value::as_str))
+}
+
+fn daemon_pid_from_body(body: &Value) -> Option<u32> {
+    body.get("pid")
+        .and_then(Value::as_u64)
+        .or_else(|| body.pointer("/data/pid").and_then(Value::as_u64))
+        .and_then(|pid| u32::try_from(pid).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(lease_id: &str, pid: u32) -> DaemonHealthReport {
+        DaemonHealthReport {
+            freshness: DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                restartable: true,
+                lease_id: Some(lease_id.to_string()),
+                pid: Some(pid),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: Some("0.1.0".to_string()),
+                daemon_build_identity: Some("homeboy 0.1.0+stale".to_string()),
+                runtime_paths: None,
+                active_jobs: 1,
+                repair_plan: Vec::new(),
+            },
+            pid: Some(pid),
+        }
+    }
+
+    fn daemon() -> RemoteDaemon {
+        RemoteDaemon {
+            address: "127.0.0.1:7331".to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        }
+    }
+
+    #[test]
+    fn tunnel_health_rejects_lease_mismatch() {
+        assert!(!health_identity_matches(
+            &report("lease-other", 7331),
+            &daemon()
+        ));
+    }
+
+    #[test]
+    fn tunnel_health_rejects_pid_mismatch() {
+        assert!(!health_identity_matches(
+            &report("lease-live", 7332),
+            &daemon()
+        ));
+    }
+
+    #[test]
+    fn tunnel_health_accepts_legacy_response_without_pid() {
+        let mut report = report("lease-live", 7331);
+        report.pid = None;
+        assert!(health_identity_matches(&report, &daemon()));
+    }
+
+    #[test]
+    fn health_pid_is_read_from_the_daemon_health_body() {
+        let body = serde_json::json!({ "pid": 7331 });
+        assert_eq!(daemon_pid_from_body(&body), Some(7331));
+    }
 }

@@ -500,6 +500,9 @@ pub struct RunnerConnectReport {
     pub tunnel_pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_daemon_pid: Option<u32>,
+    /// Drift observed while reattaching the exact remote daemon lease and PID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homeboy_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

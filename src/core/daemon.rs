@@ -942,6 +942,7 @@ where
             status_code: 200,
             body: json!({
                 "status": "ok",
+                "pid": std::process::id(),
                 "version": VERSION,
                 "build_identity": build_identity::current(),
                 "lease": heartbeat_lease().ok(),
