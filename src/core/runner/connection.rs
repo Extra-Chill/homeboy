@@ -196,11 +196,7 @@ pub fn connect_with_orphan_adoption(
             .and_then(|session| session.remote_daemon_address.as_deref())
             .filter(|address| parse_loopback_daemon_addr(address).is_ok())
             .unwrap_or("127.0.0.1:0");
-        let command = format!(
-            "{} daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
-            shell::quote_arg(homeboy),
-            shell::quote_arg(recovery_addr),
-        );
+        let command = remote_leaseless_recovery_command(homeboy, recovery_addr);
         let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
         if !recovery.success {
             let message = leaseless_recovery_failure_message(&recovery);
@@ -397,6 +393,14 @@ fn state_loss_recovery_failure_message(output: &crate::core::server::CommandOutp
     } else {
         command_failure_message("remote exact state-loss recovery failed", output)
     }
+}
+
+fn remote_leaseless_recovery_command(homeboy: &str, addr: &str) -> String {
+    format!(
+        "{} daemon reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
+        shell::quote_arg(homeboy),
+        shell::quote_arg(addr),
+    )
 }
 
 fn remote_state_loss_recovery_command(
@@ -2010,6 +2014,7 @@ use session_store::*;
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use std::collections::HashMap;
 
     use super::super::session::RunnerStaleRuntimePath;
@@ -2356,6 +2361,20 @@ mod tests {
             command,
             "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0"
         );
+    }
+
+    #[test]
+    fn generated_daemon_recovery_commands_parse_against_the_actual_cli_contract() {
+        let commands = [
+            remote_leaseless_recovery_command("homeboy", "127.0.0.1:7421"),
+            remote_state_loss_recovery_command("homeboy", "lease-dead", 4242, "127.0.0.1:7421"),
+            remote_daemon_adopt_orphan_command("homeboy", "lease-dead"),
+        ];
+        for command in commands {
+            crate::cli_surface::Cli::try_parse_from(command.split_whitespace()).unwrap_or_else(
+                |error| panic!("generated recovery command must parse: {command}: {error}"),
+            );
+        }
     }
 
     #[test]
