@@ -1099,7 +1099,7 @@ mod low_noise_polling_tests {
     }
 
     #[test]
-    fn fanout_coordinator_stays_controller_local_while_child_cooks_remain_portable() {
+    fn fanout_and_child_cook_coordinators_stay_controller_local() {
         let coordinator = parsed_command(&[
             "homeboy",
             "agent-task",
@@ -1130,7 +1130,7 @@ mod low_noise_polling_tests {
                 .lab_contract()
                 .expect("child cook contract")
                 .portability,
-            LabCommandPortability::Portable
+            LabCommandPortability::LocalOnly(AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON)
         );
     }
 

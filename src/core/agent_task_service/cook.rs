@@ -869,6 +869,7 @@ mod tests {
             let options = AgentTaskCookServiceOptions {
                 cook_id: "cook-8058".to_string(),
                 initial_run_id: run_id.to_string(),
+                initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
                 to_worktree: "homeboy@8058".to_string(),
                 source_worktree_path: None,
                 provider_command: None,
@@ -890,6 +891,7 @@ mod tests {
                 ai_tool: "OpenCode".to_string(),
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 ai_used_for: "Drafted test coverage.".to_string(),
+                attempt_dispatcher: None,
             };
             let mut backend = CaptureBackend::default();
             finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend)
