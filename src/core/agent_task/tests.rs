@@ -50,6 +50,7 @@ fn request_round_trips_generic_agent_task_shape() {
             max_runtime_ms: Some(240_000),
             liveness_timeout_ms: None,
             max_output_bytes: Some(1_000_000),
+            exclusive_resource_keys: Vec::new(),
         },
         expected_artifacts: vec!["patch".to_string(), "report".to_string()],
         artifact_declarations: vec![AgentTaskArtifactDeclaration {
