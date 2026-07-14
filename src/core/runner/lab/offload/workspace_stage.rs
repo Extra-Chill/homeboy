@@ -2136,6 +2136,7 @@ mod tests {
                 read_only_polling: false,
                 local_output_file: None,
                 durable_agent_task_plan: None,
+                source_path: None,
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
@@ -2212,6 +2213,15 @@ mod tests {
             .expect("write fixture manifest");
             git(repository.path(), &["add", "."]);
             git(repository.path(), &["commit", "-m", "base"]);
+            git(
+                repository.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    repository.path().to_str().expect("repo path"),
+                ],
+            );
             let source = worktree_parent.path().join("homeboy-fix-8009");
             git(
                 repository.path(),
@@ -2263,9 +2273,10 @@ mod tests {
                 read_only_polling: false,
                 local_output_file: None,
                 durable_agent_task_plan: None,
+                source_path: Some(source.as_path()),
                 job_overrides: LabJobOverrides::default(),
             };
-            let contract = LabOffloadCommand {
+            let mut contract = LabOffloadCommand {
                 command: crate::command_contract::LabCommandContract::portable(
                     "agent-task",
                     None,
@@ -2276,6 +2287,7 @@ mod tests {
                 required_capabilities: Vec::new(),
                 workload: None,
             };
+            contract.command.workspace_mode_policy = LabOffloadWorkspaceModePolicy::Git;
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
@@ -2298,6 +2310,21 @@ mod tests {
             );
             assert!(stage.remapped_args.contains(&"cook-8009".to_string()));
             assert!(stage.remapped_args.contains(&canonical_attempt_id));
+            assert_eq!(stage.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(
+                git_output(
+                    Path::new(&stage.remote_cwd),
+                    &["rev-parse", "--is-inside-work-tree"]
+                ),
+                "true"
+            );
+            std::fs::write(Path::new(&stage.remote_cwd).join("captured.txt"), "patch\n")
+                .expect("write remote mutation");
+            git(Path::new(&stage.remote_cwd), &["add", "-N", "captured.txt"]);
+            assert!(
+                git_output(Path::new(&stage.remote_cwd), &["diff", "--binary"])
+                    .contains("captured.txt")
+            );
 
             crate::core::agent_task_lifecycle::record_lab_offload_phase(
                 &canonical_attempt_id,
