@@ -43,8 +43,6 @@ enum DaemonCommand {
     /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
     ReconcileLeaselessOrphans {
         #[arg(long)]
-        reconcile_leaseless_orphans: bool,
-        #[arg(long)]
         confirm_no_daemon_owner: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
@@ -135,8 +133,8 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
             0,
         )),
-        DaemonCommand::ReconcileLeaselessOrphans { reconcile_leaseless_orphans, confirm_no_daemon_owner, addr } => Ok((
-            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(reconcile_leaseless_orphans, confirm_no_daemon_owner, &addr)?),
+        DaemonCommand::ReconcileLeaselessOrphans { confirm_no_daemon_owner, addr } => Ok((
+            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(confirm_no_daemon_owner, &addr)?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
@@ -233,12 +231,35 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     use homeboy::test_support::with_isolated_home;
 
     use super::*;
+    use crate::cli_surface::{Cli, Commands};
+
+    #[test]
+    fn leaseless_recovery_subcommand_reaches_address_validation() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "reconcile-leaseless-orphans",
+            "--confirm-no-daemon-owner",
+            "--addr",
+            "not-an-address",
+        ])
+        .expect("the recovery subcommand and its required confirmation should parse");
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+
+        let error = run(args, &crate::commands::GlobalArgs {})
+            .expect_err("invalid daemon address should reach handler validation");
+
+        assert!(error.message.contains("Invalid daemon bind address"));
+    }
 
     #[test]
     fn artifact_get_downloads_daemon_byte_alias() {

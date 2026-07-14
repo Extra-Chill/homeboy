@@ -192,14 +192,13 @@ pub fn adopt_orphaned_lease(
 /// missing. Process and configured-listener probes are fail-closed because no
 /// lease identity exists to adopt.
 pub fn reconcile_leaseless_orphans(
-    reconcile_leaseless_orphans: bool,
     confirm_no_daemon_owner: bool,
     addr: &str,
 ) -> Result<DaemonLeaselessRecoveryResult> {
-    if !reconcile_leaseless_orphans || !confirm_no_daemon_owner {
+    if !confirm_no_daemon_owner {
         return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "lease-less recovery requires --reconcile-leaseless-orphans and --confirm-no-daemon-owner",
+            "confirm_no_daemon_owner",
+            "lease-less recovery requires --confirm-no-daemon-owner",
             None,
             None,
         ));
