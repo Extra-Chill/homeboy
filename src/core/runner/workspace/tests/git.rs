@@ -12,7 +12,7 @@ use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorks
 use crate::core::runner::workspace::util::git_output;
 
 #[test]
-fn controller_routed_git_sync_materializes_private_unavailable_remote_with_changed_since_base() {
+fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle() {
     crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
@@ -96,6 +96,28 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 .exists(),
             "the fixture must retain a commit graph after its objects are removed"
         );
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            "--changed-since".to_string(),
+            base.clone(),
+        ];
+        let changed_since =
+            crate::core::runner::prepare_git_lab_offload_changed_since(&args, source.path())
+                .expect("preflight must resolve the local base without probing private origin");
+        assert_eq!(changed_since.resolved_base.as_deref(), Some(base.as_str()));
+        assert!(changed_since.git_fetch_refs.is_empty());
+
         remove_local_packs(source.path());
         assert!(
             git_without_lazy_fetch(
@@ -113,14 +135,6 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             .is_err(),
             "the fixture must leave unrelated promisor objects absent locally"
         );
-        crate::core::runner::create(
-            &format!(
-                r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
 
         let sync_result = sync_workspace(
             "lab-local-git-bundle",
@@ -130,7 +144,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 // The runner first attempts its normal clone. The inaccessible
                 // origin then exercises the controller bundle fallback.
                 controller_routed_git: false,
-                changed_since_base: Some(base.clone()),
+                changed_since_base: changed_since.resolved_base,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
@@ -189,6 +203,10 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
             base
         );
+        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert!(git_output(remote, &["status", "--porcelain=v1"])
+            .expect("read final checkout status")
+            .is_empty());
         assert!(
             !git_output(
                 source.path(),
@@ -599,6 +617,7 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         "abc123",
         None,
         "https://github.example.invalid/example-org/private-source.git",
+        Some("def456"),
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
     );
@@ -606,6 +625,8 @@ fn git_bundle_materialization_disables_lazy_fetches() {
     assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
     assert!(command.contains("shasum -a 256"));
     assert!(command.contains("trap 'rm -rf"));
+    assert!(command.contains("rev-parse --verify -q def456^{commit}"));
+    assert!(command.contains("merge-base def456 HEAD"));
 }
 
 #[test]
@@ -616,6 +637,7 @@ fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
         "abc123",
         None,
         "https://github.example.invalid/example-org/private-source.git",
+        None,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
     );
