@@ -103,6 +103,7 @@ where
                 ScheduledTask {
                     workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                     request,
+                    resource_wait: None,
                     attempt: 1,
                     rotation_index: 0,
                     rotation_attempts: Vec::new(),
@@ -298,6 +299,15 @@ where
                             &output_dependencies,
                         )
                     });
+                    if dependency_wait.is_none() {
+                        if let Some(task) = queued.front_mut() {
+                            AgentTaskScheduleSupport::record_resource_wait(
+                                task,
+                                &running,
+                                &mut events,
+                            );
+                        }
+                    }
                     backpressure.push(AgentTaskBackpressureStatus {
                         kind: if dependency_wait.is_some() {
                             "output_dependency".to_string()
@@ -397,7 +407,20 @@ where
                     cancellation: cancellation.clone(),
                 };
 
-                events.push(event(&task_id, AgentTaskState::Running, attempt, None));
+                let resource_wait_message = scheduled.resource_wait.as_ref().map(|wait| {
+                    format!(
+                        "acquired exclusive resource '{}' after waiting {} ms; previous holder '{}'",
+                        wait.key,
+                        wait.started_at.elapsed().as_millis(),
+                        wait.blocker_task_id
+                    )
+                });
+                events.push(event(
+                    &task_id,
+                    AgentTaskState::Running,
+                    attempt,
+                    resource_wait_message,
+                ));
                 running.push(RunningTask {
                     task_id: task_id.clone(),
                     request: request.clone(),
@@ -405,6 +428,9 @@ where
                     executor_key,
                     model_key: model_key(&request),
                     resource_units: task_resource_units(&request, &plan.options.resource_budget),
+                    exclusive_resource_keys: AgentTaskScheduleSupport::exclusive_resource_keys(
+                        &request,
+                    ),
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: Some(task_timeout_ms),
@@ -522,6 +548,7 @@ where
                         queued.push_back(ScheduledTask {
                             workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                             request,
+                            resource_wait: None,
                             attempt: next_attempt,
                             rotation_index: running_task.rotation_index,
                             rotation_attempts: running_task.rotation_attempts,
@@ -583,6 +610,7 @@ where
                             queued.push_back(ScheduledTask {
                                 workspace_key: AgentTaskScheduleSupport::workspace_key(&request),
                                 request,
+                                resource_wait: None,
                                 attempt: next_attempt,
                                 rotation_index: running_task.rotation_index + 1,
                                 rotation_attempts,
@@ -661,6 +689,7 @@ where
 struct ScheduledTask {
     request: AgentTaskRequest,
     workspace_key: Option<String>,
+    resource_wait: Option<ResourceWait>,
     attempt: u32,
     /// Rotation entries already consumed for this task (0 = original executor).
     rotation_index: usize,
@@ -680,6 +709,7 @@ struct RunningTask {
     executor_key: String,
     model_key: Option<String>,
     resource_units: u32,
+    exclusive_resource_keys: Vec<String>,
     attempt: u32,
     started_at: Instant,
     timeout_ms: Option<u64>,
@@ -703,6 +733,13 @@ struct RunningTask {
     task_base_sha: Option<String>,
     /// Verified source identity for snapshot-backed candidate artifacts.
     source_provenance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+struct ResourceWait {
+    key: String,
+    blocker_task_id: String,
+    started_at: Instant,
 }
 
 struct QuarantinedTask {
@@ -1394,6 +1431,7 @@ mod committed_harvest_tests {
             executor_key: "test".to_string(),
             model_key: None,
             resource_units: 1,
+            exclusive_resource_keys: Vec::new(),
             attempt: 1,
             started_at: Instant::now(),
             timeout_ms: None,
@@ -1573,6 +1611,7 @@ mod committed_harvest_tests {
             executor_key: "test".to_string(),
             model_key: None,
             resource_units: 1,
+            exclusive_resource_keys: Vec::new(),
             attempt: 1,
             started_at: Instant::now(),
             timeout_ms: None,
