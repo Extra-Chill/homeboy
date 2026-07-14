@@ -706,7 +706,44 @@ pub fn adopt_orphaned_lease(
     }
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
-    let status = read_status()?;
+    adopt_orphaned_lease_with_operations(
+        lease_id,
+        read_status,
+        pid_is_running,
+        try_acquire_daemon_owner_lock,
+        || {
+            let store = super::JobStore::open_without_reconciliation(
+                crate::core::paths::daemon_jobs_file()?,
+            )?;
+            store.reconcile_dead_daemon_lease_jobs(lease_id)
+        },
+        || start_or_return_live_unlocked(addr),
+    )
+}
+
+fn adopt_orphaned_lease_with_operations<
+    Status,
+    PidIsRunning,
+    AcquireOwner,
+    OwnerLock,
+    Reconcile,
+    Start,
+>(
+    lease_id: &str,
+    status: Status,
+    pid_is_running: PidIsRunning,
+    acquire_owner: AcquireOwner,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<DaemonOrphanAdoptionResult>
+where
+    Status: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: Fn(u32) -> bool,
+    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
+    Reconcile: FnOnce() -> Result<crate::core::api_jobs::DaemonLeaseJobDiagnostics>,
+    Start: FnOnce() -> Result<super::DaemonStartResult>,
+{
+    let status = status()?;
     let state = status.state.ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease_id",
@@ -737,7 +774,7 @@ pub fn adopt_orphaned_lease(
         ));
     }
 
-    let owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
+    let owner_lock = acquire_owner()?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease_id",
             "daemon owner lock is held; refusing exact dead-lease adoption",
@@ -747,7 +784,7 @@ pub fn adopt_orphaned_lease(
     })?;
     // Revalidate after taking the lifecycle-critical lock: a PID can be reused
     // between status inspection and exact orphan adoption.
-    if !pid_is_proven_dead(state.pid, pid_is_running) {
+    if !pid_is_proven_dead(state.pid, &pid_is_running) {
         return Err(Error::validation_invalid_argument(
             "lease_id",
             format!("recorded daemon PID {} is live or has been reused", state.pid),
@@ -755,9 +792,7 @@ pub fn adopt_orphaned_lease(
             Some(vec!["Refusing adoption until the exact recorded PID is proven dead under the lifecycle lock.".to_string()]),
         ));
     }
-    let store =
-        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
-    let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+    let reconciled = reconcile()?;
     if reconciled.protected_count() > 0 {
         return Err(Error::validation_invalid_argument(
             "lease_id",
@@ -771,7 +806,7 @@ pub fn adopt_orphaned_lease(
         ));
     }
     drop(owner_lock);
-    let replacement = start_or_return_live_unlocked(addr)?;
+    let replacement = start()?;
     Ok(DaemonOrphanAdoptionResult {
         adopted_lease_id: lease_id.to_string(),
         dead_pid: state.pid,
