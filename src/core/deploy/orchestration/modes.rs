@@ -367,6 +367,8 @@ mod tests {
             head: true,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let checked = run_check_mode(

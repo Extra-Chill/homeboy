@@ -148,6 +148,8 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
             no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
@@ -161,6 +163,7 @@ mod tests {
                 tag: "v1.2.3".to_string(),
                 source_commit: "0123456789abcdef".to_string(),
             }),
+            resume_run_id: None,
         };
 
         let prepared = prepare_component_deploy(
