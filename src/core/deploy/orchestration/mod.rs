@@ -409,9 +409,10 @@ mod tests {
     use crate::core::deploy::planning::{load_project_components, ExtensionSkippedComponent};
     use crate::core::deploy::types::ComponentDeployResult;
     use crate::core::project::ProjectComponentAttachment;
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{home_env_guard, with_isolated_home};
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     use super::modes::{extension_skipped_results, run_dry_run_mode};
@@ -1226,6 +1227,24 @@ mod tests {
 
     #[test]
     fn exact_ref_preflight_packages_verified_subpath_not_stale_checkout_artifact() {
+        let _home_env = home_env_guard();
+        exact_ref_preflight_fixture(None);
+    }
+
+    #[test]
+    fn exact_ref_hydration_fixtures_build_concurrently_without_crossing_worktrees() {
+        let _home_env = home_env_guard();
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || exact_ref_preflight_fixture(Some(barrier)));
+            }
+        });
+    }
+
+    fn exact_ref_preflight_fixture(barrier: Option<Arc<Barrier>>) {
         let repo = TempDir::new().expect("repo");
         let root = repo.path();
         let component_path = root.join("packages/plugin");
@@ -1288,6 +1307,9 @@ mod tests {
         let checkout =
             ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
         checkout.verify().expect("verify target ref");
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
         let hydration = checkout
             .hydrate_dependencies(false)
             .expect("hydrate the materialized workspace dependencies");
