@@ -83,10 +83,13 @@ pub use capabilities::{
     PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
     RunnerToolCapabilityRequirement,
 };
-pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{
     normalize_runner_command_env_for_homeboy_path, quote_runner_env_value,
     remote_shell_path_preamble,
+};
+pub use command_path::{
+    preflight_remote_argv_path_translation, preflight_remote_dispatch_paths,
+    rewrite_remote_dispatch_argv, RunnerPathMaterialization, RunnerRemoteDispatchWrapperFlag,
 };
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
@@ -108,9 +111,10 @@ pub(crate) use execution::{
     RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use execution::{
-    daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecStructuredSummary,
+    daemon_api_post, exec, preflight_remote_dispatch, runner_exec_failure_error, runner_job_cancel,
+    RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
+    RunnerExecPromotedOutput, RunnerExecStructuredSummary, RunnerRemoteDispatchPreflight,
+    RunnerRemoteDispatchPreflightRequest,
 };
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{

@@ -105,7 +105,8 @@
       "capability_preflight_markers": [
         "RunnerCapabilityPreflight",
         "component_runner_capability_plan",
-        "evaluate_component_runner_capabilities"
+        "evaluate_component_runner_capabilities",
+        "preflight_remote_dispatch"
       ],
       "dispatch_markers": [
         "runner::exec",
@@ -119,7 +120,8 @@
       ],
       "path_translation_markers": [
         "rewrite_component_remote_args",
-        "preflight_remote_argv_path_translation"
+        "preflight_remote_argv_path_translation",
+        "preflight_remote_dispatch"
       ]
     },
     "source_policies": [

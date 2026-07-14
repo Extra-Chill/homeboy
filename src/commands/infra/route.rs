@@ -950,6 +950,7 @@ fn run_rig_source_management_on_runner(
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let mut command = runner_rig_source_management_command(homeboy_path, normalized_args);
     let mut translated_remote_root = runner.workspace_root.clone().unwrap_or_default();
+    let mut materialized_paths = Vec::new();
     let local_cwd = std::env::current_dir().ok();
     if let Some(local_cwd) = local_cwd.as_deref() {
         if command_contains_path_prefix(&command, local_cwd) {
@@ -962,7 +963,10 @@ fn run_rig_source_management_on_runner(
                 },
             )?;
             if sync_exit_code == 0 {
-                command = translate_command_path_prefix(&command, local_cwd, &synced.remote_path);
+                materialized_paths.push(runners::RunnerPathMaterialization {
+                    local_path: local_cwd.to_path_buf(),
+                    remote_path: synced.remote_path.clone(),
+                });
                 translated_remote_root = synced.remote_path;
             }
         }
@@ -989,50 +993,24 @@ fn run_rig_source_management_on_runner(
             },
         )?;
         if sync_exit_code == 0 {
-            command = translate_command_path_prefix(&command, source_root, &synced.remote_path);
+            materialized_paths.push(runners::RunnerPathMaterialization {
+                local_path: source_root.to_path_buf(),
+                remote_path: synced.remote_path.clone(),
+            });
             translated_remote_root = synced.remote_path;
         }
     }
 
-    // Remote-execution preflight before dispatching caller-derived argv to the
-    // runner (#5093):
-    // 1. Path-translation: reject any forwarded argument that still embeds the
-    //    controller-local working directory or rig-install source path instead of
-    //    the runner-resident workspace, so a controller-only path never reaches
-    //    the remote runtime.
-    // 2. Capability parity: validate the runner can run the forwarded `homeboy`
-    //    binary before execution starts (enforced by `runners::exec` against the
-    //    supplied `RunnerCapabilityPreflight`).
-    if let Some(local_cwd) = local_cwd.as_deref() {
-        runners::preflight_remote_argv_path_translation(
-            "Rig source management",
+    let preflight =
+        runners::preflight_remote_dispatch(runners::RunnerRemoteDispatchPreflightRequest {
+            context: "Rig source management",
             runner_id,
-            &command,
-            local_cwd,
-            &translated_remote_root,
-        )?;
-    }
-    if let Some(source_root) = rig_install_source_root.as_deref() {
-        runners::preflight_remote_argv_path_translation(
-            "Rig source management",
-            runner_id,
-            &command,
-            source_root,
-            &translated_remote_root,
-        )?;
-    }
-    let required_commands: Vec<String> = command
-        .first()
-        .filter(|program| !program.trim().is_empty())
-        .cloned()
-        .into_iter()
-        .collect();
-    let capability_preflight =
-        (!required_commands.is_empty()).then(|| runners::RunnerCapabilityPreflight {
-            command: "rig.source-management".to_string(),
-            required_commands,
-            ..Default::default()
-        });
+            command: &command,
+            remote_cwd: &translated_remote_root,
+            materialized_paths: &materialized_paths,
+            local_only_wrapper_flags: &RIG_SOURCE_MANAGEMENT_LOCAL_WRAPPER_FLAGS,
+        })?;
+    command = preflight.command;
 
     let (output, exit_code) = runners::exec(
         runner_id,
@@ -1050,7 +1028,7 @@ fn run_rig_source_management_on_runner(
             raw_exec: false,
             source_snapshot: None,
             path_materialization_plan: None,
-            capability_preflight,
+            capability_preflight: preflight.capability_preflight,
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
@@ -1147,30 +1125,40 @@ fn runner_rig_source_management_command(
     normalized_args: &[String],
 ) -> Vec<String> {
     let mut command = vec![homeboy_path.to_string()];
-    let mut iter = normalized_args.iter().skip(1).peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--runner"
-            || arg == "--output"
-            || arg == "--artifact-root"
-            || arg == "--placement"
-        {
-            iter.next();
-            continue;
-        }
-        if arg == "--allow-dirty-lab-workspace" || arg == "--detach-after-handoff" {
-            continue;
-        }
-        if arg.starts_with("--runner=")
-            || arg.starts_with("--output=")
-            || arg.starts_with("--artifact-root=")
-            || arg.starts_with("--placement=")
-        {
-            continue;
-        }
-        command.push(arg.clone());
-    }
+    command.extend(normalized_args.iter().skip(1).cloned());
     command
 }
+
+const RIG_SOURCE_MANAGEMENT_LOCAL_WRAPPER_FLAGS: [runners::RunnerRemoteDispatchWrapperFlag; 7] = [
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--runner",
+        takes_value: true,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--output",
+        takes_value: true,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--artifact-root",
+        takes_value: true,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--placement",
+        takes_value: true,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--allow-local-fallback",
+        takes_value: false,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--allow-dirty-lab-workspace",
+        takes_value: false,
+    },
+    runners::RunnerRemoteDispatchWrapperFlag {
+        flag: "--detach-after-handoff",
+        takes_value: false,
+    },
+];
 
 fn is_runs_list_runner_option(args: &[String]) -> bool {
     let Some(runs_index) = args.iter().position(|arg| arg == "runs") else {
@@ -2320,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_rig_source_management_command_strips_controller_globals() {
+    fn runner_rig_source_management_remote_preflight_strips_controller_globals() {
         let normalized = vec![
             "homeboy".to_string(),
             "rig".to_string(),
@@ -2335,8 +2323,20 @@ mod tests {
             "--detach-after-handoff".to_string(),
         ];
 
+        let command = runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized);
+        let preflight =
+            runners::preflight_remote_dispatch(runners::RunnerRemoteDispatchPreflightRequest {
+                context: "test dispatch",
+                runner_id: "lab",
+                command: &command,
+                remote_cwd: "/runner/worktree",
+                materialized_paths: &[],
+                local_only_wrapper_flags: &RIG_SOURCE_MANAGEMENT_LOCAL_WRAPPER_FLAGS,
+            })
+            .expect("controller wrapper flags should be removed before remote dispatch");
+
         assert_eq!(
-            runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized),
+            preflight.command,
             vec![
                 "/usr/local/bin/homeboy".to_string(),
                 "rig".to_string(),

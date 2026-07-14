@@ -2,7 +2,10 @@ use serde_json::json;
 
 use crate::core::error::{Error, ErrorCode, Result};
 
-use crate::core::runner::{Runner, RunnerCapabilityPreflight, RunnerKind};
+use crate::core::runner::{
+    Runner, RunnerCapabilityPreflight, RunnerKind, RunnerPathMaterialization,
+    RunnerRemoteDispatchWrapperFlag,
+};
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -41,6 +44,49 @@ pub(super) fn remote_execution_preflight(
         command: "runner.exec".to_string(),
         required_commands,
         ..Default::default()
+    })
+}
+
+/// Controller-side contract prepared before a caller-derived command is sent to
+/// a remote runner. The executor validates `capability_preflight` against the
+/// selected runner before it starts the command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerRemoteDispatchPreflight {
+    pub command: Vec<String>,
+    pub capability_preflight: Option<RunnerCapabilityPreflight>,
+}
+
+/// Inputs for the typed remote-dispatch preflight.
+pub struct RunnerRemoteDispatchPreflightRequest<'a> {
+    pub context: &'a str,
+    pub runner_id: &'a str,
+    pub command: &'a [String],
+    pub remote_cwd: &'a str,
+    pub materialized_paths: &'a [RunnerPathMaterialization],
+    pub local_only_wrapper_flags: &'a [RunnerRemoteDispatchWrapperFlag],
+}
+
+/// Strip controller-only wrappers, translate declared materialized paths, and
+/// reject any remaining controller-local filesystem path before remote dispatch.
+pub fn preflight_remote_dispatch(
+    request: RunnerRemoteDispatchPreflightRequest<'_>,
+) -> Result<RunnerRemoteDispatchPreflight> {
+    let command = crate::core::runner::rewrite_remote_dispatch_argv(
+        request.command,
+        request.local_only_wrapper_flags,
+        request.materialized_paths,
+    );
+    crate::core::runner::preflight_remote_dispatch_paths(
+        request.context,
+        request.runner_id,
+        &command,
+        request.remote_cwd,
+        request.materialized_paths,
+    )?;
+
+    Ok(RunnerRemoteDispatchPreflight {
+        capability_preflight: remote_execution_preflight(&command, None),
+        command,
     })
 }
 
@@ -265,4 +311,36 @@ fn path_is_inside(root: &str, cwd: &str) -> bool {
     let root = trim_trailing_slashes(root);
     let cwd = trim_trailing_slashes(cwd);
     cwd == root || cwd.starts_with(&format!("{root}/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_remote_dispatch_preflight_declares_the_remote_program_capability() {
+        let preflight = preflight_remote_dispatch(RunnerRemoteDispatchPreflightRequest {
+            context: "test dispatch",
+            runner_id: "lab",
+            command: &[
+                "homeboy".to_string(),
+                "rig".to_string(),
+                "sources".to_string(),
+                "list".to_string(),
+            ],
+            remote_cwd: "/runner/worktree",
+            materialized_paths: &[],
+            local_only_wrapper_flags: &[],
+        })
+        .expect("runner-local argv should satisfy controller preflight");
+
+        assert_eq!(preflight.command[0], "homeboy");
+        assert_eq!(
+            preflight
+                .capability_preflight
+                .expect("capability preflight")
+                .required_commands,
+            vec!["homeboy"]
+        );
+    }
 }

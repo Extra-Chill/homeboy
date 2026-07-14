@@ -17,6 +17,106 @@ const ABSOLUTE_BIN_DIRS: &[&str] = &[
     "/sbin",
 ];
 
+/// A controller path that has been materialized at a runner-resident path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerPathMaterialization {
+    pub local_path: PathBuf,
+    pub remote_path: String,
+}
+
+/// A controller-only wrapper option that must not reach a remote command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerRemoteDispatchWrapperFlag {
+    pub flag: &'static str,
+    pub takes_value: bool,
+}
+
+pub fn rewrite_remote_dispatch_argv(
+    command: &[String],
+    local_only_wrapper_flags: &[RunnerRemoteDispatchWrapperFlag],
+    materialized_paths: &[RunnerPathMaterialization],
+) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(command.len());
+    let mut args = command.iter().peekable();
+    while let Some(arg) = args.next() {
+        if let Some(wrapper) = local_only_wrapper_flags
+            .iter()
+            .find(|wrapper| arg == wrapper.flag || arg.starts_with(&format!("{}=", wrapper.flag)))
+        {
+            if wrapper.takes_value && arg == wrapper.flag {
+                args.next();
+            }
+            continue;
+        }
+        rewritten.push(remap_declared_materialized_path(arg, materialized_paths));
+    }
+    rewritten
+}
+
+pub fn preflight_remote_dispatch_paths(
+    context: &str,
+    runner_id: &str,
+    command: &[String],
+    remote_cwd: &str,
+    materialized_paths: &[RunnerPathMaterialization],
+) -> Result<()> {
+    let mappings = materialized_paths
+        .iter()
+        .map(|path| LabPathRemap {
+            local: path.local_path.display().to_string(),
+            remote: path.remote_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_path = std::env::current_dir().unwrap_or_default();
+    preflight_remote_path_bearing_surfaces(
+        context,
+        runner_id,
+        command,
+        &HashMap::new(),
+        &source_path,
+        remote_cwd,
+        &mappings,
+    )?;
+
+    let untranslated = command
+        .iter()
+        .skip(1)
+        .flat_map(|arg| path_candidates(arg))
+        .filter(|path| is_unmapped_controller_path(path, &source_path, remote_cwd, &mappings, true))
+        .collect::<Vec<_>>();
+    if untranslated.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "path",
+        format!(
+            "{context} refused to dispatch to runner `{runner_id}`: {} argv path(s) still reference controller-local filesystems",
+            untranslated.len()
+        ),
+        Some(untranslated.join(", ")),
+        Some(vec![
+            "Materialize each controller-local path and declare its runner path before dispatch, or use a runner-local path.".to_string(),
+        ]),
+    ))
+}
+
+fn remap_declared_materialized_path(
+    arg: &str,
+    materialized_paths: &[RunnerPathMaterialization],
+) -> String {
+    let mut rewritten = arg.to_string();
+    let mut mappings = materialized_paths.iter().collect::<Vec<_>>();
+    mappings.sort_by_key(|path| std::cmp::Reverse(path.local_path.display().to_string().len()));
+    for path in mappings {
+        let local = path.local_path.display().to_string();
+        if !local.is_empty() {
+            rewritten = rewritten.replace(&local, path.remote_path.trim_end_matches('/'));
+        }
+    }
+    rewritten
+}
+
 pub(crate) fn normalize_runner_command_env(env: &mut HashMap<String, String>) {
     if env.contains_key("PATH") {
         return;
@@ -666,6 +766,62 @@ fn push_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBu
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn remote_dispatch_rewrite_strips_wrappers_and_translates_materialized_paths() {
+        let materialized_paths = [RunnerPathMaterialization {
+            local_path: PathBuf::from("/controller/worktree"),
+            remote_path: "/runner/worktree".to_string(),
+        }];
+        let wrappers = [RunnerRemoteDispatchWrapperFlag {
+            flag: "--runner",
+            takes_value: true,
+        }];
+
+        let command = rewrite_remote_dispatch_argv(
+            &[
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "lab".to_string(),
+                "rig".to_string(),
+                "install".to_string(),
+                "/controller/worktree/rigs/example".to_string(),
+            ],
+            &wrappers,
+            &materialized_paths,
+        );
+
+        assert_eq!(
+            command,
+            vec!["homeboy", "rig", "install", "/runner/worktree/rigs/example",]
+        );
+    }
+
+    #[test]
+    fn remote_dispatch_preflight_rejects_unmaterialized_local_positional_path() {
+        let local = tempfile::tempdir().expect("local path");
+        let command = vec![
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            local.path().display().to_string(),
+        ];
+
+        let err = preflight_remote_dispatch_paths(
+            "test dispatch",
+            "lab",
+            &command,
+            "/runner/worktree",
+            &[],
+        )
+        .expect_err("unmaterialized local positional path must fail before remote dispatch");
+
+        assert!(err.message.contains("controller-local filesystems"));
+        assert!(err
+            .details
+            .to_string()
+            .contains(&local.path().display().to_string()));
+    }
 
     #[test]
     fn runner_command_path_prepends_common_user_tool_dirs() {
