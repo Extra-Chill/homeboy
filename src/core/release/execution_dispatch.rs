@@ -40,14 +40,19 @@ pub(super) fn execute_release_plan_step(
             Ok(Some(run_changelog_bootstrap_preflight(step, context)))
         }
         "preflight.package" => Ok(Some(
-            executor::package_preflight::run_package_preflight(
-                context.extensions,
-                context.component,
-                context.component_id,
-                &context.component.local_path,
-                context.options.skip_build_validation,
-            )
-            .unwrap_or_else(|err| failed_result("preflight.package", "preflight.package", err)),
+            executor::package_preflight::run_package_preflight(&context.component.local_path)
+                .map(|_| {
+                    executor::step_success(
+                        "preflight.package",
+                        "preflight.package",
+                        Some(serde_json::json!({
+                            "component_path": context.component.local_path,
+                            "validated_action": "release.package.guards",
+                        })),
+                        Vec::new(),
+                    )
+                })
+                .unwrap_or_else(|err| failed_result("preflight.package", "preflight.package", err)),
         )),
         "preflight.tag_availability" => {
             let tag_name = step
@@ -109,6 +114,14 @@ pub(super) fn execute_release_plan_step(
                 None,
                 context.options.skip_build_validation,
             )
+            .and_then(|result| {
+                executor::package_preflight::validate_package_completeness(
+                    context.component,
+                    std::path::Path::new(&context.component.local_path),
+                    &context.state.artifacts,
+                )?;
+                Ok(result)
+            })
             .unwrap_or_else(|err| failed_result("package", "package", err)),
         )),
         "artifacts.inventory" => {
@@ -729,6 +742,7 @@ mod tests {
         release_step_is_show_stopper, release_step_unexpected_dirty_files, ReleaseExecutionContext,
     };
     use crate::core::component::{Component, ComponentScriptsConfig, VersionTarget};
+    use crate::core::extension::ExtensionManifest;
     use crate::core::plan::PlanStep;
     use crate::core::release::types::{
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
@@ -772,6 +786,135 @@ mod tests {
         assert!(!release_step_is_plan_only(&plan_step("preflight.package")));
         assert!(!release_step_is_plan_only(&plan_step("changelog.finalize")));
         assert!(!release_step_is_plan_only(&plan_step("deploy")));
+    }
+
+    #[test]
+    fn release_package_builds_once_and_validates_the_uploaded_durable_bytes() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            configure_git_user(repo.path());
+            run_in(repo.path(), &["git", "add", "plugin.php"]);
+            run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            let counter = repo.path().join("package-count");
+            let package = package_extension(&format!(
+                "n=$(cat '{counter}' 2>/dev/null || echo 0); echo $((n + 1)) > '{counter}'; \
+                 mkdir -p build/stage; cp plugin.php build/stage/plugin.php; \
+                 (cd build && zip -q fixture.zip stage/plugin.php); \
+                 printf '[{{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}}]'",
+                counter = counter.display(),
+            ));
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![package];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            execute_release_plan_step(&plan_step("preflight.package"), &mut context)
+                .expect("preflight dispatch")
+                .expect("preflight result");
+            assert!(!counter.exists(), "preflight must not run release.package");
+
+            let result = execute_release_plan_step(&plan_step("package"), &mut context)
+                .expect("package dispatch")
+                .expect("package result");
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(
+                std::fs::read_to_string(&counter).expect("count").trim(),
+                "1"
+            );
+            let durable = context.state.artifacts[0]
+                .durable_path
+                .as_ref()
+                .expect("durable artifact");
+            assert_eq!(
+                std::fs::read(repo.path().join("build/fixture.zip")).expect("source artifact"),
+                std::fs::read(durable).expect("uploaded artifact"),
+            );
+        });
+    }
+
+    #[test]
+    fn final_package_completeness_failure_stops_before_publication() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::create_dir_all(repo.path().join("agents")).expect("agents");
+            std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
+            std::fs::write(repo.path().join("agents/runtime.php"), "<?php\n").expect("runtime");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            configure_git_user(repo.path());
+            run_in(
+                repo.path(),
+                &["git", "add", "plugin.php", "agents/runtime.php"],
+            );
+            run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            let package = package_extension(
+                "mkdir -p build/stage; cp plugin.php build/stage/plugin.php; (cd build && zip -q fixture.zip stage/plugin.php); printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![package];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            let result = execute_release_plan_step(&plan_step("package"), &mut context)
+                .expect("package dispatch")
+                .expect("package result");
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("agents/runtime.php"));
+            assert!(release_step_is_show_stopper(&result));
+        });
+    }
+
+    fn package_extension(command: &str) -> ExtensionManifest {
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Fixture Packager",
+            "version": "1.0.0",
+            "actions": [{
+                "id": "release.package",
+                "label": "Package release",
+                "type": "command",
+                "command": command,
+            }],
+        }))
+        .expect("package extension");
+        extension.id = "fixture-packager".to_string();
+        extension
     }
 
     #[test]

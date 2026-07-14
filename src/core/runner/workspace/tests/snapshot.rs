@@ -510,7 +510,7 @@ fn snapshot_git_sync_materializes_dirty_source_as_synthetic_git_checkout() {
             source.path(),
             &[
                 "remote",
-                "add",
+                "set-url",
                 "origin",
                 "https://github.com/example/app.git",
             ],

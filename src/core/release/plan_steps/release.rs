@@ -389,7 +389,7 @@ fn add_package_preflight_step(
     steps.push(ready_step(
         &step_id,
         "preflight.package",
-        "Validate package tooling",
+        "Validate package guards",
         vec![needs.to_string()],
         StepConfig::new(),
     ));
