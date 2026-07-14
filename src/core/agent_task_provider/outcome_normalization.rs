@@ -33,6 +33,86 @@ fn strip_reserved_artifact_metadata(outcome: &mut AgentTaskOutcome) {
     }
 }
 
+/// Records the actual size of regular files that Homeboy materialized for this
+/// executor. Provider-supplied paths are otherwise treated as untrusted.
+pub(super) fn normalize_homeboy_local_artifact_sizes(
+    outcome: &mut AgentTaskOutcome,
+    artifact_root: &std::path::Path,
+    provenance: &AgentTaskArtifactsPathProvenance,
+) {
+    if provenance.owner != "homeboy" || provenance.locality != "runner" {
+        return;
+    }
+
+    let Ok(artifact_root) = artifact_root.canonicalize() else {
+        return;
+    };
+
+    for artifact in &mut outcome.artifacts {
+        measure_homeboy_local_artifact(artifact, &artifact_root);
+    }
+    for typed_artifact in &mut outcome.typed_artifacts {
+        if let Some(artifact) = &mut typed_artifact.artifact {
+            measure_homeboy_local_artifact(artifact, &artifact_root);
+            if let Some(size_bytes) = artifact.size_bytes {
+                if let Some(payload) = typed_artifact.payload.as_object_mut() {
+                    payload.insert("size_bytes".to_string(), Value::from(size_bytes));
+                }
+            }
+        }
+    }
+
+    if outcome.status == AgentTaskOutcomeStatus::Succeeded && has_known_empty_change_set(outcome) {
+        outcome.status = AgentTaskOutcomeStatus::NoOp;
+        outcome.summary = Some("provider produced an empty change artifact".to_string());
+    }
+}
+
+fn measure_homeboy_local_artifact(
+    artifact: &mut AgentTaskArtifact,
+    artifact_root: &std::path::Path,
+) {
+    let Some(path) = artifact.path.as_deref() else {
+        return;
+    };
+    let path = std::path::Path::new(path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        artifact_root.join(path)
+    };
+    let Ok(path) = path.canonicalize() else {
+        return;
+    };
+    if !path.starts_with(artifact_root) {
+        return;
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.is_file() {
+        artifact.size_bytes = Some(metadata.len());
+    }
+}
+
+fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
+    let changes = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            matches!(
+                artifact.kind.as_str(),
+                "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+            )
+        })
+        .collect::<Vec<_>>();
+
+    !changes.is_empty()
+        && changes
+            .iter()
+            .all(|artifact| artifact.size_bytes == Some(0))
+}
+
 fn normalize_provider_result_contract(
     outcome: &mut AgentTaskOutcome,
     provider: &AgentTaskExecutorProvider,

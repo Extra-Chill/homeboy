@@ -174,6 +174,18 @@ pub(crate) fn promote_with_provider(
         applied_worktree_path.as_deref(),
     );
     let operator_notification = promotion_notification(gates.status, &target);
+    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
+        applied_worktree_path
+            .as_deref()
+            .map(|path| {
+                crate::core::agent_task_promotion::candidate_fingerprint(
+                    &path.display().to_string(),
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
 
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -196,6 +208,7 @@ pub(crate) fn promote_with_provider(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "candidate": candidate,
         }),
         operator_notification,
     })

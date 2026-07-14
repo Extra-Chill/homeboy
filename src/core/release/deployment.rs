@@ -144,6 +144,7 @@ fn release_deployment_config(component_id: &str, expected_version: Option<&str>)
         force: true,
         skip_build: false,
         keep_deps: false,
+        skip_deps_hydration: false,
         expected_version: expected_version.map(str::to_string),
         no_pull: false,
         head: false,

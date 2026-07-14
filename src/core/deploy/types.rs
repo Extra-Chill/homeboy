@@ -69,6 +69,8 @@ pub struct DeployConfig {
     pub skip_build: bool,
     /// Keep build dependencies (skip cleanup even when auto_cleanup is enabled)
     pub keep_deps: bool,
+    /// Skip dependency hydration before building an exact-ref checkout.
+    pub skip_deps_hydration: bool,
     /// Assert expected version before deploying (abort if mismatch)
     pub expected_version: Option<String>,
     /// Skip auto-pulling latest changes before deploy
@@ -95,6 +97,7 @@ impl DeployConfig {
             force: false,
             skip_build: true,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: true,
             head: true,

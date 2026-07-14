@@ -29,6 +29,12 @@ pub(crate) struct DetectorProfileDefaults {
     pub version_guard_constants: Vec<String>,
     #[serde(default)]
     pub version_guard_regexes: Vec<String>,
+    /// Language tokens whose files are eligible for version-compare guard
+    /// scanning. `version_compare(...)` syntax is ecosystem-specific (e.g.
+    /// PHP), so the concrete token set is extension-provided rather than baked
+    /// into core (#2240 / #6759).
+    #[serde(default)]
+    pub version_guard_languages: Vec<String>,
     #[serde(default)]
     pub tracker_reference_regexes: Vec<String>,
 }
@@ -204,6 +210,9 @@ mod tests {
 
         assert!(profile.version_guard_constants.is_empty());
         assert!(profile.version_guard_regexes.is_empty());
+        // No ecosystem language token (e.g. "php") baked into core — the
+        // version-guard language set is extension-provided (#2240 / #6759).
+        assert!(profile.version_guard_languages.is_empty());
         assert!(profile.tracker_reference_regexes.is_empty());
     }
 

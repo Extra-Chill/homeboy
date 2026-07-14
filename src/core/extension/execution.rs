@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn build_capability_env_includes_extension_provider_output() {
-        let extension = tempfile::tempdir().expect("extension dir");
+        let extension = crate::test_support::exec_capable_tempdir();
         let component = tempfile::tempdir().expect("component dir");
         let extension_id = extension.path().file_name().unwrap().to_string_lossy();
         std::fs::write(
@@ -995,7 +995,7 @@ mod tests {
         // manual operator injection — even when the env provider does not
         // re-resolve the value in the fresh capability process.
         crate::test_support::with_isolated_home(|_| {
-            let extension = tempfile::tempdir().expect("extension dir");
+            let extension = crate::test_support::exec_capable_tempdir();
             let component = tempfile::tempdir().expect("component dir");
             let extension_id = extension.path().file_name().unwrap().to_string_lossy();
             // No env provider script: the only source of the runtime env is the
@@ -1040,7 +1040,7 @@ mod tests {
         // value and a live provider value exist for the same key, the live
         // value must win so a rebuilt runner checkout is honored.
         crate::test_support::with_isolated_home(|_| {
-            let extension = tempfile::tempdir().expect("extension dir");
+            let extension = crate::test_support::exec_capable_tempdir();
             let component = tempfile::tempdir().expect("component dir");
             let extension_id = extension.path().file_name().unwrap().to_string_lossy();
             std::fs::write(

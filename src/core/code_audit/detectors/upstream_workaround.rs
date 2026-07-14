@@ -87,11 +87,11 @@ const DEFAULT_MARKER_REGEXES: &[&str] = &[
 // Tier B — version-compare guard catalogue
 // ============================================================================
 
-// Recognized version-constant names and guard regexes are ecosystem-specific
-// (constant naming + comparison syntax), so core ships none of them as Rust
-// literals. Component or external defaults configuration supplies those values
-// when needed (#2240). Version-guard language gating likewise lives in the
-// agnostic conventions home (`builtin_version_guard_tokens`).
+// Recognized version-constant names, guard regexes, and the language tokens
+// eligible for version-compare scanning are all ecosystem-specific (constant
+// naming, comparison syntax, and which languages use it), so core ships none of
+// them as Rust literals. Component or external defaults configuration supplies
+// those values when needed (#2240 / #6759).
 const DEFAULT_VENDORED_PATH_MARKERS: &[&str] =
     &["/vendor/", "vendor/", "/node_modules/", "node_modules/"];
 
@@ -268,17 +268,16 @@ impl EffectiveDetectorProfile {
                 DetectorRegexKind::TrackerReference,
             );
             profile.extend_strings(
-                Language::builtin_version_guard_tokens(),
-                DetectorProfileField::VersionGuardLanguage,
-            );
-            profile.extend_strings(
                 DEFAULT_VENDORED_PATH_MARKERS,
                 DetectorProfileField::VendoredPathMarker,
             );
 
             // The bundled defaults asset is intentionally empty for these fields;
             // external defaults can still extend builtin profiles without adding
-            // framework literals to core source (#2240).
+            // framework literals to core source (#2240). The version-guard
+            // language token set (`version_compare(...)` is PHP-specific) is
+            // sourced from here too, so no ecosystem token remains in core
+            // (#6759).
             let ext = crate::core::defaults::extension_provided_detector_profile();
             profile.extend_owned_strings(
                 &ext.version_guard_constants,
@@ -286,6 +285,10 @@ impl EffectiveDetectorProfile {
             );
             profile
                 .extend_owned_regexes(&ext.version_guard_regexes, DetectorRegexKind::VersionGuard);
+            profile.extend_owned_strings(
+                &ext.version_guard_languages,
+                DetectorProfileField::VersionGuardLanguage,
+            );
             profile.extend_owned_regexes(
                 &ext.tracker_reference_regexes,
                 DetectorRegexKind::TrackerReference,
@@ -630,6 +633,9 @@ mod tests {
 
         assert!(profile.version_guard_constants.is_empty());
         assert!(profile.version_guard_regexes.is_empty());
+        // The version-guard language gate no longer bakes an ecosystem token
+        // (e.g. "php") into core; it is extension-provided (#2240 / #6759).
+        assert!(profile.version_guard_languages.is_empty());
         assert!(profile
             .tracker_reference_regexes
             .iter()

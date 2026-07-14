@@ -48,6 +48,7 @@ fn review_reports_queued_run_without_chat_state() {
             run_id: "run-review-queued".to_string(),
             to_worktree: None,
             provider_command: None,
+            provider_argv: Vec::new(),
         })
         .expect("review loaded");
 
@@ -79,6 +80,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             run_id: "run-review-completed".to_string(),
             to_worktree: Some("homeboy@fix-review-flow".to_string()),
             provider_command: None,
+            provider_argv: Vec::new(),
         })
         .expect("review loaded");
 
@@ -291,6 +293,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             .expect("clone target");
         assert!(status.success());
         let expected_patch = temp.path().join("expected.patch");
+        let promotion_request = temp.path().join("promotion-request.json");
         std::fs::write(
             &expected_patch,
             "diff --git a/agent-change.txt b/agent-change.txt\nnew file mode 100644\nindex 0000000..f3f8b32\n--- /dev/null\n+++ b/agent-change.txt\n@@ -0,0 +1 @@\n+committed work\n",
@@ -300,7 +303,8 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nset -eu\ncat >/dev/null\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                "#!/bin/sh\nset -eu\ncat > {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                promotion_request.display(),
                 target.display(),
                 expected_patch.display(),
                 target.display(),
@@ -338,8 +342,8 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                 attempt_plan: None,
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
-                provider_command: Some(format!("sh {}", provider.display())),
-                provider_argv: Vec::new(),
+                provider_command: None,
+                provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
@@ -396,5 +400,19 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
             "committed work\n"
         );
+        let request: Value = serde_json::from_str(
+            &std::fs::read_to_string(&promotion_request).expect("read promotion request"),
+        )
+        .expect("typed promotion request");
+        assert_eq!(
+            request["schema"],
+            "homeboy/agent-task-promotion-apply-request/v1"
+        );
+        assert_eq!(request["to_workspace"], "fixture-component@promoted");
+        assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
+        assert!(request["patch"]
+            .as_str()
+            .expect("inline selected patch")
+            .contains("committed work"));
     });
 }

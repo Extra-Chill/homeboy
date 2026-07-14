@@ -102,6 +102,27 @@ fn deploy_parser_accepts_exact_ref() {
 }
 
 #[test]
+fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--skip-deps-hydration",
+    ])
+    .expect("--skip-deps-hydration should parse");
+
+    crate::commands::set_skip_deps_hydration(cli.skip_deps_hydration);
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    let (_, config) = resolve_multi_args(&args).expect("deploy config should resolve");
+    crate::commands::set_skip_deps_hydration(false);
+
+    assert!(config.skip_deps_hydration);
+}
+
+#[test]
 fn deploy_ref_rejects_every_other_source_selector() {
     for conflicting in [
         vec!["--head"],

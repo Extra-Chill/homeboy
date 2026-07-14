@@ -53,6 +53,7 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
         .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
             remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
             head: "abc123".to_string(),
+            changed_since_base: None,
         })
         .restore_owner()
         .command();
@@ -87,6 +88,7 @@ fn workspace_materializer_builds_direct_git_checkout_command() {
         .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
             remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
             head: "abc123".to_string(),
+            changed_since_base: Some("origin/main".to_string()),
         })
         .restore_owner()
         .command();
