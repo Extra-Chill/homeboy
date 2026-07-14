@@ -88,6 +88,13 @@ impl CliRuntime {
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        // Register the config-level artifact_root resolver before any command runs
+        // so paths::artifact_root() can honor global config without paths depending
+        // on the defaults layer (breaks the paths <-> defaults dependency cycle).
+        crate::core::paths::set_config_artifact_root_resolver(|| {
+            crate::core::defaults::load_config().artifact_root
+        });
+
         if is_top_level_version_request(&args) {
             println!("{}", upgrade::current_build_version());
             return std::process::ExitCode::SUCCESS;
