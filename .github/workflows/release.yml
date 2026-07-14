@@ -6,7 +6,6 @@
 #   2. Version bump + changelog generation from conventional commits
 #   3. Cross-platform binary builds via cargo-dist
 #   4. Publish to GitHub Releases, crates.io, and Homebrew
-#   5. Auto-refactor direct commits (post-release, never opens PRs)
 #
 # No human input needed — version is computed from commit types:
 #   fix: → patch, feat: → minor, BREAKING CHANGE → major
@@ -343,66 +342,17 @@ jobs:
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
-  gate-refactor:
-    name: Auto-refactor
-    continue-on-error: true
-    timeout-minutes: 35
-    needs:
-      - check
-      - gate-build
-      - gate-lint
-      - gate-test
-    if: ${{ always() && inputs.release_tag == '' && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-          fetch-depth: 0
-
-      - name: Download homeboy binary
-        uses: actions/download-artifact@v4
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
-
-      - name: Verify homeboy binary present
-        run: |
-          if [ ! -f .homeboy-bin/homeboy ]; then
-            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not an autofix finding. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
-            exit 1
-          fi
-          chmod +x .homeboy-bin/homeboy
-
-      # Rust toolchain needed for cargo fmt (called by lint fixer in autofix)
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        continue-on-error: true
-        with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-
-      # In Homeboy Action, autofix-open-pr gates the non-PR repair transaction.
-      # Only release-blocking commands are repaired in the release path. Audit
-      # remains tracked by gate-audit unless it is explicitly added to
-      # RELEASE_BLOCKING_COMMANDS.
-      - name: Run autofix via homeboy-action
-        uses: Extra-Chill/homeboy-action@v2
-        continue-on-error: true
-        with:
-          binary-path: .homeboy-bin/homeboy
-          commands: ${{ env.RELEASE_BLOCKING_COMMANDS }}
-          expected-commands: review audit,review lint,review test
-          autofix: 'true'
-          autofix-mode: always
-          autofix-open-pr: 'true'
-          execution-timeout-seconds: '1800'
-          app-token: ${{ steps.app-token.outputs.token }}
-
+  # ── Step 3b: Release-blocking quality policy ──
+  # Release preparation is gated by release-quality-policy, not by raw job
+  # failures or generic source auto-refactor. Generic release auto-refactor /
+  # autofix was removed (#8046): the release pipeline no longer mutates source,
+  # opens autofix branches, or creates autofix PRs. Audit baseline consumption
+  # (--changed-since against homeboy.json baselines.audit.known_fingerprints)
+  # and automated categorized issue filing (app-token) are preserved in the
+  # read-only gate jobs. Extension-declared generated-drift maintenance is
+  # preserved as a narrow allowlisted transaction in core
+  # (changes_are_only_drift / drift_file_paths), not as a release-workflow
+  # source-mutation step.
   release-quality-policy:
     name: Release Quality Policy
     needs:
@@ -824,7 +774,6 @@ jobs:
       - gate-audit
       - gate-lint
       - gate-test
-      - gate-refactor
       - release-quality-policy
       - prepare
       - plan
@@ -854,7 +803,6 @@ jobs:
       - gate-audit
       - gate-lint
       - gate-test
-      - gate-refactor
       - release-quality-policy
       - prepare
       - plan

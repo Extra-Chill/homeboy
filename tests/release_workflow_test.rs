@@ -49,17 +49,62 @@ fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
 }
 
 #[test]
-fn release_refactor_gate_enables_non_pr_repair_path() {
-    let gate_refactor = job_section(release_workflow(), "gate-refactor");
+fn release_workflow_has_no_generic_source_autofix() {
+    let workflow = release_workflow();
 
-    assert!(gate_refactor.contains("commands: ${{ env.RELEASE_BLOCKING_COMMANDS }}"));
-    assert!(gate_refactor.contains("autofix: 'true'"));
-    assert!(gate_refactor.contains("autofix-mode: always"));
-    assert!(gate_refactor.contains("Only release-blocking commands are repaired"));
-    assert!(gate_refactor.contains("autofix-open-pr: 'true'"));
-    assert!(gate_refactor.contains("continue-on-error: true"));
-    assert!(gate_refactor.contains("timeout-minutes: 35"));
-    assert!(gate_refactor.contains("execution-timeout-seconds: '1800'"));
+    // Generic release auto-refactor / autofix was removed (#8046). The release
+    // pipeline must not mutate source, open autofix branches, or create
+    // autofix PRs. The gate-refactor job, the autofix action inputs, and the
+    // `refactor --from all` broad source-sweep command must all be absent.
+    assert!(
+        !workflow.contains("gate-refactor"),
+        "release workflow must not contain a gate-refactor job"
+    );
+    assert!(
+        !workflow.contains("autofix: 'true'"),
+        "release workflow must not enable generic source autofix"
+    );
+    assert!(
+        !workflow.contains("autofix-mode: always"),
+        "release workflow must not run autofix in always mode"
+    );
+    assert!(
+        !workflow.contains("autofix-open-pr: 'true'"),
+        "release workflow must not create autofix PRs"
+    );
+    assert!(
+        !workflow.contains("refactor --from all"),
+        "release workflow must not run a broad refactor --from all sweep"
+    );
+}
+
+#[test]
+fn release_workflow_declared_drift_maintenance_is_narrow_not_generic() {
+    let workflow = release_workflow();
+
+    // The only code path that can push generated drift to the base branch is
+    // the narrow allowlisted transaction in core
+    // (changes_are_only_drift / drift_file_paths), which gates on
+    // extension-declared lockfile_paths + the audit baseline (homeboy.json).
+    // The release workflow must not widen this into generic source mutation:
+    // every quality gate must run read-only (autofix disabled) so that no
+    // authored source fix is produced for the transaction to route.
+    for job in ["gate-audit", "gate-lint", "gate-test"] {
+        let section = job_section(workflow, job);
+        assert!(
+            section.contains("autofix: 'false'"),
+            "{job} must run read-only (autofix disabled) so only declared generated drift can be maintained"
+        );
+    }
+
+    // The release workflow has no other writable action invocation. Generated
+    // drift remains owned by the core allowlist, rather than a workflow-level
+    // repair action that could stage authored source files.
+    assert_eq!(
+        workflow.matches("autofix:").count(),
+        3,
+        "only the three read-only quality gates may declare autofix behavior"
+    );
 }
 
 #[test]
@@ -128,6 +173,23 @@ fn release_audit_is_advisory_without_losing_raw_failure_outcome() {
 }
 
 #[test]
+fn release_audit_preserves_changed_since_baseline_consumption() {
+    let gate_audit = job_section(release_workflow(), "gate-audit");
+
+    // Audit baseline consumption is preserved (#8046): the changed-since
+    // comparison reads homeboy.json baselines.audit.known_fingerprints from
+    // the merge-base so only newly-introduced audit findings are reported.
+    assert!(
+        gate_audit.contains("--changed-since"),
+        "gate-audit must consume the audit baseline via --changed-since"
+    );
+    assert!(
+        gate_audit.contains("app-token"),
+        "gate-audit must retain app-token for automated categorized issue filing"
+    );
+}
+
+#[test]
 fn release_ci_disables_homeboy_update_checks() {
     assert!(release_workflow().contains("HOMEBOY_NO_UPDATE_CHECK: '1'"));
 }
@@ -153,21 +215,14 @@ fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
 }
 
 #[test]
-fn release_prepare_waits_for_command_policy_not_raw_audit_or_refactor() {
-    let gate_refactor = job_section(release_workflow(), "gate-refactor");
+fn release_prepare_waits_for_command_policy_not_raw_gates() {
     let prepare = job_section(release_workflow(), "prepare");
 
+    // gate-refactor was removed (#8046); prepare must never reference it.
     assert!(
-        !gate_refactor.contains("- gate-audit"),
-        "gate-refactor should not wait on tracked-only audit by default"
+        !prepare.contains("- gate-refactor"),
+        "prepare must not wait on the removed gate-refactor job"
     );
-
-    for gate in ["gate-lint", "gate-test"] {
-        assert!(
-            gate_refactor.contains(&format!("- {gate}")),
-            "gate-refactor should inspect the read-only {gate} result for advisory repair"
-        );
-    }
 
     for gate in ["gate-audit", "gate-lint", "gate-test"] {
         assert!(
@@ -177,7 +232,6 @@ fn release_prepare_waits_for_command_policy_not_raw_audit_or_refactor() {
     }
 
     assert!(prepare.contains("- release-quality-policy"));
-    assert!(!prepare.contains("- gate-refactor"));
     assert!(prepare.contains("needs.release-quality-policy.result == 'success'"));
     assert!(prepare.contains("inputs.release_tag != ''"));
 }
