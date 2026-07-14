@@ -19,8 +19,8 @@ use super::super::{
 };
 use super::git::{git_snapshot, materialize_git, materialize_git_from_controller_bundle};
 use super::snapshot::{
-    effective_snapshot_excludes, local_snapshot_stats, materialize_snapshot,
-    materialize_snapshot_git, snapshot_identity,
+    effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
+    local_snapshot_stats, materialize_snapshot, materialize_snapshot_git, snapshot_identity,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -85,6 +85,7 @@ pub fn sync_workspace(
 
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
+            ensure_no_runner_workspace_metadata_collision(&local_path)?;
             let snapshot = snapshot_identity(&local_path, &excludes, &includes)?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(
