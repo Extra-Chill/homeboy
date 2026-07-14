@@ -1051,11 +1051,11 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_fails_closed_for_legacy_lab_metadata_without_content_hash() {
+    fn canonical_trace_fails_closed_for_snapshot_lab_metadata_without_workspace_verification() {
         let (_source, remote, snapshot, mut lab) = lab_snapshot_fixture();
         lab.as_object_mut()
             .unwrap()
-            .remove("workspace_content_hash");
+            .remove("workspace_verification");
         let mut reasons = Vec::new();
 
         let check = validate_managed_lab_snapshot(
@@ -1070,7 +1070,7 @@ mod tests {
         assert!(check.is_none());
         assert!(reasons
             .iter()
-            .any(|reason| reason.contains("missing workspace content hash")));
+            .any(|reason| reason.contains("missing workspace verification metadata")));
     }
 
     #[test]
@@ -1273,6 +1273,17 @@ mod tests {
             "source_snapshot": snapshot,
             "workspace_content_hash": workspace_content_hash,
             "workspace_materialization_plan": { "identity": "workspace:verified" },
+            "workspace_verification": {
+                "schema": "homeboy/lab-workspace-verification/v1",
+                "identity": "workspace:verified",
+                "content_hash": workspace_content_hash,
+                "sync_excludes": [".git", ".git/**"],
+                "source_snapshot": snapshot,
+                "primary_workspace": {
+                    "identity": "workspace:verified",
+                    "remote_path": remote.path().display().to_string(),
+                },
+            },
         });
         let snapshot = serde_json::from_value(lab["source_snapshot"].clone()).unwrap();
         (source, remote, snapshot, lab)

@@ -198,6 +198,165 @@ fn lab_offload_env_contains_workspace_mapping_metadata() {
 }
 
 #[test]
+fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() {
+    let source = tempfile::tempdir().expect("source workspace");
+    let remote = tempfile::tempdir().expect("materialized workspace");
+    std::fs::write(source.path().join("README.md"), "verified contents\n").expect("source file");
+    std::fs::write(remote.path().join("README.md"), "verified contents\n").expect("remote file");
+    std::fs::write(source.path().join("excluded.txt"), "controller only\n").expect("excluded file");
+
+    let source_path = source.path().canonicalize().expect("canonical source");
+    let remote_path = remote.path().canonicalize().expect("canonical remote");
+    let snapshot = SourceSnapshot {
+        runner_id: "lab".to_string(),
+        local_path: Some(source_path.display().to_string()),
+        remote_path: Some(remote_path.display().to_string()),
+        workspace_root: Some(source_path.display().to_string()),
+        git_branch: Some("main".to_string()),
+        git_sha: Some("a".repeat(40)),
+        dirty: false,
+        sync_mode: "lab_offload".to_string(),
+        workspace_snapshot_identity: Some("snapshot:verified".to_string()),
+        snapshot_hash: "sha256:verified".to_string(),
+        synced_at: "2026-07-14T00:00:00Z".to_string(),
+        sync_excludes: vec!["excluded.txt".to_string()],
+    };
+    let synced_workspace = primary_synced_workspace(&source_path, &remote_path);
+    let path_materialization_plan = PathMaterializationPlan::new([PathMaterializationEntry::new(
+        "primary",
+        PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+        Some(source_path.display().to_string()),
+        remote_path.display().to_string(),
+        PATH_MATERIALIZATION_MODE_SNAPSHOT,
+        PATH_MATERIALIZATION_STATUS_MATERIALIZED,
+    )]);
+    let mut plan = base_lab_plan(None);
+    plan.steps.push(
+        crate::core::plan::PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
+            .inputs(crate::core::plan::PlanValues::new().string("mode", "snapshot"))
+            .build(),
+    );
+    let mut metadata = crate::core::runner::lab_offload_metadata(
+        &plan,
+        "explicit",
+        Some("lab"),
+        Some("reverse"),
+        "offloaded",
+        Some(&remote_path.display().to_string()),
+        None,
+    );
+    attach_lab_workspace_metadata(
+        &mut metadata,
+        LabWorkspaceMetadataInputs {
+            source_snapshot: &snapshot,
+            legacy_path_materialization_plan: &path_materialization_plan,
+            primary_synced_workspace: &synced_workspace,
+        },
+    )
+    .expect("build verifier metadata");
+
+    let env = build_lab_offload_env(&metadata);
+    let prior_lab = std::env::var(LAB_OFFLOAD_METADATA_ENV).ok();
+    let prior_snapshot = std::env::var(SOURCE_SNAPSHOT_METADATA_ENV).ok();
+    std::env::set_var(
+        LAB_OFFLOAD_METADATA_ENV,
+        env.get(LAB_OFFLOAD_METADATA_ENV)
+            .expect("Lab metadata process env"),
+    );
+    std::env::set_var(
+        SOURCE_SNAPSHOT_METADATA_ENV,
+        serde_json::to_string(&snapshot).expect("source snapshot process env"),
+    );
+
+    let verified = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
+        .expect("verifier accepts hydrated Lab process metadata");
+    assert_eq!(verified.workspace_identity, "snapshot:verified");
+    assert_eq!(
+        metadata["workspace_verification"]["identity"],
+        "snapshot:verified"
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["sync_excludes"],
+        serde_json::json!(["excluded.txt"])
+    );
+    assert_eq!(
+        metadata["workspace_materialization_plan"],
+        serde_json::to_value(&path_materialization_plan).expect("legacy plan JSON")
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["primary_workspace"],
+        serde_json::to_value(&synced_workspace.materialization_plan)
+            .expect("primary sync plan JSON")
+    );
+
+    match prior_lab {
+        Some(value) => std::env::set_var(LAB_OFFLOAD_METADATA_ENV, value),
+        None => std::env::remove_var(LAB_OFFLOAD_METADATA_ENV),
+    }
+    match prior_snapshot {
+        Some(value) => std::env::set_var(SOURCE_SNAPSHOT_METADATA_ENV, value),
+        None => std::env::remove_var(SOURCE_SNAPSHOT_METADATA_ENV),
+    }
+}
+
+fn primary_synced_workspace(
+    local_path: &std::path::Path,
+    remote_path: &std::path::Path,
+) -> RunnerWorkspaceSyncOutput {
+    let local_path = local_path.display().to_string();
+    let remote_path = remote_path.display().to_string();
+    RunnerWorkspaceSyncOutput {
+        variant: "workspace_sync",
+        command: "runner.workspace.sync",
+        runner_id: "lab".to_string(),
+        local_path: local_path.clone(),
+        remote_path: remote_path.clone(),
+        materialization_plan: RunnerWorkspaceMaterializationPlan::from_test_parts(
+            "/srv/homeboy",
+            &local_path,
+            "app",
+            &remote_path,
+            RunnerWorkspaceSyncMode::Snapshot,
+            "snapshot:verified",
+        ),
+        current_workspace: crate::core::runner::RunnerWorkspaceCurrentSummary {
+            local_path: local_path.clone(),
+            remote_path: remote_path.clone(),
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            materialized: true,
+            source_commit: None,
+            source_ref: None,
+            source_dirty: None,
+            synthetic_checkout_commit: None,
+        },
+        workspace_lease: crate::core::runner::RunnerWorkspaceLease {
+            runner_id: "lab".to_string(),
+            local_path: local_path.clone(),
+            remote_path: remote_path.clone(),
+            sync_mode: "snapshot".to_string(),
+            materialized: true,
+            lifecycle_owner: crate::core::runner::RunnerLifecycleOwner::Controller,
+            source_commit: None,
+            source_ref: None,
+            source_dirty: None,
+        },
+        resource_lifecycle: crate::core::runner::workspace_resource_lifecycle(
+            "lab",
+            &remote_path,
+            None,
+            crate::core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnSuccess,
+        ),
+        sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+        snapshot_identity: "snapshot:verified".to_string(),
+        counts: crate::core::runner::ByteFileCounts::default(),
+        excludes: vec!["excluded.txt".to_string()],
+        includes: Vec::new(),
+        workspace_cleanliness: "snapshot_unique_workspace".to_string(),
+        validation_dependencies: Vec::new(),
+    }
+}
+
+#[test]
 fn materialization_proof_records_hashes_source_and_runner_identity() {
     let source_snapshot = SourceSnapshot {
         runner_id: "lab".to_string(),

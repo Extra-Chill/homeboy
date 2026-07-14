@@ -69,18 +69,9 @@ pub(crate) fn verify_lab_workspace(
         .get("sync_mode")
         .and_then(|value| value.as_str())
         .ok_or("is missing materialization mode")?;
-    let expected_content_hash = lab
-        .get("workspace_content_hash")
-        .and_then(|value| value.as_str())
-        .ok_or("is missing workspace content hash")?;
     let lab_snapshot = lab
         .get("source_snapshot")
         .ok_or("is missing source snapshot evidence")?;
-    let plan_identity = lab
-        .get("workspace_materialization_plan")
-        .and_then(|value| value.get("identity"))
-        .and_then(|value| value.as_str())
-        .ok_or("is missing workspace materialization identity")?;
 
     if snapshot.sync_mode != LAB_SOURCE_SNAPSHOT_SYNC_MODE {
         return Err(format!(
@@ -117,11 +108,66 @@ pub(crate) fn verify_lab_workspace(
     if lab.get("status").and_then(|value| value.as_str()) != Some("offloaded") {
         return Err("dispatch status is not `offloaded`".to_string());
     }
-    if workspace_identity != plan_identity {
-        return Err("workspace identity does not match materialization plan".to_string());
-    }
     if serde_json::to_value(&snapshot).ok().as_ref() != Some(lab_snapshot) {
         return Err("source snapshot does not match Lab dispatch evidence".to_string());
+    }
+    let verification = lab.get("workspace_verification");
+    let (expected_content_hash, verification_identity) = match verification {
+        Some(verification) => {
+            if verification.get("schema").and_then(|value| value.as_str())
+                != Some("homeboy/lab-workspace-verification/v1")
+            {
+                return Err("has an unsupported workspace verification schema".to_string());
+            }
+            let identity = verification
+                .get("identity")
+                .and_then(|value| value.as_str())
+                .ok_or("is missing workspace verification identity")?;
+            let content_hash = verification
+                .get("content_hash")
+                .and_then(|value| value.as_str())
+                .ok_or("is missing workspace verification content hash")?;
+            let excludes = verification
+                .get("sync_excludes")
+                .ok_or("is missing workspace verification sync excludes")?;
+            if excludes != &serde_json::json!(snapshot.sync_excludes) {
+                return Err("sync excludes do not match workspace verification".to_string());
+            }
+            if verification.get("source_snapshot") != Some(lab_snapshot) {
+                return Err("source snapshot does not match workspace verification".to_string());
+            }
+            let primary_workspace = verification
+                .get("primary_workspace")
+                .ok_or("is missing workspace verification primary workspace")?;
+            if primary_workspace
+                .get("identity")
+                .and_then(|value| value.as_str())
+                != Some(identity)
+                || primary_workspace
+                    .get("remote_path")
+                    .and_then(|value| value.as_str())
+                    != Some(recorded_remote_path)
+            {
+                return Err("primary workspace does not match workspace verification".to_string());
+            }
+            (content_hash, identity)
+        }
+        None if materialization_mode == "git" => {
+            let content_hash = lab
+                .get("workspace_content_hash")
+                .and_then(|value| value.as_str())
+                .ok_or("is missing workspace content hash")?;
+            let identity = lab
+                .get("workspace_materialization_plan")
+                .and_then(|value| value.get("identity"))
+                .and_then(|value| value.as_str())
+                .ok_or("is missing workspace materialization identity")?;
+            (content_hash, identity)
+        }
+        None => return Err("is missing workspace verification metadata".to_string()),
+    };
+    if workspace_identity != verification_identity {
+        return Err("workspace identity does not match workspace verification".to_string());
     }
     let actual_content_hash =
         workspace_content_hash(materialized_workspace_path, &snapshot.sync_excludes)

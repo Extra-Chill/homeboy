@@ -2,6 +2,7 @@
 //! rig component path overrides, and the stale-runner-homeboy error.
 
 use super::*;
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
 #[cfg(test)]
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 use std::path::{Path, PathBuf};
@@ -569,6 +570,43 @@ pub(crate) fn lab_materialization_proof_metadata(
         "workspace_mapping": workspace_mapping,
         "rigs": synced_rigs,
     })
+}
+
+/// The two workspace plans intentionally have distinct types: the path plan is
+/// legacy dispatch metadata, while the synced workspace binds verification.
+pub(crate) struct LabWorkspaceMetadataInputs<'a> {
+    pub(crate) source_snapshot: &'a SourceSnapshot,
+    pub(crate) legacy_path_materialization_plan: &'a PathMaterializationPlan,
+    pub(crate) primary_synced_workspace: &'a RunnerWorkspaceSyncOutput,
+}
+
+/// Add verification metadata without changing the registered path-materialization
+/// metadata shape consumed by existing dispatch clients.
+pub(crate) fn attach_lab_workspace_metadata(
+    lab_metadata: &mut serde_json::Value,
+    inputs: LabWorkspaceMetadataInputs<'_>,
+) -> Result<()> {
+    let source_snapshot = inputs.source_snapshot;
+    let primary_workspace_plan = &inputs.primary_synced_workspace.materialization_plan;
+    let content_hash = crate::core::runner::workspace_content_hash(
+        Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
+        &source_snapshot.sync_excludes,
+    )?;
+    lab_metadata["source_snapshot"] =
+        serde_json::to_value(source_snapshot).unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_content_hash"] = serde_json::json!(content_hash);
+    lab_metadata["workspace_materialization_plan"] =
+        serde_json::to_value(inputs.legacy_path_materialization_plan)
+            .unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_verification"] = serde_json::json!({
+        "schema": "homeboy/lab-workspace-verification/v1",
+        "identity": primary_workspace_plan.identity,
+        "content_hash": content_hash,
+        "sync_excludes": source_snapshot.sync_excludes,
+        "source_snapshot": source_snapshot,
+        "primary_workspace": primary_workspace_plan,
+    });
+    Ok(())
 }
 
 pub(crate) fn lab_runtime_dependency_manifest_metadata(
