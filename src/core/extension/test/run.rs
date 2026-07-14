@@ -965,7 +965,7 @@ mod tests {
     use super::*;
     use crate::core::component::ComponentScriptsConfig;
     use crate::core::extension::test::TestFailure;
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{exec_capable_tempdir, with_isolated_home};
 
     fn run_git(dir: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
@@ -1167,7 +1167,10 @@ mod tests {
     #[test]
     fn declared_result_parser_script_normalizes_provider_json() {
         with_isolated_home(|_| {
-            let temp_dir = tempfile::tempdir().expect("temp dir");
+            // Use an exec-capable tempdir: these tests write a parser script
+            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
+            // would fail with exit 126 regardless of the behavior under test.
+            let temp_dir = exec_capable_tempdir();
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
@@ -1340,7 +1343,10 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
         // is globally serialized against env-mutating tests instead of racing
         // them under default parallelism (#6760, #6804).
         with_isolated_home(|_| {
-            let temp_dir = tempfile::tempdir().expect("temp dir");
+            // Use an exec-capable tempdir: these tests write a parser script
+            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
+            // would fail with exit 126 regardless of the behavior under test.
+            let temp_dir = exec_capable_tempdir();
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
@@ -1410,7 +1416,10 @@ exit 23
     #[test]
     fn declared_result_parser_accepts_flat_count_stdout_json() {
         with_isolated_home(|_| {
-            let temp_dir = tempfile::tempdir().expect("temp dir");
+            // Use an exec-capable tempdir: these tests write a parser script
+            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
+            // would fail with exit 126 regardless of the behavior under test.
+            let temp_dir = exec_capable_tempdir();
             let extension_dir = temp_dir.path().join("extension");
             std::fs::create_dir_all(&extension_dir).expect("extension dir");
             let parser_script = extension_dir.join("parse-results.sh");
@@ -1474,7 +1483,10 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
 
     #[test]
     fn declared_result_parser_rejects_malformed_successful_stdout_json() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
+        // Exec-capable tempdir: this test runs the parser script, so a
+        // `noexec` $TMPDIR would fail with exit 126 before reaching the
+        // malformed-JSON assertion under test.
+        let temp_dir = exec_capable_tempdir();
         let extension_dir = temp_dir.path().join("extension");
         std::fs::create_dir_all(&extension_dir).expect("extension dir");
         let parser_script = extension_dir.join("parse-results.sh");
