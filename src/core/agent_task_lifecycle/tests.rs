@@ -122,40 +122,47 @@ fn active_pinned_run_blocks_controller_binary_replacement() {
 #[test]
 fn detached_lab_handoff_persists_inspectable_running_record() {
     with_isolated_home(|_| {
-        let record = record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "agent-task-detached",
-            runner_id: "homeboy-lab",
-            runner_job_id: "job-123",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &[
+        for (run_id, handoff) in [
+            ("agent-task-detached-cook", "cook"),
+            ("agent-task-detached-batch", "cook-batch"),
+            ("agent-task-detached-retry", "run-plan"),
+        ] {
+            let command = vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
-                "cook".to_string(),
-            ],
-        })
-        .expect("detached handoff recorded");
+                handoff.to_string(),
+            ];
+            let record = record_detached_lab_run(DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "job-123",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            })
+            .expect("detached handoff recorded");
 
-        let loaded = status("agent-task-detached").expect("status resolves");
-        let log = logs("agent-task-detached").expect("logs resolve");
-        let artifacts = artifacts("agent-task-detached").expect("artifacts resolve");
+            let loaded = status(run_id).expect("status resolves");
+            let log = logs(run_id).expect("logs resolve");
+            let artifacts = artifacts(run_id).expect("artifacts resolve");
 
-        assert_eq!(record.run_id, "agent-task-detached");
-        assert_eq!(loaded.state, AgentTaskRunState::Running);
-        assert_eq!(loaded.tasks[0].state, AgentTaskState::Running);
-        assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
-        assert_eq!(loaded.metadata["runner_job_id"], "job-123");
-        assert!(loaded.metadata.get("stale_running").is_none());
-        assert!(loaded.lifecycle.heartbeat.is_some());
-        assert_eq!(
-            loaded
-                .lifecycle
-                .heartbeat
-                .as_ref()
-                .map(|heartbeat| heartbeat.last_seen_at.as_str()),
-            loaded.updated_at.as_deref()
-        );
-        assert_eq!(log.events.len(), 1);
-        assert!(artifacts.evidence_refs.is_empty());
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(loaded.state, AgentTaskRunState::Running);
+            assert_eq!(loaded.tasks[0].state, AgentTaskState::Running);
+            assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
+            assert_eq!(loaded.metadata["runner_job_id"], "job-123");
+            assert!(loaded.metadata.get("stale_running").is_none());
+            assert!(loaded.lifecycle.heartbeat.is_some());
+            assert_eq!(
+                loaded
+                    .lifecycle
+                    .heartbeat
+                    .as_ref()
+                    .map(|heartbeat| heartbeat.last_seen_at.as_str()),
+                loaded.updated_at.as_deref()
+            );
+            assert_eq!(log.events.len(), 1);
+            assert!(artifacts.evidence_refs.is_empty());
+        }
     });
 }
 
