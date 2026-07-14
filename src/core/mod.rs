@@ -110,7 +110,9 @@ pub mod matrix_artifact_summary;
 pub mod notification_route;
 pub mod notify;
 pub mod observation;
-pub mod output;
+// output moved to the internal `homeboy-output` crate. Re-exported so existing
+// `crate::core::output::*` call sites keep working unchanged.
+pub use homeboy_output as output;
 pub(crate) mod ownership;
 pub mod performance_hotspots;
 pub mod phase_timing;

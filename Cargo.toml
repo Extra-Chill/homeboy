@@ -38,6 +38,7 @@ path = "src/bin/bench-audit-self.rs"
 [dependencies]
 # Internal workspace crates (path-only, not published)
 homeboy-error = { path = "crates/homeboy-error" }
+homeboy-output = { path = "crates/homeboy-output" }
 homeboy-product-identity = { path = "crates/homeboy-product-identity" }
 homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
 homeboy-redaction = { path = "crates/homeboy-redaction" }
