@@ -36,6 +36,7 @@ fn request_round_trips_generic_agent_task_shape() {
             base_ref: None,
             task_url: None,
             cleanup: None,
+            attempt: None,
             materialization: json!({ "component": "repo" }),
         },
         component_contracts: Vec::new(),
@@ -70,6 +71,31 @@ fn request_round_trips_generic_agent_task_shape() {
 
     assert_eq!(decoded, request);
     assert_eq!(decoded.schema, AGENT_TASK_REQUEST_SCHEMA);
+}
+
+#[test]
+fn attempt_workspace_identity_and_adoption_round_trip_for_lab_rematerialization() {
+    let attempt = AgentTaskAttemptWorkspace {
+        identity: "attempt-7f3c".to_string(),
+        base_ref: "9f4d".to_string(),
+        base_fingerprint: "sha256:base".to_string(),
+        adoption: Some(AgentTaskCandidateAdoption {
+            source_attempt: "attempt-1a2b".to_string(),
+            patch_path: "/artifacts/candidate.patch".to_string(),
+            patch_fingerprint: "sha256:patch".to_string(),
+            provider_backend: "provider-a".to_string(),
+            provider_model: Some("model-a".to_string()),
+            decision: "continue verified candidate".to_string(),
+        }),
+    };
+
+    let encoded = serde_json::to_value(&attempt).expect("serialize attempt workspace");
+    let decoded: AgentTaskAttemptWorkspace =
+        serde_json::from_value(encoded.clone()).expect("deserialize attempt workspace");
+
+    assert_eq!(decoded, attempt);
+    assert_eq!(encoded["identity"], "attempt-7f3c");
+    assert_eq!(encoded["adoption"]["source_attempt"], "attempt-1a2b");
 }
 
 #[test]

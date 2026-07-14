@@ -628,9 +628,9 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn expire_timed_out_tasks<E>(
         running: &mut Vec<RunningTask>,
-        quarantined: &mut Vec<QuarantinedTask>,
-        outcomes: &mut Vec<AgentTaskOutcome>,
-        events: &mut Vec<AgentTaskProgressEvent>,
+        _quarantined: &mut Vec<QuarantinedTask>,
+        _outcomes: &mut Vec<AgentTaskOutcome>,
+        _events: &mut Vec<AgentTaskProgressEvent>,
         executor: &E,
     ) where
         E: AgentTaskExecutorAdapter,
@@ -649,27 +649,14 @@ impl AgentTaskScheduleSupport {
                 continue;
             }
 
-            let task = running.remove(index);
-            executor.cancel(&task.task_id);
-            let mut outcome = Self::timeout_outcome(
-                task.task_id.clone(),
-                task.timeout_ms.unwrap_or_default(),
-                Some(&task.request),
-                "scheduler_timeout",
-            );
-            if let Err(error) = super::harvest_uncommitted_patch(&mut outcome, &task) {
-                outcome = super::committed_harvest_failure(outcome, error);
+            let task = &mut running[index];
+            if !task.timeout_cancel_requested {
+                executor.cancel(&task.task_id);
+                task.timeout_cancel_requested = true;
             }
-            events.push(event(
-                &task.task_id,
-                Self::state_for_outcome(&outcome),
-                task.attempt,
-                outcome.summary.clone(),
-            ));
-            outcomes.push(outcome);
-            quarantined.push(QuarantinedTask {
-                workspace_key: task.workspace_key,
-            });
+            // Keep the task and its Arc-owned checkout until TaskResult arrives.
+            // This is the join acknowledgement boundary for race-safe harvesting.
+            index += 1;
         }
     }
 

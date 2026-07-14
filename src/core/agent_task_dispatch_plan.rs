@@ -210,6 +210,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                     .and_then(|target| target.base_ref.clone()),
                 task_url: request.task_url.clone(),
                 cleanup: Some("preserve".to_string()),
+                attempt: None,
                 materialization: dispatch_workspace_materialization(
                     workspace_target.as_ref(),
                     &repo,

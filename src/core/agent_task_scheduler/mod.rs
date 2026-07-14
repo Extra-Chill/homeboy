@@ -5,6 +5,8 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
@@ -122,6 +124,7 @@ where
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
+                    task_base_sha: None,
                 }
             })
             .collect();
@@ -377,7 +380,10 @@ where
                         continue;
                     }
                 };
-                let task_base_sha = harvest_preflight.base_sha;
+                let task_base_sha = scheduled
+                    .task_base_sha
+                    .clone()
+                    .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
                 let attempt_workspace =
                     match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
@@ -472,6 +478,7 @@ where
                     attempt,
                     started_at: Instant::now(),
                     timeout_ms: Some(task_timeout_ms),
+                    timeout_cancel_requested: false,
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     candidate_artifacts: scheduled.candidate_artifacts,
@@ -485,8 +492,6 @@ where
                 });
 
                 thread::spawn(move || {
-                    // A scheduler timeout does not join this thread. Retain the
-                    // isolated checkout until the executor has actually stopped.
                     let _attempt_workspace = attempt_workspace;
                     let outcome = executor.execute(request, context);
                     let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
@@ -511,6 +516,7 @@ where
 
             let wait_timeout = running
                 .iter()
+                .filter(|task| !task.timeout_cancel_requested)
                 .filter_map(|task| {
                     task.timeout_ms
                         .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
@@ -544,6 +550,23 @@ where
                     }
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
+                    let mut outcome = outcome;
+                    if running_task.timeout_cancel_requested
+                        && !outcome.artifacts.iter().any(is_actionable_patch_artifact)
+                    {
+                        // Cancellation was requested at the deadline and this
+                        // result proves the provider no longer owns the checkout.
+                        // Harvest above is therefore race-free.
+                        outcome.status = AgentTaskOutcomeStatus::Timeout;
+                        outcome.failure_classification =
+                            Some(AgentTaskFailureClassification::Timeout);
+                        outcome.diagnostics.push(AgentTaskDiagnostic {
+                            class: "scheduler_timeout".to_string(),
+                            message: "provider exited after scheduler cancellation at its deadline"
+                                .to_string(),
+                            data: serde_json::json!({ "timeout_ms": running_task.timeout_ms }),
+                        });
+                    }
                     let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
                     events.push(event(
                         &outcome.task_id,
@@ -593,6 +616,7 @@ where
                             rotation_attempts: running_task.rotation_attempts,
                             candidate_artifacts,
                             retry_attempts,
+                            task_base_sha: running_task.task_base_sha,
                         });
                         continue;
                     }
@@ -657,6 +681,7 @@ where
                                 rotation_attempts,
                                 candidate_artifacts,
                                 retry_attempts: running_task.retry_attempts,
+                                task_base_sha: running_task.task_base_sha,
                             });
                             continue;
                         }
@@ -746,6 +771,8 @@ struct ScheduledTask {
     candidate_artifacts: Vec<AgentTaskArtifact>,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
+    /// Captured before the first provider execution and reused by every sibling.
+    task_base_sha: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +787,8 @@ struct RunningTask {
     attempt: u32,
     started_at: Instant,
     timeout_ms: Option<u64>,
+    /// Deadline cancellation has been sent; harvesting waits for TaskResult.
+    timeout_cancel_requested: bool,
     /// Rotation entries already consumed for this task (0 = original executor).
     rotation_index: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
@@ -984,17 +1013,85 @@ fn prepare_attempt_workspace(
         path: parent.clone(),
         message: error.to_string(),
     })?;
-    let attempt_root = parent.join(format!("attempt-{}", uuid::Uuid::new_v4()));
+    let identity = format!("attempt-{}", uuid::Uuid::new_v4());
+    let attempt_root = parent.join(&identity);
     let attempt_root_string = attempt_root.display().to_string();
     git_output(
         &root,
         &["worktree", "add", "--detach", &attempt_root_string, base],
     )?;
+    // Establish cleanup ownership before anything that can fail below.
+    let workspace = Arc::new(AttemptWorkspace {
+        source_root: root.clone(),
+        root: attempt_root.clone(),
+    });
+    let base_fingerprint = fingerprint(base.as_bytes());
+    let adoption = request
+        .workspace
+        .attempt
+        .as_ref()
+        .and_then(|attempt| attempt.adoption.clone());
+    if let Some(adoption) = adoption.as_ref() {
+        apply_adopted_candidate(&attempt_root, adoption)?;
+    }
+    remap_workspace_config(&mut request.executor.config, &root, &attempt_root);
     request.workspace.root = Some(attempt_root.display().to_string());
-    Ok(Some(Arc::new(AttemptWorkspace {
-        source_root: root,
-        root: attempt_root,
-    })))
+    request.workspace.attempt = Some(crate::core::agent_task::AgentTaskAttemptWorkspace {
+        identity,
+        base_ref: base.to_string(),
+        base_fingerprint,
+        adoption,
+    });
+    Ok(Some(workspace))
+}
+
+fn remap_workspace_config(config: &mut serde_json::Value, source: &Path, attempt: &Path) {
+    let source = source.display().to_string();
+    let attempt = attempt.display().to_string();
+    fn remap(value: &mut serde_json::Value, source: &str, attempt: &str) {
+        match value {
+            serde_json::Value::String(path) if path == source => *path = attempt.to_string(),
+            serde_json::Value::String(path) => {
+                if let Some(suffix) = path.strip_prefix(&format!("{source}/")) {
+                    *path = format!("{attempt}/{suffix}");
+                }
+            }
+            serde_json::Value::Array(values) => values
+                .iter_mut()
+                .for_each(|value| remap(value, source, attempt)),
+            serde_json::Value::Object(values) => values
+                .values_mut()
+                .for_each(|value| remap(value, source, attempt)),
+            _ => {}
+        }
+    }
+    remap(config, &source, &attempt);
+}
+
+fn apply_adopted_candidate(
+    root: &Path,
+    adoption: &crate::core::agent_task::AgentTaskCandidateAdoption,
+) -> Result<(), HarvestError> {
+    let patch = std::fs::read(&adoption.patch_path).map_err(|error| HarvestError::Adoption {
+        message: format!("could not read candidate patch: {error}"),
+    })?;
+    let actual_fingerprint = fingerprint(&patch);
+    if actual_fingerprint != adoption.patch_fingerprint {
+        return Err(HarvestError::Adoption {
+            message: "candidate patch fingerprint did not match the explicit adoption request"
+                .to_string(),
+        });
+    }
+    git_output(root, &["apply", "--index", &adoption.patch_path]).map_err(|error| {
+        HarvestError::Adoption {
+            message: format!("could not apply adopted candidate: {error:?}"),
+        }
+    })?;
+    Ok(())
+}
+
+fn fingerprint(contents: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(contents))
 }
 
 fn harvest_committed_patch(
@@ -1021,7 +1118,7 @@ fn harvest_uncommitted_patch(
     // This checkout belongs solely to this dispatch. Staging all changes makes
     // Git's binary patch generation include tracked, staged, and untracked files.
     git_output(root, &["add", "--all"])?;
-    let patch = git_output(
+    let patch = git_output_raw(
         root,
         &[
             "diff",
@@ -1061,8 +1158,9 @@ fn harvest_uncommitted_patch(
             "producer_attempt": running.attempt,
             "provider_rotation_index": running.rotation_index,
             "provider_backend": running.request.executor.backend,
-            "source_provenance": running.source_provenance,
             "provider_model": running.request.executor.model(),
+            "attempt_workspace": running.request.workspace.attempt,
+            "source_provenance": running.source_provenance,
         }),
     });
     Ok(())
@@ -1188,7 +1286,7 @@ fn harvest_committed_patch_with_metadata(
             head,
         });
     }
-    let patch = git_output(
+    let patch = git_output_raw(
         root,
         &[
             "diff",
@@ -1390,6 +1488,26 @@ fn git_output_with_env(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Preserve byte-sensitive Git output such as patches. Metadata callers use
+/// `git_output` so commit IDs and status values stay normalized.
+fn git_output_raw(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(HarvestError::Git {
+            command: format!("git {}", args.join(" ")),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[derive(Debug)]
 enum HarvestError {
     DirtyWorkspace { status: String },
@@ -1397,6 +1515,7 @@ enum HarvestError {
     Git { command: String, message: String },
     ArtifactDirectory { path: PathBuf, message: String },
     ArtifactWrite { path: PathBuf, message: String },
+    Adoption { message: String },
 }
 
 fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -1452,6 +1571,11 @@ fn committed_harvest_failure(
             "agent_task.committed_harvest_artifact_failed",
             format!("committed-change harvest could not write patch artifact {}: {message}", path.display()),
             serde_json::json!({ "path": path, "operation": "write", "error": message }),
+        ),
+        HarvestError::Adoption { message } => (
+            "agent_task.attempt_workspace_adoption_failed",
+            format!("could not materialize explicitly adopted candidate: {message}"),
+            serde_json::json!({ "error": message }),
         ),
     };
     outcome.status = AgentTaskOutcomeStatus::Failed;
@@ -1777,6 +1901,7 @@ mod committed_harvest_tests {
             attempt: 1,
             started_at: Instant::now(),
             timeout_ms: None,
+            timeout_cancel_requested: false,
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),

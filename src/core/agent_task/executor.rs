@@ -208,6 +208,10 @@ pub struct AgentTaskWorkspace {
     pub task_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<String>,
+    /// Ownership and provenance for one concrete provider execution. This is
+    /// intentionally path-free so the same contract survives Lab remapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AgentTaskAttemptWorkspace>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub materialization: Value,
 }
@@ -224,9 +228,32 @@ impl Default for AgentTaskWorkspace {
             base_ref: None,
             task_url: None,
             cleanup: None,
+            attempt: None,
             materialization: Value::Null,
         }
     }
+}
+
+/// Immutable ownership information for one provider attempt workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAttemptWorkspace {
+    pub identity: String,
+    pub base_ref: String,
+    pub base_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<AgentTaskCandidateAdoption>,
+}
+
+/// An explicit decision to continue a previously harvested candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCandidateAdoption {
+    pub source_attempt: String,
+    pub patch_path: String,
+    pub patch_fingerprint: String,
+    pub provider_backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_model: Option<String>,
+    pub decision: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

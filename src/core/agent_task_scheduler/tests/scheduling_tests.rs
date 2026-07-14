@@ -306,7 +306,11 @@ mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
     }
 
@@ -542,18 +546,14 @@ mod concurrency_tests {
 
         let started = Instant::now();
         let aggregate = scheduler.run(plan);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() >= Duration::from_secs(2));
         while !finished.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(2));
         }
         let attempt_root = attempt_roots.lock().expect("attempt roots")[0].clone();
-        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
-        while attempt_root.exists() && Instant::now() < cleanup_deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
         assert!(
-            !attempt_root.exists(),
-            "timed-out attempt checkout is retired"
+            attempt_root.join("late-change.txt").is_file(),
+            "timeout harvest precedes cleanup, so the late provider workspace remains recoverable"
         );
         let events = events.lock().expect("events");
 
@@ -852,6 +852,26 @@ mod provider_rotation_tests {
         calls: AtomicUsize,
     }
 
+    struct AdoptionExecutor {
+        observed: Arc<Mutex<Option<crate::core::agent_task::AgentTaskAttemptWorkspace>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for AdoptionExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let root = request.workspace.root.as_deref().expect("attempt root");
+            assert!(std::path::Path::new(root).join("adopted.txt").is_file());
+            self.observed
+                .lock()
+                .expect("observed workspace")
+                .replace(request.workspace.attempt.expect("attempt ownership"));
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
     impl AgentTaskExecutorAdapter for DirtyCandidateThenSuccessExecutor {
         fn execute(
             &self,
@@ -869,6 +889,16 @@ mod provider_rotation_tests {
                 .lock()
                 .expect("observed roots")
                 .push(root.clone());
+            assert_eq!(
+                request.executor.config["workspace_root"],
+                root.display().to_string(),
+                "provider workspace config follows the isolated attempt root"
+            );
+            assert_eq!(
+                request.executor.config["cwd"],
+                root.display().to_string(),
+                "provider cwd follows the isolated attempt root"
+            );
             if call == 0 {
                 fs::write(root.join("candidate.txt"), "candidate\n").expect("candidate edit");
                 let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
@@ -1140,6 +1170,11 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.tasks[0].executor.model = Some("primary-model".to_string());
+        plan.tasks[0].executor.config = json!({
+            "workspace_root": workspace.display().to_string(),
+            "cwd": workspace.display().to_string(),
+            "nested": { "workspace_root": workspace.display().to_string() },
+        });
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
 
@@ -1186,6 +1221,72 @@ mod provider_rotation_tests {
             !roots[0].exists() && !roots[1].exists(),
             "attempt checkouts are retired after their executor threads stop"
         );
+    }
+
+    #[test]
+    fn explicit_candidate_adoption_materializes_verified_patch_with_provenance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::concurrency_tests::init_git_workspace(&workspace);
+        let candidate_file = workspace.join("adopted.txt");
+        fs::write(&candidate_file, "candidate\n").expect("candidate change");
+        git_output(&workspace, &["add", "adopted.txt"]).expect("stage candidate");
+        let patch = git_output_raw(
+            &workspace,
+            &[
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--",
+                "adopted.txt",
+            ],
+        )
+        .expect("candidate patch");
+        git_output(&workspace, &["reset", "--hard", "HEAD"]).expect("restore clean task base");
+        let patch_path = temp.path().join("candidate.patch");
+        fs::write(&patch_path, &patch).expect("persist candidate patch");
+        let expected_fingerprint = fingerprint(patch.as_bytes());
+        let observed = Arc::new(Mutex::new(None));
+        let scheduler = AgentTaskScheduler::new(AdoptionExecutor {
+            observed: Arc::clone(&observed),
+        });
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].workspace.attempt =
+            Some(crate::core::agent_task::AgentTaskAttemptWorkspace {
+                identity: "adoption-request".to_string(),
+                base_ref: "ignored-before-materialization".to_string(),
+                base_fingerprint: "ignored-before-materialization".to_string(),
+                adoption: Some(crate::core::agent_task::AgentTaskCandidateAdoption {
+                    source_attempt: "attempt-provider-a".to_string(),
+                    patch_path: patch_path.display().to_string(),
+                    patch_fingerprint: expected_fingerprint.clone(),
+                    provider_backend: "provider-a".to_string(),
+                    provider_model: Some("model-a".to_string()),
+                    decision: "continue verified candidate".to_string(),
+                }),
+            });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
+        let attempt = observed
+            .lock()
+            .expect("observed workspace")
+            .clone()
+            .expect("attempt");
+        assert_ne!(attempt.identity, "adoption-request");
+        assert!(attempt.base_fingerprint.starts_with("sha256:"));
+        let adoption = attempt.adoption.expect("adoption provenance");
+        assert_eq!(adoption.source_attempt, "attempt-provider-a");
+        assert_eq!(adoption.patch_fingerprint, expected_fingerprint);
+        assert_eq!(adoption.provider_backend, "provider-a");
+        assert_eq!(adoption.provider_model.as_deref(), Some("model-a"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub fn record_pre_dispatch_failure(
                 base_ref: None,
                 task_url: None,
                 cleanup: Some("preserve".to_string()),
+                attempt: None,
                 materialization: metadata.clone(),
             },
             component_contracts: Vec::new(),
@@ -493,6 +494,7 @@ fn synthetic_remote_dispatch_plan(
                     base_ref: None,
                     task_url: None,
                     cleanup: Some("preserve".to_string()),
+                    attempt: None,
                     materialization: json!({
                         "runner_id": failure.identity.runner_id,
                         "remote_workspace": failure.remote_workspace,
