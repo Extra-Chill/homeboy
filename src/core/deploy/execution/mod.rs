@@ -170,6 +170,7 @@ mod tests {
             &Project::default(),
             Some("1.2.3".to_string()),
             None,
+            None,
         )
         .expect("prepared artifact should pass local preflight");
 
