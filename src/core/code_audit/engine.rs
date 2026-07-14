@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
-use super::detectors::{artifact_portability, field_patterns};
+use super::detectors::artifact_portability;
 use super::entry::audit_config_for;
 use super::execution_plan::AuditExecutionPlan;
 use super::findings;
@@ -25,7 +25,6 @@ use super::types::{
     CodeAuditResult, ConventionReport, ScopedAuditExecution,
 };
 use super::{checks, conventions, discovery, duplication, fingerprint, impact, structural, walker};
-use crate::core::component::AuditConfig;
 use crate::core::Result;
 
 /// Detectors run on the root-only fast path (no discovery/fingerprinting). The
@@ -38,7 +37,6 @@ const ROOT_ONLY_DETECTOR_IDS: &[&str] = &[
     "test_wiring",
     "docs",
     "compiler_warnings",
-    "field_patterns",
     "command_status_contracts",
     "thin_command_adapter",
 ];
@@ -100,7 +98,7 @@ pub(super) fn audit_internal(
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
     let discovery_started = std::time::Instant::now();
     let source_snapshot_started = std::time::Instant::now();
-    let source_snapshot = build_shared_source_snapshot(root, &audit_config);
+    let source_snapshot = build_shared_source_snapshot(root);
     timing.push_ok("source_snapshot", source_snapshot_started.elapsed());
     if scoped_execution.is_scoped() {
         log_status!(
@@ -556,25 +554,15 @@ pub(super) fn audit_internal(
 
 /// Build the shared audit source snapshot consumed by whole-tree detectors.
 ///
-/// The snapshot is a single walk/read of the codebase whose extension set is a
-/// superset of every snapshot-backed detector's inputs (structural source
-/// extensions plus the field-pattern detector's resolved scan tokens). This
-/// lets those detectors filter the shared snapshot instead of each re-walking
-/// and re-reading the tree, while keeping their inputs — and therefore their
-/// findings — identical.
+/// The snapshot uses structural source extensions so structural checks avoid a
+/// second walk/read of the tree.
 fn build_shared_source_snapshot(
     root: &Path,
-    audit_config: &AuditConfig,
 ) -> crate::core::engine::codebase_scan::CodebaseSnapshot {
-    let mut additional: Vec<String> = structural::source_extensions()
+    let additional: Vec<String> = structural::source_extensions()
         .iter()
         .map(|ext| (*ext).to_string())
         .collect();
-    additional.extend(field_patterns::scan_token_extensions(
-        &audit_config.detector_profile,
-    ));
-    additional.sort();
-    additional.dedup();
     let additional_refs: Vec<&str> = additional.iter().map(|s| s.as_str()).collect();
     walker::walk_shared_audit_files_snapshot(root, &additional_refs)
 }
@@ -591,19 +579,15 @@ fn audit_root_only(
     let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut findings = Vec::new();
 
-    // Build the shared source snapshot once for the root-only path so the
-    // whole-tree detectors below (structural, field patterns) consume a single
-    // walk/read instead of each re-walking and re-reading the tree. Built only
-    // when at least one snapshot-backed detector is enabled.
-    let source_snapshot =
-        if plan.detector_enabled("structural") || plan.detector_enabled("field_patterns") {
-            let snapshot_started = std::time::Instant::now();
-            let snapshot = build_shared_source_snapshot(root, &audit_config);
-            timing.push_ok("source_snapshot", snapshot_started.elapsed());
-            Some(snapshot)
-        } else {
-            None
-        };
+    // Structural checks consume a shared snapshot to avoid a second walk/read.
+    let source_snapshot = if plan.detector_enabled("structural") {
+        let snapshot_started = std::time::Instant::now();
+        let snapshot = build_shared_source_snapshot(root);
+        timing.push_ok("source_snapshot", snapshot_started.elapsed());
+        Some(snapshot)
+    } else {
+        None
+    };
 
     let detector_context = DetectorRunContext {
         root,

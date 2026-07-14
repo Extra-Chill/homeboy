@@ -6,7 +6,6 @@ pub(super) mod dead_guard;
 pub(super) mod deprecation_age;
 pub(super) mod enum_dispatch_contracts;
 pub(super) mod facade_passthrough;
-pub(super) mod field_patterns;
 pub(super) mod global_env_guard;
 pub(super) mod layer_ownership;
 pub(super) mod mutating_resource_access;

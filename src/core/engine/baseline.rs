@@ -56,9 +56,7 @@ pub trait Fingerprintable {
 /// CLI-driven baseline lifecycle flags passed into workflow-layer args.
 ///
 /// Shared by `audit`, `lint`, `test`, and `bench` so their inner
-/// `WorkflowArgs` don't each re-inline the same triplet (#1483 audit:
-/// RepeatedFieldPattern for `[baseline, ignore_baseline]` and
-/// `[json_summary, ratchet]`).
+/// `WorkflowArgs` don't each re-inline the same triplet (#1483).
 ///
 /// Semantics:
 /// - `baseline`: persist current state as the new baseline.

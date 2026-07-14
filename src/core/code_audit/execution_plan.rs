@@ -119,7 +119,6 @@ pub(crate) enum GenericDetectorRunner {
     Docs,
     CompilerWarnings,
     WrapperInference,
-    FieldPatterns,
     DeprecationAge,
     DeadGuard,
     RequestedDetectors,
@@ -312,15 +311,6 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         timing_id: "detector.shadow_modules",
         log_label: "Shadow modules",
         log_summary: "duplicate directory structures",
-    },
-    DetectorDescriptor {
-        id: "field_patterns",
-        findings: &[AuditFinding::RepeatedFieldPattern],
-        access: DetectorAccess::Discovery,
-        runtime: DetectorRuntime::Generic(GenericDetectorRunner::FieldPatterns),
-        timing_id: "detector.field_patterns",
-        log_label: "Field patterns",
-        log_summary: "repeated struct fields",
     },
     DetectorDescriptor {
         id: "facade_passthrough",
@@ -649,6 +639,62 @@ mod tests {
         assert!(!plan.detector_enabled("dead_code"));
         assert!(!plan.detector_enabled("source_policy"));
         assert!(!plan.detector_enabled("compiler_warnings"));
+    }
+
+    #[test]
+    fn profiles_retain_their_intended_detector_families() {
+        let enabled_ids = |profile| {
+            AuditExecutionPlan::descriptors()
+                .iter()
+                .filter(|descriptor| {
+                    AuditExecutionPlan::from_profile_and_filters(profile, &[], &[])
+                        .detector_enabled(descriptor.id)
+                })
+                .map(|descriptor| descriptor.id)
+                .collect::<Vec<_>>()
+        };
+
+        let full = enabled_ids(AuditProfile::Full);
+        for id in [
+            "conventions",
+            "duplication",
+            "dead_guard",
+            "requested_detectors",
+            "source_policy",
+            "docs",
+            "compiler_warnings",
+            "artifact_portability",
+            "command_status_contracts",
+            "remote_execution_preflight",
+            "test_wiring",
+            "thin_command_adapter",
+        ] {
+            assert!(full.contains(&id), "full profile must retain {id}");
+        }
+        assert!(!full.contains(&"field_patterns"));
+
+        assert_eq!(
+            enabled_ids(AuditProfile::Pr),
+            vec![
+                "structural",
+                "layer_ownership",
+                "test_topology",
+                "test_wiring",
+                "docs",
+                "command_status_contracts",
+                "thin_command_adapter",
+            ]
+        );
+        assert_eq!(
+            enabled_ids(AuditProfile::Architecture),
+            vec![
+                "structural",
+                "layer_ownership",
+                "docs",
+                "command_status_contracts",
+                "thin_command_adapter",
+            ]
+        );
     }
 
     #[test]

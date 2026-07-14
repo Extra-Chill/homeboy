@@ -27,19 +27,6 @@ pub struct DetectorProfileConfig {
     pub version_guard_languages: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vendored_path_markers: Vec<String>,
-    /// Language/extension tokens the field-pattern detector scans for repeated
-    /// struct/record fields (component-supplied source extension tokens).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub field_pattern_scan_tokens: Vec<String>,
-    /// Of the scanned tokens, those whose field declarations use the
-    /// type-before-name syntax (`Type $name` / `Type name`). Tokens not listed
-    /// here default to the name-before-type syntax (`name: Type`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub field_pattern_type_before_name_tokens: Vec<String>,
-    /// Tokens whose source files embed test code that must be stripped before
-    /// scanning (e.g. inline `#[cfg(test)]` modules).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub field_pattern_inline_test_strip_tokens: Vec<String>,
     /// Filename suffixes that mark a source file as test scaffolding, skipped by
     /// path-scanning detectors (e.g. `_test.rs`, `.test.ts`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -105,9 +92,6 @@ impl Default for DetectorProfileConfig {
             version_guard_constants: Vec::new(),
             version_guard_languages: Vec::new(),
             vendored_path_markers: Vec::new(),
-            field_pattern_scan_tokens: Vec::new(),
-            field_pattern_type_before_name_tokens: Vec::new(),
-            field_pattern_inline_test_strip_tokens: Vec::new(),
             test_file_suffixes: Vec::new(),
             dead_guard_languages: Vec::new(),
             lifecycle_basenames: Vec::new(),
@@ -131,9 +115,6 @@ impl DetectorProfileConfig {
             && self.version_guard_constants.is_empty()
             && self.version_guard_languages.is_empty()
             && self.vendored_path_markers.is_empty()
-            && self.field_pattern_scan_tokens.is_empty()
-            && self.field_pattern_type_before_name_tokens.is_empty()
-            && self.field_pattern_inline_test_strip_tokens.is_empty()
             && self.test_file_suffixes.is_empty()
             && self.dead_guard_languages.is_empty()
             && self.lifecycle_basenames.is_empty()
@@ -177,18 +158,6 @@ impl DetectorProfileConfig {
         extend_unique(
             &mut self.vendored_path_markers,
             &other.vendored_path_markers,
-        );
-        extend_unique(
-            &mut self.field_pattern_scan_tokens,
-            &other.field_pattern_scan_tokens,
-        );
-        extend_unique(
-            &mut self.field_pattern_type_before_name_tokens,
-            &other.field_pattern_type_before_name_tokens,
-        );
-        extend_unique(
-            &mut self.field_pattern_inline_test_strip_tokens,
-            &other.field_pattern_inline_test_strip_tokens,
         );
         extend_unique(&mut self.test_file_suffixes, &other.test_file_suffixes);
         extend_unique(&mut self.dead_guard_languages, &other.dead_guard_languages);
