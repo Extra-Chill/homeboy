@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.3] - 2026-07-14
+
+### Changed
+- prove controller-owned Lab retry handoff
+- remove release auto-refactor
+- Accept canonical clean refresh identities
+- Preserve bounded DOM box evidence
+
+### Fixed
+- preserve task workspace for Lab retries
+- negotiate remote leaseless recovery contract
+- Fix exact lease recovery after daemon state loss
+
 ## [0.284.2] - 2026-07-14
 
 ### Changed
