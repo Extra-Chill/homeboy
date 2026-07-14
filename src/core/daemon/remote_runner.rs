@@ -347,6 +347,7 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
         worker_identity: request.worker_identity.clone(),
         worker_pid: request.worker_pid,
         last_seen_at: request.last_seen_at.clone().or(Some(now)),
+        leaseless_recovery_evidence: None,
     };
     let path = write_session(&session)?;
 

@@ -57,6 +57,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                     session_path: Some("/tmp/lab.json".to_string()),
                     leaseless_recovery: None,
                     state_loss_recovery: None,
+                    leaseless_recovery_evidence: None,
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                 },
@@ -433,6 +434,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                     session_path: Some("/tmp/lab.json".to_string()),
                     leaseless_recovery: None,
                     state_loss_recovery: None,
+                    leaseless_recovery_evidence: None,
                     failure_kind: None,
                     failure_message: None,
                 },
@@ -493,6 +495,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                     session_path: Some("/tmp/lab.json".to_string()),
                     leaseless_recovery: None,
                     state_loss_recovery: None,
+                    leaseless_recovery_evidence: None,
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                 },
@@ -528,6 +531,7 @@ fn connected_direct_session(
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
+        leaseless_recovery_evidence: None,
     }
 }
 
@@ -549,6 +553,7 @@ fn successful_connect_report(runner_id: &str) -> RunnerConnectReport {
         session_path: Some("/tmp/lab.json".to_string()),
         leaseless_recovery: None,
         state_loss_recovery: None,
+        leaseless_recovery_evidence: None,
         failure_kind: None,
         failure_message: None,
     }
@@ -572,6 +577,7 @@ fn failed_connect_report(runner_id: &str, failure_message: &str) -> RunnerConnec
         session_path: Some("/tmp/lab.json".to_string()),
         leaseless_recovery: None,
         state_loss_recovery: None,
+        leaseless_recovery_evidence: None,
         failure_kind: Some(super::super::RunnerFailureKind::DaemonStartupFailure),
         failure_message: Some(failure_message.to_string()),
     }

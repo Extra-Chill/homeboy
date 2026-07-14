@@ -180,6 +180,20 @@ pub struct RunnerActiveJobError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerLeaselessRecoveryContract {
+    ConfirmNoDaemonOwner,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerLeaselessRecoveryEvidence {
+    pub contract: RunnerLeaselessRecoveryContract,
+    pub remote_command_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<DaemonLeaselessRecoveryResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerSession {
     pub runner_id: String,
     #[serde(default = "default_tunnel_mode")]
@@ -211,6 +225,8 @@ pub struct RunnerSession {
     pub worker_pid: Option<u32>,
     #[serde(default)]
     pub last_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
 }
 
 impl RunnerSession {
@@ -492,6 +508,8 @@ pub struct RunnerConnectReport {
     pub leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_loss_recovery: Option<DaemonStateLossRecoveryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<RunnerFailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]

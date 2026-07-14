@@ -272,11 +272,12 @@ fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
         plan.plan_id = "materialized-cook-plan".to_string();
         plan.tasks[0].instructions = "implement the original user task".to_string();
         plan.tasks[0].workspace.root = Some("/materialized/worktree".to_string());
+        plan.rebuild_homeboy_plan();
         let record = record_lab_offload_phase(
             "failed-lab-cook",
             "homeboy-lab",
             "materializing",
-            None,
+            Some("pending"),
             None,
             None,
             Some(&plan),

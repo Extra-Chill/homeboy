@@ -1152,6 +1152,7 @@ mod tests {
                 worker_identity: None,
                 worker_pid: None,
                 last_seen_at: None,
+                leaseless_recovery_evidence: None,
             }),
             stale_daemon: Some(RunnerStaleDaemonWarning::new(
                 "homeboy-lab",
