@@ -2122,6 +2122,7 @@ mod tests {
                 reachable: false,
                 active_jobs: 1,
                 state_identity: None,
+                endpoint_probe_error: None,
             };
 
             assert_eq!(
