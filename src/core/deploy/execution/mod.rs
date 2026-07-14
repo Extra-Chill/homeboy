@@ -10,7 +10,9 @@ mod strategies;
 pub(super) use prepare::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
-pub(super) use release_plan::{release_artifact_plan, ReleaseArtifactPlan};
+pub(super) use release_plan::{
+    release_artifact_plan, resolve_planned_release_artifact, ReleaseArtifactPlan,
+};
 
 /// Maximum number of bytes retained when reading a version-target file out of a
 /// deploy artifact. The artifact is downloaded release content and therefore

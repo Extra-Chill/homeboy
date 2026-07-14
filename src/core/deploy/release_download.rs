@@ -10,6 +10,7 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/784
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,7 @@ use crate::core::component::{Component, GithubConfig};
 use crate::core::error::{Error, Result};
 use crate::core::git::github_cli_env;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
     "dependencies",
@@ -38,6 +40,82 @@ const MUTABLE_DEPENDENCY_PREFIXES: &[&str] = &[
 ];
 
 const ZIP_MAGIC_PREFIX: &[u8] = b"PK";
+
+/// Immutable release-asset identity verified before it is made available to deploy targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseArtifact {
+    pub path: PathBuf,
+    pub tag: String,
+    pub commit: Option<String>,
+    pub url: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// Command-scoped immutable artifact cache. A multi-target deploy resolves and
+/// verifies a release asset once, then fans out the same local bytes.
+#[derive(Default)]
+pub struct ReleaseArtifactStore {
+    artifacts: HashMap<String, ReleaseArtifact>,
+}
+
+impl ReleaseArtifactStore {
+    pub fn resolve(
+        &mut self,
+        github: &GitHubRepo,
+        github_config: &GithubConfig,
+        tag: &str,
+        artifact_name: &str,
+    ) -> Result<ReleaseArtifact> {
+        self.get_or_insert_with(github, tag, artifact_name, || {
+            resolve_and_download_release_artifact(github, github_config, tag, artifact_name)
+        })
+    }
+
+    pub fn get(
+        &self,
+        github: &GitHubRepo,
+        tag: &str,
+        artifact_name: &str,
+    ) -> Option<ReleaseArtifact> {
+        self.artifacts
+            .get(&format!(
+                "{}/{}/{}:{tag}:{artifact_name}",
+                github.host, github.owner, github.repo
+            ))
+            .cloned()
+    }
+
+    fn get_or_insert_with(
+        &mut self,
+        github: &GitHubRepo,
+        tag: &str,
+        artifact_name: &str,
+        resolve: impl FnOnce() -> Result<ReleaseArtifact>,
+    ) -> Result<ReleaseArtifact> {
+        let key = format!(
+            "{}/{}/{}:{tag}:{artifact_name}",
+            github.host, github.owner, github.repo
+        );
+        if let Some(artifact) = self.artifacts.get(&key) {
+            return Ok(artifact.clone());
+        }
+        let artifact = resolve()?;
+        self.artifacts.insert(key, artifact.clone());
+        Ok(artifact)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseAssetMetadata {
+    url: String,
+    name: String,
+    size: u64,
+    digest: Option<String>,
+    tag: String,
+    commit: Option<String>,
+}
 
 /// Parsed GitHub owner/repo from a remote URL.
 #[derive(Debug, Clone)]
@@ -156,14 +234,36 @@ pub fn download_release_artifact(
     tag: &str,
     artifact_name: &str,
 ) -> Result<PathBuf> {
-    let auth_token = github_auth_token(github, github_config);
-    let url = match auth_token.as_deref() {
-        Some(token) => {
-            resolve_release_asset_api_url(github, github_config, tag, artifact_name, token)?
-                .unwrap_or_else(|| github.release_artifact_url(tag, artifact_name))
-        }
-        None => github.release_artifact_url(tag, artifact_name),
-    };
+    Ok(resolve_and_download_release_artifact(github, github_config, tag, artifact_name)?.path)
+}
+
+/// Resolve authenticated GitHub Release metadata and download one verified asset.
+///
+/// Metadata is mandatory: direct release-download URLs cannot prove which asset was
+/// selected, its expected size, or the release/tag identity.
+pub fn resolve_and_download_release_artifact(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    tag: &str,
+    artifact_name: &str,
+) -> Result<ReleaseArtifact> {
+    let auth_token = github_auth_token(github, github_config).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "github",
+            format!(
+                "No GitHub authentication token is available for {}",
+                github.host
+            ),
+            None,
+            Some(vec![
+                "Authenticate gh for the configured GitHub host before deploying a release asset."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let release_asset =
+        resolve_release_asset_metadata(github, github_config, tag, artifact_name, &auth_token)?;
+    let url = release_asset.url.clone();
 
     // Create temp directory for the download
     let tmp_dir = crate::core::engine::temp::runtime_temp_dir("deploy-download")?;
@@ -174,7 +274,7 @@ pub fn download_release_artifact(
     let curl_command = curl_release_artifact_command(
         &url,
         dest_path.to_str().unwrap_or("artifact"),
-        auth_token.as_deref(),
+        Some(&auth_token),
         github_command_env(github, github_config),
     );
 
@@ -231,43 +331,82 @@ pub fn download_release_artifact(
         ));
     }
 
-    // Verify the file exists and has content
-    let metadata = std::fs::metadata(&dest_path).map_err(|e| {
-        Error::internal_io(
-            format!("Downloaded artifact not found: {}", e),
-            Some(dest_path.display().to_string()),
-        )
-    })?;
-
-    if metadata.len() == 0 {
-        return Err(Error::internal_io(
-            format!(
-                "Downloaded artifact is empty — check that tag '{}' has a release with artifact '{}'",
-                tag, artifact_name
-            ),
-            Some(url),
-        ));
-    }
-
-    validate_downloaded_artifact(&dest_path, artifact_name, &url)?;
+    let sha256 = verify_downloaded_release_artifact(&dest_path, &release_asset, &url)?;
 
     log_status!(
         "deploy",
         "Downloaded {} ({} bytes)",
-        artifact_name,
-        metadata.len()
+        release_asset.name,
+        release_asset.size
     );
 
-    Ok(dest_path)
+    Ok(ReleaseArtifact {
+        path: dest_path,
+        tag: release_asset.tag,
+        commit: release_asset.commit,
+        url,
+        name: release_asset.name,
+        size: release_asset.size,
+        sha256,
+    })
 }
 
-fn resolve_release_asset_api_url(
+fn verify_downloaded_release_artifact(
+    path: &Path,
+    release_asset: &ReleaseAssetMetadata,
+    url: &str,
+) -> Result<String> {
+    let file_metadata = std::fs::metadata(path).map_err(|error| {
+        Error::internal_io(
+            format!("Downloaded artifact not found: {error}"),
+            Some(path.display().to_string()),
+        )
+    })?;
+    if file_metadata.len() == 0 {
+        return Err(Error::validation_invalid_argument(
+            "releaseArtifact",
+            format!(
+                "Downloaded release artifact '{}' is empty",
+                release_asset.name
+            ),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    if file_metadata.len() != release_asset.size {
+        return Err(Error::validation_invalid_argument(
+            "releaseArtifact",
+            format!("Downloaded release artifact '{}' has size {}, expected {} from GitHub Release metadata", release_asset.name, file_metadata.len(), release_asset.size),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    validate_downloaded_artifact(path, &release_asset.name, url)?;
+    let sha256 = sha256_file(path)?;
+    if let Some(expected) = release_asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+    {
+        if !expected.eq_ignore_ascii_case(&sha256) {
+            return Err(Error::validation_invalid_argument(
+                "releaseArtifact",
+                format!("Downloaded release artifact '{}' SHA-256 digest does not match GitHub Release metadata", release_asset.name),
+                Some(url.to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(sha256)
+}
+
+fn resolve_release_asset_metadata(
     github: &GitHubRepo,
     github_config: &GithubConfig,
     tag: &str,
     artifact_name: &str,
     auth_token: &str,
-) -> Result<Option<String>> {
+) -> Result<ReleaseAssetMetadata> {
     let url = github.release_by_tag_api_url(tag);
     let curl_command =
         curl_release_asset_api_command(&url, auth_token, github_command_env(github, github_config));
@@ -328,17 +467,106 @@ fn resolve_release_asset_api_url(
         )
     })?;
 
-    let Some(assets) = release.get("assets").and_then(Value::as_array) else {
-        return Ok(None);
-    };
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Error::internal_json(
+                "GitHub Release metadata has no assets array".to_string(),
+                Some(url.clone()),
+            )
+        })?;
+    let asset = assets
+        .iter()
+        .find(|asset| {
+            asset
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| release_asset_name_matches(name, artifact_name))
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "releaseArtifact",
+                format!(
+                    "GitHub Release tag '{}' is missing asset '{}'",
+                    tag, artifact_name
+                ),
+                Some(url.clone()),
+                None,
+            )
+        })?;
+    let name = asset.get("name").and_then(Value::as_str).ok_or_else(|| {
+        Error::internal_json(
+            "GitHub Release asset has no name".to_string(),
+            Some(url.clone()),
+        )
+    })?;
+    let asset_url = asset.get("url").and_then(Value::as_str).ok_or_else(|| {
+        Error::internal_json(
+            "GitHub Release asset has no API URL".to_string(),
+            Some(url.clone()),
+        )
+    })?;
+    let size = asset.get("size").and_then(Value::as_u64).ok_or_else(|| {
+        Error::internal_json(
+            "GitHub Release asset has no size".to_string(),
+            Some(url.clone()),
+        )
+    })?;
+    let release_tag = release
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .unwrap_or(tag);
+    if release_tag != tag {
+        return Err(Error::validation_invalid_argument(
+            "releaseTag",
+            format!(
+                "GitHub Release metadata returned tag '{}' for requested tag '{}'",
+                release_tag, tag
+            ),
+            Some(url),
+            None,
+        ));
+    }
+    Ok(ReleaseAssetMetadata {
+        url: asset_url.to_string(),
+        name: name.to_string(),
+        size,
+        digest: asset
+            .get("digest")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        tag: release_tag.to_string(),
+        commit: release
+            .get("target_commitish")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
 
-    Ok(assets.iter().find_map(|asset| {
-        let name = asset.get("name")?.as_str()?;
-        if !release_asset_name_matches(name, artifact_name) {
-            return None;
+fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to hash downloaded artifact: {error}"),
+            Some(path.display().to_string()),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            Error::internal_io(
+                format!("Failed to hash downloaded artifact: {error}"),
+                Some(path.display().to_string()),
+            )
+        })?;
+        if count == 0 {
+            break;
         }
-        asset.get("url")?.as_str().map(ToString::to_string)
-    }))
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn release_asset_name_matches(asset_name: &str, artifact_name: &str) -> bool {
@@ -940,6 +1168,100 @@ mod tests {
             "theme-01-studio-native-theme.zip",
             "studio-native-theme.zip"
         ));
+    }
+
+    #[test]
+    fn release_artifact_store_resolves_once_for_multiple_targets() {
+        let github = GitHubRepo {
+            host: "github.example.test".to_string(),
+            owner: "example".to_string(),
+            repo: "plugin".to_string(),
+        };
+        let mut store = ReleaseArtifactStore::default();
+        let calls = std::cell::Cell::new(0);
+        let artifact = || ReleaseArtifact {
+            path: PathBuf::from("/tmp/plugin.zip"),
+            tag: "v1.2.3".to_string(),
+            commit: Some("abc123".to_string()),
+            url: "https://github.example.test/api/v3/assets/1".to_string(),
+            name: "plugin.zip".to_string(),
+            size: 7,
+            sha256: "abc".to_string(),
+        };
+        store
+            .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
+                calls.set(calls.get() + 1);
+                Ok(artifact())
+            })
+            .expect("first target resolves asset");
+        store
+            .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
+                calls.set(calls.get() + 1);
+                Ok(artifact())
+            })
+            .expect("second target reuses asset");
+        assert_eq!(calls.get(), 1, "one metadata lookup/download per run");
+    }
+
+    #[test]
+    fn sha256_file_reports_downloaded_content_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("plugin.zip");
+        std::fs::write(&path, b"verified bytes").expect("write artifact");
+        assert_eq!(
+            sha256_file(&path).expect("hash artifact"),
+            format!("{:x}", Sha256::digest(b"verified bytes"))
+        );
+    }
+
+    #[test]
+    fn verification_failure_does_not_store_an_artifact_for_target_mutation() {
+        let github = GitHubRepo {
+            host: "github.example.test".to_string(),
+            owner: "example".to_string(),
+            repo: "plugin".to_string(),
+        };
+        let mut store = ReleaseArtifactStore::default();
+
+        let error = store
+            .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
+                Err(Error::validation_invalid_argument(
+                    "releaseArtifact",
+                    "Downloaded release artifact 'plugin.zip' SHA-256 digest does not match GitHub Release metadata".to_string(),
+                    None,
+                    None,
+                ))
+            })
+            .expect_err("digest mismatch must fail release preflight");
+
+        assert!(error.to_string().contains("SHA-256 digest does not match"));
+        assert!(
+            store.get(&github, "v1.2.3", "plugin.zip").is_none(),
+            "a failed verification must not make bytes available to deploy targets"
+        );
+    }
+
+    #[test]
+    fn digest_mismatch_fails_before_an_artifact_can_be_fanned_out() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("plugin.zip");
+        std::fs::write(&path, b"PK\x03\x04fixture").expect("write artifact");
+        let metadata = ReleaseAssetMetadata {
+            url: "https://github.example.test/api/v3/assets/1".to_string(),
+            name: "plugin.zip".to_string(),
+            size: 11,
+            digest: Some(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            ),
+            tag: "v1.2.3".to_string(),
+            commit: Some("abc123".to_string()),
+        };
+
+        let error = verify_downloaded_release_artifact(&path, &metadata, &metadata.url)
+            .expect_err("metadata digest mismatch must fail before target preparation");
+
+        assert!(error.to_string().contains("SHA-256 digest does not match"));
     }
 
     #[test]
