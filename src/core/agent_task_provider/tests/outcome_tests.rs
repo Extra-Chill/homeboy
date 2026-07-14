@@ -238,6 +238,78 @@ fn provider_outcome_roles_normalize_from_declared_aliases() {
 }
 
 #[test]
+fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_files() {
+    let root = tempfile::tempdir().expect("artifact root");
+    let empty_path = root.path().join("empty.patch");
+    let nonempty_path = root.path().join("nonempty.patch");
+    fs::write(&empty_path, "").expect("empty patch");
+    fs::write(&nonempty_path, "diff --git a/a b/a\n").expect("nonempty patch");
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "opencode-no-op".to_string(),
+        attempt: 1,
+    };
+    let mut empty = fixture_artifact("empty", "patch", &empty_path, Some("text/x-patch"));
+    empty.size_bytes = None;
+    let mut nonempty = fixture_artifact("nonempty", "patch", &nonempty_path, Some("text/x-patch"));
+    nonempty.size_bytes = None;
+    let mut unavailable = fixture_artifact(
+        "foreign",
+        "patch",
+        &std::env::temp_dir().join("homeboy-unavailable.patch"),
+        Some("text/x-patch"),
+    );
+    unavailable.size_bytes = None;
+
+    let mut empty_outcome = failed_outcome_with_run_result(Value::Null);
+    empty_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    empty_outcome.failure_classification = None;
+    empty_outcome.artifacts = vec![empty.clone()];
+    empty_outcome.typed_artifacts = vec![AgentTaskTypedArtifact {
+        name: "patch".to_string(),
+        artifact_type: Some("patch".to_string()),
+        artifact_schema: None,
+        payload: json!({ "path": empty_path, "size_bytes": null }),
+        artifact: Some(empty),
+        metadata: Value::Null,
+    }];
+    normalize_homeboy_local_artifact_sizes(&mut empty_outcome, root.path(), &provenance);
+
+    assert_eq!(empty_outcome.status, AgentTaskOutcomeStatus::NoOp);
+    assert_eq!(empty_outcome.artifacts[0].size_bytes, Some(0));
+    assert_eq!(
+        empty_outcome.typed_artifacts[0]
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.size_bytes),
+        Some(0)
+    );
+    assert_eq!(empty_outcome.typed_artifacts[0].payload["size_bytes"], 0);
+
+    let mut nonempty_outcome = failed_outcome_with_run_result(Value::Null);
+    nonempty_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    nonempty_outcome.failure_classification = None;
+    nonempty_outcome.artifacts = vec![nonempty];
+    normalize_homeboy_local_artifact_sizes(&mut nonempty_outcome, root.path(), &provenance);
+    assert_eq!(nonempty_outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(nonempty_outcome.artifacts[0].size_bytes.unwrap_or_default() > 0);
+
+    let mut unavailable_outcome = failed_outcome_with_run_result(Value::Null);
+    unavailable_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    unavailable_outcome.failure_classification = None;
+    unavailable_outcome.artifacts = vec![unavailable];
+    normalize_homeboy_local_artifact_sizes(&mut unavailable_outcome, root.path(), &provenance);
+    assert_eq!(
+        unavailable_outcome.status,
+        AgentTaskOutcomeStatus::Succeeded
+    );
+    assert_eq!(unavailable_outcome.artifacts[0].size_bytes, None);
+}
+
+#[test]
 fn declared_sandbox_result_contract_rejects_private_runtime_result_shape() {
     let (_, mut provider) = request("task-sandbox-private", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();
