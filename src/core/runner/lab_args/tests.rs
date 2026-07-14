@@ -1747,6 +1747,162 @@ mod materialize_specs_tests {
     }
 
     #[test]
+    fn materialize_agent_task_specs_remaps_and_stages_cook_attempt_plan_for_runner_harvest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let controller = temp.path().join("controller/worktree");
+        let runner = temp.path().join("runner/worktree");
+        let controller_plugin = temp.path().join("controller/provider-plugin");
+        let runner_plugin = temp.path().join("runner/provider-plugin");
+        let controller_overlay = temp.path().join("controller/runtime-overlay");
+        let runner_overlay = temp.path().join("runner/runtime-overlay");
+        let controller_component = temp.path().join("controller/component");
+        let runner_component = temp.path().join("runner/component");
+        for path in [
+            &controller,
+            &controller_plugin,
+            &controller_overlay,
+            &controller_component,
+            &runner_plugin,
+            &runner_overlay,
+            &runner_component,
+        ] {
+            std::fs::create_dir_all(path).expect("workspace directory");
+        }
+        std::fs::create_dir_all(&runner).expect("runner checkout");
+        std::fs::write(runner.join("README.md"), "runner checkout\n").expect("checkout file");
+        for args in [
+            vec!["init".to_string(), "-b".to_string(), "main".to_string()],
+            vec!["add".to_string(), ".".to_string()],
+            vec![
+                "-c".to_string(),
+                "user.name=Homeboy Test".to_string(),
+                "-c".to_string(),
+                "user.email=homeboy@example.test".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "runner checkout".to_string(),
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&runner)
+                .status()
+                .expect("run git")
+                .success());
+        }
+
+        let mappings = vec![
+            LabPathRemap {
+                local: controller.display().to_string(),
+                remote: runner.display().to_string(),
+            },
+            LabPathRemap {
+                local: controller_plugin.display().to_string(),
+                remote: runner_plugin.display().to_string(),
+            },
+            LabPathRemap {
+                local: controller_overlay.display().to_string(),
+                remote: runner_overlay.display().to_string(),
+            },
+            LabPathRemap {
+                local: controller_component.display().to_string(),
+                remote: runner_component.display().to_string(),
+            },
+        ];
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "controller-plan",
+            "component_contracts": [{ "slug": "component", "path": controller_component }],
+            "tasks": [{
+                "task_id": "task-1",
+                "workspace": { "root": controller },
+                "executor": { "config": {
+                    "workspace": controller,
+                    "workspace_root": controller,
+                    "provider_plugin_paths": [controller_plugin],
+                    "runtime_overlay": { "sources": [controller_overlay] }
+                }},
+                "metadata": { "workspace": controller, "workspace_root": controller }
+            }]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-plan".to_string(),
+            plan,
+        ];
+
+        let out = materialize_agent_task_specs_in_args(&args, &mappings, temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-attempt-plan.json");
+            std::fs::write(runner.join(spec.filename), spec.spec).expect("stage runner plan");
+            Ok(Some((
+                format!("@{}", runner.join(spec.filename).display()),
+                (),
+            )))
+        })
+        .expect("remap and stage attempt plan");
+        let staged: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(runner.join("agent-task-attempt-plan.json"))
+                .expect("read staged plan"),
+        )
+        .expect("parse staged plan");
+
+        assert_eq!(
+            out.argv[4],
+            format!("@{}", runner.join("agent-task-attempt-plan.json").display())
+        );
+        assert_eq!(
+            staged["tasks"][0]["workspace"]["root"],
+            runner.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["workspace"],
+            runner.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["workspace_root"],
+            runner.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["metadata"]["workspace"],
+            runner.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["metadata"]["workspace_root"],
+            runner.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["provider_plugin_paths"][0],
+            runner_plugin.display().to_string()
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["runtime_overlay"]["sources"][0],
+            runner_overlay.display().to_string()
+        );
+        assert_eq!(
+            staged["component_contracts"][0]["path"],
+            runner_component.display().to_string()
+        );
+        assert!(
+            !std::fs::read_to_string(runner.join("agent-task-attempt-plan.json"))
+                .expect("read staged plan")
+                .contains(&controller.display().to_string())
+        );
+        assert!(std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(
+                staged["tasks"][0]["workspace"]["root"]
+                    .as_str()
+                    .expect("runner root")
+            )
+            .status()
+            .expect("run runner git harvest preflight")
+            .success());
+    }
+
+    #[test]
     fn materialize_agent_task_specs_rewrites_fanout_child_cwd_to_runner_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let controller = temp.path().join("homeboy@cook-one");

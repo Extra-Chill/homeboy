@@ -139,19 +139,21 @@ pub(in crate::core::runner) fn remap_agent_task_plan_in_args(
     let ordered = order_mappings_by_specificity(mappings);
 
     try_rewrite_flag_value_args(args, |arg, iter, out| {
-        if arg == "--plan" {
-            out.push(arg.to_string());
-            if let Some(spec) = iter.next() {
-                out.push(remap_agent_task_plan_spec(spec, &ordered, source_path)?);
+        for flag in ["--plan", "--attempt-plan"] {
+            if arg == flag {
+                out.push(arg.to_string());
+                if let Some(spec) = iter.next() {
+                    out.push(remap_agent_task_plan_spec(spec, &ordered, source_path)?);
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        if let Some(spec) = arg.strip_prefix("--plan=") {
-            out.push(format!(
-                "--plan={}",
-                remap_agent_task_plan_spec(spec, &ordered, source_path)?
-            ));
-            return Ok(());
+            if let Some(spec) = arg.strip_prefix(&format!("{flag}=")) {
+                out.push(format!(
+                    "{flag}={}",
+                    remap_agent_task_plan_spec(spec, &ordered, source_path)?
+                ));
+                return Ok(());
+            }
         }
         out.push(arg.to_string());
         Ok(())
