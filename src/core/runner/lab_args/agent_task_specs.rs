@@ -190,13 +190,50 @@ fn remap_agent_task_plan_spec(
             None,
         )
     })?;
+    let controller_plan = value.clone();
     remap_paths_in_value(&mut value, mappings);
+    record_controller_workspace_provenance(&mut value, &controller_plan);
     serde_json::to_string(&value).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("serialize remapped agent-task plan".to_string()),
         )
     })
+}
+
+fn record_controller_workspace_provenance(remapped: &mut Value, controller: &Value) {
+    let Some(remapped_tasks) = remapped.get_mut("tasks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(controller_tasks) = controller.get("tasks").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (remapped_task, controller_task) in remapped_tasks.iter_mut().zip(controller_tasks) {
+        let Some(controller_root) = controller_task
+            .get("workspace")
+            .and_then(|workspace| workspace.get("root"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(task) = remapped_task.as_object_mut() else {
+            continue;
+        };
+        let metadata = task
+            .entry("metadata".to_string())
+            .or_insert(Value::Object(serde_json::Map::new()));
+        if metadata.is_null() {
+            *metadata = Value::Object(serde_json::Map::new());
+        }
+        let Some(metadata) = metadata.as_object_mut() else {
+            continue;
+        };
+        metadata.insert(
+            "workspace_source_provenance".to_string(),
+            serde_json::json!({ "controller_root": controller_root }),
+        );
+    }
 }
 
 fn remap_agent_task_fanout_input_spec(

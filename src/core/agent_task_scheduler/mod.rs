@@ -1485,6 +1485,66 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn committed_harvest_preflight_uses_runner_workspace_not_controller_provenance() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runner_workspace = temp.path().join("runner-workspace");
+        std::fs::create_dir(&runner_workspace).expect("runner workspace");
+        git(&runner_workspace, &["init", "-b", "main"]);
+        git(
+            &runner_workspace,
+            &["config", "user.email", "test@example.com"],
+        );
+        git(&runner_workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(runner_workspace.join("file.txt"), "baseline\n").expect("baseline file");
+        git(&runner_workspace, &["add", "file.txt"]);
+        git(&runner_workspace, &["commit", "-m", "baseline"]);
+        let controller_workspace = temp.path().join("missing-controller-workspace");
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "runner-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(runner_workspace.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::json!({
+                "workspace_source_provenance": {
+                    "controller_root": controller_workspace.display().to_string()
+                }
+            }),
+        };
+
+        let preflight = prepare_committed_harvest(&request).expect("runner workspace preflight");
+
+        assert!(preflight.base_sha.is_some());
+        assert!(!controller_workspace.exists());
+    }
+
+    #[test]
     fn lab_snapshot_preflight_materializes_a_provider_ready_attempt_workspace() {
         let _guard = LAB_ENV_LOCK
             .get_or_init(|| Mutex::new(()))

@@ -1858,6 +1858,10 @@ mod materialize_specs_tests {
             runner.display().to_string()
         );
         assert_eq!(
+            staged["tasks"][0]["metadata"]["workspace_source_provenance"]["controller_root"],
+            controller.display().to_string()
+        );
+        assert_eq!(
             staged["tasks"][0]["executor"]["config"]["workspace"],
             runner.display().to_string()
         );
@@ -1885,10 +1889,13 @@ mod materialize_specs_tests {
             staged["component_contracts"][0]["path"],
             runner_component.display().to_string()
         );
-        assert!(
-            !std::fs::read_to_string(runner.join("agent-task-attempt-plan.json"))
+        assert_eq!(
+            std::fs::read_to_string(runner.join("agent-task-attempt-plan.json"))
                 .expect("read staged plan")
-                .contains(&controller.display().to_string())
+                .matches(&controller.display().to_string())
+                .count(),
+            1,
+            "the controller path is retained only as provenance"
         );
         assert!(std::process::Command::new("git")
             .args(["rev-parse", "--is-inside-work-tree"])
