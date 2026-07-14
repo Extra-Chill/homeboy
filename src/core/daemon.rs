@@ -183,6 +183,7 @@ pub struct DaemonLeaselessRecoveryResult {
 pub struct DaemonStateLossRecoveryResult {
     pub recovered_lease_id: String,
     pub recorded_dead_pid: u32,
+    pub recorded_endpoint: String,
     pub affected_job_ids: Vec<Uuid>,
     pub affected_job_count: usize,
     pub evidence_snapshot_path: String,

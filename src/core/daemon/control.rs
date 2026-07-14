@@ -38,6 +38,7 @@ pub struct ArtifactFetchOutcome {
 pub fn recover_missing_lease_state(
     lease_id: &str,
     recorded_pid: u32,
+    recorded_endpoint: &str,
     confirm_pid_dead: bool,
     confirm_control_plane_lost: bool,
     addr: &str,
@@ -51,12 +52,15 @@ pub fn recover_missing_lease_state(
         ));
     }
     parse_bind_addr(addr)?;
+    let recorded_endpoint = parse_recorded_daemon_endpoint(recorded_endpoint)?;
     let _lock = acquire_daemon_operation_lock()?;
     recover_missing_lease_state_with_operations(
         lease_id,
         recorded_pid,
+        recorded_endpoint,
         read_status,
         pid_is_running,
+        probe_recorded_daemon_endpoint,
         try_acquire_daemon_owner_lock,
         || {
             let jobs_path = crate::core::paths::daemon_jobs_file()?;
@@ -87,6 +91,7 @@ pub fn recover_missing_lease_state(
 fn recover_missing_lease_state_with_operations<
     Status,
     PidIsRunning,
+    ProbeEndpoint,
     OwnerLock,
     AcquireOwner,
     Reconcile,
@@ -94,8 +99,10 @@ fn recover_missing_lease_state_with_operations<
 >(
     lease_id: &str,
     recorded_pid: u32,
+    recorded_endpoint: SocketAddr,
     status: Status,
     pid_is_running: PidIsRunning,
+    probe_endpoint: ProbeEndpoint,
     acquire_owner: AcquireOwner,
     reconcile: Reconcile,
     start: Start,
@@ -103,6 +110,7 @@ fn recover_missing_lease_state_with_operations<
 where
     Status: FnOnce() -> Result<super::DaemonStatus>,
     PidIsRunning: FnOnce(u32) -> bool,
+    ProbeEndpoint: FnOnce(SocketAddr) -> Result<String>,
     AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
     Reconcile: FnOnce() -> Result<(PathBuf, crate::core::api_jobs::DaemonLeaseJobDiagnostics)>,
     Start: FnOnce() -> Result<super::DaemonStartResult>,
@@ -128,6 +136,7 @@ where
             None,
         ));
     }
+    let endpoint_probe = probe_endpoint(recorded_endpoint)?;
     let owner_lock = acquire_owner()?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease_id",
@@ -151,6 +160,7 @@ where
     Ok(super::DaemonStateLossRecoveryResult {
         recovered_lease_id: lease_id.to_string(),
         recorded_dead_pid: recorded_pid,
+        recorded_endpoint: recorded_endpoint.to_string(),
         affected_job_ids: reconciled.matching_job_ids,
         affected_job_count,
         evidence_snapshot_path: snapshot_path.display().to_string(),
@@ -158,11 +168,45 @@ where
             format!("operator supplied exact missing lease `{lease_id}`"),
             format!("recorded daemon PID `{recorded_pid}` was not running"),
             "daemon owner lock acquired non-destructively".to_string(),
-            "daemon endpoint was unreachable while state record was absent".to_string(),
+            endpoint_probe,
         ],
         retry_guidance: "Recorded outcomes were retained. Retry unfinished eligible work through its original command or workflow.".to_string(),
         replacement,
     })
+}
+
+fn parse_recorded_daemon_endpoint(value: &str) -> Result<SocketAddr> {
+    let endpoint = value.parse::<SocketAddr>().map_err(|_| {
+        Error::validation_invalid_argument(
+            "recorded_endpoint",
+            "state-loss recovery requires a concrete recorded loopback endpoint",
+            Some(value.to_string()),
+            None,
+        )
+    })?;
+    if endpoint.port() == 0 || endpoint.ip().is_unspecified() || !endpoint.ip().is_loopback() {
+        return Err(Error::validation_invalid_argument(
+            "recorded_endpoint",
+            "recorded daemon endpoint must be a non-zero loopback address",
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(endpoint)
+}
+
+fn probe_recorded_daemon_endpoint(endpoint: SocketAddr) -> Result<String> {
+    match TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)) {
+        Ok(_) => Err(Error::validation_invalid_argument(
+            "recorded_endpoint",
+            format!("recorded daemon endpoint `{endpoint}` is reachable"),
+            Some(endpoint.to_string()),
+            None,
+        )),
+        Err(error) => Ok(format!(
+            "recorded daemon endpoint `{endpoint}` was unreachable: {error}"
+        )),
+    }
 }
 
 fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, Start>(

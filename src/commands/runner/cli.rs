@@ -237,6 +237,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         recorded_pid: Option<u32>,
 
+        /// Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state
+        #[arg(long)]
+        recorded_endpoint: Option<String>,
+
         /// Confirm the remote daemon state record and endpoint are unavailable
         #[arg(long)]
         confirm_control_plane_lost: bool,

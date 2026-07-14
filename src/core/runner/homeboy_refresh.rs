@@ -335,6 +335,7 @@ pub fn refresh_homeboy_binary(
             false,
             None,
             None,
+            None,
         )?;
         daemon_refreshed = connect_exit_code == 0;
     } else {

@@ -326,8 +326,8 @@ homeboy runner connect <runner-id>
 homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead
 homeboy runner connect <runner-id> --reconcile-leaseless-orphans --confirm-no-daemon-owner
 homeboy daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner
-homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --confirm-pid-dead --confirm-control-plane-lost
-homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --confirm-pid-dead --confirm-control-plane-lost
+homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port> --confirm-pid-dead --confirm-control-plane-lost
+homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port> --confirm-pid-dead --confirm-control-plane-lost
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
@@ -340,11 +340,14 @@ the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
 When a controller session was lost while a remote daemon lease is dead and its
 durable jobs remain, inspect the remote `homeboy daemon status` first. Recovery
 requires the explicit exact-lease form shown above. It verifies the recorded PID
-is dead under the remote daemon lifecycle lock, preserves job events while
-terminalizing jobs from that dead control plane with retry guidance, starts one
-replacement daemon, and then records the fresh local session. Ordinary `runner
-connect` never infers that orphan ownership; live, ambiguous, and lease-mismatched
-daemon records remain protected.
+is dead, probes the supplied concrete loopback endpoint and requires it to be
+unreachable, then acquires the remote daemon lifecycle lock before preserving job
+events and terminalizing jobs from that dead control plane. The response retains
+the exact lease, affected job IDs, endpoint probe, owner-lock proof, snapshot,
+and replacement identity before the fresh local session is recorded. Exact,
+lease-less, and orphan-adoption recovery modes are mutually exclusive. Ordinary
+`runner connect` never infers orphan ownership; live, ambiguous, and
+lease-mismatched daemon records remain protected.
 
 When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
 and unavailable recovery evidence, run the explicit daemon reconciliation on the

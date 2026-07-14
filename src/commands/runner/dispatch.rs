@@ -140,6 +140,7 @@ pub fn run(
             confirm_no_daemon_owner,
             recover_missing_lease_state,
             recorded_pid,
+            recorded_endpoint,
             confirm_control_plane_lost,
         } => map_registry(connect(
             &id,
@@ -153,6 +154,7 @@ pub fn run(
                 confirm_no_daemon_owner,
                 recover_missing_lease_state,
                 recorded_pid,
+                recorded_endpoint,
                 confirm_control_plane_lost,
             },
         )),

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::daemon::{DaemonFreshnessReport, DaemonLeaselessRecoveryResult};
+use crate::core::daemon::{
+    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStateLossRecoveryResult,
+};
 
 use crate::core::engine::shell;
 use crate::core::redaction::redact_argv_display;
@@ -488,6 +490,8 @@ pub struct RunnerConnectReport {
     pub session_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_loss_recovery: Option<DaemonStateLossRecoveryResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<RunnerFailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]

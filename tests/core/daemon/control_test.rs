@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
@@ -512,8 +512,10 @@ fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_on
         let result = super::recover_missing_lease_state_with_operations(
             "exact-lease",
             4242,
+            recorded_endpoint(),
             || Ok(leaseless_status(1)),
             |_| false,
+            |_| Ok("recorded endpoint was unreachable".to_string()),
             || Ok(Some(())),
             || {
                 let raw = std::fs::read(&path).expect("store bytes");
@@ -553,8 +555,10 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
         super::recover_missing_lease_state_with_operations(
             "exact-lease",
             4242,
+            recorded_endpoint(),
             || Ok(status),
             move |_| pid_live,
+            |_| Ok("recorded endpoint was unreachable".to_string()),
             move || Ok(owner_available.then_some(())),
             || unreachable!("refused recovery must not mutate jobs"),
             || unreachable!("refused recovery must not start a daemon"),
@@ -575,8 +579,10 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
     let replay = super::recover_missing_lease_state_with_operations(
         "exact-lease",
         4242,
+        recorded_endpoint(),
         || Ok(fake_dead_status(fake_daemon(4343, "replacement"))),
         |_| false,
+        |_| Ok("recorded endpoint was unreachable".to_string()),
         || Ok(Some(())),
         || unreachable!("replay must not reconcile jobs"),
         || unreachable!("replay must not start another daemon"),
@@ -599,8 +605,10 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
         let error = super::recover_missing_lease_state_with_operations(
             "exact-lease",
             4242,
+            recorded_endpoint(),
             || Ok(leaseless_status(2)),
             |_| false,
+            |_| Ok("recorded endpoint was unreachable".to_string()),
             || Ok(Some(())),
             || {
                 let raw = std::fs::read(&path).expect("store bytes");
@@ -630,6 +638,18 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
             JobStatus::Running
         );
     });
+}
+
+#[test]
+fn state_loss_recovery_requires_a_concrete_unreachable_recorded_endpoint() {
+    for endpoint in ["127.0.0.1:0", "0.0.0.0:7421", "not-an-endpoint"] {
+        assert!(super::parse_recorded_daemon_endpoint(endpoint).is_err());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let endpoint = listener.local_addr().expect("endpoint");
+    let error = super::probe_recorded_daemon_endpoint(endpoint)
+        .expect_err("reachable recorded endpoint must block recovery");
+    assert!(error.message.contains("is reachable"));
 }
 
 #[test]
@@ -742,6 +762,10 @@ fn fake_daemon(pid: u32, lease_id: &str) -> super::DaemonStartResult {
         state_path: "/fake/daemon-state.json".to_string(),
         lease_id: lease_id.to_string(),
     }
+}
+
+fn recorded_endpoint() -> SocketAddr {
+    "127.0.0.1:4242".parse().expect("recorded endpoint")
 }
 
 fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {

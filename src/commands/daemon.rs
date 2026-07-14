@@ -57,6 +57,9 @@ enum DaemonCommand {
         /// Recorded daemon PID captured with the lease ID
         #[arg(long)]
         recorded_pid: u32,
+        /// Recorded concrete loopback endpoint captured with the lease ID
+        #[arg(long)]
+        recorded_endpoint: String,
         /// Confirm the recorded daemon PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
@@ -157,8 +160,8 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(reconcile_leaseless_orphans, confirm_no_daemon_owner, &addr)?),
             0,
         )),
-        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, confirm_pid_dead, confirm_control_plane_lost, addr } => Ok((
-            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
+        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, addr } => Ok((
+            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
