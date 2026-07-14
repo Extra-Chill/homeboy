@@ -19,8 +19,7 @@ use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
     DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
-    DaemonOrphanAdoptionResult, DaemonStaleReasonCode,
-    DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Outcome of a daemon byte-endpoint artifact download.
@@ -74,7 +73,10 @@ fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, St
 where
     Status: FnOnce() -> Result<super::DaemonStatus>,
     Probe: FnOnce() -> Result<Vec<String>>,
-    Reconcile: FnOnce() -> Result<(PathBuf, crate::core::api_jobs::LeaselessOrphanJobDiagnostics)>,
+    Reconcile: FnOnce() -> Result<(
+        PathBuf,
+        crate::core::api_jobs::LeaselessOrphanJobDiagnostics,
+    )>,
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
     let status = status()?;

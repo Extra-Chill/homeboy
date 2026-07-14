@@ -447,7 +447,10 @@ pub fn read_status() -> Result<DaemonStatus> {
 
 fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
-    for (label, path) in [(b"daemon-state\0".as_slice(), state_path), (b"daemon-jobs\0".as_slice(), jobs_path)] {
+    for (label, path) in [
+        (b"daemon-state\0".as_slice(), state_path),
+        (b"daemon-jobs\0".as_slice(), jobs_path),
+    ] {
         hasher.update(label);
         match fs::read(path) {
             Ok(bytes) => {
@@ -455,7 +458,12 @@ fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> 
                 hasher.update(bytes);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
-            Err(error) => return Err(Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", path.display())),
+                ))
+            }
         }
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
