@@ -234,6 +234,7 @@ pub(in crate::core::runner) fn inject_agent_task_resolved_provider_policy_in_arg
             .as_ref()
             .and_then(|policy| policy.liveness_timeout_ms),
         rotation,
+        rotation_starts_with_first_entry: true,
     };
     let encoded = serde_json::to_string(&policy).map_err(|error| {
         Error::internal_json(

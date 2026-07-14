@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.285.2] - 2026-07-14
+
+### Changed
+- format engine primitive re-export
+- extract output aggregation types into homeboy-output crate
+- extract product identity literals into homeboy-product-identity crate
+- Prepare Lab snapshots for committed harvest
+- extract engine execution primitives into homeboy-engine-primitives crate
+- extract error types into internal homeboy-error crate
+- isolate exact-ref hydration fixtures
+- extract redaction into internal homeboy-redaction crate
+
+### Fixed
+- Fix detached agent task handoff timeout
+- bundle retry workspaces before runner clone
+- Fix Lab cook artifact promotion and retrieval
+- don't offer local bypass as primary rerun to non-interactive agents (#6384)
+
+## [0.285.1] - 2026-07-14
+
+### Changed
+- drop redundant native-tls stack from reqwest
+
+### Fixed
+- separate deploy health from source freshness
+
 ## [0.285.0] - 2026-07-14
 
 ### Added

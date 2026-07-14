@@ -1,6 +1,14 @@
+[workspace]
+# Internal crates split out of the homeboy monolith to gain per-crate
+# incremental compilation and lower peak build memory. These are path-only
+# members, never published to crates.io; the shipped artifact is still the
+# single `homeboy` binary. First extraction (homeboy-redaction) proves the
+# pattern ahead of larger extractions (e.g. runner).
+members = ["crates/*"]
+
 [package]
 name = "homeboy"
-version = "0.285.0"
+version = "0.285.2"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -28,6 +36,15 @@ name = "bench-audit-self"
 path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
+# Internal workspace crates (path-only, not published)
+homeboy-error = { path = "crates/homeboy-error" }
+homeboy-finding = { path = "crates/homeboy-finding" }
+homeboy-output = { path = "crates/homeboy-output" }
+homeboy-process = { path = "crates/homeboy-process" }
+homeboy-product-identity = { path = "crates/homeboy-product-identity" }
+homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
+homeboy-redaction = { path = "crates/homeboy-redaction" }
+
 # Core library dependencies
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }

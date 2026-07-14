@@ -63,6 +63,7 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+pub(crate) use workspace::materialize_verified_lab_snapshot_git_baseline_from_env;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
 pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
@@ -169,7 +170,8 @@ pub use workspace::{
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 pub(crate) use workspace::{
-    verify_lab_workspace_from_env, workspace_content_hash, VerifiedLabWorkspaceProvenance,
+    verify_lab_workspace_from_env, verify_lab_workspace_git_root, workspace_content_hash,
+    VerifiedLabWorkspaceProvenance,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -534,9 +536,19 @@ impl DefaultLabRunnerCandidate {
     }
 
     fn readiness(&self) -> DefaultLabRunnerReadiness {
+        // Eligibility for *default* selection is looser than
+        // `availability().accepts_jobs`: a disconnected direct-SSH runner is
+        // still a valid default target because auto-offload connects it on
+        // demand. So gate on the hard, non-connectivity reasons only
+        // (capabilities, a failed/absent active-job poll, and capacity), and
+        // score connectivity below rather than excluding it. The one
+        // connectivity gate that IS hard is a disconnected reverse tunnel,
+        // which cannot be woken on demand — handled explicitly below.
+        let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
         if !self.capabilities_ready
             || !self.active_jobs_available
-            || !self.availability().accepts_jobs
+            || self.stale_daemon
+            || at_capacity
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,

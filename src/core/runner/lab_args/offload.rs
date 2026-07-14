@@ -31,6 +31,17 @@ pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Resul
             })?;
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
         }
+        if arg == "--workspace" {
+            let value = iter.next().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "--workspace requires a value before Lab offload can sync the workspace",
+                    None,
+                    None,
+                )
+            })?;
+            return resolve_workspace_source_path(value);
+        }
         if arg == "--to-worktree" {
             let value = iter.next().ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -48,6 +59,9 @@ pub(in crate::core::runner) fn lab_offload_source_path(args: &[String]) -> Resul
         if let Some(value) = arg.strip_prefix("--cwd=") {
             return Ok(PathBuf::from(shellexpand::tilde(value).to_string()));
         }
+        if let Some(value) = arg.strip_prefix("--workspace=") {
+            return resolve_workspace_source_path(value);
+        }
         if let Some(value) = arg.strip_prefix("--to-worktree=") {
             return resolve_to_worktree_source_path(value);
         }
@@ -63,6 +77,14 @@ fn resolve_to_worktree_source_path(value: &str) -> Result<PathBuf> {
         None => worktree_providers::resolve_worktree_provider_handle(value)
             .map(|worktree| PathBuf::from(worktree.path)),
     }
+}
+
+fn resolve_workspace_source_path(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(shellexpand::tilde(value).to_string());
+    if path.exists() {
+        return Ok(path);
+    }
+    resolve_to_worktree_source_path(value)
 }
 
 fn extension_refresh_local_source_path(args: &[String]) -> Option<PathBuf> {
@@ -148,6 +170,12 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
             let rewritten =
                 remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
             stripped.push(format!("--cwd={rewritten}"));
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--workspace=") {
+            let rewritten =
+                remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
+            stripped.push(format!("--workspace={rewritten}"));
             continue;
         }
         if arg == "--runner" {

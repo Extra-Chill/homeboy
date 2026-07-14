@@ -47,6 +47,9 @@ pub struct LabRoutingRequest<'a> {
     /// Controller checkout selected independently of CLI argv, such as the
     /// logical primary workspace of a materialized retry plan.
     pub source_path: Option<&'a std::path::Path>,
+    /// Require controller bundle materialization for the selected source
+    /// checkout before any runner-side Git transport is attempted.
+    pub require_controller_git_bundle: bool,
     pub job_overrides: runners::LabJobOverrides,
 }
 
@@ -73,6 +76,7 @@ pub(crate) fn route_lab_offload(
         local_output_file: request.local_output_file,
         durable_agent_task_plan: request.durable_agent_task_plan,
         source_path: request.source_path,
+        require_controller_git_bundle: request.require_controller_git_bundle,
         job_overrides: request.job_overrides,
     })
 }
@@ -529,6 +533,7 @@ fn execute_lab_offload_with_timeout(
     let local_output_file = request.local_output_file.map(str::to_string);
     let durable_agent_task_plan = request.durable_agent_task_plan.cloned();
     let source_path = request.source_path.map(std::path::Path::to_path_buf);
+    let require_controller_git_bundle = request.require_controller_git_bundle;
     let job_overrides = request.job_overrides;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -548,6 +553,7 @@ fn execute_lab_offload_with_timeout(
             local_output_file: local_output_file.as_deref(),
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             source_path: source_path.as_deref(),
+            require_controller_git_bundle,
             job_overrides,
         });
         let _ = tx.send(result);
@@ -736,6 +742,7 @@ mod tests {
             local_output_file: None,
             durable_agent_task_plan: None,
             source_path: None,
+            require_controller_git_bundle: false,
             job_overrides: runners::LabJobOverrides::default(),
         })
         .unwrap();
@@ -1038,6 +1045,7 @@ mod tests {
                 local_output_file: None,
                 durable_agent_task_plan: None,
                 source_path: None,
+                require_controller_git_bundle: false,
                 job_overrides: runners::LabJobOverrides::default(),
             },
             None,

@@ -283,6 +283,13 @@ pub(super) fn disconnected_report(
             if let Some(evidence) = &recovery.ownership_evidence {
                 details.insert("ownership_evidence".to_string(), evidence.clone());
             }
+            if let Some(evidence) = &recovery.termination_evidence {
+                details.insert(
+                    "termination_evidence".to_string(),
+                    serde_json::to_string(evidence)
+                        .unwrap_or_else(|_| "unavailable: serialization failed".to_string()),
+                );
+            }
             (
                 "Disconnected runner was checked through bounded remote lease recovery".to_string(),
                 recovery.adoption_command.clone(),

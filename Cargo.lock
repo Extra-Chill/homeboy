@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.285.0"
+version = "0.285.2"
 dependencies = [
  "base64",
  "chrono",
@@ -695,6 +695,13 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-engine-primitives",
+ "homeboy-error",
+ "homeboy-finding",
+ "homeboy-output",
+ "homeboy-process",
+ "homeboy-product-identity",
+ "homeboy-redaction",
  "keyring",
  "libc",
  "regex",
@@ -713,6 +720,62 @@ dependencies = [
  "toml",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "homeboy-engine-primitives"
+version = "0.1.0"
+dependencies = [
+ "homeboy-error",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-error"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-finding"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-output"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-process"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "homeboy-error",
+ "libc",
+]
+
+[[package]]
+name = "homeboy-product-identity"
+version = "0.1.0"
+
+[[package]]
+name = "homeboy-redaction"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
 ]
 
 [[package]]

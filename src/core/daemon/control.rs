@@ -22,7 +22,8 @@ use super::{
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
     DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
     DaemonOrphanAdoptionResult, DaemonProcessCandidate, DaemonProcessOwnership,
-    DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonStaleReasonCode, DaemonStartResult, DaemonTerminationClassification,
+    DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 /// Enumerate foreground daemon processes without inferring ownership from a
@@ -51,6 +52,81 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
         .lines()
         .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
         .collect())
+}
+
+/// Supervise one daemon child and persist its bounded termination evidence.
+/// This is shared by local and SSH launches because SSH invokes the same CLI.
+pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
+    let exe = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable".to_string()),
+        )
+    })?;
+    let child = Command::new(exe)
+        .args(["daemon", "serve", "--addr", addr])
+        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("spawn supervised daemon".to_string()),
+            )
+        })?;
+    let pid = child.id();
+    let output = child.wait_with_output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("wait for supervised daemon".to_string()),
+        )
+    })?;
+    let state = super::validate_lease_file(&crate::core::paths::daemon_state_file()?)
+        .ok()
+        .and_then(|validation| validation.state);
+    let prior = super::read_termination_evidence()?;
+    let stop_requested = prior
+        .as_ref()
+        .is_some_and(|evidence| evidence.stop_requested && evidence.pid == Some(pid));
+    let (exit_code, signal) = exit_details(&output.status);
+    let evidence = DaemonTerminationEvidence {
+        classification: if stop_requested { DaemonTerminationClassification::CleanStop } else { DaemonTerminationClassification::UnexpectedExit },
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        lease_id: state.as_ref().map(|state| state.lease_id.clone()).or_else(|| prior.and_then(|evidence| evidence.lease_id)),
+        pid: Some(pid),
+        binary_identity: state.as_ref().map(|state| state.build_identity.display.clone()),
+        active_jobs: super::JobStore::active_count_at_path(crate::core::paths::daemon_jobs_file()?)?,
+        resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
+        os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
+        exit_code, signal,
+        stdout: bounded_redacted(&output.stdout), stderr: bounded_redacted(&output.stderr), stop_requested,
+    };
+    super::write_termination_evidence(&evidence)
+}
+
+fn bounded_redacted(bytes: &[u8]) -> Option<String> {
+    const LIMIT: usize = 4096;
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).to_string();
+    if bytes.len() > LIMIT {
+        text.push_str("\n[truncated]");
+    }
+    Some(crate::core::redaction::redact_string(&text))
+}
+
+#[cfg(unix)]
+fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
+    use std::os::unix::process::ExitStatusExt;
+    (status.code(), status.signal())
+}
+
+#[cfg(not(unix))]
+fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
+    (status.code(), None)
 }
 
 fn parse_daemon_process_candidate(
@@ -1199,7 +1275,14 @@ fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonSta
         )
     })?;
     let child = Command::new(exe)
-        .args(["daemon", "serve", "--addr", addr])
+        .args([
+            "daemon",
+            "supervise",
+            "--addr",
+            addr,
+            "--startup-token",
+            startup_token,
+        ])
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1341,6 +1424,59 @@ fn default_artifact_output_path(artifact_id: &str) -> PathBuf {
         .find(|segment| !segment.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("artifact.bin"))
+}
+
+#[cfg(test)]
+mod termination_tests {
+    use super::*;
+
+    #[test]
+    fn termination_output_is_bounded_and_redacted() {
+        let output =
+            bounded_redacted(format!("token=super-secret\n{}", "x".repeat(5_000)).as_bytes())
+                .expect("output");
+        assert!(output.contains("[REDACTED]"));
+        assert!(output.contains("[truncated]"));
+        assert!(output.len() < 4_200);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_fixture_exit_preserves_exit_status_without_os_cause_inference() {
+        let status = Command::new("sh")
+            .args(["-c", "exit 23"])
+            .status()
+            .expect("fixture process");
+        assert_eq!(exit_details(&status), (Some(23), None));
+        let evidence = DaemonTerminationEvidence {
+            classification: DaemonTerminationClassification::UnexpectedExit,
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            lease_id: Some("lease".to_string()),
+            pid: Some(1),
+            binary_identity: Some("fixture".to_string()),
+            active_jobs: 1,
+            resource_evidence: "unavailable: fixture has no OS resource snapshot".to_string(),
+            os_evidence: "unavailable: fixture has no OS evidence".to_string(),
+            exit_code: Some(23),
+            signal: None,
+            stdout: None,
+            stderr: Some("panic: fixture".to_string()),
+            stop_requested: false,
+        };
+        assert_eq!(
+            evidence.classification,
+            DaemonTerminationClassification::UnexpectedExit
+        );
+        assert!(evidence.os_evidence.starts_with("unavailable:"));
+    }
+
+    #[test]
+    fn requested_stop_is_distinct_from_unexpected_exit() {
+        assert_ne!(
+            DaemonTerminationClassification::CleanStop,
+            DaemonTerminationClassification::UnexpectedExit
+        );
+    }
 }
 
 fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {

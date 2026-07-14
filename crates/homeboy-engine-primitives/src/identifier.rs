@@ -1,7 +1,6 @@
 //! Shared identifier normalization and validation primitives.
 
-use crate::core::error::Error;
-use crate::core::Result;
+use homeboy_error::{Error, Result};
 
 pub fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     let trimmed = value.trim();

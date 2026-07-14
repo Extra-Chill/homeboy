@@ -659,7 +659,13 @@ fn path_size(path: &Path) -> Result<u64> {
         return Ok(metadata.len());
     }
 
-    let mut total = metadata.len();
+    // Sum only the reclaimable file/symlink content. A directory's own
+    // `metadata.len()` is the inode/directory-entry size (typically a 4 KiB
+    // block on ext4/tmpfs), not reclaimable payload — counting it made size
+    // sorting reflect directory nesting depth rather than actual artifact
+    // weight (e.g. a 5-byte file under two nested dirs outranking a 256-byte
+    // file under one). Recurse over children and count their bytes only.
+    let mut total = 0;
     for entry in fs::read_dir(path).map_err(|e| {
         Error::internal_io(
             e.to_string(),

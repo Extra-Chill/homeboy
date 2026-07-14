@@ -8,8 +8,28 @@ pub(super) fn normalize_provider_outcome_roles(
     normalize_provider_run_result_output(outcome, &provider.role_aliases);
     let result_contract_valid = normalize_provider_result_contract(outcome, provider);
     normalize_provider_runtime_contract(outcome, provider);
+    strip_reserved_artifact_metadata(outcome);
     if result_contract_valid {
         surface_provider_run_result_diagnostics(outcome);
+    }
+}
+
+const HOMEBOY_ARTIFACT_PROVENANCE_KEY: &str = "artifact_provenance";
+
+/// Provider payloads cannot assert Homeboy-internal artifact provenance. The
+/// scheduler adds this key only after it writes a generated patch itself.
+fn strip_reserved_artifact_metadata(outcome: &mut AgentTaskOutcome) {
+    for artifact in &mut outcome.artifacts {
+        if let Some(metadata) = artifact.metadata.as_object_mut() {
+            metadata.remove(HOMEBOY_ARTIFACT_PROVENANCE_KEY);
+        }
+    }
+    for typed in &mut outcome.typed_artifacts {
+        if let Some(artifact) = &mut typed.artifact {
+            if let Some(metadata) = artifact.metadata.as_object_mut() {
+                metadata.remove(HOMEBOY_ARTIFACT_PROVENANCE_KEY);
+            }
+        }
     }
 }
 

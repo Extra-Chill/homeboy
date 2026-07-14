@@ -1,4 +1,5 @@
 use super::*;
+use sha2::Digest;
 
 pub fn record_pre_execution_failure(
     run_id: &str,
@@ -540,7 +541,178 @@ pub(crate) fn record_aggregate(
     )?;
     crate::core::controller_scratch::finalize_run(&record.run_id)?;
     store::write_aggregate_and_record(record, aggregate)?;
+    record_terminal_artifact_projection(record, aggregate)?;
     Ok(record.clone())
+}
+
+pub(crate) fn record_terminal_artifact_projection(
+    record: &mut AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
+    match project_terminal_artifacts(record, aggregate) {
+        Ok(()) => {
+            record.ensure_metadata_object().insert(
+                "artifact_projection".to_string(),
+                json!({ "status": "complete" }),
+            );
+        }
+        Err(error) => {
+            record.ensure_metadata_object().insert(
+                "artifact_projection".to_string(),
+                json!({ "status": "pending", "error": error.message }),
+            );
+        }
+    }
+    store::write_record(record)
+}
+
+/// Project finalized executor artifacts into the standard observation registry.
+/// The lifecycle aggregate remains the source of task semantics; the registry
+/// supplies the canonical retrievable-byte index used by `runs artifact get`.
+pub(crate) fn project_terminal_artifacts(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
+    let store = crate::core::observation::ObservationStore::open_initialized()?;
+    let status = match record.state {
+        AgentTaskRunState::Succeeded => "pass",
+        AgentTaskRunState::PartialFailure => "fail",
+        AgentTaskRunState::Failed => "fail",
+        AgentTaskRunState::Cancelled => "fail",
+        _ => return Ok(()),
+    };
+    let mut existing_metadata = store
+        .get_run(&record.run_id)?
+        .map(|run| run.metadata_json)
+        .unwrap_or_else(|| json!({ "agent_task_run": record.run_id }));
+    if !existing_metadata.is_object() {
+        existing_metadata = json!({});
+    }
+    existing_metadata
+        .as_object_mut()
+        .expect("object checked above")
+        .insert("agent_task_terminal_state".to_string(), json!(record.state));
+    store.upsert_imported_run_preserving_terminal(&crate::core::observation::RunRecord {
+        id: record.run_id.clone(),
+        kind: "agent-task".to_string(),
+        component_id: None,
+        started_at: record.submitted_at.clone(),
+        finished_at: record.updated_at.clone(),
+        status: status.to_string(),
+        command: Some("homeboy agent-task".to_string()),
+        cwd: None,
+        homeboy_version: Some(crate::core::build_identity::current().display),
+        git_sha: None,
+        rig_id: None,
+        metadata_json: existing_metadata,
+    })?;
+
+    let mut used_ids = std::collections::BTreeSet::new();
+    for outcome in &aggregate.outcomes {
+        for artifact in &outcome.artifacts {
+            let Some(path) = artifact.path.as_deref() else {
+                continue;
+            };
+            if artifact.size_bytes.is_none() || artifact.sha256.is_none() {
+                // Unreadable/remote declarations remain visible to review only.
+                continue;
+            }
+            validate_projection_token("artifact.id", &artifact.id)?;
+            validate_projection_token("artifact.kind", &artifact.kind)?;
+            let base_id = artifact.id.trim();
+            let logical_id = unique_logical_artifact_id(&mut used_ids, base_id, &outcome.task_id);
+            // Observation artifact ids are globally unique. Keep the lifecycle
+            // logical id as the per-run lookup token exposed by runs artifact.
+            let mut id_hash = sha2::Sha256::new();
+            sha2::Digest::update(&mut id_hash, record.run_id.as_bytes());
+            sha2::Digest::update(&mut id_hash, [0]);
+            sha2::Digest::update(&mut id_hash, outcome.task_id.as_bytes());
+            sha2::Digest::update(&mut id_hash, [0]);
+            sha2::Digest::update(&mut id_hash, logical_id.as_bytes());
+            let artifact_id = format!("agent-task-{:x}", id_hash.finalize());
+            let metadata = json!({
+                "name": logical_id,
+                "agent_task": {
+                    "task_id": outcome.task_id,
+                    "logical_artifact_id": logical_id,
+                    "runner_provenance": artifact.metadata,
+                }
+            });
+            if let Some(runner_id) = record.runner_id().filter(|runner_id| {
+                std::env::var(crate::core::runner::RUNNER_ID_ENV)
+                    .ok()
+                    .as_deref()
+                    != Some(*runner_id)
+            }) {
+                if runner_id.trim().is_empty() {
+                    return Err(Error::validation_invalid_argument(
+                        "runner_id",
+                        "runner id cannot be empty when creating a runner artifact reference",
+                        None,
+                        None,
+                    ));
+                }
+                // The producing runner owns finalized bytes. Controller-side
+                // reconciliation indexes its canonical runner token instead of
+                // attempting to copy a runner-local filesystem path.
+                store.import_artifact(&crate::core::observation::ArtifactRecord {
+                    id: artifact_id,
+                    run_id: record.run_id.clone(),
+                    kind: artifact.kind.clone(),
+                    artifact_type: "remote_file".to_string(),
+                    path: crate::core::execution_contract::EXECUTION_CONTRACT
+                        .artifacts
+                        .runner_artifact_ref(runner_id, &record.run_id, &logical_id),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: artifact.sha256.clone(),
+                    size_bytes: artifact
+                        .size_bytes
+                        .and_then(|value| i64::try_from(value).ok()),
+                    mime: artifact.mime.clone(),
+                    metadata_json: metadata,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })?;
+            } else {
+                store.record_artifact_with_id(
+                    &record.run_id,
+                    &artifact.kind,
+                    path,
+                    &artifact_id,
+                    metadata,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unique_logical_artifact_id(
+    used_ids: &mut std::collections::BTreeSet<String>,
+    base_id: &str,
+    task_id: &str,
+) -> String {
+    if used_ids.insert(base_id.to_string()) {
+        return base_id.to_string();
+    }
+    let prefix = format!("{task_id}-{base_id}");
+    for suffix in 1_u64.. {
+        let candidate = if suffix == 1 {
+            prefix.clone()
+        } else {
+            format!("{prefix}-{suffix}")
+        };
+        if used_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded artifact aliases cannot exhaust u64")
+}
+
+fn validate_projection_token(field: &str, value: &str) -> Result<()> {
+    crate::core::agent_task_provider::artifact_finalization::validate_token(field, value)
 }
 
 pub(crate) fn apply_aggregate_to_record(

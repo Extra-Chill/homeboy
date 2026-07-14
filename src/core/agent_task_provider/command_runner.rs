@@ -1,3 +1,4 @@
+use super::artifact_finalization::finalize_provider_file_artifacts;
 use super::outcome_normalization::{
     normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
     push_unique_diagnostic,
@@ -483,6 +484,18 @@ pub(super) fn run_materialized_provider_command_once(
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
             normalize_provider_outcome_roles(&mut outcome, provider);
+            if let Err(error) =
+                finalize_provider_file_artifacts(&mut outcome, &request.artifacts_root_identity)
+            {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::Failed,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.artifact_finalization_failed",
+                    error.message,
+                    json!({ "provider": provider.id, "details": error.details }),
+                );
+            }
             normalize_homeboy_local_artifact_sizes(
                 &mut outcome,
                 &request.artifacts_path,
@@ -542,11 +555,15 @@ pub(super) fn run_provider_command_once(
 
 #[cfg(test)]
 fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
+    let artifacts_path = std::env::temp_dir()
+        .join("homeboy-agent-task-provider-tests")
+        .join(crate::core::paths::sanitize_path_segment(&request.task_id))
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&artifacts_path).expect("test executor artifact root");
     AgentTaskExecutorRequest {
         request: request.clone(),
-        artifacts_path: std::env::temp_dir()
-            .join("homeboy-agent-task-provider-tests")
-            .join(crate::core::paths::sanitize_path_segment(&request.task_id)),
+        artifacts_root_identity: crate::core::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("test artifact identity"),
+        artifacts_path,
         artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
             owner: "homeboy".to_string(),
             locality: "runner".to_string(),

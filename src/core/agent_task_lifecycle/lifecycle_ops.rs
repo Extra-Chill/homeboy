@@ -227,6 +227,22 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             );
         }
     }
+    if is_terminal_run_state(record.state)
+        && record
+            .metadata
+            .get("artifact_projection")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            != Some("complete")
+    {
+        if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
+            crate::core::agent_task_lifecycle::record_terminal_artifact_projection(
+                &mut record,
+                &aggregate,
+            )?;
+        }
+    }
     Ok(record)
 }
 
@@ -484,6 +500,22 @@ pub(crate) fn reconcile_runner_job_snapshot(
             let metadata = reconciled.ensure_metadata_object();
             metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
             metadata.insert("runner_job_last_seen_at".to_string(), json!(last_seen_at));
+            metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
+            metadata.insert("phase".to_string(), json!("executing"));
+            metadata.insert(
+                "phase_activity".to_string(),
+                json!("provider/executor process is active"),
+            );
+            metadata.insert("provider_state".to_string(), json!("active"));
+            if let Some(provider) = metadata
+                .get("provider_rotation")
+                .and_then(|rotation| rotation.get("entries"))
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+            {
+                metadata.insert("active_provider".to_string(), provider.clone());
+            }
+            merge_live_provider_handles(&mut reconciled, &snapshot.events);
             store::write_record(&reconciled)?;
         }
         crate::core::api_jobs::JobStatus::Succeeded
@@ -496,8 +528,14 @@ pub(crate) fn reconcile_runner_job_snapshot(
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "aggregate.json".to_string());
                 apply_aggregate_to_record(&mut reconciled, &projection_plan, &event.aggregate, aggregate_path);
-                apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
+                // The aggregate is the task result. A successful enclosing daemon
+                // job only proves transport completion, not task success.
+                record_runner_job_terminal_metadata(&mut reconciled, snapshot.job.status, &snapshot.events);
                 store::write_aggregate_and_record(&reconciled, &event.aggregate)?;
+                crate::core::agent_task_lifecycle::record_terminal_artifact_projection(
+                    &mut reconciled,
+                    &event.aggregate,
+                )?;
             } else {
                 apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
                 store::write_record(&reconciled)?;
@@ -506,6 +544,52 @@ pub(crate) fn reconcile_runner_job_snapshot(
     }
     *record = reconciled;
     Ok(())
+}
+
+fn merge_live_provider_handles(
+    record: &mut AgentTaskRunRecord,
+    events: &[crate::core::api_jobs::JobEvent],
+) {
+    for handle in events.iter().filter_map(|event| {
+        event
+            .data
+            .as_ref()
+            .and_then(|data| {
+                data.pointer("/metadata/provider_handle")
+                    .or_else(|| data.get("provider_handle"))
+            })
+            .and_then(provider_handle_from_value)
+    }) {
+        if record
+            .provider_handles
+            .iter()
+            .any(|existing| existing.provider_run_id == handle.run_id)
+        {
+            continue;
+        }
+        record.provider_handles.push(AgentTaskRunProviderHandle {
+            kind: handle.kind,
+            task_id: handle.task_id,
+            backend: handle.backend,
+            provider_run_id: handle.run_id,
+            stream_uri: handle.stream_uri,
+            state: Some(AgentTaskState::Running),
+            metadata: handle.metadata,
+        });
+    }
+    if !record.provider_handles.is_empty() {
+        record.lifecycle.provider_runtime = record
+            .provider_handles
+            .iter()
+            .map(provider_runtime_for_handle)
+            .collect();
+        record.lifecycle.external_runtime_ids = record
+            .lifecycle
+            .provider_runtime
+            .iter()
+            .flat_map(|runtime| runtime.external_runtime_ids.clone())
+            .collect();
+    }
 }
 
 fn validate_runner_job_snapshot(
@@ -673,6 +757,41 @@ pub(crate) fn apply_runner_job_terminal_state(
     metadata.remove("stale_running_reason");
 }
 
+fn record_runner_job_terminal_metadata(
+    record: &mut AgentTaskRunRecord,
+    status: crate::core::api_jobs::JobStatus,
+    events: &[crate::core::api_jobs::JobEvent],
+) {
+    let runner_identity = record
+        .runner_id()
+        .zip(record.runner_job_id())
+        .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
+    let agent_task_run_id = record.run_id.clone();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_status".to_string(), json!(status));
+    metadata.insert("runner_job_events".to_string(), json!(events));
+    if let Some((runner_id, runner_job_id)) = runner_identity {
+        metadata.insert(
+            "runner_execution_record".to_string(),
+            serde_json::to_value(
+                crate::core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                    &runner_job_id,
+                    &runner_id,
+                    "daemon",
+                    if status == crate::core::api_jobs::JobStatus::Succeeded {
+                        0
+                    } else {
+                        1
+                    },
+                )
+                .with_job_id(&runner_job_id)
+                .with_agent_task_run_id(agent_task_run_id),
+            )
+            .unwrap_or(Value::Null),
+        );
+    }
+}
+
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     let record = status(run_id)?;
     let (events, artifact_refs) = match store::read_aggregate(&record.run_id) {
@@ -788,8 +907,9 @@ pub fn record_lab_offload_phase(
         durable_plan,
     )?;
     record.updated_at = Some(now_timestamp());
+    let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
     let metadata = record.ensure_metadata_object();
-    metadata.insert("phase".to_string(), json!(phase));
+    record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
     metadata.insert("provider_state".to_string(), json!("pending"));
     if let Some(remote_workspace) = remote_workspace {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
@@ -818,8 +938,9 @@ pub fn record_lab_offload_phase_executions(
         .filter(|id| !id.trim().is_empty())
         .collect();
     record.updated_at = Some(now_timestamp());
+    let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
     let metadata = record.ensure_metadata_object();
-    metadata.insert("phase".to_string(), json!(phase));
+    record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
     metadata.insert(
         "materialization_execution_ids".to_string(),
         json!(execution_ids),
@@ -830,6 +951,44 @@ pub fn record_lab_offload_phase_executions(
     );
     store::write_record(&record)?;
     Ok(record)
+}
+
+fn record_lab_offload_phase_metadata(
+    metadata: &mut serde_json::Map<String, Value>,
+    phase: &str,
+    started_at: &str,
+) {
+    let previous_phase = metadata
+        .get("phase")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if previous_phase.as_deref() != Some(phase) {
+        if let Some(previous_phase) = previous_phase {
+            if let Some(entry) = metadata
+                .get_mut("phase_history")
+                .and_then(Value::as_array_mut)
+                .and_then(|entries| {
+                    entries.iter_mut().rev().find(|entry| {
+                        entry.get("phase").and_then(Value::as_str) == Some(previous_phase.as_str())
+                            && entry.get("ended_at").is_none()
+                    })
+                })
+            {
+                entry["ended_at"] = json!(started_at);
+            }
+        }
+        metadata
+            .entry("phase_history".to_string())
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("phase history is an array")
+            .push(json!({ "phase": phase, "started_at": started_at }));
+    }
+    metadata.insert("phase".to_string(), json!(phase));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!(format!("Homeboy {phase}")),
+    );
 }
 
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
@@ -1152,14 +1311,19 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 }
 
 pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
-    let run_id = resolve_run_id(run_id)?;
-    let record = store::read_record(&run_id)?;
+    // Status reconciliation fetches the live daemon snapshot for a bound Lab
+    // child, making executor progress visible before the child is terminal.
+    let record = status(run_id)?;
+    let run_id = record.run_id.clone();
     let (events, artifact_refs) = match store::read_aggregate(&run_id) {
         Ok(aggregate) => {
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
             (aggregate.events, refs)
         }
-        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+        Err(_) => (
+            runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
+            record.artifact_refs.clone(),
+        ),
     };
     let normalized_events = normalize_progress_events(&run_id, &events, &artifact_refs);
     Ok(AgentTaskRunLog {
@@ -1168,6 +1332,26 @@ pub fn logs(run_id: &str) -> Result<AgentTaskRunLog> {
         events,
         normalized_events,
     })
+}
+
+fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTaskProgressEvent>> {
+    let events = record.metadata.get("runner_job_events")?.as_array()?;
+    let task_id = record
+        .tasks
+        .first()
+        .map(|task| task.task_id.clone())
+        .unwrap_or_else(|| record.run_id.clone());
+    Some(
+        events
+            .iter()
+            .map(|event| AgentTaskProgressEvent {
+                task_id: task_id.clone(),
+                state: AgentTaskState::Running,
+                attempt: 0,
+                message: serde_json::to_string(event).ok(),
+            })
+            .collect(),
+    )
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {

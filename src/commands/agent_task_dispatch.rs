@@ -318,6 +318,7 @@ mod tests {
             selector: Some("controller-selector".to_string()),
             model: Some("controller-model".to_string()),
             rotation: None,
+            rotation_starts_with_first_entry: false,
             retry: Default::default(),
             liveness_timeout_ms: None,
         });

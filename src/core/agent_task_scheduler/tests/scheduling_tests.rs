@@ -311,24 +311,134 @@ mod concurrency_tests {
     }
 
     #[test]
-    fn serializes_root_and_subdirectory_of_the_same_git_worktree() {
+    fn root_and_subdirectory_share_the_same_git_workspace_identity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
         let subdirectory = workspace.join("src");
         fs::create_dir(&subdirectory).expect("subdirectory");
+        let mut root_request = request("root");
+        root_request.workspace.root = Some(workspace.display().to_string());
+        let mut subdirectory_request = request("subdirectory");
+        subdirectory_request.workspace.root = Some(subdirectory.display().to_string());
+
+        assert_eq!(
+            AgentTaskScheduleSupport::workspace_key(&root_request),
+            AgentTaskScheduleSupport::workspace_key(&subdirectory_request)
+        );
+    }
+
+    #[test]
+    fn serializes_tasks_with_the_same_declared_exclusive_resource() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
         let scheduler = AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
-        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.tasks[1].workspace.root = Some(subdirectory.display().to_string());
+        for task in &mut plan.tasks {
+            task.limits.exclusive_resource_keys = vec!["cache:shared".to_string()];
+        }
 
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-2"
+                && event.state == AgentTaskState::Blocked
+                && event.message.as_deref().is_some_and(|message| {
+                    message.contains("waiting for exclusive resource 'cache:shared'")
+                        && message.contains("held by 'task-1'")
+                        && message.contains("ms elapsed")
+                })
+        }));
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-2"
+                && event.state == AgentTaskState::Running
+                && event.message.as_deref().is_some_and(|message| {
+                    message.contains("acquired exclusive resource 'cache:shared' after waiting")
+                        && message.contains("previous holder 'task-1'")
+                })
+        }));
+    }
+
+    #[test]
+    fn unrelated_declared_resources_remain_concurrent() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.tasks[0].limits.exclusive_resource_keys = vec!["cache:one".to_string()];
+        plan.tasks[1].limits.exclusive_resource_keys = vec!["cache:two".to_string()];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 2);
+        assert!(!aggregate.events.iter().any(|event| {
+            event.state == AgentTaskState::Blocked
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("exclusive resource"))
+        }));
+    }
+
+    #[derive(Clone)]
+    struct ResourceTimeoutExecutor;
+
+    impl AgentTaskExecutorAdapter for ResourceTimeoutExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            if request.task_id == "task-1" {
+                // Keep task-2 queued on the resource for longer than its
+                // execution deadline. Its own immediate execution must still
+                // succeed after admission.
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    #[test]
+    fn execution_timeout_excludes_declared_resource_wait() {
+        let scheduler = AgentTaskScheduler::new(ResourceTimeoutExecutor);
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        for task in &mut plan.tasks {
+            task.limits.exclusive_resource_keys = vec!["cache:timeout-test".to_string()];
+        }
+        plan.tasks[0].limits.timeout_ms = Some(500);
+        plan.tasks[1].limits.timeout_ms = Some(50);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(aggregate
+            .outcomes
+            .iter()
+            .all(|outcome| { outcome.status == AgentTaskOutcomeStatus::Succeeded }));
+        let resource_wait = aggregate
+            .events
+            .iter()
+            .find(|event| event.task_id == "task-2" && event.state == AgentTaskState::Running)
+            .and_then(|event| event.message.as_deref())
+            .expect("task-2 resource acquisition event");
+        assert!(resource_wait.contains("cache:timeout-test"));
+        let waited_ms = resource_wait
+            .split("after waiting ")
+            .nth(1)
+            .and_then(|value| value.split(" ms").next())
+            .and_then(|value| value.parse::<u128>().ok())
+            .expect("resource wait duration in lifecycle event");
+        assert!(
+            waited_ms >= 50,
+            "resource wait ({waited_ms} ms) must exceed task-2's 50 ms execution timeout"
+        );
     }
 
     #[test]

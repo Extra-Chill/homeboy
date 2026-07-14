@@ -150,7 +150,7 @@ pub fn route_after_parse(
             skip_deps_hydration: cli.skip_deps_hydration,
             capture_patch: capture_mutation_patch,
             mutation_flag,
-            timeout: lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
+            timeout: lab_route_dispatch_timeout(&cli.command),
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
@@ -163,6 +163,7 @@ pub fn route_after_parse(
             source_path: retry_handoff
                 .as_ref()
                 .map(|handoff| handoff.primary_workspace.as_path()),
+            require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
         },
         inferred_runner_id.as_deref(),
@@ -256,14 +257,8 @@ fn materialize_agent_task_cook_plan(
     homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan(&request).map(Some)
 }
 
-fn lab_route_dispatch_timeout(
-    command: &Commands,
-    detach_after_handoff: bool,
-) -> Option<std::time::Duration> {
+fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {
     if matches!(command, Commands::Trace(_)) {
-        return Some(lab_routing::lab_trace_dispatch_timeout());
-    }
-    if detach_after_handoff && is_detached_agent_task_handoff(command) {
         return Some(lab_routing::lab_trace_dispatch_timeout());
     }
     None
@@ -749,33 +744,6 @@ fn agent_task_fanout_cook_batch_dispatch_id(
             args.issues.len()
         )
     })
-}
-
-fn is_agent_task_fanout_cook_batch_run_plan(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Fanout(
-                    crate::commands::agent_task::AgentTaskFanoutArgs {
-                        command:
-                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                    },
-                ),
-        }) if args.run_plan
-    )
-}
-
-fn is_detached_agent_task_handoff(command: &Commands) -> bool {
-    is_agent_task_fanout_cook_batch_run_plan(command)
-        || matches!(
-            command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Retry(
-                    crate::commands::agent_task::RetryArgs { run: true, .. },
-                ),
-            })
-        )
 }
 
 fn run_rig_source_management_on_runner(
@@ -1846,15 +1814,33 @@ mod tests {
         let lint_cli = Cli::parse_from(["homeboy", "review", "lint"]);
 
         assert_eq!(
-            lab_route_dispatch_timeout(&trace_cli.command, false),
+            lab_route_dispatch_timeout(&trace_cli.command),
             Some(lab_routing::lab_trace_dispatch_timeout())
         );
-        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command, false), None);
+        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
     }
 
     #[test]
-    fn detached_agent_task_fanout_cook_batch_run_plan_uses_bounded_handoff_timeout() {
-        let cli = Cli::parse_from([
+    fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
+        let cook = Cli::parse_from([
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--repo",
+            "homeboy",
+            "--goal",
+            "Fix the detached handoff",
+            "--to-worktree",
+            "homeboy@fix-7971",
+            "--run-id",
+            "cook-7971",
+            "--runner",
+            "homeboy-lab",
+            "--placement",
+            "lab",
+        ]);
+        let batch = Cli::parse_from([
             "homeboy",
             "--detach-after-handoff",
             "agent-task",
@@ -1867,30 +1853,7 @@ mod tests {
             "--run-plan",
             "https://github.com/Extra-Chill/homeboy/issues/7167",
         ]);
-
-        assert_eq!(
-            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
-            Some(lab_routing::lab_trace_dispatch_timeout())
-        );
-
-        let no_detach = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "cook-batch",
-            "--repo",
-            "homeboy",
-            "--verify",
-            "cargo test --lib",
-            "--run-plan",
-            "https://github.com/Extra-Chill/homeboy/issues/7167",
-        ]);
-        assert_eq!(lab_route_dispatch_timeout(&no_detach.command, false), None);
-    }
-
-    #[test]
-    fn detached_agent_task_retry_uses_bounded_handoff_timeout() {
-        let cli = Cli::parse_from([
+        let retry = Cli::parse_from([
             "homeboy",
             "--detach-after-handoff",
             "agent-task",
@@ -1899,12 +1862,13 @@ mod tests {
             "--run",
             "--runner",
             "homeboy-lab",
+            "--placement",
+            "lab",
         ]);
 
-        assert_eq!(
-            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
-            Some(lab_routing::lab_trace_dispatch_timeout())
-        );
+        for cli in [&cook, &batch, &retry] {
+            assert_eq!(lab_route_dispatch_timeout(&cli.command), None);
+        }
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[package]
+name = "homeboy-process"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Process spawning, signaling, and lifecycle helpers for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+
+[lib]
+name = "homeboy_process"
+path = "src/lib.rs"
+
+[dependencies]
+homeboy-error = { path = "../homeboy-error" }
+libc = "0.2"
+ctrlc = "3.4"

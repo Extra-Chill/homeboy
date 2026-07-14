@@ -719,11 +719,29 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?
         .or_else(|| remote_daemon_recovery_freshness(runner_id, &runner));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
+    let direct_daemon_active_jobs =
+        matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))
+            .then(|| {
+                daemon_freshness
+                    .as_ref()
+                    .map(|freshness| freshness.active_jobs)
+            })
+            .flatten();
     let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
             Some(session) => match runner_jobs(runner_id, session) {
                 Ok((active_jobs, mut stale_jobs)) => {
-                    stale_jobs.extend(orphaned_child_run_jobs(runner_id, session, &active_jobs));
+                    // `/jobs` has a typed remote-runner subset while daemon
+                    // freshness counts every live child. Never manufacture an
+                    // orphan when that subset is incomplete.
+                    if should_infer_child_run_orphans(active_jobs.len(), direct_daemon_active_jobs)
+                    {
+                        stale_jobs.extend(orphaned_child_run_jobs(
+                            runner_id,
+                            session,
+                            &active_jobs,
+                        ));
+                    }
                     (
                         active_jobs,
                         stale_jobs,
@@ -756,7 +774,20 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
             None,
         )
     };
-    let active_job_count = active_jobs.len();
+    let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
+    let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
+        (Some(error), _) => Some(error),
+        (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
+            Some(RunnerActiveJobError {
+                code: "active_job_view_inconsistent".to_string(),
+                message: format!(
+                    "direct daemon freshness reports {authoritative_count} active job(s), but /jobs exposed {} typed runner job(s); freshness is authoritative and orphan recovery is suppressed until the views converge",
+                    active_jobs.len()
+                ),
+            })
+        }
+        (None, _) => None,
+    };
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
@@ -777,6 +808,13 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_error,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn should_infer_child_run_orphans(
+    typed_active_jobs: usize,
+    direct_daemon_active_jobs: Option<usize>,
+) -> bool {
+    direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
 }
 
 /// Query the daemon job store before an operation replaces its process.
@@ -1480,6 +1518,7 @@ mod remote_daemon {
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
         pub(super) endpoint_probe_error: Option<String>,
+        pub(super) termination_evidence: Option<crate::core::daemon::DaemonTerminationEvidence>,
     }
 
     pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -1552,6 +1591,7 @@ mod remote_daemon {
             daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
             runtime_paths: None,
             active_jobs: status.active_jobs,
+            termination_evidence: status.termination_evidence.clone(),
             repair_plan: Vec::new(),
         }
     }
@@ -1576,6 +1616,7 @@ mod remote_daemon {
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 0,
+            termination_evidence: None,
             repair_plan: Vec::new(),
         }
     }
@@ -1784,6 +1825,10 @@ mod remote_daemon {
             .pointer("/freshness/stale_reason_code")
             .cloned()
             .and_then(|code| serde_json::from_value(code).ok());
+        let termination_evidence = data
+            .get("termination_evidence")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         if !data
             .get("running")
             .and_then(Value::as_bool)
@@ -1800,6 +1845,7 @@ mod remote_daemon {
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
                 endpoint_probe_error: None,
+                termination_evidence,
             });
         }
         let Some(state) = data.get("state") else {
@@ -1817,6 +1863,7 @@ mod remote_daemon {
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
                 endpoint_probe_error: None,
+                termination_evidence,
             });
         };
         Ok(RemoteDaemonStatus {
@@ -1830,6 +1877,7 @@ mod remote_daemon {
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
             endpoint_probe_error: None,
+            termination_evidence,
         })
     }
 
@@ -3046,6 +3094,7 @@ esac
             reachable: false,
             active_jobs: 0,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         assert_eq!(
@@ -3065,6 +3114,7 @@ esac
             reachable: false,
             active_jobs: 0,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         assert_eq!(
@@ -3083,6 +3133,7 @@ esac
             reachable: false,
             active_jobs: 1,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         let error = remote_daemon_connect_action(None, &status)
@@ -3560,6 +3611,17 @@ esac
     }
 
     #[test]
+    fn direct_daemon_fresh_live_job_suppresses_false_orphan_inference() {
+        assert!(should_infer_child_run_orphans(0, Some(0)));
+        assert!(should_infer_child_run_orphans(1, Some(1)));
+        assert!(should_infer_child_run_orphans(0, None));
+        assert!(
+            !should_infer_child_run_orphans(0, Some(1)),
+            "a fresh daemon heartbeat for an untyped child is authoritative live evidence"
+        );
+    }
+
+    #[test]
     fn synthetic_active_job_run_summaries_are_not_child_runs() {
         let mut synthetic = sample_run_summary("runner-job-job-1");
         synthetic.status_note = Some(
@@ -3739,6 +3801,7 @@ esac
             reachable,
             active_jobs,
             endpoint_probe_error: None,
+            termination_evidence: None,
         }
     }
 
