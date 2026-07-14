@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_after_failure_returns_to_original_branch_and_removes_new_untracked() {
+    fn package_failure_restores_release_commit_and_generated_files() {
         let temp = init_repo();
         let dir = temp.path();
         run_git(dir, &["checkout", "-q", "-b", "release-local"]);
@@ -207,9 +207,10 @@ mod tests {
             .expect("capture")
             .expect("git repo");
 
-        run_git(dir, &["checkout", "-q", "main"]);
         std::fs::write(dir.join("generated.txt"), "release output\n").expect("write generated");
         std::fs::write(dir.join("file.txt"), "mutated\n").expect("mutate tracked");
+        run_git(dir, &["add", "file.txt"]);
+        run_git(dir, &["commit", "-q", "-m", "release: v1.0.0"]);
 
         guard.restore_after_failure().expect("restore");
 
@@ -223,6 +224,10 @@ mod tests {
         );
         assert_eq!(git_stdout_for_test(dir, &["status", "--porcelain=v1"]), "");
         assert!(!dir.join("generated.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("file.txt")).unwrap(),
+            "main\n"
+        );
     }
 
     #[test]
