@@ -4,11 +4,15 @@
 //!
 //! Split into focused submodules:
 //! - [`types`]: promotion report data structures, status, and schema consts.
-//! - [`promote`]: the promote entrypoint, patch normalization, and validation.
+//! - [`promote`]: the promotion entrypoint and report assembly.
+//! - [`committed_changes`]: committed-change discovery and evidence.
+//! - [`patch`]: patch normalization and validation.
 //! - [`apply`]: the workspace provider trait and external provider transport.
 
 mod apply;
+mod committed_changes;
 mod fingerprint;
+mod patch;
 mod promote;
 mod types;
 

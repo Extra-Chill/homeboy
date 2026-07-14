@@ -369,22 +369,10 @@ fn parse_test_step(raw: &str) -> homeboy::core::Result<AgentTaskReviewTestStep> 
 }
 
 fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
-    let (target, value_and_provenance) = raw.split_once('=').ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "review-override",
-            "expected TARGET=VALUE@PROVENANCE",
-            None,
-            None,
-        )
-    })?;
-    let (value, provenance) = value_and_provenance.rsplit_once('@').ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "review-override",
-            "expected TARGET=VALUE@PROVENANCE",
-            None,
-            None,
-        )
-    })?;
+    let (target, value_and_provenance) = raw.split_once('=').ok_or_else(override_grammar_error)?;
+    let (value, provenance) = value_and_provenance
+        .rsplit_once('@')
+        .ok_or_else(override_grammar_error)?;
     let target = match target {
         "summary" => AgentTaskReviewOverrideTarget::Summary,
         "what_changed" => AgentTaskReviewOverrideTarget::WhatChanged,
@@ -403,6 +391,15 @@ fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
         value: value.to_string(),
         provenance: provenance.to_string(),
     })
+}
+
+fn override_grammar_error() -> homeboy::core::Error {
+    homeboy::core::Error::validation_invalid_argument(
+        "review-override",
+        "expected TARGET=VALUE@PROVENANCE",
+        None,
+        None,
+    )
 }
 
 pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
