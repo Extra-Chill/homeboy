@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.285.1] - 2026-07-14
+
+### Changed
+- drop redundant native-tls stack from reqwest
+
+### Fixed
+- separate deploy health from source freshness
+
 ## [0.285.0] - 2026-07-14
 
 ### Added
