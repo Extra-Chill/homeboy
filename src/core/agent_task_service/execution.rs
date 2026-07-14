@@ -120,7 +120,7 @@ where
         }
         return Err(transport_proxy_recovery_error(recovery));
     }
-    let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
@@ -248,7 +248,7 @@ fn run_claimed<E>(run_id: String, executor: E) -> Result<AgentTaskRunResult<Agen
 where
     E: AgentTaskExecutorAdapter,
 {
-    let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
+    let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
         agent_task_lifecycle::record_pre_execution_failure(
             &run_id,

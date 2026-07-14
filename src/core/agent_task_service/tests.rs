@@ -10,14 +10,71 @@ use crate::core::agent_task::{
 use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
 use crate::core::agent_task_schedule::AgentTaskPlan;
 use crate::core::agent_task_scheduler::{
-    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskState,
+    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
 };
 use crate::core::run_lifecycle_record::RunExecutionState;
 use crate::core::{agent_task_lifecycle, worktree};
 use crate::test_support::with_isolated_home;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut plan = test_plan();
+    plan.options.execution_budget =
+        crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1);
+    plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+        entries: vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let aggregate = AgentTaskScheduler::new(RotationThenSuccess {
+        calls: Arc::clone(&calls),
+    })
+    .run(plan);
+
+    let usage = execution_budget_usage(&aggregate);
+    let remaining = budget_remaining(
+        &crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1),
+        usage,
+    )
+    .expect("remaining total budget");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(usage.executions, 2);
+    assert_eq!(usage.provider_rotations, 1);
+    assert_eq!(remaining.max_provider_executions, 1);
+    assert_eq!(remaining.max_provider_rotations, 0);
+}
+
+#[test]
+fn cook_remediation_reserves_the_actual_provider_category_before_launch() {
+    let no_retry = crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 0, 2);
+    assert_eq!(
+        reserve_remediation_budget(&no_retry, true).expect_err("same provider needs retry budget"),
+        "max_same_provider_retries"
+    );
+
+    let one_retry = crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 2);
+    let reservation = reserve_remediation_budget(&one_retry, true).expect("one retry reserved");
+    assert_eq!(reservation.same_provider_retries, 1);
+    let exhausted = crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 2);
+    assert_eq!(
+        reserve_remediation_budget(&exhausted, true).expect_err("second retry blocked"),
+        "max_same_provider_retries"
+    );
+
+    let after_rotation = crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 1, 0);
+    assert_eq!(
+        reserve_remediation_budget(&after_rotation, false).expect_err("rotation blocked"),
+        "max_provider_rotations"
+    );
+}
 
 #[test]
 fn service_run_loaded_plan_persists_durable_lifecycle() {
@@ -633,6 +690,39 @@ impl AgentTaskExecutorAdapter for TimeoutExecutor {
 
 struct CapturingExecutor {
     observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
+}
+
+struct RotationThenSuccess {
+    calls: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for RotationThenSuccess {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: if call == 0 {
+                AgentTaskOutcomeStatus::ProviderError
+            } else {
+                AgentTaskOutcomeStatus::Succeeded
+            },
+            summary: None,
+            failure_classification: (call == 0).then_some(AgentTaskFailureClassification::Provider),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
 }
 
 impl AgentTaskExecutorAdapter for CapturingExecutor {

@@ -80,6 +80,60 @@ fn submit_plan_persists_queued_status() {
     });
 }
 
+#[test]
+fn execution_budget_legacy_plan_migrates_only_for_execution_reads() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("legacy-budget")).expect("submitted");
+        let mut raw: Value = serde_json::from_str(
+            &std::fs::read_to_string(&record.plan_path).expect("persisted plan"),
+        )
+        .expect("plan json");
+        raw["options"]
+            .as_object_mut()
+            .expect("schedule options")
+            .remove("execution_budget");
+        std::fs::write(
+            &record.plan_path,
+            serde_json::to_vec(&raw).expect("serialize legacy plan"),
+        )
+        .expect("replace plan");
+
+        let preview = load_plan(&record.run_id).expect("read-only preview");
+        assert_eq!(preview.options.execution_budget.version, 0);
+        let before = std::fs::read_to_string(&record.plan_path).expect("unmodified preview file");
+        assert!(!before.contains("execution_budget"));
+
+        let executed = load_plan_for_execution(&record.run_id).expect("execution migration");
+        assert_eq!(executed.options.execution_budget.version, 1);
+        let persisted = std::fs::read_to_string(&record.plan_path).expect("migrated plan");
+        assert!(persisted.contains("\"version\": 1"));
+    });
+}
+
+#[test]
+fn execution_budget_future_version_fails_closed_without_rewrite() {
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("future-budget")).expect("submitted");
+        let mut raw: Value = serde_json::from_str(
+            &std::fs::read_to_string(&record.plan_path).expect("persisted plan"),
+        )
+        .expect("plan json");
+        raw["options"]["execution_budget"]["version"] = json!(99);
+        let future = serde_json::to_string_pretty(&raw).expect("serialize future plan");
+        std::fs::write(&record.plan_path, &future).expect("replace plan");
+
+        let error = load_plan_for_execution(&record.run_id).expect_err("future version rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error
+            .message
+            .contains("unsupported agent-task execution budget version 99"));
+        assert_eq!(
+            std::fs::read_to_string(&record.plan_path).expect("future plan retained"),
+            future
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn submit_plan_persists_owner_only_plan_file_before_observation() {

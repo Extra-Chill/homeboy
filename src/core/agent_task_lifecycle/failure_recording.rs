@@ -315,9 +315,11 @@ pub fn record_remote_dispatch_failure(
         let remote_run_id = record.run_id.clone();
         let remote_plan_path = record.plan_path.clone();
         let remote_aggregate_path = record.aggregate_path.clone();
-        let plan = store::read_plan_path(&record.plan_path).unwrap_or_else(|_| {
+        let plan = if std::path::Path::new(&record.plan_path).is_file() {
+            store::read_plan_path(&record.plan_path)?
+        } else {
             synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
-        });
+        };
         record.run_id = run_id.clone();
         record.plan_path = store::write_plan(&run_id, &plan)?.display().to_string();
         apply_aggregate_to_record(

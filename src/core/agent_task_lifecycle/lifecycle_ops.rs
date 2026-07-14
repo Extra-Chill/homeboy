@@ -72,6 +72,13 @@ pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
     store::read_plan_path(&record.plan_path)
 }
 
+/// Load a durable plan for a scheduler or provider execution. This is the only
+/// read path allowed to upgrade a legacy execution-budget envelope.
+pub fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
+    let record = store::read_record(&resolve_run_id(run_id)?)?;
+    store::read_plan_path_for_execution(&record.plan_path)
+}
+
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     crate::core::controller_runtime::validate_for_mutation(

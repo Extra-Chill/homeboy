@@ -980,6 +980,123 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn execution_budget_allows_exactly_one_total_provider_execution() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0]
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+                .expect("budget reason")
+                .data["exhausted_budget"],
+            "max_provider_executions"
+        );
+    }
+
+    #[test]
+    fn execution_budget_caps_same_provider_retries() {
+        let executor =
+            RotationScriptedExecutor::new(vec![provider_failure(), provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(3, 1, 0);
+        plan.options.retry.max_attempts = 3;
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            aggregate.outcomes[0]
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+                .expect("budget reason")
+                .data["exhausted_budget"],
+            "max_same_provider_retries"
+        );
+    }
+
+    #[test]
+    fn execution_budget_caps_provider_rotations_and_reports_exact_reason() {
+        let executor =
+            RotationScriptedExecutor::new(vec![provider_failure(), provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(3, 0, 1);
+        plan.options.rotation = Some(rotation_policy(vec![
+            entry("fallback-backend-a"),
+            entry("fallback-backend-b"),
+        ]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            aggregate.outcomes[0]
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+                .expect("budget reason")
+                .data["exhausted_budget"],
+            "max_provider_rotations"
+        );
+    }
+
+    #[test]
+    fn total_execution_budget_takes_precedence_over_retry_and_rotation_caps() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 9, 9);
+        plan.options.retry.max_attempts = 10;
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0]
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+                .expect("budget reason")
+                .data["exhausted_budget"],
+            "max_provider_executions"
+        );
+    }
+
+    #[test]
+    fn execution_budget_allows_retry_then_rotation_within_total() {
+        let executor =
+            RotationScriptedExecutor::new(vec![provider_failure(), provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget::new(3, 1, 1);
+        plan.options.retry.max_attempts = 3;
+        let mut policy = rotation_policy(vec![entry("fallback-backend-a")]);
+        policy.max_attempts = Some(3);
+        plan.options.rotation = Some(policy);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    }
+
+    #[test]
     fn rotation_preserves_uncommitted_candidate_and_dispatches_next_provider_from_clean_baseline() {
         let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");

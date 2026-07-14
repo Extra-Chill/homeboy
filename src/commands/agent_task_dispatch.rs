@@ -21,9 +21,21 @@ pub struct DispatchCoreArgs {
     #[arg(long = "client-context", value_name = "JSON")]
     pub client_context: Option<String>,
 
-    /// Attempts per task, including the first attempt.
-    #[arg(long, default_value_t = 1, value_name = "N")]
-    pub attempts: u32,
+    /// Deprecated total provider-execution budget. Use --max-provider-executions.
+    #[arg(long, value_name = "N", conflicts_with_all = ["max_provider_executions", "max_same_provider_retries", "max_provider_rotations"])]
+    pub attempts: Option<u32>,
+
+    /// Total provider executions per task, including the first attempt.
+    #[arg(long, value_name = "N")]
+    pub max_provider_executions: Option<u32>,
+
+    /// Same-provider retries allowed after the first execution.
+    #[arg(long, value_name = "N")]
+    pub max_same_provider_retries: Option<u32>,
+
+    /// Cross-provider rotations allowed after the first execution.
+    #[arg(long, value_name = "N")]
+    pub max_provider_rotations: Option<u32>,
 
     /// Persist the run for a daemon/runner but do not execute immediately.
     #[arg(long)]
@@ -56,7 +68,11 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             tasks_json: args.tasks_json,
             provider_config: args.provider_config,
             client_context: args.client_context,
-            attempts: args.attempts,
+            attempts: args.attempts.unwrap_or(1),
+            attempts_explicit: args.attempts.is_some(),
+            max_provider_executions: args.max_provider_executions,
+            max_same_provider_retries: args.max_same_provider_retries,
+            max_provider_rotations: args.max_provider_rotations,
             queue_only: args.queue_only,
             timeout_ms: args.timeout_ms,
             resolved_provider_policy: args.resolved_provider_policy,
@@ -257,7 +273,10 @@ mod tests {
                     tasks_json: None,
                     provider_config: None,
                     client_context: None,
-                    attempts: 1,
+                    attempts: Some(1),
+                    max_provider_executions: None,
+                    max_same_provider_retries: None,
+                    max_provider_rotations: None,
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -292,7 +311,10 @@ mod tests {
                     tasks_json: None,
                     provider_config: None,
                     client_context: None,
-                    attempts: 1,
+                    attempts: Some(1),
+                    max_provider_executions: None,
+                    max_same_provider_retries: None,
+                    max_provider_rotations: None,
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -398,11 +420,14 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
-                attempts: if overrides.core.attempts == 0 {
+                attempts: Some(if overrides.core.attempts == 0 {
                     1
                 } else {
                     overrides.core.attempts
-                },
+                }),
+                max_provider_executions: overrides.core.max_provider_executions,
+                max_same_provider_retries: overrides.core.max_same_provider_retries,
+                max_provider_rotations: overrides.core.max_provider_rotations,
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,

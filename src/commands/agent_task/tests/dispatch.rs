@@ -330,6 +330,58 @@ fn cook_dispatch_provider_id_alias_maps_to_selector() {
 }
 
 #[test]
+fn execution_budget_flags_accept_explicit_values_and_reject_legacy_attempts_mix() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@execution-budget",
+        "--verify",
+        "true",
+        "--backend",
+        "sample-backend",
+        "--prompt",
+        "cook",
+        "--max-provider-executions",
+        "2",
+        "--max-same-provider-retries",
+        "1",
+        "--max-provider-rotations",
+        "0",
+    ])
+    .expect("execution budget flags parse");
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Cook(args) = agent_task.command else {
+        panic!("expected cook command");
+    };
+    assert_eq!(args.dispatch.core.max_provider_executions, Some(2));
+    assert_eq!(args.dispatch.core.max_same_provider_retries, Some(1));
+    assert_eq!(args.dispatch.core.max_provider_rotations, Some(0));
+
+    assert!(Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@execution-budget",
+        "--verify",
+        "true",
+        "--backend",
+        "sample-backend",
+        "--prompt",
+        "cook",
+        "--attempts",
+        "2",
+        "--max-provider-executions",
+        "2",
+    ])
+    .is_err());
+}
+
+#[test]
 fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
     let cook = Cli::try_parse_from([
         "homeboy",

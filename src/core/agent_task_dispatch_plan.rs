@@ -18,7 +18,9 @@ use crate::core::agent_task_config_materialization::materialize_provider_config_
 use crate::core::agent_task_prompts;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::core::agent_task_runtime_dependency_graph;
-use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskRetryPolicy};
+use crate::core::agent_task_scheduler::{
+    AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskRetryPolicy,
+};
 use crate::core::agent_task_secrets::validate_secret_env;
 use crate::core::{config, defaults, worktree, Error, Result};
 
@@ -32,6 +34,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     request: &AgentTaskDispatchRequest,
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> Result<AgentTaskPlan> {
+    validate_execution_budget_inputs(&request.core)?;
     if request.prompt.is_none() && request.tasks.is_empty() && request.core.tasks_json.is_none() {
         return Err(Error::validation_invalid_argument(
             "prompt",
@@ -257,6 +260,25 @@ pub fn build_dispatch_plan_with_provider_requirements(
             max_attempts: request.core.attempts.max(1),
             ..AgentTaskRetryPolicy::default()
         });
+    let attempts = request.core.attempts.max(1);
+    let max_provider_executions = request
+        .core
+        .max_provider_executions
+        .unwrap_or(attempts)
+        .max(1);
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(
+        max_provider_executions,
+        request
+            .core
+            .max_same_provider_retries
+            .unwrap_or_else(|| max_provider_executions.saturating_sub(1)),
+        request
+            .core
+            .max_provider_rotations
+            .unwrap_or_else(|| max_provider_executions.saturating_sub(1)),
+    );
+    // The explicit total controls scheduler retries as well as rotations.
+    plan.options.retry.max_attempts = plan.options.execution_budget.max_provider_executions;
     // A submitted controller policy is authoritative, including an explicitly
     // absent rotation. Per-task `metadata.provider_rotation` still overrides it.
     plan.options.rotation = match &request.core.resolved_provider_policy {
@@ -281,6 +303,26 @@ pub fn build_dispatch_plan_with_provider_requirements(
     });
 
     Ok(plan)
+}
+
+fn validate_execution_budget_inputs(
+    core: &crate::core::agent_task_dispatch_service::DispatchCoreInputs,
+) -> Result<()> {
+    if core.attempts_explicit
+        && (core.max_provider_executions.is_some()
+            || core.max_same_provider_retries.is_some()
+            || core.max_provider_rotations.is_some())
+    {
+        return Err(Error::validation_invalid_argument(
+            "attempts",
+            "--attempts is deprecated and cannot be combined with explicit execution-budget fields",
+            Some(core.attempts.to_string()),
+            Some(vec![
+                "Use --max-provider-executions and optional category caps instead.".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_dispatch_workspace_target(
@@ -921,6 +963,43 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use std::collections::HashMap;
     use std::process::Command;
+
+    #[test]
+    fn explicit_total_defaults_each_omitted_category_to_total_minus_one() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("budget mapping".to_string()),
+            core: DispatchCoreInputs {
+                max_provider_executions: Some(3),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 3);
+        assert_eq!(plan.options.execution_budget.max_same_provider_retries, 2);
+        assert_eq!(plan.options.execution_budget.max_provider_rotations, 2);
+    }
+
+    #[test]
+    fn central_budget_validation_rejects_explicit_alias_conflict() {
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            core: DispatchCoreInputs {
+                attempts: 2,
+                attempts_explicit: true,
+                max_provider_executions: Some(2),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect_err("alias conflict");
+
+        assert_eq!(
+            error.code,
+            crate::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("cannot be combined"));
+    }
 
     #[test]
     fn builds_dispatch_plan_from_prompt_file_and_client_context() {
@@ -1975,6 +2054,10 @@ mod tests {
                 } else {
                     overrides.core.attempts
                 },
+                attempts_explicit: overrides.core.attempts_explicit,
+                max_provider_executions: overrides.core.max_provider_executions,
+                max_same_provider_retries: overrides.core.max_same_provider_retries,
+                max_provider_rotations: overrides.core.max_provider_rotations,
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,

@@ -16,9 +16,9 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
-    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
-    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
-    AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
+    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionBudget,
+    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
+    AgentTaskProgressEvent, AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
@@ -29,6 +29,7 @@ use crate::core::agent_task_timeout_artifacts::{
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 use crate::core::config::value_type_name;
+pub(crate) use scheduling::{provider_rotation_attempts, terminal_executor_identity};
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
@@ -108,6 +109,8 @@ where
                     rotation_index: 0,
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
+                    same_provider_retries: 0,
+                    provider_rotations: 0,
                     retry_attempts: Vec::new(),
                 }
             })
@@ -437,6 +440,8 @@ where
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     candidate_artifacts: scheduled.candidate_artifacts,
+                    same_provider_retries: scheduled.same_provider_retries,
+                    provider_rotations: scheduled.provider_rotations,
                     retry_attempts: scheduled.retry_attempts,
                     source_workspace_root,
                     _attempt_workspace: attempt_workspace.clone(),
@@ -519,6 +524,8 @@ where
                         max_attempts,
                         retry_budget_total,
                         retry_budget_used,
+                        &plan.options.execution_budget,
+                        running_task.same_provider_retries,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
                         retry_budget_used += 1;
@@ -553,6 +560,8 @@ where
                             rotation_index: running_task.rotation_index,
                             rotation_attempts: running_task.rotation_attempts,
                             candidate_artifacts,
+                            same_provider_retries: running_task.same_provider_retries + 1,
+                            provider_rotations: running_task.provider_rotations,
                             retry_attempts,
                         });
                         continue;
@@ -567,6 +576,8 @@ where
                             policy,
                             running_task.rotation_index,
                             result.attempt,
+                            &plan.options.execution_budget,
+                            running_task.provider_rotations,
                         ) {
                             let mut rotation_attempts = running_task.rotation_attempts;
                             rotation_attempts.push(
@@ -615,12 +626,25 @@ where
                                 rotation_index: running_task.rotation_index + 1,
                                 rotation_attempts,
                                 candidate_artifacts,
+                                same_provider_retries: running_task.same_provider_retries,
+                                provider_rotations: running_task.provider_rotations + 1,
                                 retry_attempts: running_task.retry_attempts,
                             });
                             continue;
                         }
                     }
                     let mut outcome = outcome;
+                    AgentTaskScheduleSupport::attach_terminal_executor_evidence(
+                        &mut outcome,
+                        &running_task.request,
+                    );
+                    AgentTaskScheduleSupport::attach_budget_exhaustion_diagnostic(
+                        &mut outcome,
+                        &plan.options.execution_budget,
+                        result.attempt,
+                        running_task.same_provider_retries,
+                        running_task.provider_rotations,
+                    );
                     append_unique_artifacts(
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
@@ -697,6 +721,8 @@ struct ScheduledTask {
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     /// Patch candidates produced by earlier retry or rotation attempts.
     candidate_artifacts: Vec<AgentTaskArtifact>,
+    same_provider_retries: u32,
+    provider_rotations: u32,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
 }
@@ -718,6 +744,8 @@ struct RunningTask {
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     candidate_artifacts: Vec<AgentTaskArtifact>,
+    same_provider_retries: u32,
+    provider_rotations: u32,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
     /// The caller-managed workspace used for preflight and as the clean base
@@ -1438,6 +1466,8 @@ mod committed_harvest_tests {
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
+            same_provider_retries: 0,
+            provider_rotations: 0,
             retry_attempts: Vec::new(),
             source_workspace_root: None,
             _attempt_workspace: None,
@@ -1618,6 +1648,8 @@ mod committed_harvest_tests {
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
+            same_provider_retries: 0,
+            provider_rotations: 0,
             retry_attempts: Vec::new(),
             source_workspace_root: None,
             _attempt_workspace: None,
