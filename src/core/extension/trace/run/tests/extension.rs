@@ -18,7 +18,7 @@ use crate::core::extension::trace::generic_runner::{
 use crate::core::extension::trace::overlay::{apply_trace_overlays, TraceOverlayRequest};
 use crate::core::extension::trace::probes::TraceProbeConfig;
 use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext, RunnerOutput};
-use crate::test_support::with_isolated_home;
+use crate::test_support::{exec_capable_tempdir, with_isolated_home};
 
 use super::super::runner::{build_trace_runner, failure_from_output, trace_is_unclaimed};
 use super::super::types::{TraceRunWorkflowArgs, TraceRunnerInputs};
@@ -47,7 +47,7 @@ fn with_extra_workloads<T>(value: Option<String>, f: impl FnOnce() -> T) -> T {
 #[test]
 fn test_build_trace_runner() {
     let _home_env_guard = crate::test_support::home_env_guard();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     fs::create_dir_all(&extension_dir).unwrap();
@@ -141,7 +141,7 @@ JSON
 #[test]
 fn test_run_trace_list_workflow() {
     let _home_env_guard = crate::test_support::home_env_guard();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     fs::create_dir_all(&extension_dir).unwrap();
@@ -206,7 +206,7 @@ JSON
 
 #[test]
 fn generic_trace_discovery_includes_conventions_and_extra_workloads() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let component_dir = temp.path().join("component");
     let traces_dir = component_dir.join("traces");
     let scripts_trace_dir = component_dir.join("scripts/trace");
@@ -314,7 +314,7 @@ fn test_run_trace_workflow() {
 #[test]
 fn run_trace_workflow_merges_probe_events_into_results() {
     let _home_env_guard = crate::test_support::home_env_guard();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     let log_path = temp.path().join("probe.log");
@@ -393,7 +393,7 @@ JSON
 #[test]
 fn parsed_pass_result_overrides_noisy_runner_exit() {
     let _home_env_guard = crate::test_support::home_env_guard();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     fs::create_dir_all(&extension_dir).unwrap();
@@ -466,7 +466,7 @@ exit 1
 #[test]
 fn trace_attach_logfile_observes_without_owning_lifecycle() {
     let _home_env_guard = crate::test_support::home_env_guard();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     fs::create_dir_all(&extension_dir).unwrap();
@@ -685,7 +685,7 @@ struct OverlayFixture {
 }
 
 fn overlay_fixture(keep_overlay: bool) -> OverlayFixture {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = exec_capable_tempdir();
     let extension_dir = temp.path().join("extension");
     let component_dir = temp.path().join("component");
     fs::create_dir_all(&extension_dir).unwrap();
