@@ -16,6 +16,7 @@ use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::core::io::output_file::write_output_file;
 
@@ -246,68 +247,28 @@ fn run_split_placement_cook(
         .clone()
         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
     let attempt_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, 1);
-    let provider_args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "run-plan".to_string(),
-        "--plan".to_string(),
-        serialized_plan.clone(),
-        "--record-run-id".to_string(),
-        attempt_run_id.clone(),
-    ];
-    let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
-        Error::validation_invalid_argument(
-            "agent-task cook",
-            format!("build Lab provider attempt: {error}"),
-            None,
-            None,
-        )
-    })?;
-    let provider_command = lab_offload_command(&provider_cli.command)?;
     let source_path = homeboy::core::agent_tasks::service::source_worktree_path(
         cook.dispatch.cwd.clone(),
         cook.dispatch.workspace.clone(),
     );
-    let outcome = lab_routing::dispatch_lab_offload(
-        LabRoutingRequest {
-            command: provider_command,
-            normalized_args: &provider_args,
-            explicit_runner: Some(runner_id),
-            placement: homeboy::cli_surface::Placement::Lab,
-            allow_local_fallback: cli.allow_local_fallback,
-            allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            skip_deps_hydration: cli.skip_deps_hydration,
-            capture_patch: false,
-            mutation_flag: None,
-            timeout: None,
-            active_run_id: Some(&attempt_run_id),
-            detach_after_handoff: false,
-            output_file_requested: false,
-            read_only_polling: false,
-            local_output_file: None,
-            durable_agent_task_plan: Some(&plan),
-            source_path: source_path.as_deref(),
-            job_overrides: lab_job_overrides(cli)?,
-        },
-        Some(runner_id),
-        Box::new(NoopLabDispatchObserver),
-    )?;
-    let LabRouteOutcome::Offloaded(remote) = outcome else {
-        return Ok(None);
-    };
-    if remote.exit_code != 0 {
-        if !remote.stderr.is_empty() {
-            eprint!("{}", remote.stderr);
-        }
-        print!("{}", remote.stdout);
-        return Ok(Some(remote.exit_code));
-    }
-
     let mut controller = cook.clone();
     controller.dispatch.run_id = Some(cook_id);
     controller.attempt_run_id = Some(attempt_run_id);
     controller.attempt_plan = Some(serialized_plan);
-    let (value, exit_code) = crate::commands::agent_task::run::run_cook(controller)?;
+    let dispatcher = Arc::new(LabCookAttemptDispatcher {
+        runner_id: runner_id.to_string(),
+        allow_local_fallback: cli.allow_local_fallback,
+        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+        skip_deps_hydration: cli.skip_deps_hydration,
+        source_path,
+        job_overrides: lab_job_overrides(cli)?,
+    });
+    let (value, exit_code) =
+        crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher(
+            controller,
+            homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+            Some(dispatcher),
+        )?;
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -317,11 +278,123 @@ fn run_split_placement_cook(
     if let Some(path) = output_file {
         write_output_file(path, &stdout)?;
     }
-    if !remote.stderr.is_empty() {
-        eprint!("{}", remote.stderr);
-    }
     print!("{stdout}");
     Ok(Some(exit_code))
+}
+
+/// The controller supplies this transport to the cook service. Every attempt
+/// uses the same durable run id, while Lab only executes the provider plan.
+#[derive(Debug)]
+struct LabCookAttemptDispatcher {
+    runner_id: String,
+    allow_local_fallback: bool,
+    allow_dirty_lab_workspace: bool,
+    skip_deps_hydration: bool,
+    source_path: Option<PathBuf>,
+    job_overrides: runners::LabJobOverrides,
+}
+
+impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
+    fn dispatch_attempt(
+        &self,
+        plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+        run_id: &str,
+    ) -> homeboy::core::Result<()> {
+        let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize Lab cook attempt plan".to_string()),
+            )
+        })?;
+        let provider_args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            serialized_plan,
+            "--record-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
+            Error::validation_invalid_argument(
+                "agent-task cook",
+                format!("build Lab provider attempt: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        // Stage the controller-owned identity before Lab preflight. A rejected
+        // handoff can then terminalize this record with a retryable diagnosis.
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        let outcome = lab_routing::dispatch_lab_offload(
+            LabRoutingRequest {
+                command: lab_offload_command(&provider_cli.command)?,
+                normalized_args: &provider_args,
+                explicit_runner: Some(&self.runner_id),
+                placement: homeboy::cli_surface::Placement::Lab,
+                allow_local_fallback: self.allow_local_fallback,
+                allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
+                skip_deps_hydration: self.skip_deps_hydration,
+                capture_patch: false,
+                mutation_flag: None,
+                timeout: None,
+                active_run_id: Some(run_id),
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                durable_agent_task_plan: Some(&plan),
+                source_path: self.source_path.as_deref(),
+                job_overrides: self.job_overrides.clone(),
+            },
+            Some(&self.runner_id),
+            Box::new(NoopLabDispatchObserver),
+        )
+        .map_err(|error| {
+            let recovery =
+                format!("Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`.");
+            match agent_task_lifecycle::record_pre_execution_failure(
+                run_id,
+                &plan,
+                "lab_handoff_preacceptance",
+                &error,
+            ) {
+                Ok(_) => error.with_hint(recovery),
+                Err(record_error) => error.with_hint(format!(
+                    "{recovery} Homeboy also could not persist the handoff failure: {}",
+                    record_error.message
+                )),
+            }
+        })?;
+        match outcome {
+            LabRouteOutcome::Offloaded(remote) if remote.exit_code == 0 => Ok(()),
+            LabRouteOutcome::Offloaded(remote) => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab provider attempt {run_id} failed with exit code {}", remote.exit_code),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Inspect the controller-owned attempt with `homeboy agent-task status {run_id}`."
+                )]),
+            )),
+            LabRouteOutcome::RunLocal => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab did not accept controller-owned provider attempt {run_id}"),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Resolve the Lab handoff, then retry the controller-owned attempt with `homeboy agent-task retry {run_id} --run --runner {}`.",
+                    self.runner_id
+                )]),
+            )),
+            LabRouteOutcome::InFlight(_) => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab handoff for provider attempt {run_id} is still in flight"),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Inspect the controller-owned attempt with `homeboy agent-task status {run_id}`."
+                )]),
+            )),
+        }
+    }
 }
 
 /// Transfer the exact controller-compiled cook plan rather than asking the
@@ -3042,7 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_fanout_cook_batch_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -3065,9 +3138,8 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout cook-batch");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
     }
 
     #[test]

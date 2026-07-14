@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -70,6 +71,19 @@ pub(super) fn run_cook_with_executor<E>(args: AgentTaskCookArgs, executor: E) ->
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    run_cook_with_executor_and_dispatcher(args, executor, None)
+}
+
+pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
+    args: AgentTaskCookArgs,
+    executor: E,
+    attempt_dispatcher: Option<
+        Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
     if !args.gates.has_deterministic_gate() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
@@ -101,44 +115,20 @@ where
         );
     }
     dispatch_args.core.queue_only = false;
-    let run_id = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+    let (run_id, initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
                 "agent-task cook attempt plan requires an attempt run id".to_string(),
             )
         })?;
-        let plan = agent_task_service::read_plan(attempt_plan)?;
-        // A Lab provider attempt mirrors its typed aggregate into this
-        // controller-owned record before the coordinator resumes. Never run it
-        // again locally: promotion, gates, retries, and finalization consume the
-        // durable result below.
-        let has_terminal_handoff =
-            agent_task_lifecycle::status(&run_id)
-                .ok()
-                .is_some_and(|record| {
-                    matches!(
-                        record.state,
-                        agent_task_lifecycle::AgentTaskRunState::Succeeded
-                            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                            | agent_task_lifecycle::AgentTaskRunState::Failed
-                            | agent_task_lifecycle::AgentTaskRunState::Cancelled
-                    )
-                });
-        if !has_terminal_handoff {
-            agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
-        }
-        run_id
+        (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let (dispatch_value, _dispatch_exit) =
-            dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
-        dispatch_value["run_id"]
-            .as_str()
-            .ok_or_else(|| {
-                homeboy::core::Error::internal_unexpected(
-                    "agent-task cook dispatch step did not return a run_id".to_string(),
-                )
-            })?
-            .to_string()
+        let run_id = dispatch_args
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+        let request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
+        (run_id, dispatch_service::build_dispatch_plan(&request)?)
     };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Keep this cook on one runtime generation through provider work and PR finalization.
@@ -155,6 +145,7 @@ where
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
             initial_run_id: run_id,
+            initial_plan,
             to_worktree: args.to_worktree,
             source_worktree_path,
             provider_command: args.provider_command,
@@ -178,6 +169,7 @@ where
                 .model
                 .or_else(|| agent_task_service::ai_model_from_tool(&args.ai_tool)),
             ai_used_for: args.ai_used_for,
+            attempt_dispatcher,
         },
         executor,
     )?;

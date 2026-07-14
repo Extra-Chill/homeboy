@@ -12,6 +12,7 @@ use homeboy::core::agent_tasks::dispatch_service::{
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider::{self, AgentTaskProviderCatalog};
+use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy::core::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
@@ -121,18 +122,12 @@ fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
 
     for cook in &plan.cooks {
         let invocation = cook.to_cook_invocation(&plan)?;
-        let (dispatch_value, _dispatch_exit) =
-            dispatch_service::run_dispatch_command(invocation.dispatch, executor.clone())?;
-        let run_id = dispatch_value["run_id"]
-            .as_str()
-            .ok_or_else(|| {
-                Error::internal_unexpected(
-                    "agent-task dispatch did not return a run_id".to_string(),
-                )
-            })?
-            .to_string();
+        let run_id = invocation.options.initial_run_id.clone();
+        let request = dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
+        let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
         let mut options = invocation.options;
         options.initial_run_id = run_id;
+        options.initial_plan = initial_plan;
         let result = agent_task_service::run_cook(options, executor.clone())?;
         let value = serde_json::to_value(result.value).unwrap_or(Value::Null);
         let exit_code = result.exit_code;
@@ -582,6 +577,7 @@ impl BatchCookSpec {
             options: AgentTaskCookServiceOptions {
                 cook_id: self.run_id(),
                 initial_run_id: self.run_id(),
+                initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
                 to_worktree: self.to_worktree.clone(),
                 source_worktree_path,
                 provider_command: self.provider_command.clone(),
@@ -606,6 +602,7 @@ impl BatchCookSpec {
                     .clone()
                     .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
+                attempt_dispatcher: None,
             },
         })
     }

@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::core::agent_task::AgentTaskExecutor;
 use crate::core::agent_task_cook_loop::{
@@ -33,10 +34,19 @@ use crate::core::{config, Error, Result};
 use super::execution::run_loaded_plan;
 use super::AgentTaskRunResult;
 
+/// Executes one provider attempt while cook retains ownership of promotion,
+/// gates, retries, and finalization.
+pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
+    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> Result<()>;
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookServiceOptions {
     pub cook_id: String,
     pub initial_run_id: String,
+    /// Controller-compiled first attempt. The cook service owns dispatching it
+    /// through the same local-or-Lab transport used by gate-feedback retries.
+    pub initial_plan: AgentTaskPlan,
     pub to_worktree: String,
     pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
@@ -56,6 +66,8 @@ pub struct AgentTaskCookServiceOptions {
     pub ai_tool: String,
     pub ai_model: Option<String>,
     pub ai_used_for: String,
+    /// The route-selected provider transport. `None` executes locally.
+    pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -97,12 +109,60 @@ where
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
+    let mut next_plan = Some(options.initial_plan.clone());
     let cook_id = options.cook_id.clone();
     let mut budget_limit = None;
     let mut observed_budget_used = ExecutionBudgetUsage::default();
     let mut remediation_category_usage = ExecutionBudgetUsage::default();
 
     for attempt in 1..=max_attempts {
+        let plan = match next_plan.take() {
+            Some(plan) => plan,
+            None => agent_task_lifecycle::load_plan(&run_id)?,
+        };
+        let needs_execution = agent_task_lifecycle::status(&run_id)
+            .map(|record| {
+                !matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                        | agent_task_lifecycle::AgentTaskRunState::Failed
+                        | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                )
+            })
+            .unwrap_or(true);
+        if needs_execution {
+            let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
+                dispatcher.dispatch_attempt(plan.clone(), &run_id)
+            } else {
+                run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
+            };
+            if let Err(error) = execution {
+                let record = agent_task_lifecycle::status(&run_id).ok();
+                if record.is_some() {
+                    agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
+                }
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: record
+                        .as_ref()
+                        .map(|record| format!("{:?}", record.state))
+                        .unwrap_or_else(|| "DispatchFailed".to_string()),
+                    aggregate_path: record.and_then(|record| record.aggregate_path),
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(cook_report(
+                    cook_id,
+                    "provider_failure",
+                    attempts,
+                    None,
+                    Some(error.to_string()),
+                    1,
+                ));
+            }
+        }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
@@ -318,9 +378,9 @@ where
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
-                run_loaded_plan(follow_up_plan, Some(&next_run_id), executor.clone())?;
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
+                next_plan = Some(follow_up_plan);
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 return Ok(cook_report(
