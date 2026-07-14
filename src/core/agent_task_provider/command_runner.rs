@@ -1,4 +1,7 @@
-use super::outcome_normalization::{normalize_provider_outcome_roles, push_unique_diagnostic};
+use super::outcome_normalization::{
+    normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
+    push_unique_diagnostic,
+};
 use super::runner_readiness::{
     executable_file, provider_executable_env, resolve_executable_candidate,
 };
@@ -480,6 +483,11 @@ pub(super) fn run_materialized_provider_command_once(
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
             normalize_provider_outcome_roles(&mut outcome, provider);
+            normalize_homeboy_local_artifact_sizes(
+                &mut outcome,
+                &request.artifacts_path,
+                &request.artifacts_path_provenance,
+            );
             surface_provider_process_failure(
                 &mut outcome,
                 request,
