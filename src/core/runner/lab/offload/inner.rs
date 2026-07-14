@@ -1224,17 +1224,16 @@ pub(crate) fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    lab_metadata["source_snapshot"] =
-        serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
-    lab_metadata["workspace_content_hash"] =
-        serde_json::json!(crate::core::runner::workspace_content_hash(
-            Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
-            &source_snapshot.sync_excludes,
-        )?);
+    attach_lab_workspace_metadata(
+        &mut lab_metadata,
+        LabWorkspaceMetadataInputs {
+            source_snapshot: &source_snapshot,
+            legacy_path_materialization_plan: &path_materialization_plan,
+            primary_synced_workspace: &synced,
+        },
+    )?;
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
-    lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
