@@ -4,6 +4,7 @@
 //! outcome construction modules remain independently focused siblings.
 
 mod attempt_workspace;
+mod candidate_adoption;
 mod engine;
 mod harvest;
 mod outcome;
@@ -26,9 +27,10 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
-    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionBudget,
-    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
-    AgentTaskProgressEvent, AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
+    AgentTaskCancellationToken, AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
+    AgentTaskChildRun, AgentTaskExecutionBudget, AgentTaskExecutionContext, AgentTaskOutputBinding,
+    AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
@@ -40,6 +42,10 @@ use crate::core::agent_task_timeout_artifacts::{
 };
 use attempt_workspace::{
     prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
+};
+use candidate_adoption::{
+    attach_candidate_adoption_provenance, finalize_candidate_artifacts, select_candidate_adoption,
+    validate_and_apply_candidate_adoption,
 };
 pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};

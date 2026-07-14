@@ -81,7 +81,7 @@ where
     }
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
-        value: aggregate,
+        value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     })
 }
 
@@ -115,7 +115,7 @@ where
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
                 exit_code: aggregate_exit_code(&aggregate),
-                value: aggregate,
+                value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
             });
         }
         return Err(transport_proxy_recovery_error(recovery));
@@ -142,7 +142,7 @@ where
 
     let result = run_claimed(record.run_id, executor)?;
     Ok(AgentTaskRunResult {
-        value: Some(result.value),
+        value: Some(crate::core::agent_task_artifacts::reviewer_facing_aggregate(&result.value)),
         exit_code: result.exit_code,
     })
 }
@@ -158,7 +158,7 @@ where
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
                 exit_code: aggregate_exit_code(&aggregate),
-                value: aggregate,
+                value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
             });
         }
         return Err(transport_proxy_recovery_error(recovery));
@@ -198,7 +198,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
     })?;
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
-        value: aggregate,
+        value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     }))
 }
 

@@ -85,6 +85,7 @@ where
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
                     task_base_sha: None,
+                    adoption: None,
                 }
             })
             .collect();
@@ -357,6 +358,17 @@ where
                             continue;
                         }
                     };
+                if let Some(adoption) = scheduled.adoption.as_ref() {
+                    if let Err(mut outcome) = validate_and_apply_candidate_adoption(
+                        &request,
+                        adoption,
+                        task_base_sha.as_deref(),
+                    ) {
+                        outcome.task_id = task_id.clone();
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                }
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
@@ -440,6 +452,7 @@ where
                     task_base_sha,
                     source_provenance: harvest_preflight.source_provenance,
                     scratch: scratch.clone(),
+                    adoption: scheduled.adoption,
                 });
 
                 thread::spawn(move || {
@@ -496,6 +509,10 @@ where
                     };
                     debug_assert_eq!(result.scratch, running_task.scratch);
                     let mut outcome = result.outcome;
+                    attach_candidate_adoption_provenance(
+                        &mut outcome,
+                        running_task.adoption.as_ref(),
+                    );
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
@@ -504,6 +521,7 @@ where
                         }
                         outcome = committed_harvest_failure(outcome, error);
                     }
+                    finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let mut outcome = outcome;
@@ -585,6 +603,7 @@ where
                             candidate_artifacts,
                             retry_attempts,
                             task_base_sha: running_task.task_base_sha,
+                            adoption: running_task.adoption,
                         });
                         continue;
                     }
@@ -612,6 +631,45 @@ where
                                 ),
                             );
                             let entry = &policy.entries[running_task.rotation_index];
+                            let adoption = match entry.adoption.as_ref() {
+                                Some(template) => {
+                                    let mut candidate_artifacts =
+                                        running_task.candidate_artifacts.clone();
+                                    append_unique_artifacts(
+                                        &mut candidate_artifacts,
+                                        outcome
+                                            .artifacts
+                                            .iter()
+                                            .filter(|artifact| {
+                                                is_actionable_patch_artifact(artifact)
+                                            })
+                                            .cloned()
+                                            .collect(),
+                                    );
+                                    match select_candidate_adoption(
+                                        template,
+                                        &candidate_artifacts,
+                                        &running_task,
+                                    ) {
+                                        Ok(adoption) => Some(adoption),
+                                        Err(message) => {
+                                            let mut outcome = outcome;
+                                            outcome.diagnostics.push(AgentTaskDiagnostic {
+                                                class: "agent_task.candidate_adoption".to_string(),
+                                                message,
+                                                data: serde_json::Value::Null,
+                                            });
+                                            record_completed_outcome(
+                                                &mut completed_by_task,
+                                                &mut outcomes,
+                                                outcome,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                None => None,
+                            };
                             let (mut request, candidate_artifacts) = reset_attempt_request(
                                 running_task.request,
                                 running_task.source_workspace_root,
@@ -645,6 +703,7 @@ where
                                 candidate_artifacts,
                                 retry_attempts: running_task.retry_attempts,
                                 task_base_sha: running_task.task_base_sha,
+                                adoption,
                             });
                             continue;
                         }
@@ -745,6 +804,7 @@ pub(super) struct ScheduledTask {
     pub(super) retry_attempts: Vec<serde_json::Value>,
     /// Captured before the first provider execution and reused by every sibling.
     pub(super) task_base_sha: Option<String>,
+    pub(super) adoption: Option<AgentTaskCandidateAdoption>,
 }
 
 #[derive(Debug, Clone)]
@@ -782,6 +842,7 @@ pub(super) struct RunningTask {
     /// Verified source identity for snapshot-backed candidate artifacts.
     pub(super) source_provenance: Option<serde_json::Value>,
     pub(super) scratch: crate::core::controller_scratch::ControllerScratchAllocation,
+    pub(super) adoption: Option<AgentTaskCandidateAdoption>,
 }
 
 #[derive(Debug, Clone)]

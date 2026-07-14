@@ -20,6 +20,7 @@ pub use apply::apply_materialized_workspace_patch;
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };
+pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub use promote::promote;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
