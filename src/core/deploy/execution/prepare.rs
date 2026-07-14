@@ -71,11 +71,12 @@ pub(crate) fn prepare_component_deploy(
 
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
-    let release_artifact: Option<PathBuf> =
-        if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
-            Some(PathBuf::from(prepared_artifact.effective_path()))
-        } else {
-            match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
+    let release_artifact: Option<PathBuf> = if let Some(prepared_artifact) =
+        config.prepared_artifact.as_ref()
+    {
+        Some(PathBuf::from(prepared_artifact.effective_path()))
+    } else {
+        match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
                 ReleaseArtifactPlan::Reuse { tag, .. } => match release_artifact {
                     Some(artifact) => Some(artifact.path),
                     None => return Err(failed_component_deploy_result(
@@ -95,7 +96,7 @@ pub(crate) fn prepare_component_deploy(
                     None
                 }
             }
-        };
+    };
     let artifact_source = if is_git_deploy || is_file_deploy {
         None
     } else if config.prepared_artifact.is_some() {
