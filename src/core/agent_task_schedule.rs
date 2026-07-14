@@ -718,6 +718,7 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
+        CandidateRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
@@ -734,6 +735,8 @@ mod aggregate {
         pub skipped: usize,
         #[serde(default)]
         pub succeeded: usize,
+        #[serde(default)]
+        pub candidate_recoverable: usize,
         #[serde(default)]
         pub failed: usize,
         #[serde(default)]
@@ -760,6 +763,7 @@ mod aggregate {
         Skipped,
         Running,
         Succeeded,
+        CandidateRecoverable,
         Failed,
         Cancelled,
         TimedOut,

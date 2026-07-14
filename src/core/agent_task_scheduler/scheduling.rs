@@ -1322,6 +1322,7 @@ impl AgentTaskScheduleSupport {
             AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
                 AgentTaskState::Succeeded
             }
+            AgentTaskOutcomeStatus::CandidateRecoverable => AgentTaskState::CandidateRecoverable,
             AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
             AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
             _ => AgentTaskState::Failed,
@@ -1397,10 +1398,18 @@ impl AgentTaskScheduleSupport {
             return AgentTaskAggregateStatus::Cancelled;
         }
 
+        if outcomes
+            .iter()
+            .all(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
+        {
+            return AgentTaskAggregateStatus::CandidateRecoverable;
+        }
         let failed = outcomes.iter().any(|outcome| {
             !matches!(
                 outcome.status,
-                AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+                AgentTaskOutcomeStatus::Succeeded
+                    | AgentTaskOutcomeStatus::NoOp
+                    | AgentTaskOutcomeStatus::CandidateRecoverable
             )
         });
         let succeeded = outcomes.iter().any(|outcome| {
@@ -1440,6 +1449,7 @@ impl AgentTaskScheduleSupport {
                 AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
                     totals.succeeded += 1
                 }
+                AgentTaskOutcomeStatus::CandidateRecoverable => totals.candidate_recoverable += 1,
                 AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
                 AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
                 AgentTaskOutcomeStatus::Failed

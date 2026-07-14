@@ -197,6 +197,7 @@ where
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
+                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         ) {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,

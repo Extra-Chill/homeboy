@@ -1,7 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{mpsc, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -546,26 +549,46 @@ where
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
+                        if let Some(workspace) = &running_task._attempt_workspace {
+                            workspace.retain_for_diagnostics();
+                        }
                         outcome = committed_harvest_failure(outcome, error);
                     }
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let mut outcome = outcome;
-                    if running_task.timeout_cancel_requested
-                        && !outcome.artifacts.iter().any(is_actionable_patch_artifact)
-                    {
+                    if running_task.timeout_cancel_requested {
                         // Cancellation was requested at the deadline and this
                         // result proves the provider no longer owns the checkout.
                         // Harvest above is therefore race-free.
-                        outcome.status = AgentTaskOutcomeStatus::Timeout;
+                        let recovered = outcome.artifacts.iter().any(is_actionable_patch_artifact);
+                        outcome.status = if recovered {
+                            AgentTaskOutcomeStatus::CandidateRecoverable
+                        } else {
+                            AgentTaskOutcomeStatus::Timeout
+                        };
                         outcome.failure_classification =
                             Some(AgentTaskFailureClassification::Timeout);
                         outcome.diagnostics.push(AgentTaskDiagnostic {
                             class: "scheduler_timeout".to_string(),
-                            message: "provider exited after scheduler cancellation at its deadline"
-                                .to_string(),
-                            data: serde_json::json!({ "timeout_ms": running_task.timeout_ms }),
+                            message: if recovered {
+                                "provider exited after scheduler cancellation; a recoverable candidate patch was harvested".to_string()
+                            } else {
+                                "provider exited after scheduler cancellation at its deadline".to_string()
+                            },
+                            data: serde_json::json!({
+                                "timeout_ms": running_task.timeout_ms,
+                                "elapsed_ms": running_task.started_at.elapsed().as_millis() as u64,
+                                "provider_backend": running_task.request.executor.backend,
+                                "provider_model": running_task.request.executor.model(),
+                                "candidate_recoverable": recovered,
+                            }),
                         });
+                        if recovered {
+                            outcome.summary = Some(
+                                "provider timed out after producing a recoverable candidate; promote the fingerprinted patch through controller gates".to_string(),
+                            );
+                        }
                     }
                     let state = AgentTaskScheduleSupport::state_for_outcome(&outcome);
                     events.push(event(
@@ -588,6 +611,16 @@ where
                         let mut retry_attempts = running_task.retry_attempts;
                         retry_attempts.push(retry_evidence);
                         let mut request = running_task.request;
+                        if let (Some(attempt_root), Some(source_root)) = (
+                            request.workspace.root.clone(),
+                            running_task.source_workspace_root.clone(),
+                        ) {
+                            remap_workspace_config(
+                                &mut request.executor.config,
+                                Path::new(&attempt_root),
+                                Path::new(&source_root),
+                            );
+                        }
                         request.workspace.root = running_task.source_workspace_root.clone();
                         let mut candidate_artifacts = running_task.candidate_artifacts;
                         append_unique_artifacts(
@@ -654,6 +687,16 @@ where
                                     .collect(),
                             );
                             let mut request = running_task.request;
+                            if let (Some(attempt_root), Some(source_root)) = (
+                                request.workspace.root.clone(),
+                                running_task.source_workspace_root.clone(),
+                            ) {
+                                remap_workspace_config(
+                                    &mut request.executor.config,
+                                    Path::new(&attempt_root),
+                                    Path::new(&source_root),
+                                );
+                            }
                             request.workspace.root = running_task.source_workspace_root.clone();
                             AgentTaskScheduleSupport::apply_rotation_entry(
                                 &mut request,
@@ -871,19 +914,25 @@ enum SchedulerEvent {
 struct AttemptWorkspace {
     source_root: PathBuf,
     root: PathBuf,
+    retain: AtomicBool,
+}
+
+impl AttemptWorkspace {
+    fn retain_for_diagnostics(&self) {
+        self.retain.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for AttemptWorkspace {
     fn drop(&mut self) {
+        if self.retain.load(Ordering::Acquire) {
+            return;
+        }
         // This is a scheduler-created detached checkout, never the caller's
         // managed task workspace. Drop runs after the executor thread exits.
         let _ = Command::new("git")
             .args(["worktree", "remove", "--force"])
             .arg(&self.root)
-            .current_dir(&self.source_root)
-            .status();
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
             .current_dir(&self.source_root)
             .status();
     }
@@ -1024,6 +1073,7 @@ fn prepare_attempt_workspace(
     let workspace = Arc::new(AttemptWorkspace {
         source_root: root.clone(),
         root: attempt_root.clone(),
+        retain: AtomicBool::new(false),
     });
     let base_fingerprint = fingerprint(base.as_bytes());
     let adoption = request
@@ -1331,12 +1381,10 @@ fn harvest_committed_patch_with_metadata(
         "task_id": &running.task_id,
         "producer_attempt": running.attempt,
         "source_provenance": running.source_provenance,
-        "task_id": &running.task_id,
-        "producer_attempt": running.attempt,
-        "source_provenance": running.source_provenance,
         "provider_rotation_index": running.rotation_index,
         "provider_backend": running.request.executor.backend,
         "provider_model": running.request.executor.model(),
+        "attempt_workspace": &running.request.workspace.attempt,
     });
     Ok(())
 }

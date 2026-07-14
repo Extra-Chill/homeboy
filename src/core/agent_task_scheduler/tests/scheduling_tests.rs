@@ -550,26 +550,25 @@ mod concurrency_tests {
         while !finished.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(2));
         }
-        let attempt_root = attempt_roots.lock().expect("attempt roots")[0].clone();
-        assert!(
-            attempt_root.join("late-change.txt").is_file(),
-            "timeout harvest precedes cleanup, so the late provider workspace remains recoverable"
-        );
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
-        assert!(!events.iter().any(|event| event == "task-2-started"));
+        assert!(events.iter().any(|event| event == "task-2-started"));
         assert!(aggregate
             .outcomes
             .iter()
             .any(|outcome| outcome.task_id == "task-1"
-                && outcome.status == AgentTaskOutcomeStatus::Timeout));
+                && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+                && outcome.artifacts.iter().any(|artifact| {
+                    artifact.kind == "patch"
+                        && artifact
+                            .sha256
+                            .as_deref()
+                            .is_some_and(|sha| sha.starts_with("sha256:"))
+                        && artifact.metadata["provider_backend"].is_string()
+                })));
         assert!(aggregate.outcomes.iter().any(|outcome| {
-            outcome.task_id == "task-2"
-                && outcome.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.class == "backpressure"
-                        && diagnostic.message.contains("workspace remains quarantined")
-                })
+            outcome.task_id == "task-2" && outcome.status == AgentTaskOutcomeStatus::Succeeded
         }));
         assert!(
             !workspace.join("late-change.txt").exists(),
@@ -1583,16 +1582,17 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status,
-            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable
         );
-        assert_eq!(aggregate.totals.succeeded, 1);
+        assert_eq!(aggregate.totals.candidate_recoverable, 1);
         assert_eq!(aggregate.totals.timed_out, 0);
         assert!(aggregate
             .events
             .iter()
-            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::Succeeded));
+            .any(|event| event.task_id == "task-1"
+                && event.state == AgentTaskState::CandidateRecoverable));
         let outcome = &aggregate.outcomes[0];
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
         assert!(outcome.artifacts.iter().any(|artifact| {
             artifact.kind == "patch"
                 && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
@@ -1607,12 +1607,10 @@ mod timeout_tests {
             .any(|evidence| evidence.kind == "agent_result"
                 && evidence.uri == agent_result_path.display().to_string()));
         assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "completed_runtime_late_provider_race"
-                && diagnostic.data.get("timeout_kind").and_then(Value::as_str)
-                    == Some("scheduler_timeout")
+            diagnostic.class == "scheduler_timeout"
                 && diagnostic
                     .data
-                    .get("actionable_patch")
+                    .get("candidate_recoverable")
                     .and_then(Value::as_bool)
                     == Some(true)
         }));

@@ -400,6 +400,7 @@ fn totals_for_children(children: &[AgentTaskBatchChildRun]) -> AgentTaskBatchTot
             AgentTaskRunState::Queued => totals.queued += 1,
             AgentTaskRunState::Running => totals.running += 1,
             AgentTaskRunState::Succeeded => totals.succeeded += 1,
+            AgentTaskRunState::CandidateRecoverable => totals.partial_failure += 1,
             AgentTaskRunState::PartialFailure => totals.partial_failure += 1,
             AgentTaskRunState::Failed => totals.failed += 1,
             AgentTaskRunState::Cancelled => totals.cancelled += 1,
