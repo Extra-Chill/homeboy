@@ -13,7 +13,7 @@ use homeboy::core::observation::{
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::core::io::output_file::write_output_file;
@@ -247,6 +247,8 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
+    let source_plan = agent_task_lifecycle::load_plan(&retry.run_id)?;
+    let primary_workspace = retry_plan_primary_workspace(&source_plan)?;
     let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
@@ -261,7 +263,11 @@ fn materialize_agent_task_retry_handoff(
         .ok_or_else(|| {
             Error::internal_unexpected("agent-task retry argv was missing agent-task")
         })?;
-    let mut args = normalized_args[..agent_task_index].to_vec();
+    let mut args = retry_handoff_prefix(&normalized_args[..agent_task_index]);
+    // A retry executes the original task, not the controller invocation. Make
+    // its git checkout the Lab primary so the remote cwd and patch capture use
+    // the same materialized worktree.
+    args.extend(["--cwd".to_string(), primary_workspace.display().to_string()]);
     args.extend([
         "agent-task".to_string(),
         "run-plan".to_string(),
@@ -276,6 +282,89 @@ fn materialize_agent_task_retry_handoff(
         run_id: record.run_id,
         plan,
     }))
+}
+
+fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(args.len());
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--cwd" || arg == "--path" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--cwd=") || arg.starts_with("--path=") {
+            continue;
+        }
+        rewritten.push(arg.clone());
+    }
+    rewritten
+}
+
+fn retry_plan_primary_workspace(
+    plan: &homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<PathBuf> {
+    let mut roots = BTreeSet::new();
+    for task in &plan.tasks {
+        let root = task
+            .workspace
+            .root
+            .as_deref()
+            .or_else(|| {
+                task.executor
+                    .config
+                    .get("workspace_root")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                task.metadata
+                    .get("workspace")
+                    .and_then(|workspace| workspace.get("root"))
+                    .and_then(serde_json::Value::as_str)
+            });
+        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+            let path = PathBuf::from(root);
+            let git_root = git::repo_root(&path).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    format!(
+                        "agent-task retry task '{}' workspace is not inside a git checkout",
+                        task.task_id
+                    ),
+                    Some(path.display().to_string()),
+                    Some(vec![
+                        "Retry the task from a plan with a git-backed workspace root.".to_string(),
+                    ]),
+                )
+            })?;
+            roots.insert(git_root);
+        }
+    }
+
+    match roots.len() {
+        1 => Ok(roots.into_iter().next().expect("one retry workspace")),
+        0 => Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry --run through Lab requires one git-backed task workspace; the controller cwd cannot become the task primary",
+            None,
+            Some(vec![
+                "Record workspace.root or executor.config.workspace_root in the task plan before retrying.".to_string(),
+            ]),
+        )),
+        _ => Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry --run through Lab found multiple task workspaces and cannot choose a primary checkout",
+            Some(
+                roots
+                    .iter()
+                    .map(|root| root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(vec![
+                "Retry a plan whose tasks share one git-backed workspace, or split the tasks into separate retries.".to_string(),
+            ]),
+        )),
+    }
 }
 
 fn persist_retry_handoff_preacceptance_failure(
@@ -1129,8 +1218,22 @@ mod tests {
     use homeboy::command_contract::{lab_runner_supports_contract_label, LabCommandPortability};
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    fn git_init(path: &Path) {
+        let output = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .expect("initialize git workspace");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     struct EnvGuard {
         previous: Vec<(&'static str, Option<String>)>,
@@ -1761,9 +1864,20 @@ mod tests {
     #[test]
     fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
         crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            git_init(workspace.path());
             let source_plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
                 "failed-retry-source",
-                Vec::new(),
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "retry-task",
+                    "executor": {
+                        "backend": "fixture",
+                        "config": { "workspace_root": workspace.path() }
+                    },
+                    "instructions": "retry",
+                    "workspace": { "root": workspace.path() }
+                }))
+                .expect("task")],
             );
             agent_task_lifecycle::submit_plan(&source_plan, Some("failed-run"))
                 .expect("source run submitted");
@@ -1780,6 +1894,8 @@ mod tests {
             let normalized = [
                 "homeboy",
                 "--detach-after-handoff",
+                "--cwd",
+                "/controller/homeboy",
                 "agent-task",
                 "retry",
                 "failed-run",
@@ -1795,11 +1911,25 @@ mod tests {
                 .expect("retry handoff materialized")
                 .expect("retry handoff");
 
-            assert_eq!(handoff.args[2], "agent-task");
-            assert_eq!(handoff.args[3], "run-plan");
-            assert_eq!(handoff.args[4], "--plan");
-            assert_eq!(handoff.args[6], "--record-run-id");
-            assert_eq!(handoff.args[7], handoff.run_id);
+            let cwd_index = handoff
+                .args
+                .iter()
+                .position(|arg| arg == "--cwd")
+                .expect("canonical task cwd");
+            assert_eq!(
+                handoff.args[cwd_index + 1],
+                workspace.path().display().to_string()
+            );
+            assert!(!handoff.args.iter().any(|arg| arg == "/controller/homeboy"));
+            let agent_task_index = handoff
+                .args
+                .iter()
+                .position(|arg| arg == "agent-task")
+                .expect("agent task");
+            assert_eq!(handoff.args[agent_task_index + 1], "run-plan");
+            assert_eq!(handoff.args[agent_task_index + 2], "--plan");
+            assert_eq!(handoff.args[agent_task_index + 4], "--record-run-id");
+            assert_eq!(handoff.args[agent_task_index + 5], handoff.run_id);
             let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
             assert_eq!(replacement.metadata["retry_of"], "failed-run");
 
@@ -1821,6 +1951,50 @@ mod tests {
                 replacement.metadata["pre_execution_failure"]["phase"],
                 "detached_lab_handoff_preacceptance"
             );
+        });
+    }
+
+    #[test]
+    fn retry_handoff_refuses_multiple_task_workspaces() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = tempfile::tempdir().expect("first workspace");
+            let second = tempfile::tempdir().expect("second workspace");
+            git_init(first.path());
+            git_init(second.path());
+            let task = |id: &str, root: &Path| {
+                serde_json::from_value(serde_json::json!({
+                    "task_id": id,
+                    "executor": { "backend": "fixture" },
+                    "instructions": "retry",
+                    "workspace": { "root": root }
+                }))
+                .expect("task")
+            };
+            let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+                "multiple-workspaces",
+                vec![task("first", first.path()), task("second", second.path())],
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("source plan");
+            let source_plan = agent_task_lifecycle::load_plan("failed-run").expect("source plan");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "failed-run",
+                &source_plan,
+                "provider_execution",
+                &Error::internal_unexpected("failed"),
+            )
+            .expect("source failure");
+            let normalized = ["homeboy", "agent-task", "retry", "failed-run", "--run"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&normalized);
+
+            let error = match materialize_agent_task_retry_handoff(&cli, &normalized) {
+                Ok(_) => panic!("multiple workspaces must fail closed"),
+                Err(error) => error,
+            };
+            assert!(error.message.contains("multiple task workspaces"));
+            assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
         });
     }
 
