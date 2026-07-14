@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn package_preflight_payload_distinguishes_staging_path_from_source_path() {
+    fn package_preflight_runs_guards_without_building_an_artifact() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
             run_in(component.path(), &["git", "init"]);
@@ -931,45 +931,17 @@ mod tests {
             );
             crate::core::extension::save_manifest(&package).expect("save package extension");
 
-            let result = package_preflight::run_package_preflight(
-                &[package],
-                &Component {
-                    id: "fixture".to_string(),
-                    local_path: component.path().to_string_lossy().to_string(),
-                    ..Component::default()
-                },
-                "fixture",
-                &component.path().to_string_lossy(),
-                false,
-            )
-            .expect("package preflight");
+            package_preflight::run_package_preflight(&component.path().to_string_lossy())
+                .expect("package guards");
 
-            assert_eq!(result.status, ReleaseStepStatus::Success);
-            let payload: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(&payload_out).expect("payload output"),
-            )
-            .expect("payload json");
-            assert_eq!(
-                payload["release"]["source_path"].as_str(),
-                Some(component.path().to_string_lossy().as_ref())
-            );
-            assert_ne!(
-                payload["release"]["local_path"].as_str(),
-                payload["release"]["source_path"].as_str()
-            );
-            assert_eq!(
-                std::fs::read_to_string(&source_env_out).expect("source env"),
-                component.path().to_string_lossy()
-            );
-            assert_eq!(
-                std::fs::read_to_string(&component_env_out).expect("component env"),
-                payload["release"]["local_path"].as_str().unwrap()
-            );
+            assert!(!payload_out.exists());
+            assert!(!source_env_out.exists());
+            assert!(!component_env_out.exists());
         });
     }
 
     #[test]
-    fn package_preflight_materializes_repo_root_for_subdirectory_component() {
+    fn package_preflight_does_not_materialize_a_repository_copy() {
         crate::test_support::with_isolated_home(|_| {
             let repo = tempfile::tempdir().expect("repo tempdir");
             std::fs::write(repo.path().join("build-input.txt"), "repo-root-input")
@@ -998,27 +970,14 @@ mod tests {
             );
             crate::core::extension::save_manifest(&package).expect("save package extension");
 
-            let result = package_preflight::run_package_preflight(
-                &[package],
-                &Component {
-                    id: "fixture".to_string(),
-                    local_path: component.to_string_lossy().to_string(),
-                    ..Component::default()
-                },
-                "fixture",
-                &component.to_string_lossy(),
-                false,
-            )
-            .expect("package preflight");
-
-            assert_eq!(result.status, ReleaseStepStatus::Success);
-            let data = result.data.expect("preflight data");
-            assert_eq!(data["validated_action"].as_str(), Some("release.package"));
+            package_preflight::run_package_preflight(&component.to_string_lossy())
+                .expect("package guards");
+            assert!(!component.join("build").exists());
         });
     }
 
     #[test]
-    fn package_preflight_failure_includes_actionable_diagnostics() {
+    fn package_failure_surfaces_actionable_output() {
         crate::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
             let package = release_package_extension(
@@ -1027,59 +986,19 @@ mod tests {
             );
             crate::core::extension::save_manifest(&package).expect("save package extension");
 
-            let err = package_preflight::run_package_preflight(
+            let mut state = ReleaseState::default();
+            let err = run_package(
                 &[package],
-                &Component {
-                    id: "fixture".to_string(),
-                    local_path: component.path().to_string_lossy().to_string(),
-                    ..Component::default()
-                },
+                &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                None,
                 true,
             )
-            .expect_err("failing package preflight should surface diagnostics");
+            .expect_err("failing final package should surface output");
 
-            let diagnostic = &err.details["diagnostic"];
-            assert_eq!(diagnostic["component_id"].as_str(), Some("fixture"));
-            assert_eq!(
-                diagnostic["package_root"].as_str(),
-                Some(component.path().to_string_lossy().as_ref())
-            );
-            assert!(diagnostic["build_cwd"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("homeboy-release-package-preflight"));
-            assert!(diagnostic["materialized_temp_root"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("homeboy-release-package-preflight"));
-            assert_eq!(diagnostic["exit_code"].as_i64(), Some(9));
-            let command = diagnostic["command"].as_str().expect("command");
-            assert!(command.contains("building package"));
-            assert!(command.contains("missing tsconfig.base.json"));
-            assert!(command.contains("exit 9"));
-            assert_eq!(
-                diagnostic["config_fields"]["component.local_path"].as_str(),
-                Some(component.path().to_string_lossy().as_ref())
-            );
-            assert_eq!(
-                diagnostic["config_fields"]["config.skip_build_validation"].as_bool(),
-                Some(true)
-            );
-            assert!(diagnostic["relevant_error_lines"]
-                .as_array()
-                .expect("relevant error lines")
-                .iter()
-                .any(|line| line.as_str() == Some("error: missing tsconfig.base.json")));
-
-            let artifact_path = err.details["artifact_path"]
-                .as_str()
-                .expect("artifact path");
-            assert!(std::path::Path::new(artifact_path).is_file());
-            let artifact = std::fs::read_to_string(artifact_path).expect("diagnostic artifact");
-            assert!(artifact.contains("missing tsconfig.base.json"));
-            assert!(err.message.contains("diagnostic artifact"));
+            assert!(err.message.contains("missing tsconfig.base.json"));
+            assert_eq!(err.details["source"]["exit_code"].as_i64(), Some(9));
         });
     }
 
