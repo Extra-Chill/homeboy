@@ -94,6 +94,82 @@ fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
 }
 
 #[test]
+fn daemon_process_attribution_matches_only_explicit_store_and_binary_identity() {
+    let home = tempfile::tempdir().expect("home");
+    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4242 {} HOME={} {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        home.path().display(),
+        executable.display()
+    );
+
+    let candidate =
+        super::parse_daemon_process_candidate(&line, &jobs, Some(&executable)).expect("candidate");
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Owning
+    );
+    assert_eq!(candidate.bind_endpoint.as_deref(), Some("127.0.0.1:7421"));
+    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+}
+
+#[test]
+fn daemon_process_attribution_proves_unrelated_and_fails_closed_when_ambiguous() {
+    let home = tempfile::tempdir().expect("home");
+    let other_home = tempfile::tempdir().expect("other home");
+    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+    let unrelated = format!(
+        "4243 {} HOME={} {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        other_home.path().display(),
+        executable.display()
+    );
+    let ambiguous = format!(
+        "4244 {} {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        executable.display()
+    );
+
+    assert_eq!(
+        super::parse_daemon_process_candidate(&unrelated, &jobs, Some(&executable))
+            .expect("unrelated")
+            .ownership,
+        super::super::DaemonProcessOwnership::Unrelated
+    );
+    assert_eq!(
+        super::parse_daemon_process_candidate(&ambiguous, &jobs, Some(&executable))
+            .expect("ambiguous")
+            .ownership,
+        super::super::DaemonProcessOwnership::Ambiguous
+    );
+}
+
+#[test]
+fn multiple_ambiguous_candidates_block_recovery_and_pid_reuse_blocks_adoption() {
+    let ambiguous = super::super::DaemonProcessCandidate {
+        pid: 71,
+        executable: "/tmp/homeboy".to_string(),
+        cmdline: "homeboy daemon serve --addr 127.0.0.1:0".to_string(),
+        bind_endpoint: Some("127.0.0.1:0".to_string()),
+        durable_store_path: None,
+        build_identity: None,
+        ownership: super::super::DaemonProcessOwnership::Ambiguous,
+    };
+    assert!(!super::candidates_prove_no_owner(&[
+        ambiguous.clone(),
+        ambiguous
+    ]));
+    assert!(super::pid_is_proven_dead(71, |_| false));
+    assert!(
+        !super::pid_is_proven_dead(71, |_| true),
+        "a reused PID remains live under the lifecycle lock"
+    );
+}
+
+#[test]
 fn concurrent_leaseless_recovery_callers_commit_once_and_preserve_job_evidence() {
     with_isolated_home(|_| {
         let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
@@ -226,6 +302,7 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
         state: None,
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "lease-missing-test-state".to_string(),
+        process_candidates: Vec::new(),
     }
 }
 
@@ -886,6 +963,7 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
         state: daemon.map(fake_daemon_state),
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
+        process_candidates: Vec::new(),
     }
 }
 
@@ -914,6 +992,7 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
         state: Some(fake_daemon_state(daemon)),
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
+        process_candidates: Vec::new(),
     }
 }
 
