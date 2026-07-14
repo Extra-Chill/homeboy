@@ -24,6 +24,7 @@ mod tests {
     use serde_json::json;
 
     use super::persistence::recovered_terminal_from_result;
+    use super::store::RecoveredTerminalJob;
     use super::*;
     use crate::core::secret_env_plan::SecretEnvPlan;
     use crate::core::source_snapshot::SourceSnapshot;
@@ -652,6 +653,97 @@ mod tests {
         assert!(diagnostics.protected_job_ids.is_empty());
         assert_eq!(diagnostics.terminalized_count(), 1);
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn dead_child_recovers_linked_terminal_result_and_artifacts() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
+            .expect("heartbeat");
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| false,
+                |_| {
+                    Some(RecoveredTerminalJob::test_result(
+                        JobStatus::Succeeded,
+                        "run-success",
+                        json!({ "aggregate": { "status": "succeeded" } }),
+                        vec![JobArtifactMetadata {
+                            id: "artifact-1".to_string(),
+                            name: None,
+                            path: None,
+                            url: Some("artifact://1".to_string()),
+                            mime: None,
+                            size_bytes: None,
+                            sha256: None,
+                            content_base64: None,
+                            metadata: None,
+                        }],
+                    ))
+                },
+            )
+            .expect("reconcile");
+        let recovered = store.get(job.id).expect("job");
+        assert_eq!(recovered.status, JobStatus::Succeeded);
+        assert_eq!(recovered.artifacts[0].id, "artifact-1");
+        assert!(store
+            .events(job.id)
+            .expect("events")
+            .iter()
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(
+                    |data| data["child_terminal_result"]["aggregate"]["status"] == "succeeded"
+                )));
+    }
+
+    #[test]
+    fn dead_child_recovers_linked_terminal_failure_and_live_child_skips_resolver() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
+            .expect("heartbeat");
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| true,
+                |_| panic!("live child must win"),
+            )
+            .expect("live child deferred");
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| false,
+                |_| {
+                    Some(RecoveredTerminalJob::test_result(
+                        JobStatus::Failed,
+                        "run-failure",
+                        json!({ "provider": "failed" }),
+                        Vec::new(),
+                    ))
+                },
+            )
+            .expect("reconcile failure");
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+        assert!(store.get(job.id).expect("job").stale_reason.is_none());
     }
 
     #[test]
