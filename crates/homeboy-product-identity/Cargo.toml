@@ -1,0 +1,14 @@
+[package]
+name = "homeboy-product-identity"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Homeboy-owned product literals (name, binary, config/env/artifact prefixes)"
+repository = "https://github.com/Extra-Chill/homeboy"
+
+[lib]
+name = "homeboy_product_identity"
+path = "src/lib.rs"
+
+[dependencies]

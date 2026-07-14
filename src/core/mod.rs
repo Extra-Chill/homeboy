@@ -121,7 +121,9 @@ pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
 pub mod process;
-pub mod product_identity;
+// product_identity moved to the internal `homeboy-product-identity` crate.
+// Re-exported so `crate::core::product_identity::*` call sites keep working.
+pub use homeboy_product_identity as product_identity;
 pub mod project;
 pub mod proof;
 pub mod publication_artifacts;
