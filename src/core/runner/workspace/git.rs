@@ -97,6 +97,7 @@ pub(super) fn materialize_git(
     remote_path: &str,
     remote_url: &str,
     head: &str,
+    branch: Option<&str>,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
@@ -105,6 +106,7 @@ pub(super) fn materialize_git(
         remote_path,
         remote_url,
         head,
+        branch,
         changed_since_base,
         git_fetch_refs,
         allow_dirty_lab_workspace,
@@ -449,6 +451,10 @@ pub(crate) fn git_bundle_install_command(
             allow_dirty: allow_dirty_lab_workspace,
         })
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
+        })
         .restore_owner()
         .command()
 }
@@ -457,6 +463,7 @@ pub(super) fn materialize_git_command(
     remote_path: &str,
     remote_url: &str,
     head: &str,
+    branch: Option<&str>,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
@@ -467,9 +474,14 @@ pub(super) fn materialize_git_command(
         .op(WorkspaceMaterializationOperation::SyncGitCheckout {
             remote_url: remote_url.to_string(),
             head: head.to_string(),
+            branch: branch.map(str::to_string),
             changed_since_base: changed_since_base.map(str::to_string),
             fetch_refs: git_fetch_refs.to_vec(),
             allow_dirty: allow_dirty_lab_workspace,
+        })
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
         })
         .restore_owner()
         .command()

@@ -93,6 +93,14 @@ pub(crate) fn verify_lab_workspace(
             "has untrusted workspace materialization mode `{materialization_mode}`"
         ));
     }
+    if materialization_mode == "git"
+        && snapshot
+            .sync_excludes
+            .iter()
+            .any(|exclude| exclude == ".git" || exclude == ".git/")
+    {
+        return Err("claims git materialization while excluding .git metadata".to_string());
+    }
     if snapshot.dirty {
         return Err("records a dirty source checkout".to_string());
     }

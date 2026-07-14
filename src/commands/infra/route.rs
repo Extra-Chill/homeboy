@@ -77,7 +77,7 @@ pub fn route_after_parse(
         }
     }
 
-    let lab_command = lab_offload_command(&cli.command)?;
+    let mut lab_command = lab_offload_command(&cli.command)?;
 
     let inferred_runner_id = if lab_command.is_some() {
         cli.runner
@@ -92,6 +92,14 @@ pub fn route_after_parse(
     } else {
         None
     };
+    if retry_handoff.is_some() {
+        if let Some(command) = lab_command.as_mut() {
+            // A retry's task primary must be a real checkout so the provider can
+            // capture a bounded git diff instead of receiving a source snapshot.
+            command.command.workspace_mode_policy =
+                homeboy::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired;
+        }
+    }
     let normalized_args = retry_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())

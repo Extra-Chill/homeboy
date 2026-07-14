@@ -386,4 +386,102 @@ mod tests {
         assert!(patch_body.contains("-before"));
         assert!(patch_body.contains("+after"));
     }
+
+    #[test]
+    fn git_baseline_materialization_is_clean_and_patch_capture_is_bounded() {
+        crate::test_support::with_isolated_home(|_| {
+            let origin = tempfile::tempdir().expect("origin");
+            let author = tempfile::tempdir().expect("author");
+            let source_parent = tempfile::tempdir().expect("source parent");
+            let runner_root = tempfile::tempdir().expect("runner root");
+            let source = source_parent.path().join("source");
+            git_test_command(origin.path(), &["init", "--bare"]);
+            git_test_command(author.path(), &["init", "-b", "main"]);
+            git_test_command(author.path(), &["config", "user.email", "test@example.com"]);
+            git_test_command(author.path(), &["config", "user.name", "Test User"]);
+            fs::write(author.path().join("tracked.txt"), "before\n").expect("tracked file");
+            git_test_command(author.path(), &["add", "tracked.txt"]);
+            git_test_command(author.path(), &["commit", "-m", "base"]);
+            let head = git_output(author.path(), &["rev-parse", "HEAD"]).expect("head");
+            let remote_url = format!("file://{}", origin.path().display());
+            git_test_command(author.path(), &["remote", "add", "origin", &remote_url]);
+            git_test_command(author.path(), &["push", "origin", "main"]);
+            git_test_command(origin.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+            git_test_command(source_parent.path(), &["clone", &remote_url, "source"]);
+
+            crate::core::runner::create(
+                &format!(
+                    r#"{{"id":"patch-baseline","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let (sync, exit_code) = crate::core::runner::sync_workspace(
+                "patch-baseline",
+                crate::core::runner::RunnerWorkspaceSyncOptions {
+                    path: source.display().to_string(),
+                    mode: crate::core::runner::RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: false,
+                    ..Default::default()
+                },
+            )
+            .expect("materialize git baseline");
+            let remote = Path::new(&sync.remote_path);
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(sync.sync_mode.label(), "git");
+            assert!(remote.join(".git").is_dir());
+            assert_eq!(git_output(remote, &["rev-parse", "HEAD"]), Some(head));
+            assert_eq!(
+                git_output(remote, &["config", "--get", "remote.origin.url"]),
+                Some(remote_url)
+            );
+            assert_eq!(
+                git_output(remote, &["status", "--porcelain=v1"]),
+                Some(String::new())
+            );
+
+            let baseline = capture_baseline(&sync.remote_path).expect("capture baseline");
+            fs::write(remote.join("tracked.txt"), "after\n").expect("modify tracked file");
+            let report = capture_patch_report(
+                uuid::Uuid::new_v4(),
+                "patch-baseline",
+                &sync.remote_path,
+                &["true".to_string()],
+                None,
+                &baseline,
+                0,
+            )
+            .expect("capture patch");
+
+            assert_eq!(report.modified_files, vec!["tracked.txt".to_string()]);
+        });
+    }
+
+    fn git_test_command(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> Option<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
 }

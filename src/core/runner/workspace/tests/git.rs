@@ -560,6 +560,7 @@ fn git_materialization_fetches_changed_since_base_before_checkout() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         Some("def456"),
         &[],
         false,
@@ -593,6 +594,7 @@ fn git_materialization_restores_workspace_owner_after_root_run() {
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
         None,
+        None,
         &[],
         false,
     );
@@ -613,6 +615,7 @@ fn git_materialization_fetches_extra_refs_before_checkout() {
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
         None,
+        None,
         &["refs/pull/5530/head".to_string()],
         false,
     );
@@ -627,6 +630,7 @@ fn git_materialization_fetches_extra_refs_before_changed_since_sha() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         Some("def456"),
         &["refs/heads/main".to_string()],
         false,
@@ -649,6 +653,7 @@ fn git_materialization_refuses_dirty_remote_workspace_by_default() {
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
         None,
+        None,
         &[],
         false,
     );
@@ -666,6 +671,7 @@ fn git_materialization_override_is_noisy_but_allows_reset() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         None,
         &[],
         true,
