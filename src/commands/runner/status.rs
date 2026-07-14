@@ -918,6 +918,15 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             "Active-job status for `{}` is unavailable: {reason}. Treat active_job_count=0 as unknown, not idle.",
             report.runner_id
         ));
+    } else if let Some(error) = report
+        .active_job_error
+        .as_ref()
+        .filter(|error| error.code == "active_job_view_inconsistent")
+    {
+        hints.push(format!(
+            "Active-job view for `{}` is inconsistent: {}",
+            report.runner_id, error.message
+        ));
     }
     if report.stale_runner_job_count > 0 {
         hints.push(format!(

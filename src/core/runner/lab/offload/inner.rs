@@ -315,6 +315,17 @@ pub(crate) fn exec_lab_context(
     secret_env_names.dedup();
 
     let pre_dispatch_started = std::time::Instant::now();
+    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "executor_preflight",
+            Some(&remote_cwd),
+            None,
+            None,
+            request.durable_agent_task_plan,
+        )?;
+    }
     preflight_lab_secret_env_handoff(runner_id, context.runner, &env, &context.secret_env_handoff)?;
     if let Some(runner) = context.runner {
         preflight_agent_task_runner_secret_env_plan(
@@ -330,6 +341,17 @@ pub(crate) fn exec_lab_context(
         context.runner,
         context.source_snapshot.as_ref(),
     ) {
+        if let Some(run_id) = context.agent_task_run_id.as_deref() {
+            agent_task_lifecycle::record_lab_offload_phase(
+                run_id,
+                runner_id,
+                "provider_preflight",
+                Some(&remote_cwd),
+                None,
+                None,
+                request.durable_agent_task_plan,
+            )?;
+        }
         preflight_agent_task_provider_on_runner(
             runner_id,
             &provider.command_prefix_argv,
@@ -369,6 +391,15 @@ pub(crate) fn exec_lab_context(
                 remote_command: &context.remote_command,
                 durable_plan: request.durable_agent_task_plan,
             },
+        )?;
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "provider_dispatch",
+            Some(&remote_cwd),
+            None,
+            None,
+            request.durable_agent_task_plan,
         )?;
     }
 
@@ -883,6 +914,15 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
             .unwrap_or(serde_json::Value::Null);
     if let Some(run_id) = pre_acceptance_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "validation",
+            None,
+            Some(&source_checkout),
+            Some(&provider_rotation),
+            request.durable_agent_task_plan,
+        )?;
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,
