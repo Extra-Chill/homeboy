@@ -695,6 +695,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-error",
  "homeboy-redaction",
  "keyring",
  "libc",
@@ -714,6 +715,14 @@ dependencies = [
  "toml",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "homeboy-error"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

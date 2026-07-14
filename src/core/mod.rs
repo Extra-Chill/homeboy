@@ -80,7 +80,9 @@ pub mod deps;
 pub mod deterministic_loop;
 pub mod engine;
 pub mod env_materialization_plan;
-pub mod error;
+// error moved to the internal `homeboy-error` crate. Re-exported here so existing
+// `crate::core::error::*` call sites keep working unchanged.
+pub use homeboy_error as error;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
