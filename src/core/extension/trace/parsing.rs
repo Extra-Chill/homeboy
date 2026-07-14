@@ -189,6 +189,10 @@ pub struct TraceCanonicalCheck {
     pub commits_ahead: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commits_behind: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

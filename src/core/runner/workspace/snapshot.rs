@@ -37,6 +37,126 @@ pub(crate) fn snapshot_identity(
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
+/// Stable digest of the files a snapshot materializes. Unlike `snapshot_identity`,
+/// this is portable across controller and runner paths and can be recomputed after
+/// transport. The runner workspace record is transport metadata, not source.
+pub(crate) fn workspace_content_hash(path: &Path, excludes: &[String]) -> Result<String> {
+    let mut entries = Vec::new();
+    let root = path.canonicalize().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("canonicalize workspace".to_string()))
+    })?;
+    collect_content_hash_entries(
+        &root,
+        &root,
+        Path::new(""),
+        excludes,
+        &mut vec![root.clone()],
+        &mut entries,
+    )?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    hasher.update(b"homeboy-workspace-content-v1\0");
+    for (relative, kind, mode, contents) in entries {
+        hasher.update(relative.as_bytes());
+        hasher.update(kind.as_bytes());
+        hasher.update(mode.to_le_bytes());
+        hasher.update((contents.len() as u64).to_le_bytes());
+        hasher.update(contents);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn collect_content_hash_entries(
+    root: &Path,
+    path: &Path,
+    logical: &Path,
+    excludes: &[String],
+    ancestors: &mut Vec<std::path::PathBuf>,
+    entries: &mut Vec<(String, &'static str, u32, Vec<u8>)>,
+) -> Result<()> {
+    let mut children = fs::read_dir(path)
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read sync directory entry".to_string()),
+            )
+        })?;
+    children.sort_by_key(|entry| entry.path());
+    for entry in children {
+        let entry_path = entry.path();
+        let relative_path = logical.join(entry.file_name());
+        let relative = relative_path.to_string_lossy().replace('\\', "/");
+        if relative == ".homeboy/runner-workspace.json"
+            || is_excluded(root, &root.join(&relative_path), excludes, &[])
+        {
+            continue;
+        }
+        let link_metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
+        })?;
+        let resolved = if link_metadata.file_type().is_symlink() {
+            entry_path.canonicalize().map_err(|err| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "workspace content hash refused an unresolved symlink",
+                    Some(err.to_string()),
+                    None,
+                )
+            })?
+        } else {
+            entry_path.clone()
+        };
+        let metadata = fs::metadata(&resolved).map_err(|err| {
+            Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
+        })?;
+        if metadata.is_dir() {
+            let canonical = resolved
+                .canonicalize()
+                .map_err(|err| Error::internal_io(err.to_string(), None))?;
+            if ancestors.contains(&canonical) {
+                return Err(Error::validation_invalid_argument(
+                    "workspace",
+                    "workspace content hash refused a symlink cycle",
+                    Some(entry_path.display().to_string()),
+                    None,
+                ));
+            }
+            entries.push((relative, "\0dir\0", mode_bits(&metadata), Vec::new()));
+            ancestors.push(canonical);
+            collect_content_hash_entries(
+                root,
+                &resolved,
+                &relative_path,
+                excludes,
+                ancestors,
+                entries,
+            )?;
+            ancestors.pop();
+        } else if metadata.is_file() {
+            let contents = fs::read(&resolved).map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read sync file".to_string()))
+            })?;
+            entries.push((relative, "\0file\0", mode_bits(&metadata), contents));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mode_bits(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn mode_bits(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
 pub(crate) fn local_snapshot_stats(
     path: &Path,
     excludes: &[String],

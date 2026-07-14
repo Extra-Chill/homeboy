@@ -5,6 +5,11 @@ use crate::core::component::Component;
 use crate::core::error::{ErrorCode, Result};
 use crate::core::extension::manifest_config::TraceToolchainProvenanceConfig;
 use crate::core::extension::ExtensionExecutionContext;
+#[cfg(test)]
+use crate::core::runner::verify_lab_workspace;
+use crate::core::runner::verify_lab_workspace_from_env;
+#[cfg(test)]
+use crate::core::source_snapshot::SourceSnapshot;
 
 use super::parsing::{
     TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck, TraceEvidenceMetadata, TraceResults,
@@ -168,6 +173,7 @@ pub(crate) fn evaluate_trace_canonicality(
     checks.push(check_git_checkout(
         "component",
         Path::new(component_path),
+        Some(&component.local_path),
         checkout_provenance,
         &mut reasons,
     ));
@@ -243,6 +249,7 @@ fn check_declared_toolchain_provenance(
                 &format!("toolchain:{} ({key}, {source})", requirement.id),
                 &crate::core::git::git_probe_path(Path::new(path)),
                 None,
+                None,
                 reasons,
             )),
             _ => reasons.push(format!(
@@ -265,7 +272,7 @@ fn check_extension_checkout(
     .as_deref()
         == Some("true")
     {
-        return check_git_checkout(&target, &context.extension_path, None, reasons);
+        return check_git_checkout(&target, &context.extension_path, None, None, reasons);
     }
 
     let manifest_path = context
@@ -289,7 +296,7 @@ fn check_extension_checkout(
     }
 
     TraceCanonicalCheck {
-        target,
+        target: target.to_string(),
         path: context.extension_path.to_string_lossy().to_string(),
         status: "installed-extension".to_string(),
         sha: None,
@@ -297,6 +304,8 @@ fn check_extension_checkout(
         upstream: None,
         commits_ahead: None,
         commits_behind: None,
+        materialization_mode: None,
+        runner_id: None,
     }
 }
 
@@ -309,6 +318,7 @@ fn canonical_paths_equal(left: &str, right: &str) -> bool {
 fn check_git_checkout(
     target: &str,
     path: &Path,
+    expected_remote_component_path: Option<&str>,
     provenance: Option<&TraceCheckoutProvenance>,
     reasons: &mut Vec<String>,
 ) -> TraceCanonicalCheck {
@@ -321,6 +331,11 @@ fn check_git_checkout(
         return empty_check(target, path, "missing");
     }
     if git_output(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        if let Some(check) =
+            check_managed_lab_snapshot(target, path, expected_remote_component_path, reasons)
+        {
+            return check;
+        }
         reasons.push(format!(
             "{} path is not a git checkout: {}",
             target,
@@ -380,6 +395,68 @@ fn check_git_checkout(
         upstream,
         commits_ahead: ahead,
         commits_behind: behind,
+        materialization_mode: None,
+        runner_id: None,
+    }
+}
+
+/// A Lab snapshot deliberately excludes `.git`; accept it only when the Lab
+/// dispatch envelope binds the remote directory to the clean controller checkout.
+fn check_managed_lab_snapshot(
+    target: &str,
+    path: &Path,
+    expected_remote_component_path: Option<&str>,
+    reasons: &mut Vec<String>,
+) -> Option<TraceCanonicalCheck> {
+    let expected_remote_component_path = expected_remote_component_path?;
+    verified_lab_snapshot_check(
+        target,
+        path,
+        verify_lab_workspace_from_env(expected_remote_component_path, path),
+        reasons,
+    )
+}
+
+#[cfg(test)]
+fn validate_managed_lab_snapshot(
+    target: &str,
+    path: &Path,
+    expected_remote_component_path: &str,
+    snapshot: SourceSnapshot,
+    lab: serde_json::Value,
+    reasons: &mut Vec<String>,
+) -> Option<TraceCanonicalCheck> {
+    verified_lab_snapshot_check(
+        target,
+        path,
+        verify_lab_workspace(expected_remote_component_path, path, snapshot, lab),
+        reasons,
+    )
+}
+
+fn verified_lab_snapshot_check(
+    target: &str,
+    path: &Path,
+    provenance: std::result::Result<crate::core::runner::VerifiedLabWorkspaceProvenance, String>,
+    reasons: &mut Vec<String>,
+) -> Option<TraceCanonicalCheck> {
+    match provenance {
+        Ok(provenance) => Some(TraceCanonicalCheck {
+            target: target.to_string(),
+            path: path.to_string_lossy().to_string(),
+            status: "managed-lab-snapshot".to_string(),
+            sha: Some(provenance.source_revision),
+            branch: None,
+            upstream: None,
+            commits_ahead: None,
+            commits_behind: None,
+            materialization_mode: Some(provenance.materialization_mode),
+            runner_id: Some(provenance.runner_id),
+        }),
+        Err(reason) => {
+            reasons.push(format!("{target} Lab materialization {reason}"));
+            None
+        }
     }
 }
 
@@ -437,6 +514,8 @@ fn empty_check(target: &str, path: &Path, status: &str) -> TraceCanonicalCheck {
         upstream: None,
         commits_ahead: None,
         commits_behind: None,
+        materialization_mode: None,
+        runner_id: None,
     }
 }
 
@@ -840,6 +919,182 @@ mod tests {
     }
 
     #[test]
+    fn canonical_trace_accepts_verified_lab_snapshot_without_git_metadata() {
+        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(reasons.is_empty());
+        let check = check.expect("verified Lab snapshot accepted");
+        assert_eq!(check.status, "managed-lab-snapshot");
+        assert_eq!(check.materialization_mode.as_deref(), Some("snapshot"));
+        assert_eq!(check.runner_id.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_forged_lab_snapshot_evidence() {
+        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
+        snapshot.git_sha = Some("forged".to_string());
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("invalid source revision")));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_arbitrary_non_git_materialization_evidence() {
+        let (_source, remote, mut snapshot, mut lab) = lab_snapshot_fixture();
+        snapshot.sync_mode = "snapshot".to_string();
+        lab["source_snapshot"] = serde_json::to_value(&snapshot).unwrap();
+        let snapshot = serde_json::from_value(lab["source_snapshot"].clone()).unwrap();
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("untrusted source mode `snapshot`")));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_nonmatching_lab_snapshot_workspace() {
+        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
+        snapshot.remote_path = Some("/not/the/materialized/workspace".to_string());
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("remote workspace does not match")));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_self_consistent_forged_lab_env_with_changed_bytes() {
+        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
+        std::fs::write(remote.path().join("README.md"), "forged contents\n").unwrap();
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("content hash does not match")));
+    }
+
+    #[test]
+    fn canonical_trace_accepts_lab_dispatch_environment_for_remapped_workspace() {
+        let (_source, remote, snapshot, lab) = lab_snapshot_fixture();
+        let mut env = crate::core::runner::build_lab_offload_env(&lab);
+        env.insert(
+            "HOMEBOY_SOURCE_SNAPSHOT_JSON".to_string(),
+            serde_json::to_string(&snapshot).unwrap(),
+        );
+        let _guard = TraceEnvGuard::set(env);
+        let mut reasons = Vec::new();
+
+        let check = check_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            Some(&remote.path().display().to_string()),
+            &mut reasons,
+        );
+
+        assert!(reasons.is_empty());
+        let check = check.expect("Lab dispatch environment accepted");
+        assert_eq!(check.sha, snapshot.git_sha);
+        assert_eq!(check.materialization_mode.as_deref(), Some("snapshot"));
+        assert_eq!(check.runner_id.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn canonical_trace_fails_closed_for_legacy_lab_metadata_without_content_hash() {
+        let (_source, remote, snapshot, mut lab) = lab_snapshot_fixture();
+        lab.as_object_mut()
+            .unwrap()
+            .remove("workspace_content_hash");
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("missing workspace content hash")));
+    }
+
+    #[test]
+    fn canonical_trace_refuses_dirty_lab_snapshot_evidence() {
+        let (_source, remote, mut snapshot, lab) = lab_snapshot_fixture();
+        snapshot.dirty = true;
+        let mut reasons = Vec::new();
+
+        let check = validate_managed_lab_snapshot(
+            "component",
+            remote.path(),
+            &remote.path().display().to_string(),
+            snapshot,
+            lab,
+            &mut reasons,
+        );
+
+        assert!(check.is_none());
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("records a dirty source checkout")));
+    }
+
+    #[test]
     fn canonical_trace_accepts_installed_extension_manifest_directory() {
         let component_dir = tempfile::tempdir().unwrap();
         let component_remote = tempfile::tempdir().unwrap();
@@ -977,6 +1232,78 @@ mod tests {
         std::fs::write(path.join("README.md"), "test\n").unwrap();
         git(path, &["add", "."]);
         git(path, &["commit", "-m", "initial"]);
+    }
+
+    fn lab_snapshot_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        SourceSnapshot,
+        serde_json::Value,
+    ) {
+        let source = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        init_git_repo(source.path());
+        std::fs::copy(
+            source.path().join("README.md"),
+            remote.path().join("README.md"),
+        )
+        .unwrap();
+        let snapshot = SourceSnapshot {
+            runner_id: "homeboy-lab".to_string(),
+            local_path: Some(source.path().display().to_string()),
+            remote_path: Some(remote.path().display().to_string()),
+            workspace_root: Some(source.path().display().to_string()),
+            git_branch: Some("main".to_string()),
+            git_sha: Some(git_stdout(source.path(), &["rev-parse", "HEAD"]).unwrap()),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            workspace_snapshot_identity: Some("workspace:verified".to_string()),
+            snapshot_hash: "sha256:verified".to_string(),
+            synced_at: "2026-01-01T00:00:00Z".to_string(),
+            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+        };
+        let workspace_content_hash =
+            crate::core::runner::workspace_content_hash(source.path(), &snapshot.sync_excludes)
+                .unwrap();
+        let lab = serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "remote_workspace": remote.path().display().to_string(),
+            "sync_mode": "snapshot",
+            "status": "offloaded",
+            "source_snapshot": snapshot,
+            "workspace_content_hash": workspace_content_hash,
+            "workspace_materialization_plan": { "identity": "workspace:verified" },
+        });
+        let snapshot = serde_json::from_value(lab["source_snapshot"].clone()).unwrap();
+        (source, remote, snapshot, lab)
+    }
+
+    struct TraceEnvGuard(Vec<(String, Option<String>)>);
+
+    impl TraceEnvGuard {
+        fn set(env: std::collections::HashMap<String, String>) -> Self {
+            let previous = env
+                .into_iter()
+                .map(|(name, value)| {
+                    let previous = std::env::var(&name).ok();
+                    unsafe { std::env::set_var(&name, value) };
+                    (name, previous)
+                })
+                .collect();
+            Self(previous)
+        }
+    }
+
+    impl Drop for TraceEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    unsafe { std::env::set_var(name, value) };
+                } else {
+                    unsafe { std::env::remove_var(name) };
+                }
+            }
+        }
     }
 
     fn init_bare_repo(path: &std::path::Path) {
