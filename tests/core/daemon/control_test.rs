@@ -338,6 +338,7 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs,
+            termination_evidence: None,
             repair_plan: Vec::new(),
         },
         stale_reason: None,
@@ -345,6 +346,7 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "lease-missing-test-state".to_string(),
         process_candidates: Vec::new(),
+        termination_evidence: None,
     }
 }
 
@@ -1129,6 +1131,7 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 0,
+            termination_evidence: None,
             repair_plan: Vec::new(),
         },
         stale_reason: (!fresh).then(|| "simulated stale daemon".to_string()),
@@ -1136,6 +1139,7 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
+        termination_evidence: None,
     }
 }
 
@@ -1158,6 +1162,7 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 1,
+            termination_evidence: None,
             repair_plan: Vec::new(),
         },
         stale_reason: Some("daemon lease pid is not running".to_string()),
@@ -1165,6 +1170,7 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
+        termination_evidence: None,
     }
 }
 

@@ -613,6 +613,7 @@ fn restartable_daemon_freshness() -> DaemonFreshnessReport {
         daemon_build_identity: None,
         runtime_paths: None,
         active_jobs: 0,
+        termination_evidence: None,
         repair_plan: Vec::new(),
     }
 }

@@ -127,6 +127,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         daemon_build_identity: Some("homeboy 0.284.0+live".to_string()),
         runtime_paths: None,
         active_jobs: 1,
+        termination_evidence: None,
         repair_plan: Vec::new(),
     };
     let runner = Runner {
