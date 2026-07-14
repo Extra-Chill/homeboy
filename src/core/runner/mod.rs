@@ -63,6 +63,7 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
+pub(crate) use workspace::materialize_verified_lab_snapshot_git_baseline_from_env;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
 pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
@@ -169,7 +170,8 @@ pub use workspace::{
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 pub(crate) use workspace::{
-    verify_lab_workspace_from_env, workspace_content_hash, VerifiedLabWorkspaceProvenance,
+    verify_lab_workspace_from_env, verify_lab_workspace_git_root, workspace_content_hash,
+    VerifiedLabWorkspaceProvenance,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
