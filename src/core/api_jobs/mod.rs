@@ -586,6 +586,58 @@ mod tests {
     }
 
     #[test]
+    fn dead_lease_reconciliation_preserves_a_job_with_a_live_recorded_child() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record child heartbeat");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |pid| pid == 4242)
+            .expect("reconcile dead lease");
+
+        assert_eq!(diagnostics.protected_job_ids, vec![job.id]);
+        assert_eq!(diagnostics.terminalized_count(), 0);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        assert!(store.events(job.id).expect("events").iter().all(|event| {
+            event
+                .data
+                .as_ref()
+                .is_none_or(|data| data["reason"] != json!("dead_daemon_lease"))
+        }));
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_terminalizes_a_job_with_a_dead_recorded_child() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record child heartbeat");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+            .expect("reconcile dead lease");
+
+        assert!(diagnostics.protected_job_ids.is_empty());
+        assert_eq!(diagnostics.terminalized_count(), 1);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
     fn leaseless_recovery_terminalizes_one_historical_lease_and_retains_evidence() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("jobs.json");

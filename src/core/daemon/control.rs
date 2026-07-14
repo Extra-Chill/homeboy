@@ -136,7 +136,20 @@ pub fn recover_missing_lease_state(
             replacement: None,
         };
         write_state_loss_receipt(&receipt_path, &receipt)?;
-        store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+        let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+        if reconciled.protected_count() > 0 {
+            let _ = std::fs::remove_file(&receipt_path);
+            return Err(Error::validation_invalid_argument(
+                "lease_id",
+                format!(
+                    "deferred missing-lease recovery because {} active child process(es) are still running: {}",
+                    reconciled.protected_count(),
+                    reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                ),
+                Some(lease_id.to_string()),
+                Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
+            ));
+        }
         receipt.phase = StateLossRecoveryPhase::Reconciled;
         write_state_loss_receipt(&receipt_path, &receipt)?;
         drop(owner_lock);
@@ -364,6 +377,18 @@ where
         )
     })?;
     let (snapshot_path, reconciled) = reconcile()?;
+    if reconciled.protected_count() > 0 {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "deferred missing-lease recovery because {} active child process(es) are still running: {}",
+                reconciled.protected_count(),
+                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            Some(lease_id.to_string()),
+            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
+        ));
+    }
     if reconciled.matching_count() == 0 {
         return Err(Error::validation_invalid_argument(
             "lease_id",
@@ -455,6 +480,18 @@ where
     }
     let no_owner_proof = probe()?;
     let (snapshot_path, reconciled) = reconcile()?;
+    if !reconciled.protected_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "job_store",
+            format!(
+                "deferred lease-less recovery because {} active child process(es) are still running: {}",
+                reconciled.protected_job_ids.len(),
+                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
+        ));
+    }
     let affected_job_count = reconciled.reconciled_count();
     let replacement = start()?;
     Ok(DaemonLeaselessOrphanReconciliationResult {
@@ -540,12 +577,24 @@ pub fn adopt_orphaned_lease(
     let store =
         super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
     let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+    if reconciled.protected_count() > 0 {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "deferred exact dead-lease adoption because {} active child process(es) are still running: {}",
+                reconciled.protected_count(),
+                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            Some(lease_id.to_string()),
+            Some(vec!["Wait for the recorded child process to finish, then retry adoption.".to_string()]),
+        ));
+    }
     drop(owner_lock);
     let replacement = start_or_return_live_unlocked(addr)?;
     Ok(DaemonOrphanAdoptionResult {
         adopted_lease_id: lease_id.to_string(),
         dead_pid: state.pid,
-        active_jobs_terminalized: reconciled.matching_count(),
+        active_jobs_terminalized: reconciled.terminalized_count(),
         retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
     })
@@ -591,6 +640,18 @@ pub fn reconcile_leaseless_orphans(
     let snapshot_path = snapshot_job_store(&jobs_path, &raw_store)?;
     let store = super::JobStore::open_without_reconciliation_from_bytes(&jobs_path, &raw_store)?;
     let reconciled = store.reconcile_leaseless_orphan_jobs()?;
+    if !reconciled.protected_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            format!(
+                "deferred lease-less recovery because {} active child process(es) are still running: {}",
+                reconciled.protected_job_ids.len(),
+                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
+        ));
+    }
     let affected_job_count = reconciled.reconciled_count();
     drop(owner_lock);
     let replacement = start_or_return_live_unlocked(addr)?;
