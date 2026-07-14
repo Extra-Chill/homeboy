@@ -151,6 +151,9 @@ pub fn route_after_parse(
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             durable_agent_task_plan,
+            source_path: retry_handoff
+                .as_ref()
+                .map(|handoff| handoff.primary_workspace.as_path()),
             job_overrides,
         },
         inferred_runner_id.as_deref(),
@@ -228,6 +231,7 @@ struct AgentTaskRetryHandoff {
     args: Vec<String>,
     run_id: String,
     plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    primary_workspace: PathBuf,
 }
 
 /// Retries are controller-owned because the source plan lives in the local
@@ -264,10 +268,9 @@ fn materialize_agent_task_retry_handoff(
             Error::internal_unexpected("agent-task retry argv was missing agent-task")
         })?;
     let mut args = retry_handoff_prefix(&normalized_args[..agent_task_index]);
-    // A retry executes the original task, not the controller invocation. Make
-    // its git checkout the Lab primary so the remote cwd and patch capture use
-    // the same materialized worktree.
-    args.extend(["--cwd".to_string(), primary_workspace.display().to_string()]);
+    // A retry executes the original task, not the controller invocation. Carry
+    // its checkout through the route request rather than emitting an unsupported
+    // global --cwd argument; staging makes it the git-backed Lab primary.
     args.extend([
         "agent-task".to_string(),
         "run-plan".to_string(),
@@ -281,6 +284,7 @@ fn materialize_agent_task_retry_handoff(
         args,
         run_id: record.run_id,
         plan,
+        primary_workspace,
     }))
 }
 
@@ -1908,19 +1912,29 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-            let cli = Cli::parse_from(&normalized);
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--detach-after-handoff",
+                "agent-task",
+                "retry",
+                "failed-run",
+                "--run",
+                "--new-run-id",
+                "failed-run-retry-on-lab",
+                "--runner",
+                "homeboy-lab",
+            ]);
             let handoff = materialize_agent_task_retry_handoff(&cli, &normalized)
                 .expect("retry handoff materialized")
                 .expect("retry handoff");
 
-            let cwd_index = handoff
-                .args
-                .iter()
-                .position(|arg| arg == "--cwd")
-                .expect("canonical task cwd");
+            assert!(!handoff.args.iter().any(|arg| arg == "--cwd"));
             assert_eq!(
-                handoff.args[cwd_index + 1],
-                workspace.path().display().to_string()
+                handoff.primary_workspace,
+                workspace
+                    .path()
+                    .canonicalize()
+                    .expect("canonical workspace")
             );
             assert!(!handoff.args.iter().any(|arg| arg == "/controller/homeboy"));
             let agent_task_index = handoff
@@ -1949,6 +1963,10 @@ mod tests {
             let remote_plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan =
                 serde_json::from_str(&remote.plan).expect("serialized retry plan");
             assert_eq!(remote_plan, handoff.plan);
+            // The emitted command is accepted by the real CLI parser without
+            // inventing a global --cwd. The route carries the selected task
+            // checkout separately, and workspace staging maps it to the job cwd.
+            assert!(remote_cli.detach_after_handoff);
             let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
             assert_eq!(replacement.metadata["retry_of"], "failed-run");
 

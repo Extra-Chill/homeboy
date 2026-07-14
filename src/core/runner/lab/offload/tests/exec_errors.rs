@@ -375,6 +375,7 @@ fn plan_records_skipped_auto_offload() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     })
     .expect("outcome");
@@ -405,6 +406,7 @@ fn lab_placement_refuses_local_execution_without_lab_contract() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     });
 
@@ -438,6 +440,7 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     });
 
@@ -473,6 +476,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     });
 
@@ -517,6 +521,7 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     });
 
@@ -563,6 +568,7 @@ fn unsupported_runner_error_guides_tunnel_service_inspection() {
         read_only_polling: false,
         local_output_file: None,
         durable_agent_task_plan: None,
+        source_path: None,
         job_overrides: LabJobOverrides::default(),
     });
 
