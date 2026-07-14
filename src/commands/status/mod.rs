@@ -366,7 +366,9 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             ReleaseStateStatus::NeedsRelease => ProjectComponentDashboardStatus::NeedsRelease,
             ReleaseStateStatus::DocsOnly => ProjectComponentDashboardStatus::DocsOnly,
             ReleaseStateStatus::Clean => {
-                // Check upstream drift first
+                // Check source freshness first. Deployment health is evaluated
+                // independently, so a newer target is not marked outdated when
+                // this configured checkout is stale.
                 if let Some(d) = drift {
                     if d.is_behind() {
                         ProjectComponentDashboardStatus::BehindUpstream
@@ -461,15 +463,31 @@ fn deployed_version_dashboard_status(
     remote_ver: &Option<String>,
     origin_tag: Option<&str>,
 ) -> ProjectComponentDashboardStatus {
-    match (local_ver, remote_ver) {
-        (Some(local), Some(remote)) if local != remote => ProjectComponentDashboardStatus::Outdated,
-        (Some(_), None) => ProjectComponentDashboardStatus::Outdated,
-        (Some(local), Some(remote))
-            if local == remote && origin_tag_is_newer_than_local(origin_tag, local) =>
+    match homeboy::core::deploy::compare_deployed_versions(
+        local_ver.as_deref(),
+        remote_ver.as_deref(),
+    ) {
+        homeboy::core::deploy::ComponentStatus::NeedsUpdate => {
+            ProjectComponentDashboardStatus::Outdated
+        }
+        homeboy::core::deploy::ComponentStatus::UpToDate
+            if local_ver.as_deref().is_some_and(|local| {
+                origin_tag_is_newer_than_local(origin_tag, local)
+            }) =>
         {
             ProjectComponentDashboardStatus::PinnedCurrent
         }
-        _ => ProjectComponentDashboardStatus::Current,
+        homeboy::core::deploy::ComponentStatus::Unknown => {
+            ProjectComponentDashboardStatus::Unknown
+        }
+        homeboy::core::deploy::ComponentStatus::UpToDate
+        | homeboy::core::deploy::ComponentStatus::BehindRemote => {
+            ProjectComponentDashboardStatus::Current
+        }
+        homeboy::core::deploy::ComponentStatus::BehindUpstream
+        | homeboy::core::deploy::ComponentStatus::SourceStale => {
+            unreachable!("version comparison only returns version statuses")
+        }
     }
 }
 
@@ -663,6 +681,28 @@ mod tests {
         );
 
         assert!(matches!(status, ProjectComponentDashboardStatus::Current));
+    }
+
+    #[test]
+    fn deployed_version_status_keeps_newer_remote_current() {
+        let status = deployed_version_dashboard_status(
+            &Some("0.12.2".to_string()),
+            &Some("0.12.15".to_string()),
+            Some("v0.12.15"),
+        );
+
+        assert!(matches!(status, ProjectComponentDashboardStatus::Current));
+    }
+
+    #[test]
+    fn deployed_version_status_marks_unknown_versions_unknown() {
+        let status = deployed_version_dashboard_status(
+            &Some("not-a-version".to_string()),
+            &Some("1.0.0".to_string()),
+            None,
+        );
+
+        assert!(matches!(status, ProjectComponentDashboardStatus::Unknown));
     }
 
     #[test]
