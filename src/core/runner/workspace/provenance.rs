@@ -125,12 +125,15 @@ pub(crate) fn verify_lab_workspace_git_root(
     if head != provenance.source_revision {
         return Err("Git HEAD does not match the verified source revision".to_string());
     }
+    if !git(workspace, &["status", "--porcelain"])?.is_empty() {
+        return Err("Git workspace is not clean".to_string());
+    }
     Ok(())
 }
 
-/// Verifies a Lab-materialized workspace against the controller-produced
-/// content digest. Environment values transport the contract; the remote bytes
-/// are the authority for the content match.
+/// Verifies a Lab-materialized workspace against its declared provenance.
+/// Snapshot modes require byte-for-byte content parity; Git mode validates its
+/// checkout identity separately because checkout normalization can change bytes.
 pub(crate) fn verify_lab_workspace_from_env(
     expected_remote_component_path: &str,
     materialized_workspace_path: &Path,
@@ -290,11 +293,14 @@ pub(crate) fn verify_lab_workspace(
     if workspace_identity != verification_identity {
         return Err("workspace identity does not match workspace verification".to_string());
     }
-    let actual_content_hash =
-        workspace_content_hash(materialized_workspace_path, &snapshot.sync_excludes)
-            .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
-    if actual_content_hash != expected_content_hash {
-        return Err("content hash does not match the controller materialization".to_string());
+    if materialization_mode != "git" {
+        let actual_content_hash =
+            workspace_content_hash(materialized_workspace_path, &snapshot.sync_excludes).map_err(
+                |error| format!("could not hash materialized workspace: {}", error.message),
+            )?;
+        if actual_content_hash != expected_content_hash {
+            return Err("content hash does not match the controller materialization".to_string());
+        }
     }
 
     Ok(VerifiedLabWorkspaceProvenance {
@@ -413,6 +419,136 @@ mod tests {
                 }
             }
         })
+    }
+
+    fn git_workspace() -> tempfile::TempDir {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        git(workspace.path(), &["init", "--quiet"]).expect("initialize repository");
+        git(workspace.path(), &["add", "--all"]).expect("stage source");
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        )
+        .expect("commit source");
+        workspace
+    }
+
+    fn git_snapshot(path: &Path) -> SourceSnapshot {
+        let mut snapshot = snapshot(path);
+        snapshot.git_sha = Some(git(path, &["rev-parse", "HEAD"]).expect("source revision"));
+        snapshot.sync_excludes = Vec::new();
+        snapshot
+    }
+
+    fn git_lab(path: &Path, snapshot: &SourceSnapshot) -> serde_json::Value {
+        let mut lab = lab(path, snapshot);
+        lab["sync_mode"] = serde_json::json!("git");
+        lab["workspace_verification"]["content_hash"] = serde_json::json!("controller-byte-hash");
+        lab
+    }
+
+    #[test]
+    fn git_materialization_accepts_checkout_normalization_hash_difference() {
+        let workspace = git_workspace();
+        let snapshot = git_snapshot(workspace.path());
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            git_lab(workspace.path(), &snapshot),
+        )
+        .expect("Git provenance accepts non-authoritative byte hash");
+
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect("clean checkout at expected revision");
+    }
+
+    #[test]
+    fn git_materialization_rejects_wrong_head_root_identity_and_dirty_workspace() {
+        let workspace = git_workspace();
+        let snapshot = git_snapshot(workspace.path());
+        let lab = git_lab(workspace.path(), &snapshot);
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("initial Git provenance");
+
+        std::fs::write(workspace.path().join("file.txt"), "changed\n").expect("change source");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("dirty Git workspace must fail closed")
+            .contains("not clean"));
+        git(workspace.path(), &["checkout", "--", "file.txt"]).expect("restore source");
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "wrong head",
+            ],
+        )
+        .expect("advance head");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("wrong Git HEAD must fail closed")
+            .contains("HEAD does not match"));
+
+        let nested_root = workspace.path().join("nested");
+        std::fs::create_dir(&nested_root).expect("nested path");
+        assert!(verify_lab_workspace_git_root(&nested_root, &provenance)
+            .expect_err("wrong managed root must fail closed")
+            .contains("top-level does not exactly match"));
+
+        let mut wrong_identity = lab;
+        wrong_identity["workspace_verification"]["identity"] = serde_json::json!("other");
+        wrong_identity["workspace_verification"]["primary_workspace"]["identity"] =
+            serde_json::json!("other");
+        assert!(verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            wrong_identity,
+        )
+        .expect_err("wrong declared identity must fail closed")
+        .contains("workspace identity"));
+    }
+
+    #[test]
+    fn snapshot_materializations_reject_content_hash_mismatch() {
+        for mode in ["snapshot", "snapshot-git"] {
+            let workspace = tempfile::tempdir().expect("workspace");
+            std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+            let snapshot = snapshot(workspace.path());
+            let mut lab = lab(workspace.path(), &snapshot);
+            lab["sync_mode"] = serde_json::json!(mode);
+            lab["workspace_verification"]["content_hash"] = serde_json::json!("wrong-hash");
+
+            assert!(verify_lab_workspace(
+                &workspace.path().display().to_string(),
+                workspace.path(),
+                snapshot,
+                lab,
+            )
+            .expect_err("snapshot hash mismatch must fail closed")
+            .contains("content hash"));
+        }
     }
 
     #[test]
