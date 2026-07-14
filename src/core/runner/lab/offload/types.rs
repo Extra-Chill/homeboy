@@ -31,6 +31,10 @@ pub struct LabOffloadRequest<'a> {
     /// The controller-materialized task plan to retain if this offload creates
     /// a durable agent-task record before the runner accepts its child job.
     pub durable_agent_task_plan: Option<&'a crate::core::agent_task_scheduler::AgentTaskPlan>,
+    /// Controller checkout selected independently of the remote command argv.
+    /// This keeps process cwd in the runner job while retaining an exact local
+    /// source for Git materialization and path remapping.
+    pub source_path: Option<&'a std::path::Path>,
     pub job_overrides: LabJobOverrides,
 }
 

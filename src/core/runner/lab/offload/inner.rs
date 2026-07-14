@@ -797,9 +797,11 @@ pub(crate) fn run_lab_offload_inner(
         );
     }
 
-    let source_path =
-        rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
-            .unwrap_or(lab_offload_source_path(request.normalized_args)?);
+    let source_path = request
+        .source_path
+        .map(std::path::Path::to_path_buf)
+        .or(rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?)
+        .unwrap_or(lab_offload_source_path(request.normalized_args)?);
     // Begin best-effort host-level telemetry capture around the offloaded run
     // boundary (#3258). The opening snapshot of the controller host + watched
     // source/artifact dir is taken now; the closing snapshot and before/after
