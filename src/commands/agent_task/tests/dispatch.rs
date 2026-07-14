@@ -330,7 +330,7 @@ fn cook_dispatch_provider_id_alias_maps_to_selector() {
 }
 
 #[test]
-fn execution_budget_flags_accept_explicit_values_and_reject_legacy_attempts_mix() {
+fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
     let cli = Cli::try_parse_from([
         "homeboy",
         "agent-task",

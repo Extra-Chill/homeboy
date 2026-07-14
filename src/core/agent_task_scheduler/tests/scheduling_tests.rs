@@ -1308,6 +1308,37 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn one_provider_execution_budget_never_rotates() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            max_provider_executions: 1,
+            max_same_provider_retries: 0,
+            max_provider_rotations: 0,
+        };
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(aggregate.events.iter().all(|event| !event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider rotation queued"))));
+        let diagnostic = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.execution_budget_exhausted")
+            .expect("execution budget exhaustion diagnostic");
+        assert_eq!(
+            diagnostic.data["exhausted_budget"],
+            "max_provider_executions"
+        );
+    }
+
+    #[test]
     fn rotates_on_transient_and_timeout_classifications() {
         for classification in [
             AgentTaskFailureClassification::Transient,

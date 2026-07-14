@@ -47,27 +47,6 @@ normalized `runtime_task`, provider config, `runtime_component_paths`,
 inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for
 multi-task runs.
 
-### Provider Execution Budget
-
-Every dispatched plan serializes an `execution_budget` before a provider starts:
-`max_total_executions`, `max_same_provider_retries`, and
-`max_provider_rotations`. The total is a hard cap across both retry paths, so
-`--attempts 1` guarantees exactly one provider execution even when a configured
-rotation chain has fallback entries.
-
-```bash
-# One provider execution; no retry or rotation.
-homeboy agent-task cook --attempts 1 ...
-
-# At most four executions: two retries with the selected provider and one
-# cross-provider rotation, subject to the total execution cap.
-homeboy agent-task cook --attempts 4 --same-provider-retries 2 --provider-rotations 1 ...
-```
-
-`agent-task status <run-id> --full` exposes the serialized budget. Terminal
-provider outcomes include `metadata.execution_budget`, including the exhausted
-budget dimension and the number of executions used.
-
 ### Durable Fanout Batches
 
 Use `agent-task fanout submit-batch` when a caller has many independent tasks and
@@ -94,19 +73,26 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 
 ### Provider Execution Budgets
 
-Each dispatched plan carries one versioned `execution_budget`: total provider
-executions, same-provider retries, and provider rotations. The total cap applies
-before either category cap, so retry and rotation cannot multiply executions.
+Every agent-task plan serializes one `execution_budget` per task: total provider
+executions, same-provider retries, and cross-provider rotations. The total cap is
+always authoritative across both retry paths.
 
 ```bash
+# Exactly one provider process: no retry and no rotation.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 1
+
+# One retry on the same provider, with at most two executions total.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
+
+# Rotate once after a provider failure, with no same-provider retry.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
 ```
 
-`--attempts` remains a deprecated alias for the total. It cannot be combined
-with explicit budget fields and resolves both category limits to `N - 1`.
-Status previews the resolved budget without changing durable run data.
+`--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.
+It also sets both category ceilings to `N - 1`, so it never grants an independent
+rotation budget. It cannot be combined with the explicit budget flags. Plan and
+`agent-task status` output show the resolved defaults before provider execution;
+an exhausted run records which budget stopped further execution.
 
 | Subcommand | Purpose |
 |---|---|
