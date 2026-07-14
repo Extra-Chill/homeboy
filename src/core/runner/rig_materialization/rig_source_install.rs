@@ -28,6 +28,7 @@ pub(super) fn rig_install_capability_preflight() -> RunnerCapabilityPreflight {
         required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
+        timeout: None,
     }
 }
 

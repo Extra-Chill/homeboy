@@ -80,6 +80,15 @@ The same path convention covers `report.html`, `report.md`, `evidence.json`, com
 
 `artifact-origin dom-boxes` reports mark each entrypoint with provider CSS diagnostics. When `dom_css_loaded`, `dom_capture_valid`, or an object-shaped `stylesheet_status` is missing or invalid, Homeboy writes `dom_capture_valid: false` and `dom_capture_invalid_reason` so operators can reject untrustworthy DOM evidence without inspecting provider internals.
 
+DOM-box providers may add the optional v1 evidence objects `computed_style`,
+`text_metrics`, `asset_state`, `visibility`, and `source` to each element.
+Homeboy preserves these generic objects without interpreting their product semantics.
+Every supplied evidence field must be a JSON object and is validated at the
+provider boundary before shaping or writing a report: at most 16,384 serialized
+bytes, 8 nesting levels, 64 total object keys, and 4,096 UTF-8 bytes per key or
+string value. Providers receive an actionable validation error when a limit is
+exceeded; omitted fields remain omitted for legacy providers.
+
 ## Service Tunnels
 
 Declare a private service reachable from a configured SSH server:

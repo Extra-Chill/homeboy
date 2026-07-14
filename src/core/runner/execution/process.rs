@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::engine::command::StdoutLineObserver;
 use crate::core::engine::shell;
@@ -49,6 +50,7 @@ pub(super) fn exec_diagnostic_ssh(
     secret_env_names: &[String],
     require_paths: Vec<String>,
     path_materialization_plan: Option<PathMaterializationPlan>,
+    timeout: Option<Duration>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -78,7 +80,11 @@ pub(super) fn exec_diagnostic_ssh(
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let output = client.execute_with_secret_env(&command_line, &secret_env);
+    let output = timeout
+        .map(|timeout| {
+            client.execute_with_secret_env_and_timeout(&command_line, &secret_env, timeout)
+        })
+        .unwrap_or_else(|| client.execute_with_secret_env(&command_line, &secret_env));
     let source_snapshot =
         SourceSnapshot::existing_remote(&runner.id, &cwd, runner.workspace_root.as_deref());
     Ok(exec_output(

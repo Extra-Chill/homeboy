@@ -147,6 +147,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         cwd: None,
         project_id: None,
         allow_diagnostic_ssh: true,
+        diagnostic_ssh_timeout: None,
         command,
         env: runner.env.clone(),
         secret_env_names: Vec::new(),
@@ -176,5 +177,6 @@ pub fn runner_upgrade_capability_plan() -> RunnerCapabilityPreflight {
         required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
+        timeout: None,
     }
 }

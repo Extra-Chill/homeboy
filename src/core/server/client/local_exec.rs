@@ -29,6 +29,14 @@ pub(crate) fn execute_local_command_with_stdin(command: &str, stdin: &[u8]) -> C
     execute_local_command_in_dir_impl(command, None, None, None, Some(stdin.to_vec()))
 }
 
+pub(crate) fn execute_local_command_with_stdin_and_timeout(
+    command: &str,
+    stdin: &[u8],
+    timeout: Duration,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, None, None, Some(timeout), Some(stdin.to_vec()))
+}
+
 /// Run a local command, capturing stdout/stderr.
 ///
 /// All locally-spawned commands run in their own process group with guaranteed
