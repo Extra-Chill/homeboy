@@ -35,6 +35,8 @@ pub struct LabOffloadRequest<'a> {
     /// This keeps process cwd in the runner job while retaining an exact local
     /// source for Git materialization and path remapping.
     pub source_path: Option<&'a std::path::Path>,
+    /// Select controller-bundle materialization before runner-side Git transport.
+    pub require_controller_git_bundle: bool,
     pub job_overrides: LabJobOverrides,
 }
 

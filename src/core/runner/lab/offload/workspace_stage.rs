@@ -149,12 +149,14 @@ fn prepare_lab_offload_workspace_stage_inner(
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: sync_mode,
-            // Patch-producing retry primaries must materialize their recorded
-            // remote baseline. Other Git workloads retain controller-routed
-            // bundles for remotes unavailable from the runner.
+            // Retry handoffs must stage the controller checkout before the
+            // runner attempts Git transport: private origins are intentionally
+            // unavailable to the runner, and changed-since must resolve from
+            // the staged bundle.
             controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git
-                && contract.workspace_mode_policy
-                    != LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                && (request.require_controller_git_bundle
+                    || contract.workspace_mode_policy
+                        != LabOffloadWorkspaceModePolicy::GitCheckoutRequired),
             changed_since_base: changed_since_preflight.resolved_base.clone(),
             git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
@@ -2077,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_routes_changed_since_private_source_through_controller_bundle() {
+    fn retry_stage_routes_changed_since_private_source_through_controller_bundle() {
         crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().expect("source checkout");
             let runner_root = tempfile::tempdir().expect("runner workspace root");
@@ -2147,15 +2149,19 @@ mod tests {
                 local_output_file: None,
                 durable_agent_task_plan: None,
                 source_path: None,
+                require_controller_git_bundle: true,
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
-                command: crate::command_contract::LabCommandContract::portable(
-                    "audit",
-                    None,
-                    false,
-                    &[],
-                ),
+                command: crate::command_contract::LabCommandContract {
+                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                    ..crate::command_contract::LabCommandContract::portable(
+                        "audit",
+                        None,
+                        false,
+                        &[],
+                    )
+                },
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
@@ -2197,9 +2203,20 @@ mod tests {
                 Some(base.as_str())
             );
             assert!(stage.remapped_args.contains(&base));
+            let provenance = stage
+                .synced
+                .materialization_plan
+                .controller_git_bundle
+                .as_ref()
+                .expect("retry stage must emit controller bundle provenance");
+            assert_eq!(provenance.provenance, "controller_git_bundle");
             assert_eq!(
                 git_output(Path::new(&stage.remote_cwd), &["rev-parse", &base]),
                 base
+            );
+            assert_eq!(
+                git_output(Path::new(&stage.remote_cwd), &["rev-parse", "HEAD"]),
+                git_output(source.path(), &["rev-parse", "HEAD"])
             );
         });
     }
@@ -2284,6 +2301,7 @@ mod tests {
                 local_output_file: None,
                 durable_agent_task_plan: None,
                 source_path: Some(source.as_path()),
+                require_controller_git_bundle: false,
                 job_overrides: LabJobOverrides::default(),
             };
             let mut contract = LabOffloadCommand {
