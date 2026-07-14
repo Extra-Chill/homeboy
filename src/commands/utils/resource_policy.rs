@@ -737,6 +737,23 @@ mod tests {
     }
 
     #[test]
+    fn non_interactive_hot_warning_allows_explicit_lab_runner_without_default() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+
+        assert!(
+            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
