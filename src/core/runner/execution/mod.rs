@@ -6,6 +6,7 @@
 //! below so callers continue to reference `runner::execution::<item>`.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -111,6 +112,7 @@ pub struct RunnerExecOptions {
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub allow_diagnostic_ssh: bool,
+    pub diagnostic_ssh_timeout: Option<Duration>,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
@@ -137,6 +139,7 @@ impl Default for RunnerExecOptions {
             cwd: None,
             project_id: None,
             allow_diagnostic_ssh: false,
+            diagnostic_ssh_timeout: None,
             command: Vec::new(),
             env: HashMap::new(),
             secret_env_names: Vec::new(),
@@ -183,6 +186,11 @@ impl RunnerExecOptions {
 
     pub(crate) fn diagnostic_raw_shell(script: String) -> Self {
         Self::diagnostic_raw_command(vec!["bash".to_string(), "-lc".to_string(), script])
+    }
+
+    pub(crate) fn with_diagnostic_ssh_timeout(mut self, timeout: Duration) -> Self {
+        self.diagnostic_ssh_timeout = Some(timeout);
+        self
     }
 
     pub(crate) fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
@@ -769,6 +777,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             &secret_env_names,
             options.require_paths,
             options.path_materialization_plan,
+            options.diagnostic_ssh_timeout,
         );
     }
 
@@ -847,6 +856,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
             &secret_env_names,
             options.require_paths,
             options.path_materialization_plan,
+            options.diagnostic_ssh_timeout,
         ),
         RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
             "runner",

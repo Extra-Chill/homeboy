@@ -742,6 +742,7 @@ fn run_rig_source_management_on_runner(
             cwd: runner.workspace_root.clone(),
             project_id: None,
             allow_diagnostic_ssh: false,
+            diagnostic_ssh_timeout: None,
             command,
             env: HashMap::new(),
             secret_env_names: Vec::new(),

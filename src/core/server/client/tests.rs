@@ -11,7 +11,9 @@ use super::local_exec::{
     execute_local_command_passthrough, execute_local_command_stderr_passthrough,
 };
 use super::ssh_client::{
-    build_secret_env_stdin_block, wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
+    build_secret_env_stdin_block, execute_command_with_stdin_timeout,
+    execute_command_with_writer_factory, wrap_command_with_secret_env_read_loop,
+    SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -67,6 +69,109 @@ fn empty_secret_env_block_carries_only_the_sentinel() {
     ))
     .expect("utf8 block");
     assert_eq!(block, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
+}
+
+#[test]
+fn secret_env_execution_timeout_terminates_the_blocking_process_group() {
+    let client = SshClient {
+        host: "localhost".to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        auth: None,
+        is_local: true,
+        env: HashMap::new(),
+    };
+    let secret_env = std::collections::BTreeMap::from([(
+        "OPENAI_API_KEY".to_string(),
+        "secret-value-must-not-appear-in-diagnostics".to_string(),
+    )]);
+    let started = Instant::now();
+
+    let output = client.execute_with_secret_env_and_timeout(
+        "sleep 5",
+        &secret_env,
+        Duration::from_millis(25),
+    );
+
+    assert!(output.timed_out);
+    assert_eq!(output.exit_code, 124);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!output
+        .stderr
+        .contains("secret-value-must-not-appear-in-diagnostics"));
+}
+
+#[test]
+fn large_secret_stdin_payload_times_out_when_child_never_reads() {
+    let secret = "secret-payload-must-not-leak".repeat(32 * 1024);
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "sleep 5"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::core::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = execute_command_with_stdin_timeout(
+        command,
+        Some(secret.as_bytes()),
+        Duration::from_millis(75),
+    );
+
+    assert!(output.timed_out);
+    assert_eq!(output.exit_code, 124);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!output.stdout.contains("secret-payload-must-not-leak"));
+    assert!(!output.stderr.contains("secret-payload-must-not-leak"));
+}
+
+#[test]
+fn small_secret_stdin_payload_completes_successfully() {
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "cat >/dev/null; printf done"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::core::server::process_cleanup::configure_process_group_cleanup(&mut command);
+
+    let output =
+        execute_command_with_stdin_timeout(command, Some(b"small-secret"), Duration::from_secs(1));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "done");
+}
+
+#[test]
+fn injected_stdin_write_failure_kills_a_term_ignoring_child_without_leaking_secret() {
+    let secret = "stdin-failure-secret";
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "exec 0<&-; trap '' TERM; while :; do sleep 1; done"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::core::server::process_cleanup::configure_process_group_cleanup(&mut command);
+    let started = Instant::now();
+
+    let output = execute_command_with_writer_factory(
+        command,
+        Some(secret.as_bytes()),
+        Duration::from_secs(2),
+        |pipe, _| {
+            drop(pipe);
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(Err(std::io::ErrorKind::BrokenPipe))
+                .expect("inject writer failure");
+            (rx, None)
+        },
+    );
+
+    assert!(!output.success);
+    assert!(!output.timed_out);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(output.stderr.contains("stdin delivery failed"));
+    assert!(!output.stdout.contains("stdin-failure-secret"));
+    assert!(!output.stderr.contains("stdin-failure-secret"));
 }
 
 #[test]

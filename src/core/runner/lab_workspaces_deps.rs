@@ -418,6 +418,7 @@ pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPre
         required_tool_capabilities: Vec::new(),
         required_components: Vec::new(),
         required_env: Vec::new(),
+        timeout: None,
     }
 }
 
