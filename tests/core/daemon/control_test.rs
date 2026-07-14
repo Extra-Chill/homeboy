@@ -413,6 +413,54 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
 }
 
 #[test]
+fn exact_lease_adoption_reconciles_terminal_children_idempotently() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Result,
+                None,
+                Some(serde_json::json!({ "exit_code": 0, "output": "retained" })),
+            )
+            .expect("record terminal result");
+
+        let adopt = || {
+            super::adopt_orphaned_lease_with_operations(
+                "lease-dead",
+                || Ok(fake_dead_status(fake_daemon(4242, "lease-dead"))),
+                |_| false,
+                || Ok(Some(())),
+                || {
+                    JobStore::open_without_reconciliation(&path)?
+                        .reconcile_dead_daemon_lease_jobs("lease-dead")
+                },
+                || Ok(fake_daemon(4343, "lease-replacement")),
+            )
+        };
+
+        let first = adopt().expect("terminal child permits adoption");
+        let recovered = JobStore::open_without_reconciliation(&path).expect("reopen store");
+        let event_count = recovered.events(job.id).expect("events").len();
+        let second = adopt().expect("repeat adoption is a no-op for terminal child");
+        let recovered = JobStore::open_without_reconciliation(&path).expect("reopen store");
+
+        assert_eq!(first.active_jobs_terminalized, 1);
+        assert_eq!(second.active_jobs_terminalized, 0);
+        assert_eq!(
+            recovered.get(job.id).expect("job").status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(recovered.events(job.id).expect("events").len(), event_count);
+    });
+}
+
+#[test]
 fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
     with_isolated_home(|home| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
