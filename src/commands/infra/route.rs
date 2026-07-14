@@ -163,6 +163,7 @@ pub fn route_after_parse(
             source_path: retry_handoff
                 .as_ref()
                 .map(|handoff| handoff.primary_workspace.as_path()),
+            require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
         },
         inferred_runner_id.as_deref(),
