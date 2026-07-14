@@ -12,6 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -25,7 +26,7 @@ use super::outcome::{
 };
 use super::*;
 
-pub(super) struct AgentTaskScheduleSupport;
+pub(crate) struct AgentTaskScheduleSupport;
 
 impl AgentTaskScheduleSupport {
     pub(super) fn next_dispatchable_index(
@@ -1465,7 +1466,7 @@ fn workspace_is_busy(
                 .iter()
                 .filter_map(|task| task.workspace_key.as_deref()),
         )
-        .any(|running_workspace| running_workspace == workspace)
+        .any(|running_workspace| workspace_keys_overlap(running_workspace, workspace))
 }
 
 /// Returns the first deterministic exclusive-key conflict. Resource keys are
@@ -1497,10 +1498,10 @@ impl AgentTaskScheduleSupport {
         quarantined
             .iter()
             .filter_map(|task| task.workspace_key.as_deref())
-            .any(|quarantined_workspace| quarantined_workspace == workspace)
+            .any(|quarantined_workspace| workspace_keys_overlap(quarantined_workspace, workspace))
     }
 
-    pub(super) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
+    pub(crate) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
         let root = request.workspace.root.as_deref()?;
         let git_identity = Command::new("git")
             .args([
@@ -1528,6 +1529,19 @@ impl AgentTaskScheduleSupport {
                 .display()
         ))
     }
+}
+
+fn workspace_keys_overlap(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some(left), Some(right)) = (left.strip_prefix("path:"), right.strip_prefix("path:"))
+    else {
+        return false;
+    };
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left.starts_with(right) || right.starts_with(left)
 }
 
 pub(super) fn select_artifact_payload(

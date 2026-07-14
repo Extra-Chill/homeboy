@@ -14,6 +14,7 @@ use std::fs;
 use serde_json::{Map, Value};
 
 use super::*;
+use crate::core::config::value_type_name;
 
 pub(super) fn missing_required_typed_artifacts(
     outcome: &AgentTaskOutcome,

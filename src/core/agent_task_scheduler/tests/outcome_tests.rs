@@ -8,6 +8,7 @@ use super::fixtures::*;
 use serde_json::json;
 use std::fs;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {

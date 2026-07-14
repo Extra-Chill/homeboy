@@ -11,8 +11,12 @@ use crate::core::agent_task::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod adaptive_concurrency_tests {
     use super::*;
@@ -465,14 +469,20 @@ mod concurrency_tests {
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
-        assert!(aggregate.events.iter().any(|event| {
-            event.task_id == "task-2"
-                && event.state == AgentTaskState::Running
-                && event
-                    .message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("after waiting"))
-        }));
+        let serialized = aggregate
+            .events
+            .iter()
+            .filter(|event| event.state == AgentTaskState::Running)
+            .map(|event| event.task_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serialized.len(),
+            3,
+            "all overlapping tasks must be admitted through the scheduler"
+        );
+        assert_eq!(serialized[0], "task-1");
+        assert!(serialized.contains(&"task-2"));
+        assert!(serialized.contains(&"task-3"));
     }
 
     #[derive(Clone)]
