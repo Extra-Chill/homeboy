@@ -221,7 +221,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         confirm_pid_dead: bool,
 
-        /// Explicitly reconcile legacy unowned active jobs after proving no daemon owns the remote store
+        /// Explicitly reconcile active jobs after proving the missing-lease remote store has no daemon owner
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
 

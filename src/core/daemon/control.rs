@@ -235,17 +235,18 @@ pub fn reconcile_leaseless_orphans(
     Ok(DaemonLeaselessRecoveryResult {
         affected_job_ids: reconciled.reconciled_job_ids,
         affected_job_count,
+        affected_jobs: reconciled.affected_jobs,
+        historical_lease_ids: reconciled.historical_lease_ids,
         evidence_snapshot_path: snapshot_path.display().to_string(),
         ownership_proof,
-        retry_guidance: "Recorded outcomes were retained. Retry unfinished eligible work through its original command or workflow.".to_string(),
+        retry_guidance: "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string(),
         replacement,
     })
 }
 
 fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {
-    // The owner lock is the authoritative proof. These probes are retained as
-    // diagnostics only: port 0 and process command lines cannot establish
-    // durable ownership of the job store.
+    // The owner lock proves no serving daemon owns this store. Refuse any
+    // matching process or configured listener as additional ambiguous ownership.
     let output = Command::new("ps")
         .args(["-ax", "-o", "command="])
         .output()
@@ -259,17 +260,34 @@ fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {
                 .lines()
                 .any(|line| line.contains("homeboy daemon serve"));
             if matched {
-                "supplemental process probe found a matching command; owner lock remained available"
+                return Err(Error::validation_invalid_argument(
+                    "owner_probe",
+                    "a Homeboy daemon serve process is present; refusing ambiguous missing-lease recovery",
+                    None,
+                    None,
+                ));
             } else {
                 "supplemental process probe found no matching command"
             }
         }
-        _ => "supplemental process probe unavailable; owner lock is authoritative",
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "owner_probe",
+                "unable to inspect Homeboy daemon processes; refusing ambiguous missing-lease recovery",
+                None,
+                None,
+            ));
+        }
     };
     let listener = if parsed.port() == 0 {
-        format!("supplemental listener probe skipped for dynamic address {addr}")
+        format!("listener probe has no fixed address for dynamic bind {addr}")
     } else if TcpStream::connect_timeout(&parsed, Duration::from_millis(200)).is_ok() {
-        format!("supplemental listener probe reached {addr}; owner lock remained available")
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            format!("a daemon listener is reachable at {addr}; refusing missing-lease recovery"),
+            None,
+            None,
+        ));
     } else {
         format!("supplemental listener probe found no listener at {addr}")
     };
