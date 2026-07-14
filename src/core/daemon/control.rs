@@ -33,35 +33,136 @@ pub struct ArtifactFetchOutcome {
     pub sha256: Option<String>,
 }
 
-/// Preserve the status-snapshot interface while directing operators to the
-/// explicit owner-lock-backed recovery command.
+/// Recover active jobs from an absent daemon-state record only when an operator
+/// supplies the exact lease and dead PID recorded before control-plane loss.
 pub fn recover_missing_lease_state(
-    state_identity: &str,
-    confirm_lease_missing: bool,
-    _addr: &str,
-) -> Result<super::DaemonLeaselessOrphanReconciliationResult> {
-    if !confirm_lease_missing {
+    lease_id: &str,
+    recorded_pid: u32,
+    confirm_pid_dead: bool,
+    confirm_control_plane_lost: bool,
+    addr: &str,
+) -> Result<super::DaemonStateLossRecoveryResult> {
+    if !confirm_pid_dead || !confirm_control_plane_lost {
         return Err(Error::validation_invalid_argument(
-            "confirm_lease_missing",
-            "missing-lease recovery requires --confirm-lease-missing",
-            None,
+            "recover_missing_lease_state",
+            "state-loss recovery requires --confirm-pid-dead and --confirm-control-plane-lost",
+            Some(lease_id.to_string()),
             None,
         ));
     }
-    if read_status()?.state_identity != state_identity {
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock()?;
+    recover_missing_lease_state_with_operations(
+        lease_id,
+        recorded_pid,
+        read_status,
+        pid_is_running,
+        try_acquire_daemon_owner_lock,
+        || {
+            let jobs_path = crate::core::paths::daemon_jobs_file()?;
+            let raw_store = read_job_store_bytes(&jobs_path)?;
+            let snapshot_path = snapshot_job_store(&jobs_path, &raw_store)?;
+            let store =
+                super::JobStore::open_without_reconciliation_from_bytes(&jobs_path, &raw_store)?;
+            let diagnostics = store.daemon_lease_job_diagnostics(lease_id);
+            if diagnostics.unowned_count() > 0 || !diagnostics.other_lease_job_ids.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "lease_id",
+                    format!(
+                        "refusing state-loss recovery: active jobs are not exclusively owned by lease `{lease_id}` (other leases: {}; unowned: {})",
+                        diagnostics.other_lease_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                        diagnostics.unowned_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                    ),
+                    Some(lease_id.to_string()),
+                    None,
+                ));
+            }
+            let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
+            Ok((snapshot_path, reconciled))
+        },
+        || start_or_return_live_unlocked(addr),
+    )
+}
+
+fn recover_missing_lease_state_with_operations<
+    Status,
+    PidIsRunning,
+    OwnerLock,
+    AcquireOwner,
+    Reconcile,
+    Start,
+>(
+    lease_id: &str,
+    recorded_pid: u32,
+    status: Status,
+    pid_is_running: PidIsRunning,
+    acquire_owner: AcquireOwner,
+    reconcile: Reconcile,
+    start: Start,
+) -> Result<super::DaemonStateLossRecoveryResult>
+where
+    Status: FnOnce() -> Result<super::DaemonStatus>,
+    PidIsRunning: FnOnce(u32) -> bool,
+    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
+    Reconcile: FnOnce() -> Result<(PathBuf, crate::core::api_jobs::DaemonLeaseJobDiagnostics)>,
+    Start: FnOnce() -> Result<super::DaemonStartResult>,
+{
+    let status = status()?;
+    if status.state.is_some()
+        || status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
+        || status.freshness.active_jobs == 0
+        || status.reachable
+    {
         return Err(Error::validation_invalid_argument(
-            "state-identity",
-            "daemon state changed since inspection; refusing missing-lease recovery",
-            Some(state_identity.to_string()),
+            "lease_id",
+            "state-loss recovery requires an absent daemon state, unreachable endpoint, and active jobs",
+            Some(lease_id.to_string()),
             None,
         ));
     }
-    Err(Error::validation_invalid_argument(
-        "state-identity",
-        "missing-lease recovery requires explicit lease-less orphan reconciliation",
-        Some(state_identity.to_string()),
-        None,
-    ))
+    if pid_is_running(recorded_pid) {
+        return Err(Error::validation_invalid_argument(
+            "recorded_pid",
+            format!("recorded daemon PID `{recorded_pid}` is still running"),
+            Some(recorded_pid.to_string()),
+            None,
+        ));
+    }
+    let owner_lock = acquire_owner()?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "daemon owner lock is held; refusing state-loss recovery",
+            Some(lease_id.to_string()),
+            None,
+        )
+    })?;
+    let (snapshot_path, reconciled) = reconcile()?;
+    if reconciled.matching_count() == 0 {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!("no active durable jobs belong to exact lease `{lease_id}`"),
+            Some(lease_id.to_string()),
+            None,
+        ));
+    }
+    drop(owner_lock);
+    let replacement = start()?;
+    let affected_job_count = reconciled.matching_count();
+    Ok(super::DaemonStateLossRecoveryResult {
+        recovered_lease_id: lease_id.to_string(),
+        recorded_dead_pid: recorded_pid,
+        affected_job_ids: reconciled.matching_job_ids,
+        affected_job_count,
+        evidence_snapshot_path: snapshot_path.display().to_string(),
+        ownership_proof: vec![
+            format!("operator supplied exact missing lease `{lease_id}`"),
+            format!("recorded daemon PID `{recorded_pid}` was not running"),
+            "daemon owner lock acquired non-destructively".to_string(),
+            "daemon endpoint was unreachable while state record was absent".to_string(),
+        ],
+        retry_guidance: "Recorded outcomes were retained. Retry unfinished eligible work through its original command or workflow.".to_string(),
+        replacement,
+    })
 }
 
 fn reconcile_leaseless_orphan_store_with_operations<Status, Probe, Reconcile, Start>(

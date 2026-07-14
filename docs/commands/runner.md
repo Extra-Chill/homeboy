@@ -324,8 +324,10 @@ plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 ```sh
 homeboy runner connect <runner-id>
 homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead
-homeboy runner connect <runner-id> --reconcile-leaseless-orphans --confirm-control-plane-lost
-homeboy daemon reconcile-leaseless-orphans --confirm-control-plane-lost
+homeboy runner connect <runner-id> --reconcile-leaseless-orphans --confirm-no-daemon-owner
+homeboy daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner
+homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --confirm-pid-dead --confirm-control-plane-lost
+homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --confirm-pid-dead --confirm-control-plane-lost
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 

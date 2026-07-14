@@ -198,16 +198,32 @@ pub(super) fn remove(id: &str) -> CmdResult<RunnerOutput> {
     ))
 }
 
-pub(super) fn connect(
-    id: &str,
-    reverse: bool,
-    runner_id: Option<String>,
-    broker_url: Option<String>,
-    adopt_orphan_lease: Option<String>,
-    confirm_pid_dead: bool,
-    reconcile_leaseless_orphans: bool,
-    confirm_no_daemon_owner: bool,
-) -> CmdResult<RunnerOutput> {
+pub(super) struct RunnerConnectInput {
+    pub(super) reverse: bool,
+    pub(super) runner_id: Option<String>,
+    pub(super) broker_url: Option<String>,
+    pub(super) adopt_orphan_lease: Option<String>,
+    pub(super) confirm_pid_dead: bool,
+    pub(super) reconcile_leaseless_orphans: bool,
+    pub(super) confirm_no_daemon_owner: bool,
+    pub(super) recover_missing_lease_state: Option<String>,
+    pub(super) recorded_pid: Option<u32>,
+    pub(super) confirm_control_plane_lost: bool,
+}
+
+pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOutput> {
+    let RunnerConnectInput {
+        reverse,
+        runner_id,
+        broker_url,
+        adopt_orphan_lease,
+        confirm_pid_dead,
+        reconcile_leaseless_orphans,
+        confirm_no_daemon_owner,
+        recover_missing_lease_state,
+        recorded_pid,
+        confirm_control_plane_lost,
+    } = input;
     if adopt_orphan_lease.is_some() && !confirm_pid_dead {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "confirm_pid_dead",
@@ -240,6 +256,24 @@ pub(super) fn connect(
             None,
         ));
     }
+    if recover_missing_lease_state.is_some()
+        && (!confirm_pid_dead || !confirm_control_plane_lost || recorded_pid.is_none())
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "recover_missing_lease_state",
+            "--recover-missing-lease-state requires --recorded-pid, --confirm-pid-dead, and --confirm-control-plane-lost",
+            None,
+            None,
+        ));
+    }
+    if reverse && recover_missing_lease_state.is_some() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "recover_missing_lease_state",
+            "state-loss recovery only applies to direct SSH runner connections",
+            None,
+            None,
+        ));
+    }
     let (report, exit_code) = if reverse {
         let runner_id = runner_id.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -259,6 +293,8 @@ pub(super) fn connect(
             id,
             adopt_orphan_lease.as_deref(),
             reconcile_leaseless_orphans,
+            recover_missing_lease_state.as_deref(),
+            recorded_pid,
         )?
     };
     Ok((
@@ -302,13 +338,35 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
 
 #[cfg(test)]
 mod tests {
-    use super::connect;
+    use super::{connect, RunnerConnectInput};
+
+    fn input() -> RunnerConnectInput {
+        RunnerConnectInput {
+            reverse: false,
+            runner_id: None,
+            broker_url: None,
+            adopt_orphan_lease: None,
+            confirm_pid_dead: false,
+            reconcile_leaseless_orphans: false,
+            confirm_no_daemon_owner: false,
+            recover_missing_lease_state: None,
+            recorded_pid: None,
+            confirm_control_plane_lost: false,
+        }
+    }
 
     #[test]
     fn leaseless_recovery_requires_both_affirmative_flags() {
         for (recover, confirm) in [(true, false), (false, true)] {
-            let error = connect("runner", false, None, None, None, false, recover, confirm)
-                .expect_err("partial confirmation must fail before connecting");
+            let error = connect(
+                "runner",
+                RunnerConnectInput {
+                    reconcile_leaseless_orphans: recover,
+                    confirm_no_daemon_owner: confirm,
+                    ..input()
+                },
+            )
+            .expect_err("partial confirmation must fail before connecting");
             assert!(error
                 .message
                 .contains("--reconcile-leaseless-orphans requires"));
@@ -317,9 +375,31 @@ mod tests {
 
     #[test]
     fn reverse_connections_cannot_reconcile_leaseless_jobs() {
-        let error = connect("runner", true, None, None, None, false, true, true)
-            .expect_err("reverse recovery is unsupported");
+        let error = connect(
+            "runner",
+            RunnerConnectInput {
+                reverse: true,
+                reconcile_leaseless_orphans: true,
+                confirm_no_daemon_owner: true,
+                ..input()
+            },
+        )
+        .expect_err("reverse recovery is unsupported");
         assert!(error.message.contains("direct SSH"));
+    }
+
+    #[test]
+    fn state_loss_recovery_requires_exact_evidence_and_confirmations() {
+        let error = connect(
+            "runner",
+            RunnerConnectInput {
+                recover_missing_lease_state: Some("lease".to_string()),
+                confirm_control_plane_lost: true,
+                ..input()
+            },
+        )
+        .expect_err("partial state-loss evidence must fail before connecting");
+        assert!(error.message.contains("--recorded-pid"));
     }
 }
 

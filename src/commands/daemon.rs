@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStatus, DaemonStopResult,
+    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
@@ -46,6 +46,23 @@ enum DaemonCommand {
         reconcile_leaseless_orphans: bool,
         #[arg(long)]
         confirm_no_daemon_owner: bool,
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
+    /// Recover one exact lease after its daemon state record was lost
+    RecoverMissingLeaseState {
+        /// Exact lease ID captured before the daemon state record was lost
+        #[arg(long)]
+        lease_id: String,
+        /// Recorded daemon PID captured with the lease ID
+        #[arg(long)]
+        recorded_pid: u32,
+        /// Confirm the recorded daemon PID was inspected and is dead
+        #[arg(long)]
+        confirm_pid_dead: bool,
+        /// Confirm the daemon state record and endpoint are unavailable
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -102,6 +119,7 @@ pub enum DaemonOutput {
     EnsureRunning(DaemonStartResult),
     AdoptOrphan(DaemonOrphanAdoptionResult),
     ReconcileLeaselessOrphans(DaemonLeaselessRecoveryResult),
+    RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(DaemonStatus),
@@ -137,6 +155,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         )),
         DaemonCommand::ReconcileLeaselessOrphans { reconcile_leaseless_orphans, confirm_no_daemon_owner, addr } => Ok((
             DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(reconcile_leaseless_orphans, confirm_no_daemon_owner, &addr)?),
+            0,
+        )),
+        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, confirm_pid_dead, confirm_control_plane_lost, addr } => Ok((
+            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),

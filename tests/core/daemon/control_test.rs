@@ -499,30 +499,135 @@ fn legacy_unowned_job_blocks_replacement_start() {
 }
 
 #[test]
-fn missing_lease_recovery_rejects_changed_active_job_state() {
+fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_once() {
     with_isolated_home(|_| {
-        let before = crate::core::daemon::read_status().expect("missing lease status");
-        assert_eq!(
-            before.freshness.stale_reason_code,
-            Some(DaemonStaleReasonCode::LeaseMissing)
-        );
-        let path = crate::core::paths::daemon_jobs_file().expect("daemon jobs path");
-        let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("exact-lease".to_string());
         let job = store.create("runner.exec");
-        store.start(job.id).expect("start job");
-
-        let error = super::recover_missing_lease_state(&before.state_identity, true, "127.0.0.1:0")
-            .expect_err("changed durable queue must reject recovery");
-
-        assert!(error.message.contains("state changed since inspection"));
+        store.start(job.id).expect("start");
+        let starts = Arc::new(Mutex::new(0));
+        let start_count = Arc::clone(&starts);
+        let result = super::recover_missing_lease_state_with_operations(
+            "exact-lease",
+            4242,
+            || Ok(leaseless_status(1)),
+            |_| false,
+            || Ok(Some(())),
+            || {
+                let raw = std::fs::read(&path).expect("store bytes");
+                let snapshot = super::snapshot_job_store(&path, &raw).expect("snapshot");
+                let recovered = JobStore::open_without_reconciliation_from_bytes(&path, &raw)
+                    .expect("recovery store");
+                let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
+                assert!(diagnostics.other_lease_job_ids.is_empty());
+                Ok((
+                    snapshot,
+                    recovered.reconcile_dead_daemon_lease_jobs("exact-lease")?,
+                ))
+            },
+            move || {
+                *start_count.lock().expect("starts") += 1;
+                Ok(fake_daemon(4343, "replacement"))
+            },
+        )
+        .expect("exact recovery");
+        assert_eq!(result.affected_job_ids, vec![job.id]);
+        assert_eq!(*starts.lock().expect("starts"), 1);
+        assert!(std::path::Path::new(&result.evidence_snapshot_path).exists());
         assert_eq!(
             JobStore::open_without_reconciliation(&path)
-                .expect("reopen durable store")
+                .expect("reopen store")
                 .get(job.id)
-                .expect("job remains")
+                .expect("job")
                 .status,
-            JobStatus::Running,
-            "TOCTOU rejection must leave the job untouched"
+            JobStatus::Failed
+        );
+    });
+}
+
+#[test]
+fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
+    let refusal = |status: DaemonStatus, pid_live: bool, owner_available: bool| {
+        super::recover_missing_lease_state_with_operations(
+            "exact-lease",
+            4242,
+            || Ok(status),
+            move |_| pid_live,
+            move || Ok(owner_available.then_some(())),
+            || unreachable!("refused recovery must not mutate jobs"),
+            || unreachable!("refused recovery must not start a daemon"),
+        )
+        .expect_err("unsafe state must fail closed")
+    };
+    assert!(refusal(leaseless_status(1), true, true)
+        .message
+        .contains("still running"));
+    assert!(refusal(leaseless_status(1), false, false)
+        .message
+        .contains("owner lock"));
+    let mut endpoint_live = leaseless_status(1);
+    endpoint_live.reachable = true;
+    assert!(refusal(endpoint_live, false, true)
+        .message
+        .contains("unreachable endpoint"));
+    let replay = super::recover_missing_lease_state_with_operations(
+        "exact-lease",
+        4242,
+        || Ok(fake_dead_status(fake_daemon(4343, "replacement"))),
+        |_| false,
+        || Ok(Some(())),
+        || unreachable!("replay must not reconcile jobs"),
+        || unreachable!("replay must not start another daemon"),
+    )
+    .expect_err("replacement state makes recovery replay fail closed");
+    assert!(replay.message.contains("absent daemon state"));
+
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let exact = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("exact-lease".to_string());
+        let exact_job = exact.create("runner.exec");
+        exact.start(exact_job.id).expect("start exact");
+        let other = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("other-lease".to_string());
+        let other_job = other.create("runner.exec");
+        other.start(other_job.id).expect("start other");
+        let error = super::recover_missing_lease_state_with_operations(
+            "exact-lease",
+            4242,
+            || Ok(leaseless_status(2)),
+            |_| false,
+            || Ok(Some(())),
+            || {
+                let raw = std::fs::read(&path).expect("store bytes");
+                let recovered =
+                    JobStore::open_without_reconciliation_from_bytes(&path, &raw).expect("store");
+                let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
+                if !diagnostics.other_lease_job_ids.is_empty() {
+                    return Err(crate::core::Error::validation_invalid_argument(
+                        "lease_id",
+                        "mixed exact leases",
+                        None,
+                        None,
+                    ));
+                }
+                unreachable!("mixed lease must not reconcile")
+            },
+            || unreachable!("mixed lease must not start"),
+        )
+        .expect_err("mixed leases must fail closed");
+        assert!(error.message.contains("mixed exact leases"));
+        assert_eq!(
+            exact.get(exact_job.id).expect("exact job").status,
+            JobStatus::Running
+        );
+        assert_eq!(
+            other.get(other_job.id).expect("other job").status,
+            JobStatus::Running
         );
     });
 }
