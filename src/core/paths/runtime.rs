@@ -24,6 +24,11 @@ pub fn daemon_jobs_file() -> Result<PathBuf> {
     Ok(daemon_state_dir()?.join("jobs.json"))
 }
 
+/// Latest bounded launcher-owned termination evidence for this daemon store.
+pub fn daemon_termination_file() -> Result<PathBuf> {
+    Ok(daemon_state_dir()?.join("termination.json"))
+}
+
 /// Exact state-loss recovery receipt keyed by the operator-supplied lease.
 pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf> {
     Ok(daemon_state_dir()?

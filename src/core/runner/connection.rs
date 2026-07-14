@@ -1518,6 +1518,7 @@ mod remote_daemon {
         pub(super) reachable: bool,
         pub(super) active_jobs: usize,
         pub(super) endpoint_probe_error: Option<String>,
+        pub(super) termination_evidence: Option<crate::core::daemon::DaemonTerminationEvidence>,
     }
 
     pub(super) fn remote_daemon_recovery_freshness_from_status(
@@ -1590,6 +1591,7 @@ mod remote_daemon {
             daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
             runtime_paths: None,
             active_jobs: status.active_jobs,
+            termination_evidence: status.termination_evidence.clone(),
             repair_plan: Vec::new(),
         }
     }
@@ -1614,6 +1616,7 @@ mod remote_daemon {
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 0,
+            termination_evidence: None,
             repair_plan: Vec::new(),
         }
     }
@@ -1822,6 +1825,10 @@ mod remote_daemon {
             .pointer("/freshness/stale_reason_code")
             .cloned()
             .and_then(|code| serde_json::from_value(code).ok());
+        let termination_evidence = data
+            .get("termination_evidence")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         if !data
             .get("running")
             .and_then(Value::as_bool)
@@ -1838,6 +1845,7 @@ mod remote_daemon {
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
                 endpoint_probe_error: None,
+                termination_evidence,
             });
         }
         let Some(state) = data.get("state") else {
@@ -1855,6 +1863,7 @@ mod remote_daemon {
                     .unwrap_or(false),
                 active_jobs: remote_daemon_active_jobs(&data),
                 endpoint_probe_error: None,
+                termination_evidence,
             });
         };
         Ok(RemoteDaemonStatus {
@@ -1868,6 +1877,7 @@ mod remote_daemon {
                 .unwrap_or(false),
             active_jobs: remote_daemon_active_jobs(&data),
             endpoint_probe_error: None,
+            termination_evidence,
         })
     }
 
@@ -3084,6 +3094,7 @@ esac
             reachable: false,
             active_jobs: 0,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         assert_eq!(
@@ -3103,6 +3114,7 @@ esac
             reachable: false,
             active_jobs: 0,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         assert_eq!(
@@ -3121,6 +3133,7 @@ esac
             reachable: false,
             active_jobs: 1,
             endpoint_probe_error: None,
+            termination_evidence: None,
         };
 
         let error = remote_daemon_connect_action(None, &status)
@@ -3788,6 +3801,7 @@ esac
             reachable,
             active_jobs,
             endpoint_probe_error: None,
+            termination_evidence: None,
         }
     }
 

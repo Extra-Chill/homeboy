@@ -37,7 +37,7 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    reconcile_leaseless_orphans, recover_missing_lease_state, start_background,
+    reconcile_leaseless_orphans, recover_missing_lease_state, start_background, supervise,
     ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
@@ -88,6 +88,43 @@ pub struct DaemonStatus {
     /// operator can distinguish another runner from an attributable owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_candidates: Vec<DaemonProcessCandidate>,
+    /// Launcher-owned evidence is best effort. A missing record explicitly does
+    /// not imply an OS-level cause for a dead daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<DaemonTerminationEvidence>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonTerminationClassification {
+    CleanStop,
+    UnexpectedExit,
+}
+
+/// Durable, bounded evidence from the process that launched the daemon.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonTerminationEvidence {
+    pub classification: DaemonTerminationClassification,
+    pub observed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_identity: Option<String>,
+    pub active_jobs: usize,
+    pub resource_evidence: String,
+    pub os_evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -168,6 +205,8 @@ pub struct DaemonFreshnessReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_paths: Option<DaemonRuntimeSnapshot>,
     pub active_jobs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<DaemonTerminationEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repair_plan: Vec<DaemonRepairStep>,
 }
@@ -497,6 +536,44 @@ pub fn read_status() -> Result<DaemonStatus> {
         state_path,
         state_identity,
         process_candidates: control::daemon_process_candidates(&jobs_path)?,
+        termination_evidence: (!validation.running)
+            .then(read_termination_evidence)
+            .transpose()?
+            .flatten(),
+    })
+}
+
+fn read_termination_evidence() -> Result<Option<DaemonTerminationEvidence>> {
+    let path = paths::daemon_termination_file()?;
+    match fs::read_to_string(&path) {
+        Ok(body) => serde_json::from_str(&body).map(Some).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {}", path.display())))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("read {}", path.display())),
+        )),
+    }
+}
+
+pub(crate) fn write_termination_evidence(evidence: &DaemonTerminationEvidence) -> Result<()> {
+    let path = paths::daemon_termination_file()?;
+    let parent = path.parent().expect("daemon termination path has parent");
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let body = serde_json::to_vec_pretty(evidence).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize daemon termination evidence".to_string()),
+        )
+    })?;
+    fs::write(&path, body).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("write {}", path.display())))
     })
 }
 
@@ -672,6 +749,12 @@ fn freshness_report_from_validation(
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
         runtime_paths: state.map(|state| state.runtime_paths.clone()),
         active_jobs,
+        termination_evidence: (!validation.running)
+            .then(read_termination_evidence)
+            .transpose()
+            .ok()
+            .flatten()
+            .flatten(),
         repair_plan,
     }
 }
@@ -757,6 +840,26 @@ fn stop_unlocked() -> Result<DaemonStopResult> {
         )));
     }
 
+    if pid_is_running(pid) {
+        write_termination_evidence(&DaemonTerminationEvidence {
+            classification: DaemonTerminationClassification::CleanStop,
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            lease_id: Some(state.lease_id.clone()),
+            pid: Some(pid),
+            binary_identity: Some(state.build_identity.display.clone()),
+            active_jobs: JobStore::active_count_at_path(paths::daemon_jobs_file()?)?,
+            resource_evidence: "unavailable: launcher does not collect OS resource snapshots"
+                .to_string(),
+            os_evidence:
+                "unavailable: no OS termination evidence collected before operator-requested stop"
+                    .to_string(),
+            exit_code: None,
+            signal: None,
+            stdout: None,
+            stderr: None,
+            stop_requested: true,
+        })?;
+    }
     let stopped = if pid_is_running(pid) {
         terminate_pid(pid)?;
         true
