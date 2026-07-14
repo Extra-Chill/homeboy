@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.1] - 2026-07-14
+
+### Changed
+- remove dormant field pattern audit detector
+- consolidate passive capture behind trace
+- Recover lease-less runner job stores
+- Pin controller runtime across dispatch and recovery
+
+### Fixed
+- recover mixed historical daemon leases (#8054)
+- canonicalize activity lifecycle records
+- reattach matching live runner daemon
+
 ## [0.284.0] - 2026-07-13
 
 ### Added
