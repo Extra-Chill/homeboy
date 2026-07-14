@@ -258,6 +258,7 @@ fn release_deployment_config(
         requested_ref: None,
         tagged: false,
         prepared_artifact: Some(prepared_artifact),
+        resume_run_id: None,
     }
 }
 
@@ -366,6 +367,7 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
+                phase_timings: None,
             },
         };
 

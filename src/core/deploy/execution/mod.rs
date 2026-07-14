@@ -231,6 +231,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let result = resolve_preflight_artifact_path(
@@ -292,6 +293,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -326,6 +328,7 @@ mod tests {
             requested_ref: None,
             tagged: true,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -371,6 +374,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -416,6 +420,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -452,6 +457,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         match release_artifact_plan(&component, &config, false, false) {
@@ -501,6 +507,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -575,6 +582,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let artifact = resolve_preflight_artifact_path(

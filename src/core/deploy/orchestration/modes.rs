@@ -302,6 +302,7 @@ mod tests {
             requested_ref: Some("reviewed".to_string()),
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let result = run_dry_run_mode(
