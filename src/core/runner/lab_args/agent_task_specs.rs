@@ -113,8 +113,21 @@ pub(in crate::core::runner) fn materialize_inline_agent_task_json_specs_in_args<
         "lab.sync_remapped_agent_task_plan",
         |spec| sync_inline_json(spec),
     )?;
+    let (args, attempt_plan_entry) = materialize_inline_json_option(
+        &args,
+        agent_task_subcommand_is(&args, &["cook"]),
+        "--attempt-plan",
+        "agent-task-attempt-plan.json",
+        "agent_task_attempt_plan_remapped",
+        "lab.sync_remapped_agent_task_attempt_plan",
+        |spec| sync_inline_json(spec),
+    )?;
 
-    let workspace_entries = task_entry.into_iter().chain(plan_entry).collect();
+    let workspace_entries = task_entry
+        .into_iter()
+        .chain(plan_entry)
+        .chain(attempt_plan_entry)
+        .collect();
     Ok((args, workspace_entries))
 }
 
