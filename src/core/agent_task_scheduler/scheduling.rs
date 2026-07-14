@@ -590,12 +590,15 @@ impl AgentTaskScheduleSupport {
 
             let task = running.remove(index);
             executor.cancel(&task.task_id);
-            let outcome = Self::timeout_outcome(
+            let mut outcome = Self::timeout_outcome(
                 task.task_id.clone(),
                 task.timeout_ms.unwrap_or_default(),
                 Some(&task.request),
                 "scheduler_timeout",
             );
+            if let Err(error) = super::harvest_uncommitted_patch(&mut outcome, &task) {
+                outcome = super::committed_harvest_failure(outcome, error);
+            }
             events.push(event(
                 &task.task_id,
                 Self::state_for_outcome(&outcome),

@@ -157,7 +157,7 @@ mod adaptive_concurrency_tests {
 mod concurrency_tests {
     use super::*;
 
-    fn init_git_workspace(path: &std::path::Path) {
+    pub(super) fn init_git_workspace(path: &std::path::Path) {
         fs::create_dir(path).expect("workspace directory");
         for args in [
             ["init", "-b", "main"].as_slice(),
@@ -357,9 +357,9 @@ mod concurrency_tests {
 
     #[derive(Clone)]
     struct LateMutatingExecutor {
-        workspace: std::path::PathBuf,
         events: Arc<Mutex<Vec<String>>>,
         finished: Arc<AtomicBool>,
+        attempt_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
     }
 
     impl AgentTaskExecutorAdapter for LateMutatingExecutor {
@@ -373,18 +373,28 @@ mod concurrency_tests {
                 .expect("events")
                 .push(format!("{}-started", request.task_id));
             if request.task_id == "task-1" {
+                let workspace = request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .expect("attempt workspace");
+                self.attempt_roots
+                    .lock()
+                    .expect("attempt roots")
+                    .push(workspace.clone());
                 std::thread::sleep(Duration::from_millis(3_000));
-                fs::write(self.workspace.join("late-change.txt"), "late\n")
+                fs::write(workspace.join("late-change.txt"), "late\n")
                     .expect("late workspace mutation");
                 assert!(Command::new("git")
                     .args(["add", "late-change.txt"])
-                    .current_dir(&self.workspace)
+                    .current_dir(&workspace)
                     .status()
                     .expect("stage late mutation")
                     .success());
                 assert!(Command::new("git")
                     .args(["commit", "-m", "late mutation"])
-                    .current_dir(&self.workspace)
+                    .current_dir(&workspace)
                     .status()
                     .expect("commit late mutation")
                     .success());
@@ -409,10 +419,11 @@ mod concurrency_tests {
         init_git_workspace(&unrelated);
         let events = Arc::new(Mutex::new(Vec::new()));
         let finished = Arc::new(AtomicBool::new(false));
+        let attempt_roots = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(LateMutatingExecutor {
-            workspace: workspace.clone(),
             events: Arc::clone(&events),
             finished: Arc::clone(&finished),
+            attempt_roots: Arc::clone(&attempt_roots),
         });
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
@@ -427,6 +438,15 @@ mod concurrency_tests {
         while !finished.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(2));
         }
+        let attempt_root = attempt_roots.lock().expect("attempt roots")[0].clone();
+        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+        while attempt_root.exists() && Instant::now() < cleanup_deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            !attempt_root.exists(),
+            "timed-out attempt checkout is retired"
+        );
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
@@ -443,10 +463,14 @@ mod concurrency_tests {
                         && diagnostic.message.contains("workspace remains quarantined")
                 })
         }));
+        assert!(
+            !workspace.join("late-change.txt").exists(),
+            "the late provider mutation must stay out of the caller workspace"
+        );
     }
 
     #[test]
-    fn rejects_dirty_workspace_before_executor_can_commit_user_changes() {
+    fn rejects_preexisting_caller_dirt_before_attempt_checkout_or_provider_dispatch() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
@@ -565,6 +589,42 @@ mod resource_budget_tests {
 mod provider_rotation_tests {
     use super::*;
 
+    struct DirtyCandidateThenSuccessExecutor {
+        observed_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
+        calls: AtomicUsize,
+    }
+
+    impl AgentTaskExecutorAdapter for DirtyCandidateThenSuccessExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let root = request
+                .workspace
+                .root
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .expect("attempt workspace");
+            self.observed_roots
+                .lock()
+                .expect("observed roots")
+                .push(root.clone());
+            if call == 0 {
+                fs::write(root.join("candidate.txt"), "candidate\n").expect("candidate edit");
+                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+                return outcome;
+            }
+            assert!(
+                !root.join("candidate.txt").exists(),
+                "the rotated provider must receive a clean attempt checkout"
+            );
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
     fn rotation_policy(
         entries: Vec<AgentTaskProviderRotationEntry>,
     ) -> AgentTaskProviderRotationPolicy {
@@ -657,6 +717,62 @@ mod provider_rotation_tests {
         assert!(aggregate.events.iter().any(|event| {
             event.message.as_deref() == Some("provider rotation queued: entry 1 of 2")
         }));
+    }
+
+    #[test]
+    fn rotation_preserves_uncommitted_candidate_and_dispatches_next_provider_from_clean_baseline() {
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::concurrency_tests::init_git_workspace(&workspace);
+        let observed_roots = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(DirtyCandidateThenSuccessExecutor {
+            observed_roots: Arc::clone(&observed_roots),
+            calls: AtomicUsize::new(0),
+        })
+        .with_run_id("run-8081");
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
+        assert!(
+            !workspace.join("candidate.txt").exists(),
+            "the managed task worktree must remain untouched"
+        );
+        let roots = observed_roots.lock().expect("observed roots");
+        assert_eq!(roots.len(), 2);
+        assert_ne!(roots[0], workspace);
+        assert_ne!(roots[1], workspace);
+        assert_ne!(roots[0], roots[1]);
+        let candidate = aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "task-1-attempt-1-uncommitted-changes")
+            .expect("failed attempt patch candidate is retained for promotion");
+        assert_eq!(candidate.kind, "patch");
+        assert_eq!(candidate.metadata["producer_attempt"], 1);
+        assert_eq!(candidate.metadata["provider_rotation_index"], 0);
+        assert_eq!(candidate.metadata["provider_backend"], "test");
+        assert_eq!(candidate.metadata["run_id"], "run-8081");
+        assert_eq!(candidate.metadata["task_id"], "task-1");
+        let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))
+            .expect("candidate patch remains available");
+        assert!(patch.contains("diff --git a/candidate.txt b/candidate.txt"));
+        assert!(candidate
+            .path
+            .as_deref()
+            .is_some_and(|path| path.contains("agent-task/attempt-patches/run-8081/task-1")));
+        assert!(
+            !roots[0].exists() && !roots[1].exists(),
+            "attempt checkouts are retired after their executor threads stop"
+        );
     }
 
     #[test]
