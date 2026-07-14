@@ -12,8 +12,8 @@ pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics, Job,
-    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanJobDiagnostics,
-    RunnerJobLifecycleOwner, RunnerJobSource,
+    JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
+    LeaselessOrphanJobDiagnostics, RunnerJobLifecycleOwner, RunnerJobSource,
 };
 
 #[cfg(test)]
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn leaseless_recovery_retains_recorded_outcomes_and_refuses_lease_owned_jobs() {
+    fn leaseless_recovery_terminalizes_one_historical_lease_and_retains_evidence() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("jobs.json");
         let legacy = JobStore::open_without_reconciliation(&path).expect("open legacy store");
@@ -612,7 +612,7 @@ mod tests {
         assert!(diagnostics.reconciled_job_ids.contains(&unfinished.id));
         assert_eq!(
             recovery.get(succeeded.id).expect("succeeded").status,
-            JobStatus::Succeeded
+            JobStatus::Failed
         );
         assert_eq!(
             recovery.get(unfinished.id).expect("unfinished").status,
@@ -632,15 +632,79 @@ mod tests {
             .with_daemon_lease("lease-owned".to_string());
         let leased_job = leased.create("runner.exec");
         leased.start(leased_job.id).expect("start leased job");
-        let error = JobStore::open_without_reconciliation(&path)
+        let diagnostics = JobStore::open_without_reconciliation(&path)
             .expect("open refusing recovery")
             .reconcile_leaseless_orphan_jobs()
-            .expect_err("lease-owned job must fail closed");
-        assert!(error.message.contains("have daemon leases"));
+            .expect("historical lease has no current owner");
+        assert_eq!(diagnostics.historical_lease_ids, vec!["lease-owned"]);
+        assert_eq!(diagnostics.affected_jobs.len(), 1);
         assert_eq!(
-            leased.get(leased_job.id).expect("leased job").status,
-            JobStatus::Running
+            diagnostics.affected_jobs[0]
+                .original_daemon_lease_id
+                .as_deref(),
+            Some("lease-owned")
         );
+        let recovered = JobStore::open_without_reconciliation(&path).expect("reopen recovered");
+        assert_eq!(
+            recovered.get(leased_job.id).expect("leased job").status,
+            JobStatus::Failed
+        );
+        assert!(recovered
+            .events(leased_job.id)
+            .expect("events")
+            .iter()
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| data["original_daemon_lease_id"] == json!("lease-owned"))));
+    }
+
+    #[test]
+    fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let first = JobStore::open_without_reconciliation(&path)
+            .expect("open first")
+            .with_daemon_lease("lease-first".to_string());
+        let first_job = first.create("runner.exec");
+        first.start(first_job.id).expect("start first");
+        first
+            .append_event(
+                first_job.id,
+                JobEventKind::Stdout,
+                Some("first output".to_string()),
+                None,
+            )
+            .expect("first output");
+        let second = JobStore::open_without_reconciliation(&path)
+            .expect("open second")
+            .with_daemon_lease("lease-second".to_string());
+        let second_job = second.create("runner.exec");
+        second.start(second_job.id).expect("start second");
+
+        let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
+        let diagnostics = recovery
+            .reconcile_leaseless_orphan_jobs()
+            .expect("reconcile");
+
+        assert_eq!(
+            diagnostics.historical_lease_ids,
+            vec!["lease-first", "lease-second"]
+        );
+        assert_eq!(diagnostics.affected_jobs.len(), 2);
+        assert_eq!(
+            recovery.get(first_job.id).expect("first job").status,
+            JobStatus::Failed
+        );
+        assert_eq!(
+            recovery.get(second_job.id).expect("second job").status,
+            JobStatus::Failed
+        );
+        assert!(recovery
+            .events(first_job.id)
+            .expect("first events")
+            .iter()
+            .any(|event| event.message.as_deref() == Some("first output")));
     }
 
     #[test]

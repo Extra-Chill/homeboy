@@ -351,8 +351,10 @@ and unavailable recovery evidence, run the explicit daemon reconciliation on the
 configured runner host. It acquires the daemon lifecycle lock, requires the
 affirmative confirmation flag, independently checks for a `homeboy daemon serve`
 process and Homeboy TCP listener, snapshots `jobs.json`, retains all job events
-and result evidence, terminalizes only lease-less active jobs, and starts one
-replacement daemon. Live or ambiguous probes abort without changing the store.
+and artifact references, terminalizes every active job as control-plane-lost, and
+returns each original lease ID plus the affected job mapping before starting one
+replacement daemon. Historical lease IDs do not establish a current owner. Live
+or ambiguous probes abort without changing the store.
 
 Reverse runner connections record the runner-initiated session substrate and use
 the controller daemon as the broker. A reverse runner can register itself with

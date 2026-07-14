@@ -40,7 +40,7 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
-    /// Explicitly reconcile legacy unowned jobs after proving no daemon owns the store
+    /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
     ReconcileLeaselessOrphans {
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
