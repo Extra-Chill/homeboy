@@ -1,0 +1,16 @@
+[package]
+name = "homeboy-redaction"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Secret/sensitive-value redaction helpers for homeboy"
+repository = "https://github.com/Extra-Chill/homeboy"
+
+[lib]
+name = "homeboy_redaction"
+path = "src/lib.rs"
+
+[dependencies]
+regex = "1.11"
+serde_json = "1.0"

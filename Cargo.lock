@@ -695,6 +695,7 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-redaction",
  "keyring",
  "libc",
  "regex",
@@ -713,6 +714,14 @@ dependencies = [
  "toml",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "homeboy-redaction"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
 ]
 
 [[package]]
