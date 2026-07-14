@@ -1061,6 +1061,7 @@ fn harvest_uncommitted_patch(
             "provider_rotation_index": running.rotation_index,
             "provider_backend": running.request.executor.backend,
             "source_provenance": running.source_provenance,
+            "provider_model": running.request.executor.model(),
         }),
     });
     Ok(())
@@ -1120,6 +1121,18 @@ fn persist_attempt_patch_artifacts(
                 (
                     "change_source".to_string(),
                     serde_json::json!("attempt_workspace_artifact"),
+                ),
+                (
+                    "provider_rotation_index".to_string(),
+                    serde_json::json!(running.rotation_index),
+                ),
+                (
+                    "provider_backend".to_string(),
+                    serde_json::json!(running.request.executor.backend),
+                ),
+                (
+                    "provider_model".to_string(),
+                    serde_json::json!(running.request.executor.model()),
                 ),
             ]));
     }
@@ -1218,6 +1231,12 @@ fn harvest_committed_patch_with_metadata(
         "task_id": &running.task_id,
         "producer_attempt": running.attempt,
         "source_provenance": running.source_provenance,
+        "task_id": &running.task_id,
+        "producer_attempt": running.attempt,
+        "source_provenance": running.source_provenance,
+        "provider_rotation_index": running.rotation_index,
+        "provider_backend": running.request.executor.backend,
+        "provider_model": running.request.executor.model(),
     });
     Ok(())
 }
@@ -1263,6 +1282,9 @@ fn committed_patch_artifact(
             "task_id": running.task_id,
             "producer_attempt": running.attempt,
             "source_provenance": running.source_provenance,
+            "provider_rotation_index": running.rotation_index,
+            "provider_backend": running.request.executor.backend,
+            "provider_model": running.request.executor.model(),
         }),
     }
 }

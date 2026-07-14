@@ -1141,6 +1141,7 @@ mod provider_rotation_tests {
         .with_run_id("run-8081");
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].executor.model = Some("primary-model".to_string());
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
 
@@ -1169,6 +1170,7 @@ mod provider_rotation_tests {
         assert_eq!(candidate.metadata["producer_attempt"], 1);
         assert_eq!(candidate.metadata["provider_rotation_index"], 0);
         assert_eq!(candidate.metadata["provider_backend"], "test");
+        assert_eq!(candidate.metadata["provider_model"], "primary-model");
         assert_eq!(candidate.metadata["run_id"], "run-8081");
         assert_eq!(candidate.metadata["task_id"], "task-1");
         let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))
