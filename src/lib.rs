@@ -25,8 +25,14 @@ pub mod core;
 pub mod extensions;
 pub mod help_topics;
 
-#[cfg(test)]
-pub(crate) mod test_support;
+/// Test-only fixtures and hermetic process contexts.
+///
+/// This is public so integration tests can use the same isolation contract as
+/// unit tests. It is hidden from normal API documentation and has no role in
+/// production command execution.
+#[doc(hidden)]
+#[allow(dead_code)] // Unit-test-only helpers share this module with public CLI fixtures.
+pub mod test_support;
 
 /// Helper for `#[serde(skip_serializing_if = "is_zero")]` on `usize` fields.
 pub fn is_zero(v: &usize) -> bool {

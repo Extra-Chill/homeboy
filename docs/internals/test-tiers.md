@@ -30,3 +30,19 @@ cargo test --lib --features slow-tests collect_refactor_sources_audit_write_uses
 ```
 
 Use the slow tier when changing audit detector orchestration, audit fixability planning, or audit-driven refactor planning. These tests remain runnable, but they are not part of the default unit gate because they scan real fixture/checkouts and dominated local suite wall-clock time.
+
+## Hermetic CLI Fixtures
+
+Ordinary Rust tests must use `homeboy::test_support::HermeticTestContext` for
+Homeboy subprocesses. It supplies owned HOME, config, data, artifact, runtime,
+temporary, daemon, and runner locations, and requires an explicit binary choice:
+`TestBinary::HomeboyFixture` for Cargo's fixture binary or
+`TestBinary::CurrentTest` for the running test executable. This prevents tests
+from reading operator configuration or resolving an installed `homeboy` through
+`PATH`.
+
+Host integration tests are opt-in: place them behind an explicit Cargo feature
+or an explicit command-line opt-in and document the required host service,
+credentials, and cleanup contract beside the test. They may use host state only
+when that contract is the behavior under test; they are excluded from the
+ordinary Rust gate.
