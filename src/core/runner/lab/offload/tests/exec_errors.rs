@@ -296,7 +296,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
     let tried = err.details["tried"].as_array().expect("tried");
     assert!(tried.iter().any(|hint| hint
         .as_str()
-        .is_some_and(|hint| hint.contains("--allow-local-fallback"))));
+        .is_some_and(|hint| hint.contains("--placement lab-or-local"))));
 }
 
 #[test]
