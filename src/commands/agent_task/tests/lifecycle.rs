@@ -1151,20 +1151,10 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
                 .expect("executor workspace"),
         );
         assert_ne!(executor_workspace, workspace.path());
-        assert!(executor_workspace.is_dir());
-        let source_head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workspace.path())
-            .output()
-            .expect("source revision");
-        let executor_head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&executor_workspace)
-            .output()
-            .expect("executor revision");
-        assert!(source_head.status.success());
-        assert!(executor_head.status.success());
-        assert_eq!(source_head.stdout, executor_head.stdout);
+        assert!(
+            !executor_workspace.exists(),
+            "the isolated attempt workspace is retired after the executor returns"
+        );
         assert_eq!(
             observed.workspace.slug.as_deref(),
             Some("sample-agent-runtime")

@@ -363,7 +363,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         assert_eq!(value["status"], "green_no_finalize");
         assert_eq!(
             value["attempts"][0]["promotion"]["patch_artifact"]["id"],
-            "committed-changes"
+            "cook-fixture-component-attempt-1-committed-changes"
         );
         assert_eq!(
             value["attempts"][0]["promotion"]["changed_files"],

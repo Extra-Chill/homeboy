@@ -9,6 +9,7 @@
 mod git;
 mod materialized;
 mod materializer;
+mod provenance;
 mod pull;
 mod snapshot;
 mod sync;
@@ -36,9 +37,12 @@ pub(crate) use materializer::{
     dependency_cache_manifest_command, dependency_cache_restore_command,
     dependency_cache_save_command,
 };
+#[cfg(test)]
+pub(crate) use provenance::verify_lab_workspace;
+pub(crate) use provenance::{verify_lab_workspace_from_env, VerifiedLabWorkspaceProvenance};
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
-    materialize_snapshot, materialize_snapshot_git, snapshot_identity,
+    materialize_snapshot, materialize_snapshot_git, snapshot_identity, workspace_content_hash,
 };
 pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
 pub(crate) use util::{

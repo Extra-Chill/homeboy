@@ -1224,6 +1224,11 @@ pub(crate) fn run_lab_offload_inner(
     );
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_content_hash"] =
+        serde_json::json!(crate::core::runner::workspace_content_hash(
+            Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
+            &source_snapshot.sync_excludes,
+        )?);
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_materialization_plan"] =
