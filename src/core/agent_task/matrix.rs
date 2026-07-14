@@ -303,7 +303,7 @@ fn matrix_execution_state_for_outcome(
     };
 
     match outcome.status {
-        AgentTaskOutcomeStatus::Succeeded => {
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::CandidateRecoverable => {
             if outcome_has_quality_findings(outcome) {
                 AgentTaskMatrixExecutionState::ExecutedWithFindings
             } else {
