@@ -349,6 +349,12 @@ lease-less, and orphan-adoption recovery modes are mutually exclusive. Ordinary
 `runner connect` never infers orphan ownership; live, ambiguous, and
 lease-mismatched daemon records remain protected.
 
+Exact state-loss recovery writes a lease-keyed receipt before terminalizing jobs.
+If replacement startup fails, the receipt retains the reconciled evidence and the
+same exact lease, PID, and endpoint inputs resume only replacement startup on
+retry. Different replay inputs fail closed, and a zero-active-job invocation
+without a matching receipt remains invalid.
+
 When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
 and unavailable recovery evidence, run the explicit daemon reconciliation on the
 configured runner host. It acquires the daemon lifecycle lock, requires the

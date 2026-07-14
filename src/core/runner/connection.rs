@@ -230,12 +230,14 @@ pub fn connect_with_orphan_adoption(
 
     let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
     let Ok(daemon) = daemon else {
-        return Ok(failed_connect(
+        let (mut report, exit_code) = failed_connect(
             runner_id,
             session_path,
             RunnerFailureKind::DaemonStartupFailure,
             daemon.err().unwrap(),
-        ));
+        );
+        attach_state_loss_recovery(&mut report, state_loss_recovery);
+        return Ok((report, exit_code));
     };
 
     let expected_version = daemon.version.clone().unwrap_or(version.clone());
@@ -254,7 +256,10 @@ pub fn connect_with_orphan_adoption(
         &session_path,
     ) {
         Ok(connection) => connection,
-        Err(report) => return Ok(report),
+        Err((mut report, exit_code)) => {
+            attach_state_loss_recovery(&mut report, state_loss_recovery);
+            return Ok((report, exit_code));
+        }
     };
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
@@ -327,6 +332,13 @@ fn decode_state_loss_recovery(data: Option<Value>) -> Result<DaemonStateLossReco
             Some("decode exact state-loss daemon recovery".to_string()),
         )
     })
+}
+
+fn attach_state_loss_recovery(
+    report: &mut RunnerConnectReport,
+    recovery: Option<DaemonStateLossRecoveryResult>,
+) {
+    report.state_loss_recovery = recovery;
 }
 
 fn leaseless_recovery_failure_message(output: &crate::core::server::CommandOutput) -> String {
@@ -2217,6 +2229,26 @@ mod tests {
         assert_eq!(
             data["state_loss_recovery"]["replacement"]["lease_id"],
             "lease-new"
+        );
+    }
+
+    #[test]
+    fn ensure_or_tunnel_failure_report_retains_completed_state_loss_recovery() {
+        let envelope = parse_envelope(r#"{"success":true,"data":{"recovered_lease_id":"lease-old","recorded_dead_pid":42,"recorded_endpoint":"127.0.0.1:7421","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/snapshot","ownership_proof":[],"retry_guidance":"retry","replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state","lease_id":"lease-new"}}}"#).expect("envelope");
+        let recovery = decode_state_loss_recovery(envelope.data).expect("recovery");
+        let (mut report, _) = failed_connect(
+            "runner",
+            std::path::PathBuf::from("/session"),
+            RunnerFailureKind::TunnelFailure,
+            "tunnel failed".to_string(),
+        );
+        attach_state_loss_recovery(&mut report, Some(recovery));
+        assert_eq!(
+            report
+                .state_loss_recovery
+                .as_ref()
+                .map(|value| value.replacement.lease_id.as_str()),
+            Some("lease-new")
         );
     }
 

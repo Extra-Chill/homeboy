@@ -653,6 +653,98 @@ fn state_loss_recovery_requires_a_concrete_unreachable_recorded_endpoint() {
 }
 
 #[test]
+fn state_loss_receipt_survives_start_failure_and_replay_starts_once() {
+    with_isolated_home(|_| {
+        let receipt_path = crate::core::paths::daemon_state_loss_recovery_receipt_file("lease-old")
+            .expect("receipt path");
+        let job_id = uuid::Uuid::new_v4();
+        let mut receipt = super::StateLossRecoveryReceipt {
+            lease_id: "lease-old".to_string(),
+            recorded_pid: 4242,
+            recorded_endpoint: "127.0.0.1:7421".to_string(),
+            affected_job_ids: vec![job_id],
+            evidence_snapshot_path: "/evidence/jobs.snapshot".to_string(),
+            ownership_proof: vec!["owner lock acquired".to_string()],
+            phase: super::StateLossRecoveryPhase::Reconciled,
+            replacement: None,
+        };
+        super::write_state_loss_receipt(&receipt_path, &receipt).expect("persist receipt");
+        let error = super::complete_state_loss_replacement(&mut receipt, &receipt_path, || {
+            Err(crate::core::Error::internal_unexpected(
+                "replacement failed",
+            ))
+        })
+        .expect_err("failed replacement preserves receipt");
+        assert_eq!(error.details["state_loss_recovery"]["phase"], "reconciled");
+        let durable = super::read_state_loss_receipt(&receipt_path)
+            .expect("read receipt")
+            .expect("receipt");
+        assert_eq!(durable.affected_job_ids, vec![job_id]);
+        assert_eq!(durable.phase, super::StateLossRecoveryPhase::Reconciled);
+        let replay = super::complete_state_loss_replacement(&mut receipt, &receipt_path, || {
+            Ok(fake_daemon(4343, "lease-new"))
+        })
+        .expect("replay replacement");
+        assert_eq!(replay.replacement.lease_id, "lease-new");
+        let durable = super::read_state_loss_receipt(&receipt_path)
+            .expect("read receipt")
+            .expect("receipt");
+        assert_eq!(
+            durable.phase,
+            super::StateLossRecoveryPhase::ReplacementStarted
+        );
+        assert_eq!(durable.affected_job_ids, vec![job_id]);
+    });
+}
+
+#[test]
+fn state_loss_receipt_refuses_mismatched_replay_inputs() {
+    let receipt = super::StateLossRecoveryReceipt {
+        lease_id: "lease-old".to_string(),
+        recorded_pid: 4242,
+        recorded_endpoint: "127.0.0.1:7421".to_string(),
+        affected_job_ids: Vec::new(),
+        evidence_snapshot_path: "/evidence/jobs.snapshot".to_string(),
+        ownership_proof: Vec::new(),
+        phase: super::StateLossRecoveryPhase::Reconciled,
+        replacement: None,
+    };
+    let endpoint = "127.0.0.1:7422".parse().expect("endpoint");
+    assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_err());
+}
+
+#[test]
+fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let endpoint = listener.local_addr().expect("endpoint");
+    drop(listener);
+    let status = leaseless_status(0);
+    assert!(
+        super::validate_state_loss_preconditions("lease-old", 4242, endpoint, &status, None)
+            .is_err()
+    );
+    let receipt = super::StateLossRecoveryReceipt {
+        lease_id: "lease-old".to_string(),
+        recorded_pid: 4242,
+        recorded_endpoint: endpoint.to_string(),
+        affected_job_ids: Vec::new(),
+        evidence_snapshot_path: "/evidence/jobs.snapshot".to_string(),
+        ownership_proof: Vec::new(),
+        phase: super::StateLossRecoveryPhase::Reconciled,
+        replacement: None,
+    };
+    assert!(super::validate_state_loss_preconditions(
+        "lease-old",
+        4242,
+        endpoint,
+        &status,
+        Some(&receipt),
+    )
+    .is_ok());
+    assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_ok());
+}
+
+#[test]
 fn dead_lease_reconciliation_reattaches_live_or_refuses_mismatched_daemon() {
     let live_daemon = fake_daemon(4242, "lease-dead");
     let live = reconcile_dead_lease_and_ensure_running_with_operations(

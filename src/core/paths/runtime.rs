@@ -24,6 +24,13 @@ pub fn daemon_jobs_file() -> Result<PathBuf> {
     Ok(daemon_state_dir()?.join("jobs.json"))
 }
 
+/// Exact state-loss recovery receipt keyed by the operator-supplied lease.
+pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf> {
+    Ok(daemon_state_dir()?
+        .join("state-loss-recovery")
+        .join(format!("{}.json", sanitize_path_segment(lease_id))))
+}
+
 /// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
 pub(crate) fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("runner-sessions"))
