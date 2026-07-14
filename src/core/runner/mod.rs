@@ -536,9 +536,19 @@ impl DefaultLabRunnerCandidate {
     }
 
     fn readiness(&self) -> DefaultLabRunnerReadiness {
+        // Eligibility for *default* selection is looser than
+        // `availability().accepts_jobs`: a disconnected direct-SSH runner is
+        // still a valid default target because auto-offload connects it on
+        // demand. So gate on the hard, non-connectivity reasons only
+        // (capabilities, a failed/absent active-job poll, and capacity), and
+        // score connectivity below rather than excluding it. The one
+        // connectivity gate that IS hard is a disconnected reverse tunnel,
+        // which cannot be woken on demand — handled explicitly below.
+        let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
         if !self.capabilities_ready
             || !self.active_jobs_available
-            || !self.availability().accepts_jobs
+            || self.stale_daemon
+            || at_capacity
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,
