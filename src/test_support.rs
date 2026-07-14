@@ -8,6 +8,119 @@ use tempfile::TempDir;
 static SHARED_EMPTY_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 static SHARED_COMMITTED_GIT_REPO_TEMPLATE: OnceLock<TempDir> = OnceLock::new();
 
+/// An explicit executable selection for a hermetic test command.
+///
+/// Fixture commands never resolve `homeboy` through `PATH`: integration tests
+/// select Cargo's binary and unit tests can select their current test binary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestBinary {
+    CurrentTest,
+    HomeboyFixture,
+}
+
+/// Isolated filesystem and process environment for one test.
+///
+/// Constructing this type does not mutate the parent process. Prefer
+/// [`HermeticTestContext::command`] for subprocess tests. `HomeGuard` exists
+/// only for legacy in-process tests whose dependencies still read environment
+/// variables directly.
+pub struct HermeticTestContext {
+    root: TempDir,
+    runtime: TempDir,
+    invocation_runtime: TempDir,
+}
+
+impl HermeticTestContext {
+    pub fn new() -> Self {
+        let context = Self {
+            root: exec_capable_tempdir(),
+            runtime: exec_capable_tempdir(),
+            invocation_runtime: short_invocation_tempdir(),
+        };
+        for path in [
+            context.root().join(".config"),
+            context.data_dir(),
+            context.artifact_dir(),
+            context.temp_dir(),
+            context.daemon_dir(),
+            context.runner_dir(),
+        ] {
+            fs::create_dir_all(path).expect("create hermetic test path");
+        }
+        context
+    }
+
+    pub fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    pub fn home(&self) -> &Path {
+        self.root()
+    }
+
+    pub fn config_dir(&self) -> PathBuf {
+        self.home().join(".config/homeboy")
+    }
+
+    pub fn data_dir(&self) -> PathBuf {
+        self.root().join("data/homeboy")
+    }
+
+    pub fn artifact_dir(&self) -> PathBuf {
+        self.root().join("artifacts")
+    }
+
+    pub fn runtime_dir(&self) -> &Path {
+        self.runtime.path()
+    }
+
+    pub fn temp_dir(&self) -> PathBuf {
+        self.root().join("tmp")
+    }
+
+    pub fn daemon_dir(&self) -> PathBuf {
+        self.config_dir().join("daemon")
+    }
+
+    pub fn runner_dir(&self) -> PathBuf {
+        self.config_dir().join("runners")
+    }
+
+    pub fn binary_path(&self, binary: TestBinary) -> PathBuf {
+        match binary {
+            TestBinary::CurrentTest => std::env::current_exe().expect("current test executable"),
+            TestBinary::HomeboyFixture => PathBuf::from(
+                std::env::var_os("CARGO_BIN_EXE_homeboy")
+                    .expect("CARGO_BIN_EXE_homeboy fixture binary"),
+            ),
+        }
+    }
+
+    /// Build a command whose Homeboy state is wholly owned by this context.
+    pub fn command(&self, binary: TestBinary) -> Command {
+        let mut command = Command::new(self.binary_path(binary));
+        command
+            .env("HOME", self.home())
+            .env("XDG_CONFIG_HOME", self.root().join(".config"))
+            .env("XDG_DATA_HOME", self.root().join("data"))
+            .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
+            .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
+            .env("TMPDIR", self.temp_dir())
+            .env(
+                crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
+                self.invocation_runtime.path(),
+            )
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1");
+        command
+    }
+}
+
+impl Default for HermeticTestContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) struct HomeGuard {
     prior: Option<String>,
     prior_xdg_data_home: Option<String>,
@@ -15,13 +128,7 @@ pub(crate) struct HomeGuard {
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
-    dir: TempDir,
-    _runtime_dir: TempDir,
-    /// Held alongside `dir` so the short invocation runtime tempdir is
-    /// dropped only after the test completes. Distinct from `dir` so the
-    /// invocation root can live on a short path (e.g. `/tmp/hb-XXXX`)
-    /// regardless of where `$TMPDIR` lands.
-    _inv_dir: Option<TempDir>,
+    context: HermeticTestContext,
     _guard: MutexGuard<'static, ()>,
 }
 
@@ -75,8 +182,7 @@ impl AuditHomeGuard {
 impl HomeGuard {
     pub(crate) fn new() -> Self {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-        crate::core::defaults::reset_config_cache_for_test();
-        crate::commands::utils::entity_suggest::reset_entity_suggestion_cache_for_test();
+        reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
@@ -90,23 +196,23 @@ impl HomeGuard {
         // failing every capability-script test with exit 126 (#6760). Anchor
         // it (and the runtime tmpdir, which also hosts executables) on an
         // exec-capable root.
-        let dir = exec_capable_tempdir();
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
+        let context = HermeticTestContext::new();
+        std::env::set_var("HOME", context.home());
+        // Preserve the legacy in-process defaults while the subprocess context
+        // uses explicit paths. These tests exercise fallback path resolution.
+        std::env::set_var("XDG_DATA_HOME", context.home().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
-        let runtime_dir = exec_capable_tempdir();
-        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", runtime_dir.path());
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
         crate::core::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
         // and from the home tempdir (which itself can already live on a long
         // path on macOS, e.g. `/var/folders/<14>/T/.tmpXXXXXX/...`). Using
         // `/tmp` directly keeps tests within the platform `sockaddr_un`
         // budget regardless of host configuration.
-        let inv_dir = short_invocation_tempdir();
         std::env::set_var(
             crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
-            inv_dir.path(),
+            context.invocation_runtime.path(),
         );
         Self {
             prior,
@@ -115,9 +221,7 @@ impl HomeGuard {
             prior_runtime_tmpdir,
             prior_invocation_runtime,
             prior_no_update_check,
-            dir,
-            _runtime_dir: runtime_dir,
-            _inv_dir: Some(inv_dir),
+            context,
             _guard: guard,
         }
     }
@@ -227,7 +331,7 @@ pub(crate) fn exec_capable_tempdir() -> TempDir {
     #[cfg(unix)]
     {
         let mut roots: Vec<PathBuf> = Vec::new();
-        let mut push = |path: PathBuf, roots: &mut Vec<PathBuf>| {
+        let push = |path: PathBuf, roots: &mut Vec<PathBuf>| {
             if path.is_dir() && !roots.contains(&path) {
                 roots.push(path);
             }
@@ -286,20 +390,28 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", value),
             None => std::env::remove_var("HOMEBOY_NO_UPDATE_CHECK"),
         }
-        crate::core::defaults::reset_config_cache_for_test();
-        crate::commands::utils::entity_suggest::reset_entity_suggestion_cache_for_test();
+        reset_cached_test_state();
     }
 }
 
 pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     let home = HomeGuard::new();
-    body(&home.dir)
+    body(&home.context.root)
 }
 
 pub(crate) fn with_isolated_audit_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     let guard = AuditHomeGuard::new();
-    body(&guard.home.dir)
+    body(&guard.home.context.root)
 }
+
+#[cfg(test)]
+fn reset_cached_test_state() {
+    crate::core::defaults::reset_config_cache_for_test();
+    crate::commands::utils::entity_suggest::reset_entity_suggestion_cache_for_test();
+}
+
+#[cfg(not(test))]
+fn reset_cached_test_state() {}
 
 pub(crate) fn write_source_extension(home: &std::path::Path, id: &str, file_extension: &str) {
     let extension_dir = home.join(".config/homeboy/extensions").join(id);
