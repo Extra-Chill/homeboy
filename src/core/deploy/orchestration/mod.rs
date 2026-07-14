@@ -24,8 +24,9 @@ mod smoke_check;
 
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode};
 use preflight::{
-    check_uncommitted_changes, check_unreleased_commits, sync_components, verify_expected_version,
-    warn_non_default_branch,
+    check_uncommitted_changes, check_unreleased_commits, guard_local_build_downgrades,
+    guard_local_build_source_freshness, local_build_components, sync_components,
+    verify_expected_version, warn_non_default_branch,
 };
 use smoke_check::run_post_deploy_smoke;
 
@@ -169,13 +170,18 @@ pub(super) fn deploy_components(
         .iter()
         .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
         .collect();
-    let remote_versions =
-        if config.outdated || config.behind_upstream || config.dry_run || config.check {
-            fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
-                .versions
-        } else {
-            HashMap::new()
-        };
+    let local_build_components = local_build_components(&components, config);
+    let remote_versions = if config.outdated
+        || config.behind_upstream
+        || config.dry_run
+        || config.check
+        || !local_build_components.is_empty()
+    {
+        fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
+            .versions
+    } else {
+        HashMap::new()
+    };
 
     // Check and dry-run modes return early without building or deploying
     if config.check {
@@ -213,6 +219,8 @@ pub(super) fn deploy_components(
         sync_components(&local_build_components)?;
     }
 
+    guard_local_build_source_freshness(&local_build_components, config)?;
+
     // Warn when --head deploys from a non-default branch (safety guardrail)
     if config.head && !config.skip_build {
         warn_non_default_branch(&local_build_components, config)?;
@@ -248,6 +256,13 @@ pub(super) fn deploy_components(
         .iter()
         .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
         .collect();
+
+    guard_local_build_downgrades(
+        &local_build_components,
+        &local_versions,
+        &remote_versions,
+        config,
+    )?;
 
     // Build and validate every local artifact before the first remote write.
     let prepared_deployments = match prepare_component_deployments(
@@ -509,6 +524,8 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,

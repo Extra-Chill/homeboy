@@ -974,6 +974,8 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,

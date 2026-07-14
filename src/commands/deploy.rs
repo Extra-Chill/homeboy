@@ -72,6 +72,12 @@ pub struct DeployArgs {
     /// Skip auto-pulling latest changes before deploy
     #[arg(long)]
     pub no_pull: bool,
+    /// Deploy a local build even when its source checkout is behind its upstream
+    #[arg(long)]
+    pub allow_stale_source: bool,
+    /// Deploy a local build even when its semantic version is older than the remote
+    #[arg(long)]
+    pub allow_downgrade: bool,
     /// Deploy from current branch HEAD instead of the latest tag
     #[arg(long)]
     pub head: bool,
@@ -359,6 +365,8 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         skip_deps_hydration: crate::commands::skip_deps_hydration(),
         expected_version: args.version.clone(),
         no_pull: args.no_pull,
+        allow_stale_source: args.allow_stale_source,
+        allow_downgrade: args.allow_downgrade,
         head: args.head,
         requested_ref: args.requested_ref.clone(),
         tagged: args.tagged,

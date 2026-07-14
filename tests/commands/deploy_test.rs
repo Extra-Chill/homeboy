@@ -105,10 +105,10 @@ fn deploy_parser_accepts_exact_ref() {
 fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     let cli = Cli::try_parse_from([
         "homeboy",
+        "--skip-deps-hydration",
         "deploy",
         "project-a",
         "component-a",
-        "--skip-deps-hydration",
     ])
     .expect("--skip-deps-hydration should parse");
 
@@ -120,6 +120,44 @@ fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     crate::commands::set_skip_deps_hydration(false);
 
     assert!(config.skip_deps_hydration);
+}
+
+#[test]
+fn deploy_apply_does_not_grant_stale_or_downgrade_consent() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--apply",
+    ])
+    .expect("--apply should parse");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert!(args.apply);
+    assert!(!args.allow_stale_source);
+    assert!(!args.allow_downgrade);
+}
+
+#[test]
+fn deploy_parser_accepts_explicit_source_safety_overrides() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "project-a",
+        "component-a",
+        "--allow-stale-source",
+        "--allow-downgrade",
+    ])
+    .expect("source-safety overrides should parse");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert!(args.allow_stale_source);
+    assert!(args.allow_downgrade);
 }
 
 #[test]
@@ -251,6 +289,8 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         keep_deps: false,
         version: None,
         no_pull: false,
+        allow_stale_source: false,
+        allow_downgrade: false,
         head: false,
         requested_ref: None,
         tagged: false,
