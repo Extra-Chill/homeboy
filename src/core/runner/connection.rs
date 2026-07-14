@@ -1492,12 +1492,19 @@ mod remote_daemon {
         let proven_dead = status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
             && lease_id.is_some()
             && pid.is_some();
+        let leaseless_reconciliation_available = status.active_jobs > 0
+            && matches!(
+                status.stale_reason_code,
+                Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
+            );
         let mut ownership_evidence = if proven_dead {
             Some(format!(
                 "remote daemon status over SSH proved PID {} is dead for lease `{}`",
                 pid.expect("proven dead PID"),
                 lease_id.as_deref().expect("proven dead lease")
             ))
+        } else if leaseless_reconciliation_available {
+            Some("active durable jobs have missing or corrupt daemon lease metadata; explicit reconciliation will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
         } else {
             Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
         };
@@ -1513,13 +1520,20 @@ mod remote_daemon {
                 ownership_evidence.unwrap_or_default()
             ));
         }
-        let adoption_command = proven_dead.then(|| {
-            format!(
+        let adoption_command = if proven_dead {
+            Some(format!(
                 "homeboy runner connect {} --adopt-orphan-lease {} --confirm-pid-dead",
                 shell::quote_arg(runner_id),
                 shell::quote_arg(lease_id.as_deref().expect("proven dead lease"))
-            )
-        });
+            ))
+        } else if leaseless_reconciliation_available {
+            Some(format!(
+                "homeboy runner connect {} --reconcile-leaseless-orphans --confirm-no-daemon-owner",
+                shell::quote_arg(runner_id),
+            ))
+        } else {
+            None
+        };
         DaemonFreshnessReport {
             fresh: status.fresh,
             stale_reason_code: status.stale_reason_code,
@@ -2439,6 +2453,43 @@ mod tests {
             Some(crate::core::daemon::DaemonRecoveryEvidence::Unavailable)
         );
         assert!(recovery.adoption_command.is_none());
+    }
+
+    #[test]
+    fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliation() {
+        for reason in [
+            DaemonStaleReasonCode::LeaseMissing,
+            DaemonStaleReasonCode::LeaseCorrupt,
+        ] {
+            let mut status = remote_daemon_status_for_test_with_reason(
+                false,
+                false,
+                1,
+                "legacy-lease",
+                4545,
+                Some(reason),
+            );
+            status.daemon = None;
+
+            let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+            assert_eq!(recovery.active_jobs, 1, "{reason:?}");
+            assert_eq!(
+                recovery.recovery_evidence,
+                Some(crate::core::daemon::DaemonRecoveryEvidence::Unavailable),
+                "recovery remains explicit until remote ownership probes pass ({reason:?})"
+            );
+            assert_eq!(
+                recovery.adoption_command.as_deref(),
+                Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"),
+                "{reason:?}"
+            );
+            assert!(recovery
+                .ownership_evidence
+                .as_deref()
+                .expect("recovery guidance")
+                .contains("explicit reconciliation"));
+        }
     }
 
     #[test]

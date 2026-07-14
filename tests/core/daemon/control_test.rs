@@ -66,6 +66,48 @@ fn leaseless_store_requires_missing_lease_and_no_owner_then_preserves_evidence()
 }
 
 #[test]
+fn corrupt_lease_reconciliation_terminalizes_queued_durable_agent_task_after_proof() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("agent-task.cook");
+
+        let result = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(corrupt_leaseless_status(1)),
+            || {
+                Ok(vec![
+                    "owner lock acquired".to_string(),
+                    "no process".to_string(),
+                ])
+            },
+            || {
+                let snapshot = path.with_extension("corrupt-lease.snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || Ok(fake_daemon(4343, "fresh-lease")),
+        )
+        .expect("reconcile corrupt lease");
+
+        assert_eq!(result.affected_job_ids, vec![job.id.to_string()]);
+        let recovered = JobStore::open_without_reconciliation(&path).expect("recovered");
+        assert_eq!(
+            recovered.get(job.id).expect("job").status,
+            JobStatus::Failed
+        );
+        assert!(recovered
+            .events(job.id)
+            .expect("events")
+            .iter()
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(|data| { data["reason"] == "leaseless_orphan_reconciliation" })));
+    });
+}
+
+#[test]
 fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
     for probe in [
         || {
@@ -304,6 +346,13 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
         state_identity: "lease-missing-test-state".to_string(),
         process_candidates: Vec::new(),
     }
+}
+
+fn corrupt_leaseless_status(active_jobs: usize) -> DaemonStatus {
+    let mut status = leaseless_status(active_jobs);
+    status.freshness.stale_reason_code = Some(DaemonStaleReasonCode::LeaseCorrupt);
+    status.stale_reason = Some("invalid daemon lease".to_string());
+    status
 }
 
 #[test]
