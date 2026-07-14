@@ -612,12 +612,14 @@ where
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
     let status = status()?;
-    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
-        || status.freshness.active_jobs == 0
+    if !matches!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
+    ) || status.freshness.active_jobs == 0
     {
         return Err(Error::validation_invalid_argument(
             "job_store",
-            "lease-less reconciliation requires lease_missing with active jobs",
+            "lease-less reconciliation requires missing or corrupt lease metadata with active jobs",
             None,
             None,
         ));
@@ -731,8 +733,8 @@ pub fn adopt_orphaned_lease(
 }
 
 /// Explicitly recover legacy unowned durable jobs when the daemon lease is
-/// missing. Process and configured-listener probes are fail-closed because no
-/// lease identity exists to adopt.
+/// missing or unreadable. Process and configured-listener probes are fail-closed
+/// because no trustworthy lease identity exists to adopt.
 pub fn reconcile_leaseless_orphans(
     confirm_no_daemon_owner: bool,
     addr: &str,
@@ -748,10 +750,13 @@ pub fn reconcile_leaseless_orphans(
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
-    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing) {
+    if !matches!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
+    ) {
         return Err(Error::validation_invalid_argument(
             "reconcile_leaseless_orphans",
-            "lease-less recovery requires a missing daemon lease; use exact lease recovery for recorded leases",
+            "lease-less recovery requires missing or corrupt daemon lease metadata; use exact lease recovery for recorded leases",
             None,
             None,
         ));
