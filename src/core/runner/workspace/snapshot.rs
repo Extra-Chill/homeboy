@@ -15,6 +15,8 @@ use super::util::{
     tar_exclude_args,
 };
 
+const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
+
 pub(crate) fn snapshot_identity(
     local_path: &Path,
     excludes: &[String],
@@ -90,9 +92,10 @@ fn collect_content_hash_entries(
         let entry_path = entry.path();
         let relative_path = logical.join(entry.file_name());
         let relative = relative_path.to_string_lossy().replace('\\', "/");
+        let is_runner_metadata_directory = relative == ".homeboy";
         if relative == ".git"
-            || relative == ".homeboy/runner-workspace.json"
             || is_excluded(root, &root.join(&relative_path), excludes, &[])
+            || relative == RUNNER_WORKSPACE_METADATA_FILE
         {
             continue;
         }
@@ -126,7 +129,12 @@ fn collect_content_hash_entries(
                     None,
                 ));
             }
-            entries.push((relative, "\0dir\0", mode_bits(&metadata), Vec::new()));
+            // The runner adds `.homeboy/runner-workspace.json` after transport.
+            // Recurse through the directory so user-owned children remain bound,
+            // but omit the transport-owned container entry and record itself.
+            if !is_runner_metadata_directory {
+                entries.push((relative, "\0dir\0", mode_bits(&metadata), Vec::new()));
+            }
             ancestors.push(canonical);
             collect_content_hash_entries(
                 root,
@@ -267,7 +275,12 @@ pub(super) fn is_excluded(
         return false;
     }
     excludes.iter().any(|pattern| {
-        pattern == rel || pattern == name || glob_match(pattern, rel) || glob_match(pattern, name)
+        let directory_pattern = pattern.trim_end_matches('/');
+        pattern == rel
+            || pattern == name
+            || directory_pattern == rel
+            || glob_match(pattern, rel)
+            || glob_match(pattern, name)
     })
 }
 
@@ -461,6 +474,25 @@ pub(crate) fn copy_snapshot_to_directory(
         excludes,
         "prepare local workspace snapshot",
     )
+}
+
+pub(crate) fn ensure_no_runner_workspace_metadata_collision(local_path: &Path) -> Result<()> {
+    let metadata_path = local_path.join(RUNNER_WORKSPACE_METADATA_FILE);
+    match fs::symlink_metadata(&metadata_path) {
+        Ok(_) => Err(Error::validation_invalid_argument(
+            "workspace",
+            "source workspace contains the reserved runner metadata path `.homeboy/runner-workspace.json`; remove or rename it before syncing",
+            Some(metadata_path.display().to_string()),
+            Some(vec![
+                "Remove or rename the source file before syncing; Homeboy writes this path only after runner materialization.".to_string(),
+            ]),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some("inspect reserved runner metadata path".to_string()),
+        )),
+    }
 }
 
 fn materialize_snapshot_piped(
