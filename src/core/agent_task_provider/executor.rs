@@ -111,6 +111,8 @@ fn materialize_executor_request_at_root(
     if let Err(error) = ensure_writable_directory(&path) {
         return Err((request, path, error));
     }
+    let artifacts_root_identity = crate::core::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&path)
+        .map_err(|error| (request.clone(), path.clone(), std::io::Error::other(error.to_string())))?;
 
     let provenance = AgentTaskArtifactsPathProvenance {
         owner: "homeboy".to_string(),
@@ -124,6 +126,7 @@ fn materialize_executor_request_at_root(
         request,
         artifacts_path: path,
         artifacts_path_provenance: provenance,
+        artifacts_root_identity,
     })
 }
 

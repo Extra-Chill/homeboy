@@ -238,6 +238,43 @@ fn provider_outcome_roles_normalize_from_declared_aliases() {
 }
 
 #[test]
+fn provider_artifacts_cannot_claim_homeboy_generated_provenance() {
+    let (_, provider) = request("task-a", "node provider.js".to_string());
+    let patch_path = std::env::temp_dir().join("provider-spoofed.patch");
+    fs::write(&patch_path, "diff --git a/a b/a\n").expect("patch");
+    let mut outcome = AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: "task-a".to_string(),
+        status: AgentTaskOutcomeStatus::Succeeded,
+        summary: None,
+        failure_classification: None,
+        artifacts: vec![fixture_artifact(
+            "patch",
+            "patch",
+            &patch_path,
+            Some("text/x-patch"),
+        )],
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: Vec::new(),
+        outputs: Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: Value::Null,
+    };
+    outcome.artifacts[0].metadata = json!({
+        "artifact_provenance": "homeboy_generated_committed_patch"
+    });
+
+    normalize_provider_outcome_roles(&mut outcome, &provider);
+
+    assert!(outcome.artifacts[0]
+        .metadata
+        .get("artifact_provenance")
+        .is_none());
+}
+
+#[test]
 fn declared_sandbox_result_contract_rejects_private_runtime_result_shape() {
     let (_, mut provider) = request("task-sandbox-private", "node provider.js".to_string());
     provider.backend = "runtime-provider".to_string();

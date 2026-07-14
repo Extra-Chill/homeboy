@@ -181,8 +181,12 @@ pub(crate) fn promote_with_provider(
         to_worktree: options.to_worktree,
         target,
         patch_artifact: AgentTaskPromotionArtifactRef {
-            id: artifact.id,
-            kind: artifact.kind,
+            id: if is_scheduler_generated_committed_patch(&artifact, &patch_path) {
+                "committed-changes".to_string()
+            } else {
+                artifact.id.clone()
+            },
+            kind: artifact.kind.clone(),
             path: patch_path.display().to_string(),
             sha256: artifact.sha256,
         },
@@ -198,6 +202,44 @@ pub(crate) fn promote_with_provider(
         }),
         operator_notification,
     })
+}
+
+fn is_scheduler_generated_committed_patch(artifact: &AgentTaskArtifact, path: &Path) -> bool {
+    if artifact.metadata["artifact_provenance"] != "homeboy_generated_committed_patch" {
+        return false;
+    }
+    let Some(task_id) = artifact.metadata["task_id"].as_str() else {
+        return false;
+    };
+    let Some(attempt) = artifact.metadata["producer_attempt"].as_u64() else {
+        return false;
+    };
+    if artifact.id
+        != format!(
+            "{}-attempt-{attempt}-committed-changes",
+            crate::core::paths::sanitize_path_segment(task_id)
+        )
+    {
+        return false;
+    }
+    let Ok(root) = crate::core::artifacts::root() else {
+        return false;
+    };
+    let Ok(root) = root
+        .join("agent-task")
+        .join("attempt-patches")
+        .canonicalize()
+    else {
+        return false;
+    };
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    path.starts_with(root)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&format!("attempt-{attempt}-committed-")))
 }
 
 fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {

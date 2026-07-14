@@ -3,10 +3,10 @@
 
 use super::*;
 use crate::core::agent_task::{
-    AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
-    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
-    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
+    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
+    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -880,6 +880,185 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
         assert_eq!(loaded.state, AgentTaskRunState::Running);
         assert_eq!(observation.metadata_json["lab"]["remote_job_id"], "job-123");
         assert!(observation.metadata_json.get("agent_task_run").is_some());
+    });
+}
+
+#[test]
+fn terminal_executor_artifacts_are_projected_under_logical_ids() {
+    with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("executor artifact root");
+        let patch = root.path().join("patch.diff");
+        std::fs::write(&patch, "patch bytes").expect("write patch");
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some(patch.display().to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(11),
+            sha256: Some(crate::core::artifact_metadata::sha256_file(&patch).expect("sha")),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        });
+        submit_plan(&plan, Some("projection-parity")).expect("submit");
+        record_run_aggregate("projection-parity", &plan, &aggregate).expect("record aggregate");
+
+        let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
+        let artifact = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            "projection-parity",
+            "patch",
+        )
+        .expect("resolve logical patch id");
+        assert_eq!(artifact.run_id, "projection-parity");
+        assert_eq!(artifact.kind, "patch");
+        assert_eq!(
+            std::fs::read(&artifact.path).expect("projected bytes"),
+            b"patch bytes"
+        );
+        let fetched = crate::core::observation::runs_service::copy_local_file_artifact(
+            crate::core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-parity",
+                "patch",
+            )
+            .expect("resolve runs artifact token"),
+            Some(root.path().join("retrieved.patch")),
+        )
+        .expect("retrieve projected artifact");
+        assert_eq!(
+            std::fs::read(fetched.output_path).expect("retrieved bytes"),
+            b"patch bytes"
+        );
+    });
+}
+
+#[test]
+fn controller_projects_runner_artifact_aliases_with_encoded_retrieval_tokens() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts = vec![
+            AgentTaskArtifact {
+                schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("/runner/private/one.patch".to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(3),
+                sha256: Some("one".to_string()),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            },
+            AgentTaskArtifact {
+                schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "report".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("/runner/private/two.json".to_string()),
+                url: None,
+                mime: Some("application/json".to_string()),
+                size_bytes: Some(3),
+                sha256: Some("two".to_string()),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            },
+        ];
+        let submitted = submit_plan(&plan, Some("projection/run with space")).expect("submit");
+        record_runner_job_identity(&submitted.run_id, "runner/a:lab", "job-1")
+            .expect("runner identity");
+        record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("controller projection");
+
+        let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
+        let patch = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            &submitted.run_id,
+            "patch",
+        )
+        .expect("patch alias");
+        let report = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            &submitted.run_id,
+            "task-a-patch",
+        )
+        .expect("duplicate alias");
+        assert_eq!(patch.artifact_type, "remote_file");
+        assert_eq!(
+            patch.path,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .artifacts
+                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "patch")
+        );
+        assert_eq!(
+            report.path,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .artifacts
+                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "task-a-patch")
+        );
+    });
+}
+
+#[test]
+fn running_observation_projects_each_terminal_aggregate_state() {
+    with_isolated_home(|_| {
+        let cases = [
+            (
+                "terminal-success",
+                AgentTaskAggregateStatus::Succeeded,
+                AgentTaskOutcomeStatus::Succeeded,
+                "succeeded",
+            ),
+            (
+                "terminal-failure",
+                AgentTaskAggregateStatus::Failed,
+                AgentTaskOutcomeStatus::Failed,
+                "failed",
+            ),
+            (
+                "terminal-partial",
+                AgentTaskAggregateStatus::PartialFailure,
+                AgentTaskOutcomeStatus::Failed,
+                "partial_failure",
+            ),
+            (
+                "terminal-cancelled",
+                AgentTaskAggregateStatus::Cancelled,
+                AgentTaskOutcomeStatus::Cancelled,
+                "cancelled",
+            ),
+        ];
+        for (run_id, aggregate_status, outcome_status, terminal_state) in cases {
+            let plan = test_plan();
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.status = aggregate_status;
+            aggregate.outcomes[0].status = outcome_status;
+            submit_plan(&plan, Some(run_id)).expect("submit");
+            mark_running(run_id).expect("running");
+            record_run_aggregate(run_id, &plan, &aggregate).expect("terminal aggregate");
+
+            let observation = crate::core::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(run_id)
+                .expect("observation")
+                .expect("existing running observation transitioned");
+            assert_ne!(observation.status, "running");
+            assert_eq!(
+                observation.metadata_json["agent_task_terminal_state"],
+                terminal_state
+            );
+        }
     });
 }
 

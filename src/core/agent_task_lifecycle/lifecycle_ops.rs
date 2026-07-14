@@ -227,6 +227,22 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             );
         }
     }
+    if is_terminal_run_state(record.state)
+        && record
+            .metadata
+            .get("artifact_projection")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            != Some("complete")
+    {
+        if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
+            crate::core::agent_task_lifecycle::record_terminal_artifact_projection(
+                &mut record,
+                &aggregate,
+            )?;
+        }
+    }
     Ok(record)
 }
 
@@ -496,8 +512,14 @@ pub(crate) fn reconcile_runner_job_snapshot(
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "aggregate.json".to_string());
                 apply_aggregate_to_record(&mut reconciled, &projection_plan, &event.aggregate, aggregate_path);
-                apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
+                // The aggregate is the task result. A successful enclosing daemon
+                // job only proves transport completion, not task success.
+                record_runner_job_terminal_metadata(&mut reconciled, snapshot.job.status, &snapshot.events);
                 store::write_aggregate_and_record(&reconciled, &event.aggregate)?;
+                crate::core::agent_task_lifecycle::record_terminal_artifact_projection(
+                    &mut reconciled,
+                    &event.aggregate,
+                )?;
             } else {
                 apply_runner_job_terminal_state(&mut reconciled, snapshot.job.status, &snapshot.events);
                 store::write_record(&reconciled)?;
@@ -671,6 +693,41 @@ pub(crate) fn apply_runner_job_terminal_state(
     );
     metadata.remove("stale_running");
     metadata.remove("stale_running_reason");
+}
+
+fn record_runner_job_terminal_metadata(
+    record: &mut AgentTaskRunRecord,
+    status: crate::core::api_jobs::JobStatus,
+    events: &[crate::core::api_jobs::JobEvent],
+) {
+    let runner_identity = record
+        .runner_id()
+        .zip(record.runner_job_id())
+        .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
+    let agent_task_run_id = record.run_id.clone();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("runner_job_status".to_string(), json!(status));
+    metadata.insert("runner_job_events".to_string(), json!(events));
+    if let Some((runner_id, runner_job_id)) = runner_identity {
+        metadata.insert(
+            "runner_execution_record".to_string(),
+            serde_json::to_value(
+                crate::core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+                    &runner_job_id,
+                    &runner_id,
+                    "daemon",
+                    if status == crate::core::api_jobs::JobStatus::Succeeded {
+                        0
+                    } else {
+                        1
+                    },
+                )
+                .with_job_id(&runner_job_id)
+                .with_agent_task_run_id(agent_task_run_id),
+            )
+            .unwrap_or(Value::Null),
+        );
+    }
 }
 
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {

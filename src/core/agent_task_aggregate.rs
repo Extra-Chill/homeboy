@@ -407,7 +407,9 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
 }
 
 fn is_apply_artifact(artifact: &AgentTaskArtifact) -> bool {
-    is_apply_kind_artifact(artifact) && artifact_has_nonzero_size(artifact)
+    !artifact_flag(artifact, "review_only")
+        && is_apply_kind_artifact(artifact)
+        && artifact_has_nonzero_size(artifact)
 }
 
 fn is_apply_kind_artifact(artifact: &AgentTaskArtifact) -> bool {
@@ -434,7 +436,9 @@ fn empty_or_unknown_patch_reason(outcome: &AgentTaskOutcome) -> Option<String> {
     let patch_artifacts: Vec<&AgentTaskArtifact> = outcome
         .artifacts
         .iter()
-        .filter(|artifact| is_apply_kind_artifact(artifact))
+        .filter(|artifact| {
+            !artifact_flag(artifact, "review_only") && is_apply_kind_artifact(artifact)
+        })
         .collect();
     if patch_artifacts.is_empty() {
         return None;
@@ -625,6 +629,22 @@ mod tests {
             report.apply_candidates[0].artifact_ids,
             vec!["sample-patch"]
         );
+    }
+
+    #[test]
+    fn aggregate_outcomes_keeps_review_only_patch_visible_without_promoting_it() {
+        let mut patch = artifact("external-patch", "patch", json!({ "review_only": true }));
+        patch.size_bytes = Some(128);
+
+        let report = aggregate_agent_task_outcomes(&[outcome(
+            "review-only-patch",
+            AgentTaskOutcomeStatus::Succeeded,
+            vec![patch],
+        )]);
+
+        assert!(report.apply_candidates.is_empty());
+        assert_eq!(report.artifact_inventory[0].artifact_id, "external-patch");
+        assert_eq!(report.summary.review_candidates, 1);
     }
 
     #[test]

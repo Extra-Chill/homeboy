@@ -149,6 +149,9 @@ pub struct AgentTaskExecutorRequest {
     pub request: AgentTaskRequest,
     pub artifacts_path: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
+    #[serde(skip)]
+    pub(crate) artifacts_root_identity:
+        crate::core::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
