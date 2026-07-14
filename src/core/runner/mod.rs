@@ -126,6 +126,8 @@ pub use lab::{
     execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
 };
+#[cfg(test)]
+pub(crate) use lab_env::build_lab_offload_env;
 pub use offload_changed_since::{
     lab_offload_changed_since_ref, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since,
@@ -153,6 +155,8 @@ pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::reap_run_workspace;
+#[cfg(test)]
+pub(crate) use workspace::verify_lab_workspace;
 pub use workspace::{
     list_workspaces, plan_workspace_pull, prune_workspaces, pull_workspace, sync_workspace,
     workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
@@ -163,6 +167,9 @@ pub use workspace::{
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+};
+pub(crate) use workspace::{
+    verify_lab_workspace_from_env, workspace_content_hash, VerifiedLabWorkspaceProvenance,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -27,7 +27,7 @@ pub(super) fn forward_release_ci_env(env: &mut HashMap<String, String>) {
     }
 }
 
-pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
+pub(crate) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap<String, String> {
     HashMap::from([(
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(lab_metadata).unwrap_or_default(),

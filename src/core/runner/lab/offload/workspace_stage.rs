@@ -295,6 +295,9 @@ fn prepare_lab_offload_workspace_stage_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
+    // The effective workspace filters define the bytes shipped to Lab and are
+    // carried to the runner for deterministic post-materialization verification.
+    source_snapshot.sync_excludes = synced.excludes.clone();
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     if contract.routing_policy.requires_extension_parity {

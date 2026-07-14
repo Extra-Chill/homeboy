@@ -76,7 +76,6 @@ fn run_trace_workflow_with_component_script(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
-    let evidence = canonicality.metadata(args.canonical_policy);
     let (mut toolchain, components) = trace_provenance(None, &component_path, &args)?;
     mark_non_canonical(
         &mut toolchain,
@@ -112,6 +111,10 @@ fn run_trace_workflow_with_component_script(
         cleanup_trace_overlays(&applied_overlays)?
     }
     let script_output = script_output?;
+    let final_canonicality = evaluate_trace_canonicality(None, component, &args)?;
+    let canonicality_changed =
+        args.canonical_policy.refuses_non_canonical() && !final_canonicality.is_canonical();
+    let evidence = final_canonicality.metadata(args.canonical_policy);
     let preview = finish_trace_public_preview(preview_session, run_dir)?;
     let results_path = run_dir.step_file(run_dir::files::TRACE_RESULTS);
     let mut results = if results_path.exists() {
@@ -133,17 +136,21 @@ fn run_trace_workflow_with_component_script(
         super::super::assertions::apply_temporal_assertions(parsed);
         persist_trace_results(&results_path, parsed)?;
     }
-    let status = results
-        .as_ref()
-        .map(|r| r.status.as_str().to_string())
-        .unwrap_or_else(|| {
-            if script_output.success {
-                "pass"
-            } else {
-                "error"
-            }
-            .to_string()
-        });
+    let status = if canonicality_changed {
+        "error".to_string()
+    } else {
+        results
+            .as_ref()
+            .map(|r| r.status.as_str().to_string())
+            .unwrap_or_else(|| {
+                if script_output.success {
+                    "pass"
+                } else {
+                    "error"
+                }
+                .to_string()
+            })
+    };
     let exit_code = if script_output.success {
         if status == "pass" {
             0
@@ -223,7 +230,6 @@ pub(super) fn run_trace_workflow_with_context(
             canonicality.metadata(TraceCanonicalPolicy::Canonical),
         ));
     }
-    let evidence = canonicality.metadata(args.canonical_policy);
     let (toolchain, components) = trace_provenance(execution_context, &component_path, &args)?;
     let _overlay_locks = if args.overlays.is_empty() {
         None
@@ -269,6 +275,14 @@ pub(super) fn run_trace_workflow_with_context(
         cleanup_trace_overlays(&applied_overlays)?
     }
     let preview = finish_trace_public_preview(preview_session, run_dir)?;
+    // A Lab snapshot is verified again after the workload. This is structural
+    // provenance, not a security boundary: a same-user process can construct
+    // both Git and envelope claims, while the independently recomputed bytes
+    // prevent a changed materialized workspace from retaining canonical status.
+    let final_canonicality = evaluate_trace_canonicality(execution_context, component, &args)?;
+    let canonicality_changed =
+        args.canonical_policy.refuses_non_canonical() && !final_canonicality.is_canonical();
+    let evidence = final_canonicality.metadata(args.canonical_policy);
     let results_path = run_dir.step_file(run_dir::files::TRACE_RESULTS);
     let mut results = if results_path.exists() {
         let mut parsed = parse_trace_results_file(&results_path)?;
@@ -294,17 +308,21 @@ pub(super) fn run_trace_workflow_with_context(
         persist_trace_results(&results_path, parsed)?;
     }
 
-    let status = results
-        .as_ref()
-        .map(|r| r.status.as_str().to_string())
-        .unwrap_or_else(|| {
-            if runner_output.success {
-                "pass"
-            } else {
-                "error"
-            }
-            .to_string()
-        });
+    let status = if canonicality_changed {
+        "error".to_string()
+    } else {
+        results
+            .as_ref()
+            .map(|r| r.status.as_str().to_string())
+            .unwrap_or_else(|| {
+                if runner_output.success {
+                    "pass"
+                } else {
+                    "error"
+                }
+                .to_string()
+            })
+    };
     let failure = (!runner_output.success && status != "pass")
         .then(|| failure_from_output(&args, &runner_output, Some(&artifact_dir), results.as_ref()));
     let exit_code = if status == "pass" {
