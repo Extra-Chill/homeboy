@@ -232,8 +232,23 @@ pub(crate) fn extension_guidance_hints(
         ),
     };
 
+    // Point at the component-owned escape hatch too: a component can supply its
+    // own command via a `scripts.<capability>` entry without linking an
+    // extension at all. Named after the capability so the hint is actionable
+    // (e.g. `scripts.build`) and independently regression-covered.
+    let scripts_hint = match capability {
+        Some(capability) => format!(
+            "Use `scripts.{}` for component-owned {} commands (no extension required): set it in the component config.",
+            capability.label().to_lowercase(),
+            capability.label().to_lowercase()
+        ),
+        None => "Use `scripts.<command>` for component-owned commands (no extension required): set it in the component config."
+            .to_string(),
+    };
+
     vec![
         link_hint,
+        scripts_hint,
         "List installed extensions: homeboy extension list".to_string(),
         format!(
             "Component config lives at ~/.config/homeboy/components/{}.json or in a portable homeboy.json discovered from the component path.",

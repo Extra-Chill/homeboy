@@ -1379,17 +1379,33 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        // The duplicate is surfaced by `resolve_duplicate_scenario_ids`, which
+        // emits the structured `duplicate_scenario_id` diagnostic naming the
+        // conflicting id, both discovered source paths, and the actionable
+        // `--path` / `--rig` remediation.
         assert!(
-            problem.contains("duplicate bench scenario id `heavy`"),
+            problem.contains("duplicate bench scenario id(s) discovered"),
             "expected duplicate-id problem, got: {}",
             problem
         );
+        assert!(
+            problem.contains("`heavy`"),
+            "problem should name the id: {problem}"
+        );
         assert!(problem.contains("tests/bench/reads/heavy.php"));
         assert!(problem.contains("tests/bench/writes/heavy.php"));
-        assert!(problem.contains("workload paths relative to the bench root"));
+        assert!(
+            problem.contains("homeboy bench --path <workspace>"),
+            "problem should offer the --path remediation: {problem}"
+        );
+        assert!(
+            problem.contains("--rig <id>"),
+            "problem should offer the --rig remediation: {problem}"
+        );
+        // `id` carries the diagnostic code, not the scenario id.
         assert_eq!(
             err.details.get("id").and_then(|v| v.as_str()),
-            Some("heavy")
+            Some("duplicate_scenario_id")
         );
     }
 
@@ -1459,7 +1475,14 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        assert!(problem.contains("duplicate bench scenario id `target`"));
+        assert!(
+            problem.contains("duplicate bench scenario id(s) discovered"),
+            "expected duplicate-id problem, got: {problem}"
+        );
+        assert!(
+            problem.contains("`target`"),
+            "problem should name the id: {problem}"
+        );
     }
 
     #[test]
