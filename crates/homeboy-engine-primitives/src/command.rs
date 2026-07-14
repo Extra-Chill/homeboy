@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::core::error::{Error, Result};
+use homeboy_error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
