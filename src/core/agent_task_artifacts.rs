@@ -8,10 +8,11 @@ use crate::core::agent_task::AgentTaskTypedArtifact;
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskArtifactLineage, AgentTaskArtifactRunBinding,
 };
+use crate::core::artifact_manifest::normalize_relative_artifact_path;
 
 pub(crate) fn reviewer_facing_artifact(artifact: &AgentTaskArtifact) -> AgentTaskArtifact {
     let mut artifact = artifact.clone();
-    artifact.path = None;
+    artifact.path = reviewer_facing_path(artifact.path.as_deref());
     artifact
 }
 
@@ -54,13 +55,17 @@ pub(crate) fn reviewer_facing_typed_artifact(
 pub(crate) fn reviewer_facing_binding(
     mut binding: AgentTaskArtifactRunBinding,
 ) -> AgentTaskArtifactRunBinding {
-    binding.path = None;
+    binding.path = reviewer_facing_path(binding.path.as_deref());
     binding
 }
 
 fn reviewer_facing_lineage(mut lineage: AgentTaskArtifactLineage) -> AgentTaskArtifactLineage {
-    lineage.path = None;
+    lineage.path = reviewer_facing_path(lineage.path.as_deref());
     lineage
+}
+
+fn reviewer_facing_path(path: Option<&str>) -> Option<String> {
+    path.and_then(|path| normalize_relative_artifact_path(path).ok())
 }
 
 #[cfg(test)]
@@ -68,7 +73,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portable_artifact_projection_omits_operator_local_path() {
+    fn artifact_projection_preserves_safe_relative_path() {
         let artifact = AgentTaskArtifact {
             schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "patch".to_string(),
@@ -77,7 +82,7 @@ mod tests {
             label: None,
             role: None,
             semantic_key: None,
-            path: Some("/private/operator/patch.diff".to_string()),
+            path: Some("artifacts/patch.diff".to_string()),
             url: Some(
                 "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch".to_string(),
             ),
@@ -86,11 +91,11 @@ mod tests {
             sha256: None,
             metadata: serde_json::Value::Null,
         };
-        assert_eq!(reviewer_facing_artifact(&artifact).path, None);
         assert_eq!(
-            artifact.path.as_deref(),
-            Some("/private/operator/patch.diff")
+            reviewer_facing_artifact(&artifact).path.as_deref(),
+            Some("artifacts/patch.diff")
         );
+        assert_eq!(artifact.path.as_deref(), Some("artifacts/patch.diff"));
     }
 
     #[test]
@@ -118,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_artifact_projection_omits_embedded_portable_path() {
+    fn typed_artifact_projection_preserves_safe_embedded_path() {
         let artifact = AgentTaskArtifact {
             schema: "homeboy/agent-task-artifact/v1".to_string(),
             id: "patch".to_string(),
@@ -127,7 +132,7 @@ mod tests {
             label: None,
             role: None,
             semantic_key: None,
-            path: Some("/private/operator/patch.diff".to_string()),
+            path: Some("artifacts\\patch.diff".to_string()),
             url: Some(
                 "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch".to_string(),
             ),
@@ -149,8 +154,52 @@ mod tests {
                 .artifact
                 .unwrap()
                 .path,
-            None
+            Some("artifacts/patch.diff".to_string())
         );
         assert_eq!(typed.artifact.unwrap().path, artifact.path);
+    }
+
+    #[test]
+    fn projection_clears_unsafe_paths_in_artifacts_bindings_and_lineage() {
+        let artifact = AgentTaskArtifact {
+            schema: "homeboy/agent-task-artifact/v1".to_string(),
+            id: "report".to_string(),
+            kind: "report".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("C:\\controller\\report.json".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: None,
+            sha256: None,
+            metadata: serde_json::Value::Null,
+        };
+        let binding = AgentTaskArtifactRunBinding {
+            task_id: "task".to_string(),
+            run_id: "run".to_string(),
+            artifact_id: "report".to_string(),
+            kind: "report".to_string(),
+            name: None,
+            path: Some("artifacts/../report.json".to_string()),
+            url: None,
+            sha256: None,
+        };
+        let lineage = AgentTaskArtifactLineage {
+            task_id: "task".to_string(),
+            name: "report".to_string(),
+            kind: "report".to_string(),
+            schema: None,
+            artifact_id: Some("report".to_string()),
+            path: Some("artifacts/.git/config".to_string()),
+            url: None,
+            sha256: None,
+            payload: serde_json::Value::Null,
+        };
+
+        assert_eq!(reviewer_facing_artifact(&artifact).path, None);
+        assert_eq!(reviewer_facing_binding(binding).path, None);
+        assert_eq!(reviewer_facing_lineage(lineage).path, None);
     }
 }
