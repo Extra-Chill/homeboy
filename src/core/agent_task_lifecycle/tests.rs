@@ -79,6 +79,31 @@ fn submit_plan_persists_queued_status() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn submit_plan_persists_owner_only_plan_file_before_observation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("private-plan")).expect("submitted");
+
+        assert_eq!(
+            std::fs::metadata(&record.plan_path)
+                .expect("plan metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            status(&record.run_id)
+                .expect("observation record")
+                .plan_path,
+            record.plan_path
+        );
+    });
+}
+
 #[test]
 fn active_pinned_run_blocks_controller_binary_replacement() {
     with_isolated_home(|_| {
@@ -262,6 +287,56 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
             "lab_workspace_stage"
         );
         assert!(record.metadata.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
+fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
+    with_isolated_home(|_| {
+        let run_id = "cook-8096-attempt-1";
+        let plan = test_plan();
+        let record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("controller attempt persisted");
+        std::fs::remove_file(&record.plan_path).expect("remove interrupted plan");
+
+        let recovered = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "dispatching",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("controller plan recovery");
+        assert_eq!(load_plan(run_id).expect("recovered plan"), plan);
+
+        std::fs::remove_file(&recovered.plan_path).expect("remove unrecoverable plan");
+        let error = record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-8096",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &[],
+        })
+        .expect_err("handoff without plan must not become running");
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+
+        let terminal = status(run_id).expect("terminal recovery record");
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            terminal.metadata["pre_execution_failure"]["phase"],
+            "lab_attempt_plan_recovery"
+        );
+        assert!(terminal.metadata.get("runner_job_id").is_none());
     });
 }
 

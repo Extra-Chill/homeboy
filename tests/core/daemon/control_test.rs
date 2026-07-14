@@ -413,6 +413,54 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
 }
 
 #[test]
+fn exact_lease_adoption_reconciles_terminal_children_idempotently() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Result,
+                None,
+                Some(serde_json::json!({ "exit_code": 0, "output": "retained" })),
+            )
+            .expect("record terminal result");
+
+        let adopt = || {
+            super::adopt_orphaned_lease_with_operations(
+                "lease-dead",
+                || Ok(fake_dead_status(fake_daemon(4242, "lease-dead"))),
+                |_| false,
+                || Ok(Some(())),
+                || {
+                    JobStore::open_without_reconciliation(&path)?
+                        .reconcile_dead_daemon_lease_jobs("lease-dead")
+                },
+                || Ok(fake_daemon(4343, "lease-replacement")),
+            )
+        };
+
+        let first = adopt().expect("terminal child permits adoption");
+        let recovered = JobStore::open_without_reconciliation(&path).expect("reopen store");
+        let event_count = recovered.events(job.id).expect("events").len();
+        let second = adopt().expect("repeat adoption is a no-op for terminal child");
+        let recovered = JobStore::open_without_reconciliation(&path).expect("reopen store");
+
+        assert_eq!(first.active_jobs_terminalized, 1);
+        assert_eq!(second.active_jobs_terminalized, 0);
+        assert_eq!(
+            recovered.get(job.id).expect("job").status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(recovered.events(job.id).expect("events").len(), event_count);
+    });
+}
+
+#[test]
 fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
     with_isolated_home(|home| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -555,6 +603,14 @@ fn dead_matching_lease_reconciles_jobs_before_starting_replacement() {
             .with_daemon_lease("lease-dead".to_string());
         let job = store.create("runner.exec");
         store.start(job.id).expect("job starts");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(serde_json::json!({ "phase": "heartbeat", "process": { "root_pid": u32::MAX } })),
+            )
+            .expect("record dead child heartbeat");
         let daemon = fake_daemon(4343, "lease-replacement");
 
         let started = reconcile_dead_lease_and_ensure_running_with_operations(
@@ -633,6 +689,14 @@ fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_on
             .with_daemon_lease("exact-lease".to_string());
         let job = store.create("runner.exec");
         store.start(job.id).expect("start");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(serde_json::json!({ "phase": "heartbeat", "process": { "root_pid": u32::MAX } })),
+            )
+            .expect("record dead child heartbeat");
         let starts = Arc::new(Mutex::new(0));
         let start_count = Arc::clone(&starts);
         let result = super::recover_missing_lease_state_with_operations(
@@ -929,32 +993,34 @@ fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
 
 #[test]
 fn dead_lease_reconciliation_reattaches_live_or_refuses_mismatched_daemon() {
-    let live_daemon = fake_daemon(4242, "lease-dead");
-    let live = reconcile_dead_lease_and_ensure_running_with_operations(
-        Duration::from_millis(50),
-        super::super::acquire_daemon_operation_lock_for_ensure,
-        "lease-dead",
-        || Ok(fake_dead_status(live_daemon.clone())),
-        |_| true,
-        || unreachable!("live daemon must not reconcile"),
-        || unreachable!("live daemon must not start replacement"),
-    )
-    .expect("live replacement from a concurrent reconnect is reattached");
-    assert_eq!(live, live_daemon);
+    with_isolated_home(|_| {
+        let live_daemon = fake_daemon(4242, "lease-dead");
+        let live = reconcile_dead_lease_and_ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            "lease-dead",
+            || Ok(fake_dead_status(live_daemon.clone())),
+            |_| true,
+            || unreachable!("live daemon must not reconcile"),
+            || unreachable!("live daemon must not start replacement"),
+        )
+        .expect("live replacement from a concurrent reconnect is reattached");
+        assert_eq!(live, live_daemon);
 
-    let mismatched = reconcile_dead_lease_and_ensure_running_with_operations(
-        Duration::from_millis(50),
-        super::super::acquire_daemon_operation_lock_for_ensure,
-        "lease-expected",
-        || Ok(fake_dead_status(fake_daemon(4242, "lease-other"))),
-        |_| false,
-        || unreachable!("mismatched lease must not reconcile"),
-        || unreachable!("mismatched lease must not start replacement"),
-    )
-    .expect_err("mismatched lease must fail closed");
-    assert!(mismatched
-        .message
-        .contains("does not match expected stale lease"));
+        let mismatched = reconcile_dead_lease_and_ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            "lease-expected",
+            || Ok(fake_dead_status(fake_daemon(4242, "lease-other"))),
+            |_| false,
+            || unreachable!("mismatched lease must not reconcile"),
+            || unreachable!("mismatched lease must not start replacement"),
+        )
+        .expect_err("mismatched lease must fail closed");
+        assert!(mismatched
+            .message
+            .contains("does not match expected stale lease"));
+    });
 }
 
 fn ensure_with_fake_operations(

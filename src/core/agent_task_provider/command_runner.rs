@@ -229,7 +229,7 @@ pub(super) fn run_materialized_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
-    let Some((program, args, cwd)) = provider_command_parts(provider) else {
+    let Some((program, args, provider_cwd)) = provider_command_parts(provider) else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -239,6 +239,17 @@ pub(super) fn run_materialized_provider_command_once(
             json!({ "provider": provider.id }),
         );
     };
+
+    // The scheduler may replace a task workspace with an isolated attempt
+    // worktree. That task root is the execution cwd; a manifest cwd is only a
+    // fallback for requests without a workspace.
+    let cwd = request
+        .request
+        .workspace
+        .root
+        .as_deref()
+        .map(PathBuf::from)
+        .or(provider_cwd);
 
     if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
     {

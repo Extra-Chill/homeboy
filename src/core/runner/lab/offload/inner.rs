@@ -797,9 +797,11 @@ pub(crate) fn run_lab_offload_inner(
         );
     }
 
-    let source_path =
-        rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
-            .unwrap_or(lab_offload_source_path(request.normalized_args)?);
+    let source_path = request
+        .source_path
+        .map(std::path::Path::to_path_buf)
+        .or(rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?)
+        .unwrap_or(lab_offload_source_path(request.normalized_args)?);
     // Begin best-effort host-level telemetry capture around the offloaded run
     // boundary (#3258). The opening snapshot of the controller host + watched
     // source/artifact dir is taken now; the closing snapshot and before/after
@@ -1222,17 +1224,16 @@ pub(crate) fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    lab_metadata["source_snapshot"] =
-        serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
-    lab_metadata["workspace_content_hash"] =
-        serde_json::json!(crate::core::runner::workspace_content_hash(
-            Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
-            &source_snapshot.sync_excludes,
-        )?);
+    attach_lab_workspace_metadata(
+        &mut lab_metadata,
+        LabWorkspaceMetadataInputs {
+            source_snapshot: &source_snapshot,
+            legacy_path_materialization_plan: &path_materialization_plan,
+            primary_synced_workspace: &synced,
+        },
+    )?;
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
-    lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(

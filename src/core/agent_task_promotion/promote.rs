@@ -153,6 +153,7 @@ pub(crate) fn promote_with_provider(
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
+            patch: Some(normalized_patch.content.clone()),
             patch_path: provider_patch_path,
             changed_files: changed_files.clone(),
             dry_run: options.dry_run,
@@ -273,6 +274,7 @@ fn promote_committed_changes(
     let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: options.to_worktree.clone(),
+        patch: Some(normalized_patch.content.clone()),
         patch_path: committed_patch.patch_path.display().to_string(),
         changed_files: normalized_patch.changed_files.clone(),
         dry_run: options.dry_run,

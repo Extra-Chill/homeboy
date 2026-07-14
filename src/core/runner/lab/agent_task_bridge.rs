@@ -30,6 +30,7 @@ use crate::core::api_jobs::JobEvent;
 #[cfg(test)]
 use crate::core::api_jobs::JobEventKind;
 use crate::core::artifact_manifest::ArtifactManifest;
+use crate::core::engine::local_files::write_file_owner_only;
 use crate::core::notification_route::NotificationRoute;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
@@ -52,7 +53,10 @@ fn materialize_inline_agent_task_tasks_arg_with(
     mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
 ) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
     let (rewritten, entries) = materialize_inline_agent_task_json_specs_in_args(args, |spec| {
-        if spec.role == "agent_task_tasks_remapped" {
+        if matches!(
+            spec.role,
+            "agent_task_tasks_remapped" | "agent_task_attempt_plan_remapped"
+        ) {
             sync(spec.spec)
         } else {
             Ok(None)
@@ -82,12 +86,16 @@ pub(super) fn sync_inline_agent_task_file(
         )
     })?;
     let plan_file = temp.path().join(spec.filename);
-    fs::write(&plan_file, spec.spec).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("write remapped agent-task plan".to_string()),
-        )
-    })?;
+    if spec.role == "agent_task_attempt_plan_remapped" {
+        write_private_remapped_agent_task_plan(&plan_file, spec.spec)?;
+    } else {
+        fs::write(&plan_file, spec.spec).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("write remapped agent-task plan".to_string()),
+            )
+        })?;
+    }
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -109,6 +117,10 @@ pub(super) fn sync_inline_agent_task_file(
     );
     let entry = workspace_mapping_entry(spec.role, &synced);
     Ok(Some((remote_spec, entry)))
+}
+
+fn write_private_remapped_agent_task_plan(path: &std::path::Path, contents: &str) -> Result<()> {
+    write_file_owner_only(path, contents, "write remapped agent-task plan")
 }
 
 pub(super) fn mirror_agent_task_run_plan_lifecycle(
@@ -1583,6 +1595,27 @@ mod tests {
         );
         assert!(!rewritten.join(" ").contains(prompt));
         assert_eq!(entry.expect("mapping entry").remote_path(), "/remote/input");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remapped_agent_task_plan_is_owner_only_before_snapshot_sync() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_file = temp.path().join("agent-task-attempt-plan.json");
+
+        write_private_remapped_agent_task_plan(&plan_file, r#"{"plan_id":"private"}"#)
+            .expect("write private plan");
+
+        assert_eq!(
+            std::fs::metadata(&plan_file)
+                .expect("plan metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]

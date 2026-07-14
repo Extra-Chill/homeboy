@@ -175,7 +175,7 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn materialized_workspace_promotion_adapter_applies_patch_and_returns_workspace() {
+fn materialized_workspace_promotion_adapter_applies_inline_patch_when_artifact_is_remote() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("create workspace");
@@ -185,19 +185,16 @@ fn materialized_workspace_promotion_adapter_applies_patch_and_returns_workspace(
     std::fs::write(workspace.join("src.txt"), "old\n").expect("write source");
     git(&workspace, &["add", "src.txt"]);
     git(&workspace, &["commit", "-m", "initial"]);
-    let patch = temp.path().join("changes.patch");
-    std::fs::write(
-        &patch,
-        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n",
-    )
-    .expect("write patch");
+    let patch =
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
     let response = super::apply_materialized_workspace_patch(
         &workspace,
         &serde_json::json!({
             "schema": AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
             "to_workspace": "homeboy@fix-7913",
-            "patch_path": patch,
+            "patch": patch,
+            "patch_path": "runner-artifact://homeboy-lab/run-1/changes.patch",
             "changed_files": ["src.txt"]
         })
         .to_string(),
@@ -691,6 +688,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
     assert_eq!(report.patch_artifact.id, "patch");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.apply_calls[0].patch.as_deref(), Some(VALID_PATCH));
     assert!(provider.apply_calls[0].dry_run);
     assert_eq!(report.command_evidence.len(), 1);
     assert!(report.deterministic_gates.is_empty());
@@ -1197,6 +1195,7 @@ fn provider_command_response_supplies_workspace_and_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: temp.path().join("changes.patch").display().to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,
@@ -1237,6 +1236,7 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,
@@ -1271,6 +1271,7 @@ fn provider_response_overflow_is_terminated_with_bounded_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,

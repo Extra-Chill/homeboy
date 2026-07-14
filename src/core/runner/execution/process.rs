@@ -222,6 +222,16 @@ pub(crate) fn prepare_runner_process(
         runner.env = runner_env.clone();
         env = runner_env;
         env.extend(request_env.clone());
+        // Stamp the dispatch-only runner-placement markers for local execs too.
+        // These are kept out of argv so nested Homeboy commands (parity preflight
+        // `extension show`, extension materialization, ready_check chains) do not
+        // re-enter routing and dispatch themselves a second time. Without them a
+        // local runner exec that carries an explicit `--placement` recursively
+        // spawns `homeboy component show` / `extension show` and the extension
+        // ready_check, saturating the host (#8115).
+        env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_PLACEMENT_RESOLVED_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
         env.extend(resolve_runner_secret_env_for_plan(
             &runner.secret_env,
             &secret_env_plan,

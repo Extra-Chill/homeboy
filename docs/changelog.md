@@ -4,6 +4,36 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.8] - 2026-07-14
+
+### Changed
+- split status command god file into focused modules (#7551)
+
+### Fixed
+- Fix private Git workspace materialization fallback
+- align bench/build diagnostic assertions with actionable contract (#7975)
+- enforce embedded docs list/resolve contract (#7607)
+
+## [0.284.7] - 2026-07-14
+
+### Changed
+- Propagate Lab workspace verification metadata
+
+### Fixed
+- mark local runner execs as placement-resolved (#8115)
+- Fix terminal child reconciliation during lease adoption
+- materialize retry git baselines
+- carry Lab promotion patch content
+- persist Lab cook attempt plan before handoff
+- Fix cook retry workspace isolation
+
+## [0.284.6] - 2026-07-14
+
+### Fixed
+- materialize retry primary checkout on Lab
+- preserve live child jobs during lease recovery
+- isolate provider rotation attempt worktrees
+
 ## [0.284.5] - 2026-07-14
 
 ### Changed

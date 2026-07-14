@@ -232,6 +232,8 @@ pub struct DaemonLeaseJobDiagnostics {
     pub matching_job_ids: Vec<Uuid>,
     pub other_lease_job_ids: Vec<Uuid>,
     pub unowned_job_ids: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_job_ids: Vec<Uuid>,
 }
 
 /// An active durable job terminalized after the daemon lease disappeared.
@@ -248,6 +250,8 @@ pub struct LeaselessOrphanJobDiagnostics {
     pub reconciled_job_ids: Vec<Uuid>,
     pub affected_jobs: Vec<LeaselessOrphanAffectedJob>,
     pub historical_lease_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_job_ids: Vec<Uuid>,
 }
 
 impl LeaselessOrphanJobDiagnostics {
@@ -265,5 +269,13 @@ impl DaemonLeaseJobDiagnostics {
     }
     pub fn unowned_count(&self) -> usize {
         self.unowned_job_ids.len()
+    }
+
+    pub fn protected_count(&self) -> usize {
+        self.protected_job_ids.len()
+    }
+
+    pub fn terminalized_count(&self) -> usize {
+        self.matching_count().saturating_sub(self.protected_count())
     }
 }

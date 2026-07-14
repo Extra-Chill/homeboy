@@ -143,6 +143,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                     },
                 },
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
+                attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
@@ -197,17 +198,28 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
         request: AgentTaskRequest,
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        std::fs::write(self.workspace.join("agent-change.txt"), "committed work\n")
+        let workspace = std::path::PathBuf::from(
+            request
+                .workspace
+                .root
+                .as_deref()
+                .expect("isolated workspace"),
+        );
+        assert_ne!(
+            workspace, self.workspace,
+            "executor must not receive the source workspace"
+        );
+        std::fs::write(workspace.join("agent-change.txt"), "committed work\n")
             .expect("write executor change");
         let status = Command::new("git")
             .args(["add", "agent-change.txt"])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .status()
             .expect("stage executor change");
         assert!(status.success());
         let status = Command::new("git")
             .args(["commit", "-m", "agent: make committed change"])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .status()
             .expect("commit executor change");
         assert!(status.success());
@@ -227,7 +239,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
                     label: None,
                     role: None,
                     semantic_key: None,
-                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    path: Some(workspace.join("plugin.php").display().to_string()),
                     url: None,
                     mime: Some("application/json".to_string()),
                     size_bytes: None,
@@ -242,7 +254,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
                     label: None,
                     role: None,
                     semantic_key: None,
-                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    path: Some(workspace.join("plugin.php").display().to_string()),
                     url: None,
                     mime: Some("text/plain".to_string()),
                     size_bytes: None,
@@ -323,6 +335,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                     },
                 },
                 attempt_run_id: None,
+                attempt_plan: None,
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
                 provider_command: Some(format!("sh {}", provider.display())),
@@ -352,7 +365,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         assert_eq!(value["status"], "green_no_finalize");
         assert_eq!(
             value["attempts"][0]["promotion"]["patch_artifact"]["id"],
-            "committed-changes"
+            "cook-fixture-component-attempt-1-committed-changes"
         );
         assert_eq!(
             value["attempts"][0]["promotion"]["changed_files"],

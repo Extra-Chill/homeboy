@@ -251,7 +251,7 @@ impl AgentTaskExecutorAdapter for ExecutorResultEvidenceFailureExecutor {
 }
 
 pub(crate) struct ExecutorInputEvidenceExecutor {
-    pub(crate) evidence_uri: String,
+    pub(crate) evidence_uris: Vec<String>,
 }
 
 impl AgentTaskExecutorAdapter for ExecutorInputEvidenceExecutor {
@@ -268,11 +268,15 @@ impl AgentTaskExecutorAdapter for ExecutorInputEvidenceExecutor {
             failure_classification: None,
             artifacts: Vec::new(),
             typed_artifacts: Vec::new(),
-            evidence_refs: vec![AgentTaskEvidenceRef {
-                kind: "executor-input".to_string(),
-                uri: self.evidence_uri.clone(),
-                label: Some("latest raw executor input".to_string()),
-            }],
+            evidence_refs: self
+                .evidence_uris
+                .iter()
+                .map(|uri| AgentTaskEvidenceRef {
+                    kind: "executor-input".to_string(),
+                    uri: uri.clone(),
+                    label: Some("latest raw executor input".to_string()),
+                })
+                .collect(),
             diagnostics: Vec::new(),
             outputs: Value::Null,
             workflow: None,

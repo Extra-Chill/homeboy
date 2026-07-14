@@ -107,6 +107,7 @@ where
                     rotation_index: 0,
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
+                    retry_attempts: Vec::new(),
                 }
             })
             .collect();
@@ -375,6 +376,9 @@ where
                             continue;
                         }
                     };
+                if let Some(root) = request.workspace.root.as_deref() {
+                    request.executor.remap_workspace_root(root);
+                }
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -406,6 +410,7 @@ where
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     candidate_artifacts: scheduled.candidate_artifacts,
+                    retry_attempts: scheduled.retry_attempts,
                     source_workspace_root,
                     _attempt_workspace: attempt_workspace.clone(),
                     run_id: self.run_id.clone(),
@@ -489,6 +494,9 @@ where
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
                         retry_budget_used += 1;
+                        let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
+                        let mut retry_attempts = running_task.retry_attempts;
+                        retry_attempts.push(retry_evidence);
                         let mut request = running_task.request;
                         request.workspace.root = running_task.source_workspace_root.clone();
                         let mut candidate_artifacts = running_task.candidate_artifacts;
@@ -516,6 +524,7 @@ where
                             rotation_index: running_task.rotation_index,
                             rotation_attempts: running_task.rotation_attempts,
                             candidate_artifacts,
+                            retry_attempts,
                         });
                         continue;
                     }
@@ -576,6 +585,7 @@ where
                                 rotation_index: running_task.rotation_index + 1,
                                 rotation_attempts,
                                 candidate_artifacts,
+                                retry_attempts: running_task.retry_attempts,
                             });
                             continue;
                         }
@@ -585,6 +595,13 @@ where
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
                     );
+                    for retry_attempt in running_task.retry_attempts {
+                        outcome.diagnostics.push(AgentTaskDiagnostic {
+                            class: "agent_task.retry_attempt".to_string(),
+                            message: "previous retry attempt failed; its diagnostics and patch evidence are retained".to_string(),
+                            data: retry_attempt,
+                        });
+                    }
                     if !running_task.rotation_attempts.is_empty() {
                         let mut rotation_attempts = running_task.rotation_attempts.clone();
                         rotation_attempts.push(AgentTaskScheduleSupport::rotation_attempt_record(
@@ -649,6 +666,8 @@ struct ScheduledTask {
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     /// Patch candidates produced by earlier retry or rotation attempts.
     candidate_artifacts: Vec<AgentTaskArtifact>,
+    /// Structured diagnostics retained from failed retries before finalization.
+    retry_attempts: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +686,8 @@ struct RunningTask {
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     candidate_artifacts: Vec<AgentTaskArtifact>,
+    /// Structured diagnostics retained from failed retries before finalization.
+    retry_attempts: Vec<serde_json::Value>,
     /// The caller-managed workspace used for preflight and as the clean base
     /// for each isolated provider dispatch.
     source_workspace_root: Option<String>,
@@ -688,6 +709,18 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+}
+
+fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
+    serde_json::json!({
+        "attempt": running.attempt,
+        "status": outcome.status,
+        "failure_classification": outcome.failure_classification,
+        "summary": outcome.summary,
+        "diagnostics": outcome.diagnostics,
+        "artifacts": outcome.artifacts,
+        "evidence_refs": outcome.evidence_refs,
+    })
 }
 
 enum SchedulerEvent {
@@ -1253,6 +1286,7 @@ mod committed_harvest_tests {
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
+            retry_attempts: Vec::new(),
             source_workspace_root: None,
             _attempt_workspace: None,
             run_id: Some("committed-harvest-test".to_string()),

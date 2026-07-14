@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::git;
 use crate::core::runner::workspace::git::{
@@ -84,7 +85,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 "remote",
                 "add",
                 "origin",
-                "https://github.example.invalid/example-org/private-source.git",
+                "https://127.0.0.1:1/example-org/private-source.git",
             ],
         );
         git(source.path(), &["commit-graph", "write", "--reachable"]);
@@ -126,7 +127,9 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Git,
-                controller_routed_git: true,
+                // The runner first attempts its normal clone. The inaccessible
+                // origin then exercises the controller bundle fallback.
+                controller_routed_git: false,
                 changed_since_base: Some(base.clone()),
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
@@ -151,6 +154,16 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             Some(output.snapshot_identity.clone())
         );
         assert_eq!(output.current_workspace.source_dirty, Some(false));
+        let provenance = output
+            .materialization_plan
+            .controller_git_bundle
+            .as_ref()
+            .expect("inaccessible origin falls back to a controller bundle");
+        assert_eq!(provenance.provenance, "controller_git_bundle");
+        assert_eq!(provenance.source_sha, head);
+        assert_eq!(provenance.cleanup_owner, "controller");
+        assert_eq!(provenance.cleanup_ttl, "PT0S");
+        assert_eq!(provenance.sha256.len(), 64);
         let remote = Path::new(&output.remote_path);
         assert_eq!(
             git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
@@ -161,7 +174,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
         // proves materialization did not fall back to a network clone.
         assert_eq!(
             git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "https://github.example.invalid/example-org/private-source.git"
+            "https://127.0.0.1:1/example-org/private-source.git"
         );
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
@@ -200,6 +213,11 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             )
             .is_err(),
             "the runner bundle must not include unrelated refs"
+        );
+        fs::write(remote.join("file.txt"), "patched\n").expect("write tracked patch");
+        assert_eq!(
+            git_output(remote, &["status", "--porcelain=v1"]).unwrap(),
+            "M file.txt"
         );
     });
 }
@@ -560,6 +578,7 @@ fn git_materialization_fetches_changed_since_base_before_checkout() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         Some("def456"),
         &[],
         false,
@@ -580,10 +599,43 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         "abc123",
         None,
         "https://github.example.invalid/example-org/private-source.git",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
     );
 
     assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
+    assert!(command.contains("shasum -a 256"));
+    assert!(command.contains("trap 'rm -rf"));
+}
+
+#[test]
+fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
+    let root = tempfile::tempdir().expect("runner root");
+    let command = git_bundle_install_command(
+        &root.path().join("workspace").display().to_string(),
+        "abc123",
+        None,
+        "https://github.example.invalid/example-org/private-source.git",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        false,
+    );
+    let mut child = Command::new("sh")
+        .args(["-c", &command])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start bundle materialization");
+    child
+        .stdin
+        .take()
+        .expect("bundle stdin")
+        .write_all(b"not a bundle")
+        .expect("write malformed bundle");
+
+    assert!(
+        !child.wait().expect("wait for materialization").success(),
+        "a digest mismatch must fail before Git can clone the transfer"
+    );
+    assert!(!root.path().join("workspace.bundle").exists());
 }
 
 #[test]
@@ -592,6 +644,7 @@ fn git_materialization_restores_workspace_owner_after_root_run() {
         "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         None,
         &[],
         false,
@@ -613,6 +666,7 @@ fn git_materialization_fetches_extra_refs_before_checkout() {
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
         None,
+        None,
         &["refs/pull/5530/head".to_string()],
         false,
     );
@@ -627,6 +681,7 @@ fn git_materialization_fetches_extra_refs_before_changed_since_sha() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         Some("def456"),
         &["refs/heads/main".to_string()],
         false,
@@ -649,6 +704,7 @@ fn git_materialization_refuses_dirty_remote_workspace_by_default() {
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
         None,
+        None,
         &[],
         false,
     );
@@ -666,6 +722,7 @@ fn git_materialization_override_is_noisy_but_allows_reset() {
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
         "https://github.com/Extra-Chill/homeboy.git",
         "abc123",
+        None,
         None,
         &[],
         true,
