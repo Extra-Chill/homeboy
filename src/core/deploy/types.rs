@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::{fs, io::Read};
+
+use sha2::{Digest, Sha256};
 
 use crate::core::artifact_inputs::ResolvedArtifactInput;
 use crate::core::component::Component;
@@ -85,6 +88,8 @@ pub struct DeployConfig {
     pub requested_ref: Option<String>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
+    /// An immutable artifact prepared by an upstream workflow.
+    pub prepared_artifact: Option<PreparedDeployArtifact>,
 }
 
 impl DeployConfig {
@@ -109,8 +114,125 @@ impl DeployConfig {
             head: true,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
         }
     }
+}
+
+/// A durable, pre-built payload supplied by an upstream workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedDeployArtifact {
+    pub component_id: String,
+    pub path: String,
+    pub durable_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub version: String,
+    pub tag: String,
+    pub source_commit: String,
+}
+
+impl PreparedDeployArtifact {
+    pub(crate) fn effective_path(&self) -> &str {
+        &self.durable_path
+    }
+
+    pub(crate) fn validate(
+        &self,
+        component_id: &str,
+        expected_version: Option<&str>,
+    ) -> Result<()> {
+        if self.component_id != component_id {
+            return Err(crate::core::error::Error::validation_invalid_argument(
+                "prepared_artifact.component_id",
+                format!(
+                    "Prepared artifact is for '{}' rather than '{}'",
+                    self.component_id, component_id
+                ),
+                None,
+                None,
+            ));
+        }
+        if let Some(expected_version) = expected_version {
+            if expected_version != self.version {
+                return Err(crate::core::error::Error::validation_invalid_argument(
+                    "prepared_artifact.version",
+                    format!(
+                        "Prepared artifact version '{}' does not match expected version '{}'",
+                        self.version, expected_version
+                    ),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        let path = Path::new(self.effective_path());
+        let metadata = fs::metadata(path).map_err(|error| {
+            crate::core::error::Error::internal_io(
+                format!(
+                    "Prepared artifact '{}' is unavailable: {}",
+                    path.display(),
+                    error
+                ),
+                Some(path.display().to_string()),
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(crate::core::error::Error::validation_invalid_argument(
+                "prepared_artifact.durable_path",
+                format!("Prepared artifact '{}' is not a file", path.display()),
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        if metadata.len() != self.size_bytes {
+            return Err(crate::core::error::Error::validation_invalid_argument(
+                "prepared_artifact.size_bytes",
+                format!(
+                    "Prepared artifact size changed: expected {}, found {}",
+                    self.size_bytes,
+                    metadata.len()
+                ),
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        let actual_sha256 = sha256_file(path)?;
+        if actual_sha256 != self.sha256 {
+            return Err(crate::core::error::Error::validation_invalid_argument(
+                "prepared_artifact.sha256",
+                format!(
+                    "Prepared artifact SHA-256 changed: expected {}, found {}",
+                    self.sha256, actual_sha256
+                ),
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        crate::core::error::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            crate::core::error::Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +240,7 @@ impl DeployConfig {
 pub enum DeployArtifactSource {
     ReleaseAsset,
     LocalBuild,
+    Prepared,
 }
 
 /// Where the payload that was deployed actually came from.
@@ -134,6 +257,8 @@ pub enum BuildSource {
     ReusedArtifact,
     /// A prebuilt release asset was downloaded instead of building locally.
     DownloadedRelease,
+    /// A durable artifact supplied by an upstream workflow.
+    PreparedArtifact,
     /// Committed source was pushed directly via the `git` deploy strategy.
     GitPush,
     /// Source files were copied directly via the `file` deploy strategy.
@@ -374,6 +499,9 @@ pub struct ComponentDeployResult {
     /// identity of the artifact that shipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_provenance: Option<BuildProvenance>,
+    /// Identity of an upstream-prepared artifact, when used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_artifact: Option<PreparedDeployArtifact>,
 }
 
 impl ComponentDeployResult {
@@ -407,6 +535,7 @@ impl ComponentDeployResult {
             source: None,
             resolution_mode: None,
             build_provenance: None,
+            prepared_artifact: None,
         }
     }
 
@@ -467,6 +596,11 @@ impl ComponentDeployResult {
 
     pub(super) fn with_artifact_source(mut self, source: DeployArtifactSource) -> Self {
         self.artifact_source = Some(source);
+        self
+    }
+
+    pub(super) fn with_prepared_artifact(mut self, artifact: PreparedDeployArtifact) -> Self {
+        self.prepared_artifact = Some(artifact);
         self
     }
 
@@ -599,7 +733,8 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
 mod tests {
     use super::{
         compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult,
-        ComponentStatus, DeployConfig, DeployResult, ReleaseState, ReleaseStateStatus,
+        ComponentStatus, DeployConfig, DeployResult, PreparedDeployArtifact, ReleaseState,
+        ReleaseStateStatus,
     };
     use crate::core::component::{Component, ScopedExtensionConfig};
     use crate::core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
@@ -976,6 +1111,51 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("configured_source_detached")));
+    }
+
+    #[test]
+    fn prepared_artifact_rejects_changed_bytes_and_version_before_deploy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("fixture.zip");
+        std::fs::write(&artifact_path, "release bytes").expect("artifact");
+        let artifact = PreparedDeployArtifact {
+            component_id: "fixture".to_string(),
+            path: artifact_path.display().to_string(),
+            durable_path: artifact_path.display().to_string(),
+            size_bytes: 13,
+            sha256: super::sha256_file(&artifact_path).expect("sha"),
+            version: "1.2.3".to_string(),
+            tag: "v1.2.3".to_string(),
+            source_commit: "0123456789abcdef".to_string(),
+        };
+
+        assert!(artifact.validate("fixture", Some("1.2.3")).is_ok());
+        assert!(artifact.validate("fixture", Some("1.2.4")).is_err());
+
+        std::fs::write(&artifact_path, "changed bytes").expect("changed artifact");
+        assert!(artifact.validate("fixture", Some("1.2.3")).is_err());
+    }
+
+    #[test]
+    fn prepared_artifact_identity_is_identical_in_each_target_result() {
+        let artifact = PreparedDeployArtifact {
+            component_id: "fixture".to_string(),
+            path: "/source/fixture.zip".to_string(),
+            durable_path: "/durable/fixture.zip".to_string(),
+            size_bytes: 12,
+            sha256: "abc123".to_string(),
+            version: "1.2.3".to_string(),
+            tag: "v1.2.3".to_string(),
+            source_commit: "0123456789abcdef".to_string(),
+        };
+        let first = deploy_result().with_prepared_artifact(artifact.clone());
+        let second = deploy_result().with_prepared_artifact(artifact);
+
+        assert_eq!(first.prepared_artifact, second.prepared_artifact);
+        assert_eq!(
+            serde_json::to_value(&first).expect("first evidence")["prepared_artifact"]["sha256"],
+            serde_json::to_value(&second).expect("second evidence")["prepared_artifact"]["sha256"],
+        );
     }
 
     fn run_git(path: &std::path::Path, args: &[&str]) {

@@ -21,10 +21,12 @@ pub use planning::{
     bucket_release_states, calculate_release_state, calculate_release_state_from_baseline,
     classify_release_state,
 };
+pub(crate) use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
     DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
-    MultiDeploySummary, ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+    MultiDeploySummary, PreparedDeployArtifact, ProjectDeployResult, ReleaseState,
+    ReleaseStateBuckets, ReleaseStateStatus,
 };
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
@@ -78,9 +80,8 @@ pub fn fetch_project_remote_versions(
 
 /// Deploy components across multiple projects.
 ///
-/// Builds each project independently. Keeping build artifacts local to each
-/// project run avoids lifecycle coupling between deploy target cleanup and
-/// later projects in the same command.
+/// Builds each project independently unless an upstream workflow supplies a
+/// prepared artifact, which is validated once and reused unchanged for every target.
 ///
 /// Unknown project IDs are skipped (not fatal) — fleet configs can
 /// accumulate stale references that shouldn't block the rest.
@@ -132,6 +133,12 @@ pub fn run_multi(
             None,
             None,
         ));
+    }
+
+    if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
+        for component_id in component_ids {
+            prepared_artifact.validate(component_id, config.expected_version.as_deref())?;
+        }
     }
 
     log_status!(
@@ -189,6 +196,7 @@ pub fn run_multi(
             head: config.head,
             requested_ref: config.requested_ref.clone(),
             tagged: config.tagged,
+            prepared_artifact: config.prepared_artifact.clone(),
         };
 
         match run_with_release_artifacts(project_id, &project_config, &mut release_artifacts) {
@@ -306,6 +314,7 @@ mod tests {
     use super::*;
     use crate::core::project::{Project, ProjectComponentAttachment};
     use crate::test_support::with_isolated_home;
+    use std::path::Path;
 
     fn deploy_config() -> DeployConfig {
         DeployConfig {
@@ -326,6 +335,7 @@ mod tests {
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
         }
     }
 
@@ -354,6 +364,39 @@ mod tests {
                     "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
                 )
             }));
+        });
+    }
+
+    #[test]
+    fn prepared_artifact_mismatch_fails_before_project_ssh_resolution() {
+        with_isolated_home(|_| {
+            project::save(&Project {
+                id: "site".to_string(),
+                ..Project::default()
+            })
+            .expect("save project");
+            let missing_path = Path::new("/definitely/missing/prepared-artifact.zip");
+            let config = DeployConfig {
+                prepared_artifact: Some(PreparedDeployArtifact {
+                    component_id: "plugin".to_string(),
+                    path: missing_path.display().to_string(),
+                    durable_path: missing_path.display().to_string(),
+                    size_bytes: 0,
+                    sha256: "not-a-real-sha".to_string(),
+                    version: "1.2.3".to_string(),
+                    tag: "v1.2.3".to_string(),
+                    source_commit: "0123456789abcdef".to_string(),
+                }),
+                ..deploy_config()
+            };
+
+            let error = run_multi(&["site".to_string()], &["plugin".to_string()], &config)
+                .expect_err("missing prepared artifact must stop before any target mutation");
+
+            assert!(
+                error.details.to_string().contains("prepared-artifact.zip"),
+                "prepared artifact validation must fail before SSH resolution: {error:?}"
+            );
         });
     }
 }

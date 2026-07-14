@@ -355,4 +355,25 @@ mod tests {
         )
         .expect("verified asset");
     }
+
+    #[test]
+    fn publishing_uses_durable_release_artifact_after_source_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let durable = dir.path().join("durable.zip");
+        std::fs::write(&durable, b"release bytes").expect("durable artifact");
+        let state = ReleaseState {
+            artifacts: vec![crate::core::release::types::ReleaseArtifact {
+                path: dir.path().join("removed-source.zip").display().to_string(),
+                durable_path: Some(durable.display().to_string()),
+                artifact_type: None,
+                platform: None,
+            }],
+            ..ReleaseState::default()
+        };
+
+        assert_eq!(
+            github_release_artifact_paths(&state),
+            vec![durable.display().to_string()]
+        );
+    }
 }
