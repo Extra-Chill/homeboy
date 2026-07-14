@@ -83,6 +83,32 @@ fn lab_placement_requires_a_portable_command_and_runner() {
 }
 
 #[test]
+fn lab_or_local_prefers_a_default_runner_without_requiring_one() {
+    let selection = select(
+        &portable_lab_command("test"),
+        None,
+        crate::cli_surface::Placement::LabOrLocal,
+        false,
+        false,
+        Some("lab-default".to_string()),
+    )
+    .expect("selection")
+    .expect("default runner selected");
+    assert_eq!(selection.runner_id, "lab-default");
+
+    assert!(select(
+        &portable_lab_command("test"),
+        None,
+        crate::cli_surface::Placement::LabOrLocal,
+        false,
+        false,
+        None,
+    )
+    .expect("no default runner allows local fallback")
+    .is_none());
+}
+
+#[test]
 fn local_placement_obeys_bench_and_release_gates() {
     let bench_error = select(
         &portable_lab_command("bench"),
