@@ -88,7 +88,9 @@ pub mod execution;
 pub mod execution_contract;
 pub(crate) mod expand;
 pub mod extension;
-pub mod finding;
+// finding moved to the internal `homeboy-finding` crate. Re-exported so existing
+// `crate::core::finding::*` call sites keep working unchanged.
+pub use homeboy_finding as finding;
 pub mod fleet;
 pub mod fuzz;
 pub mod gate;
@@ -122,7 +124,9 @@ pub mod preview_consumer;
 pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
-pub mod process;
+// process moved to the internal `homeboy-process` crate. Re-exported so existing
+// `crate::core::process::*` call sites keep working unchanged.
+pub use homeboy_process as process;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::core::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;

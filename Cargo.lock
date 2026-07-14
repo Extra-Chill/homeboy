@@ -697,7 +697,9 @@ dependencies = [
  "heck",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-finding",
  "homeboy-output",
+ "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
  "keyring",
@@ -740,11 +742,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "homeboy-finding"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "homeboy-output"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-process"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "homeboy-error",
+ "libc",
 ]
 
 [[package]]
