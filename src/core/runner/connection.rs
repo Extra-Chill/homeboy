@@ -319,6 +319,10 @@ pub fn connect_with_orphan_adoption(
     };
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
+    let connection_warning = daemon
+        .inspected_freshness
+        .as_ref()
+        .and_then(|report| stale_reattach_warning_for_report(&runner.id, report));
     let session = RunnerSession {
         runner_id: runner.id.clone(),
         mode: RunnerTunnelMode::DirectSsh,
@@ -355,6 +359,7 @@ pub fn connect_with_orphan_adoption(
             remote_daemon_address: session.remote_daemon_address.clone(),
             tunnel_pid: session.tunnel_pid,
             remote_daemon_pid: session.remote_daemon_pid,
+            connection_warning,
             homeboy_version: Some(session.homeboy_version.clone()),
             homeboy_build_identity: session.homeboy_build_identity.clone(),
             session_path: Some(session_path.display().to_string()),
@@ -626,6 +631,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             remote_daemon_address: None,
             tunnel_pid: None,
             remote_daemon_pid: None,
+            connection_warning: None,
             homeboy_version: Some(session.homeboy_version),
             homeboy_build_identity: session.homeboy_build_identity,
             session_path: Some(session_path.display().to_string()),
@@ -1131,6 +1137,17 @@ fn stale_daemon_warning(
     ))
 }
 
+fn stale_reattach_warning_for_report(
+    runner_id: &str,
+    report: &DaemonFreshnessReport,
+) -> Option<String> {
+    (!report.fresh).then(|| format!(
+        "Reattached the live remote daemon lease after drift ({:?}; {}); active jobs were preserved. Refresh it explicitly with `homeboy runner refresh-homeboy {runner_id} --reconnect` when its work is complete.",
+        report.stale_reason_code,
+        report.ownership_evidence.as_deref().unwrap_or("remote status freshness drift")
+    ))
+}
+
 fn changed_runtime_paths(
     runner_env: &std::collections::HashMap<String, String>,
     loaded_paths: &BTreeMap<String, String>,
@@ -1427,6 +1444,7 @@ mod remote_daemon {
         pub(super) lease_id: Option<String>,
         pub(super) version: Option<String>,
         pub(super) build_identity: Option<String>,
+        pub(super) inspected_freshness: Option<DaemonFreshnessReport>,
     }
 
     #[derive(Debug, Clone)]
@@ -1462,6 +1480,12 @@ mod remote_daemon {
         if let Some(error) = &status.endpoint_probe_error {
             ownership_evidence = Some(format!(
                 "{}; reachable endpoint identity probe failed: {error}",
+                ownership_evidence.unwrap_or_default()
+            ));
+        }
+        if let Some(stale_reason) = &status.stale_reason {
+            ownership_evidence = Some(format!(
+                "{}; inspected stale reason: {stale_reason}",
                 ownership_evidence.unwrap_or_default()
             ));
         }
@@ -1543,15 +1567,19 @@ mod remote_daemon {
                 return remote_daemon_adopt_orphan(client, homeboy, lease_id);
             }
         }
+        let inspected_freshness =
+            remote_daemon_recovery_freshness_from_status("<runner-id>", &status);
         match remote_daemon_connect_action_with_controller_identity(
             previous_session,
             &status,
             &crate::core::build_identity::current().display,
         )? {
             RemoteDaemonConnectAction::Reattach => {
-                return status.daemon.ok_or_else(|| {
+                let mut daemon = status.daemon.ok_or_else(|| {
                     "remote daemon reattach selected without a daemon lease".to_string()
-                });
+                })?;
+                daemon.inspected_freshness = Some(inspected_freshness);
+                return Ok(daemon);
             }
             RemoteDaemonConnectAction::Start => {
                 return remote_daemon_ensure_running(client, homeboy)
@@ -1576,50 +1604,60 @@ mod remote_daemon {
         status: &RemoteDaemonStatus,
         controller_identity: &str,
     ) -> std::result::Result<RemoteDaemonConnectAction, String> {
-        let healthy = status.fresh && status.reachable;
-        if status.active_jobs > 0 && !healthy {
-            let lease_evidence = status
-                .daemon
-                .as_ref()
-                .map(|daemon| {
-                    format!(
-                        "lease_id={}, recorded_pid={}",
-                        daemon.lease_id.as_deref().unwrap_or("unavailable"),
-                        daemon
-                            .pid
-                            .map(|pid| pid.to_string())
-                            .as_deref()
-                            .unwrap_or("unavailable")
-                    )
-                })
-                .unwrap_or_else(|| "lease_id=unavailable, recorded_pid=unavailable".to_string());
-            let recovery = match (
-                status.stale_reason_code,
-                status
-                    .daemon
-                    .as_ref()
-                    .and_then(|daemon| daemon.lease_id.as_deref()),
-            ) {
-                (Some(DaemonStaleReasonCode::PidDead), Some(lease_id)) => format!(
-                    " The recorded PID is proven dead; recover this exact lease with `homeboy runner connect <runner-id> --adopt-orphan-lease {lease_id} --confirm-pid-dead`."
-                ),
-                _ => " Inspect `homeboy daemon status`; explicit adoption is available only after the recorded PID is proven dead.".to_string(),
-            };
-            return Err(format!(
-                "remote daemon has {} active job(s) but cannot be safely reattached (fresh={}, reachable={}, reason={:?}, {}, active_job_count={}); refusing implicit replacement.{}",
-                status.active_jobs,
-                status.fresh,
-                status.reachable,
-                status.stale_reason,
-                lease_evidence,
-                status.active_jobs,
-                recovery,
-            ));
-        }
-
         let Some(daemon) = status.daemon.as_ref() else {
+            if status.active_jobs > 0 {
+                return Err(format!(
+                    "remote daemon status has {} active job(s) but no daemon state; refusing ensure-running or implicit replacement. Inspect `homeboy daemon status` and use the explicit active-job recovery guidance before retrying.",
+                    status.active_jobs
+                ));
+            }
             return Ok(RemoteDaemonConnectAction::Start);
         };
+
+        if !status.reachable {
+            return Err(format!(
+                "remote daemon is unreachable; refusing to replace or persist a session{}",
+                active_job_recovery_guidance(status.active_jobs)
+            ));
+        }
+        if daemon.lease_id.as_deref().is_none_or(str::is_empty) || daemon.pid.is_none() {
+            return Err(format!(
+                "reachable remote daemon did not report both lease and PID; refusing to replace or persist a session{}",
+                active_job_recovery_guidance(status.active_jobs)
+            ));
+        }
+        if parse_loopback_daemon_addr(&daemon.address).is_err() {
+            return Err(format!(
+                "reachable remote daemon did not report a loopback address; refusing to replace or persist a session{}",
+                active_job_recovery_guidance(status.active_jobs)
+            ));
+        }
+        if let Some(session) = previous_session.filter(|session| {
+            session.mode == RunnerTunnelMode::DirectSsh
+                && session.role == RunnerSessionRole::Controller
+        }) {
+            if let Some(expected_lease) = session.remote_daemon_lease_id.as_deref() {
+                let actual_lease = daemon.lease_id.as_deref().expect("checked above");
+                if expected_lease != actual_lease {
+                    return Err(format!(
+                        "live remote daemon lease `{actual_lease}` does not match persisted session lease `{expected_lease}`; refusing to replace the live daemon"
+                    ));
+                }
+            } else if session.remote_daemon_pid != daemon.pid
+                || session.remote_daemon_address.as_deref() != Some(daemon.address.as_str())
+            {
+                return Err("persisted direct-SSH runner session has no daemon lease and does not match the live daemon PID/address; refusing replacement".to_string());
+            }
+        }
+
+        // Retain a live daemon across version/build/runtime drift. The tunnel's
+        // health endpoint must still prove this exact lease and PID before a
+        // session is persisted.
+        if !status.fresh {
+            return Ok(RemoteDaemonConnectAction::Reattach);
+        }
+
+        let healthy = status.fresh && status.reachable;
 
         if healthy {
             if previous_session.is_none() && status.active_jobs > 0 {
@@ -1667,6 +1705,14 @@ mod remote_daemon {
         }
 
         Ok(RemoteDaemonConnectAction::Start)
+    }
+
+    fn active_job_recovery_guidance(active_jobs: usize) -> String {
+        (active_jobs > 0)
+            .then(|| format!(
+                "; {active_jobs} active job(s) were not replaced. Inspect `homeboy daemon status` and use explicit active-job recovery guidance before retrying"
+            ))
+            .unwrap_or_default()
     }
 
     pub(super) fn remote_daemon_status(
@@ -1825,6 +1871,7 @@ mod remote_daemon {
                 .map(str::to_string),
             version: None,
             build_identity: None,
+            inspected_freshness: None,
         }
     }
 
@@ -1881,6 +1928,7 @@ mod remote_daemon {
                 .map(str::to_string),
             version: None,
             build_identity: None,
+            inspected_freshness: None,
         })
     }
 
@@ -1927,6 +1975,7 @@ mod remote_daemon {
                 .map(str::to_string),
             version: None,
             build_identity: None,
+            inspected_freshness: None,
         })
     }
 
@@ -2118,6 +2167,7 @@ mod session_store {
                 remote_daemon_address: None,
                 tunnel_pid: None,
                 remote_daemon_pid: None,
+                connection_warning: None,
                 homeboy_version: None,
                 homeboy_build_identity: None,
                 session_path: Some(session_path.display().to_string()),
@@ -2266,17 +2316,17 @@ mod tests {
     }
 
     #[test]
-    fn stale_daemon_without_jobs_routes_to_safe_replacement() {
+    fn stale_daemon_without_jobs_reattaches_without_replacement() {
         let status = remote_daemon_status_for_test(false, true, 0, "lease-stale", 4444);
 
         assert_eq!(
-            remote_daemon_connect_action(None, &status).expect("replace stale daemon"),
-            RemoteDaemonConnectAction::Start
+            remote_daemon_connect_action(None, &status).expect("reattach stale daemon"),
+            RemoteDaemonConnectAction::Reattach
         );
     }
 
     #[test]
-    fn refuses_to_replace_non_dead_stale_daemon_with_active_jobs() {
+    fn reattaches_live_stale_daemon_with_active_jobs_without_replacing_it() {
         let status = remote_daemon_status_for_test_with_reason(
             false,
             true,
@@ -2286,10 +2336,21 @@ mod tests {
             Some(DaemonStaleReasonCode::VersionMismatch),
         );
 
-        let err = remote_daemon_connect_action(None, &status).expect_err("refuse replacement");
+        let action = remote_daemon_connect_action(None, &status).expect("reattach live daemon");
 
-        assert!(err.contains("1 active job(s)"));
-        assert!(err.contains("refusing implicit replacement"));
+        assert_eq!(action, RemoteDaemonConnectAction::Reattach);
+        let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+        assert!(!recovery.fresh);
+        assert_eq!(recovery.active_jobs, 1);
+        assert_eq!(
+            recovery.stale_reason_code,
+            Some(DaemonStaleReasonCode::VersionMismatch)
+        );
+        let warning = stale_reattach_warning_for_report("homeboy-lab", &recovery)
+            .expect("stale reattach warning");
+        assert!(warning.contains("VersionMismatch"));
+        assert!(warning.contains("active jobs were preserved"));
+        assert!(warning.contains("refresh-homeboy homeboy-lab --reconnect"));
     }
 
     #[test]
@@ -2307,12 +2368,10 @@ mod tests {
         let err = remote_daemon_connect_action(Some(&session), &status)
             .expect_err("require explicit orphan adoption");
 
-        assert!(err.contains("refusing implicit replacement"));
-        assert!(err.contains("--adopt-orphan-lease"));
-        assert!(err.contains("lease_id=lease-dead"));
-        assert!(err.contains("recorded_pid=4545"));
-        assert!(err.contains("active_job_count=1"));
-        assert!(err.contains("--adopt-orphan-lease lease-dead"));
+        assert!(err.contains("unreachable"));
+        assert!(err.contains("1 active job(s) were not replaced"));
+        assert!(err.contains("active-job recovery guidance"));
+        assert!(err.contains("Inspect `homeboy daemon status`"));
     }
 
     #[test]
@@ -2857,7 +2916,7 @@ esac
     }
 
     #[test]
-    fn lost_local_session_refuses_dead_daemon_with_active_jobs_without_explicit_adoption() {
+    fn lost_local_session_refuses_unreachable_daemon_with_active_jobs() {
         let status = remote_daemon_status_for_test_with_reason(
             false,
             false,
@@ -2867,10 +2926,9 @@ esac
             Some(DaemonStaleReasonCode::PidDead),
         );
 
-        let err = remote_daemon_connect_action(None, &status)
-            .expect_err("lost session must not imply orphan ownership");
+        let err = remote_daemon_connect_action(None, &status).expect_err("unreachable daemon");
 
-        assert!(err.contains("refusing implicit replacement"));
+        assert!(err.contains("unreachable"));
     }
 
     #[test]
@@ -2898,7 +2956,9 @@ esac
             .expect_err("refuse mismatched dead lease");
 
         assert!(err.contains("1 active job(s)"));
-        assert!(err.contains("refusing implicit replacement"));
+        assert!(err.contains("unreachable"));
+        assert!(err.contains("1 active job(s) were not replaced"));
+        assert!(err.contains("active-job recovery guidance"));
     }
 
     #[test]
@@ -2936,6 +2996,26 @@ esac
             remote_daemon_connect_action(None, &status).expect("ensure start"),
             RemoteDaemonConnectAction::Start
         );
+    }
+
+    #[test]
+    fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
+        let status = RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: Some("daemon state is unavailable".to_string()),
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+            fresh: false,
+            reachable: false,
+            active_jobs: 1,
+            endpoint_probe_error: None,
+        };
+
+        let error = remote_daemon_connect_action(None, &status)
+            .expect_err("active jobs require explicit recovery");
+
+        assert!(error.contains("1 active job(s)"));
+        assert!(error.contains("refusing ensure-running"));
+        assert!(error.contains("active-job recovery guidance"));
     }
 
     #[test]
@@ -3576,6 +3656,7 @@ esac
                 lease_id: Some(lease_id.to_string()),
                 version: None,
                 build_identity: None,
+                inspected_freshness: None,
             }),
             stale_reason: (!fresh).then(|| "daemon is stale".to_string()),
             stale_reason_code,
