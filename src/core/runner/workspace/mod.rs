@@ -39,7 +39,10 @@ pub(crate) use materializer::{
 };
 #[cfg(test)]
 pub(crate) use provenance::verify_lab_workspace;
-pub(crate) use provenance::{verify_lab_workspace_from_env, VerifiedLabWorkspaceProvenance};
+pub(crate) use provenance::{
+    materialize_verified_lab_snapshot_git_baseline_from_env, verify_lab_workspace_from_env,
+    verify_lab_workspace_git_root, VerifiedLabWorkspaceProvenance,
+};
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,
     materialize_snapshot, materialize_snapshot_git, snapshot_identity, workspace_content_hash,

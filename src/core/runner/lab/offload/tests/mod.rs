@@ -11,13 +11,18 @@ pub(super) use super::super::super::lab_workspaces::{
 };
 pub(super) use super::*;
 pub(super) use crate::core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
-pub(super) use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+pub(super) use crate::core::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 pub(super) use crate::core::plan::PlanKind;
+pub(super) use crate::core::runner::verify_lab_workspace_from_env;
 pub(super) use crate::core::runner::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability, RunnerExecMode,
     RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
     RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceMaterializationPlan,
     RunnerWorkspaceSyncOutput,
+};
+pub(super) use crate::core::runner_execution_envelope::{
+    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_MODE_SNAPSHOT,
+    PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT, PATH_MATERIALIZATION_STATUS_MATERIALIZED,
 };
 
 mod capability_metadata;

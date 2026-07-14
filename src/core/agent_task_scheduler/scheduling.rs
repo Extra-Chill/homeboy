@@ -50,6 +50,10 @@ impl AgentTaskScheduleSupport {
                 return false;
             }
 
+            if resource_is_busy(task, running).is_some() {
+                return false;
+            }
+
             let executor_key = executor_key(&task.request);
             let limit = per_executor_concurrency
                 .get(&executor_key)
@@ -543,6 +547,10 @@ impl AgentTaskScheduleSupport {
             return "workspace_quarantined";
         }
 
+        if resource_is_busy(task, running).is_some() {
+            return "exclusive_resource";
+        }
+
         "scheduler_capacity"
     }
 
@@ -563,6 +571,59 @@ impl AgentTaskScheduleSupport {
                 "cancelled before execution".to_string(),
             ));
         }
+    }
+
+    pub(super) fn exclusive_resource_keys(request: &AgentTaskRequest) -> Vec<String> {
+        let mut keys = request
+            .limits
+            .exclusive_resource_keys
+            .iter()
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    pub(super) fn record_resource_wait(
+        task: &mut ScheduledTask,
+        running: &[RunningTask],
+        events: &mut Vec<AgentTaskProgressEvent>,
+    ) {
+        let Some((key, blocker_task_id)) = resource_is_busy(task, running) else {
+            return;
+        };
+        let should_record = task
+            .resource_wait
+            .as_ref()
+            .is_none_or(|wait| wait.key != key || wait.blocker_task_id != blocker_task_id);
+        if should_record {
+            task.resource_wait = Some(ResourceWait {
+                key: key.clone(),
+                blocker_task_id: blocker_task_id.clone(),
+                started_at: Instant::now(),
+            });
+        }
+        let wait = task
+            .resource_wait
+            .as_ref()
+            .expect("resource wait is recorded");
+        if !should_record {
+            return;
+        }
+        events.push(event(
+            &task.request.task_id,
+            AgentTaskState::Blocked,
+            task.attempt,
+            Some(format!(
+                "waiting for exclusive resource '{}' held by '{}' ({} ms elapsed)",
+                key,
+                blocker_task_id,
+                wait.started_at.elapsed().as_millis()
+            )),
+        ));
     }
 
     pub(super) fn expire_timed_out_tasks<E>(
@@ -590,12 +651,15 @@ impl AgentTaskScheduleSupport {
 
             let task = running.remove(index);
             executor.cancel(&task.task_id);
-            let outcome = Self::timeout_outcome(
+            let mut outcome = Self::timeout_outcome(
                 task.task_id.clone(),
                 task.timeout_ms.unwrap_or_default(),
                 Some(&task.request),
                 "scheduler_timeout",
             );
+            if let Err(error) = super::harvest_uncommitted_patch(&mut outcome, &task) {
+                outcome = super::committed_harvest_failure(outcome, error);
+            }
             events.push(event(
                 &task.task_id,
                 Self::state_for_outcome(&outcome),
@@ -1374,6 +1438,24 @@ fn workspace_is_busy(
                 .filter_map(|task| task.workspace_key.as_deref()),
         )
         .any(|running_workspace| running_workspace == workspace)
+}
+
+/// Returns the first deterministic exclusive-key conflict. Resource keys are
+/// caller declarations, never inferred from provider configuration or command
+/// text, so the scheduler remains tool-agnostic.
+fn resource_is_busy(task: &ScheduledTask, running: &[RunningTask]) -> Option<(String, String)> {
+    let keys = AgentTaskScheduleSupport::exclusive_resource_keys(&task.request);
+    for key in keys {
+        if let Some(holder) = running.iter().find(|running| {
+            running
+                .exclusive_resource_keys
+                .iter()
+                .any(|held| held == &key)
+        }) {
+            return Some((key, holder.task_id.clone()));
+        }
+    }
+    None
 }
 
 impl AgentTaskScheduleSupport {

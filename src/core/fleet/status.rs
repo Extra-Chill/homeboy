@@ -290,12 +290,13 @@ fn collect_project_component_statuses(
                 component_summary.total += 1;
                 match &drift {
                     FleetComponentDrift::Current => component_summary.current += 1,
-                    FleetComponentDrift::NeedsUpdate
-                    | FleetComponentDrift::BehindRemote
-                    | FleetComponentDrift::BehindUpstream => component_summary.needs_update += 1,
+                    FleetComponentDrift::NeedsUpdate => component_summary.needs_update += 1,
                     FleetComponentDrift::NeedsRelease => component_summary.needs_release += 1,
                     FleetComponentDrift::DocsOnly => component_summary.docs_only += 1,
                     FleetComponentDrift::Unknown => component_summary.unknown += 1,
+                    // These describe remote or configured-source freshness, not a
+                    // deployment required from the configured source.
+                    FleetComponentDrift::BehindRemote | FleetComponentDrift::BehindUpstream => {}
                 }
 
                 statuses.push(FleetComponentStatus {

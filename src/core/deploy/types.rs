@@ -69,6 +69,8 @@ pub struct DeployConfig {
     pub skip_build: bool,
     /// Keep build dependencies (skip cleanup even when auto_cleanup is enabled)
     pub keep_deps: bool,
+    /// Skip dependency hydration before building an exact-ref checkout.
+    pub skip_deps_hydration: bool,
     /// Assert expected version before deploying (abort if mismatch)
     pub expected_version: Option<String>,
     /// Skip auto-pulling latest changes before deploy
@@ -95,6 +97,7 @@ impl DeployConfig {
             force: false,
             skip_build: true,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: true,
             head: true,
@@ -193,7 +196,7 @@ pub enum DeployReason {
 }
 
 /// Status indicator for component version comparison.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentStatus {
     /// Local and remote versions match
@@ -208,6 +211,36 @@ pub enum ComponentStatus {
     SourceStale,
     /// Cannot determine status
     Unknown,
+}
+
+impl ComponentStatus {
+    /// Whether deploying the configured source would advance the target.
+    pub fn requires_deploy(&self) -> bool {
+        matches!(self, Self::NeedsUpdate)
+    }
+}
+
+/// Compare the configured source version with the version observed on the target.
+///
+/// This deliberately describes deployment health only. Callers may layer source
+/// freshness checks on top when both versions identify the same deployed release.
+pub fn compare_deployed_versions(
+    local_version: Option<&str>,
+    remote_version: Option<&str>,
+) -> ComponentStatus {
+    match (local_version, remote_version) {
+        (Some(local), Some(remote)) if local == remote => ComponentStatus::UpToDate,
+        (Some(local), Some(remote)) => {
+            let parse = |version: &str| semver::Version::parse(version.trim_start_matches('v'));
+            match (parse(local), parse(remote)) {
+                (Ok(local), Ok(remote)) if local > remote => ComponentStatus::NeedsUpdate,
+                (Ok(local), Ok(remote)) if local < remote => ComponentStatus::BehindRemote,
+                (Ok(_), Ok(_)) => ComponentStatus::UpToDate,
+                _ => ComponentStatus::Unknown,
+            }
+        }
+        _ => ComponentStatus::Unknown,
+    }
 }
 
 /// Release state tracking for deployment decisions.
@@ -559,8 +592,8 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployConfig,
-        DeployResult, ReleaseState, ReleaseStateStatus,
+        compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult,
+        ComponentStatus, DeployConfig, DeployResult, ReleaseState, ReleaseStateStatus,
     };
     use crate::core::component::{Component, ScopedExtensionConfig};
     use crate::core::extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
@@ -735,6 +768,51 @@ mod tests {
             result.component_status,
             Some(ComponentStatus::NeedsUpdate)
         ));
+    }
+
+    #[test]
+    fn deployed_version_comparison_distinguishes_direction_and_unknown_versions() {
+        let cases = [
+            (Some("1.0.1"), Some("1.0.0"), ComponentStatus::NeedsUpdate),
+            (Some("1.0.0"), Some("1.0.1"), ComponentStatus::BehindRemote),
+            (Some("1.0.0"), Some("1.0.0"), ComponentStatus::UpToDate),
+            (
+                Some("1.0.0"),
+                Some("1.0.0-rc.1"),
+                ComponentStatus::NeedsUpdate,
+            ),
+            (
+                Some("1.0.0-rc.1"),
+                Some("1.0.0"),
+                ComponentStatus::BehindRemote,
+            ),
+            (
+                Some("not-a-version"),
+                Some("1.0.0"),
+                ComponentStatus::Unknown,
+            ),
+            (Some("1.0.0"), None, ComponentStatus::Unknown),
+            (None, Some("1.0.0"), ComponentStatus::Unknown),
+        ];
+
+        for (local, remote, expected) in cases {
+            assert_eq!(compare_deployed_versions(local, remote), expected);
+        }
+    }
+
+    #[test]
+    fn only_a_newer_configured_source_requires_deploy() {
+        assert!(ComponentStatus::NeedsUpdate.requires_deploy());
+
+        for status in [
+            ComponentStatus::UpToDate,
+            ComponentStatus::BehindRemote,
+            ComponentStatus::BehindUpstream,
+            ComponentStatus::SourceStale,
+            ComponentStatus::Unknown,
+        ] {
+            assert!(!status.requires_deploy());
+        }
     }
 
     #[test]

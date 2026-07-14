@@ -50,6 +50,11 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
         })
         .op(WorkspaceMaterializationOperation::GuardCleanGitWorkspace { allow_dirty: false })
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
+            head: "abc123".to_string(),
+            changed_since_base: None,
+        })
         .restore_owner()
         .command();
 
@@ -61,6 +66,8 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
     assert!(!command.contains("config branch.main.remote origin"));
     assert!(!command.contains("config branch.main.merge refs/heads/main"));
     assert!(command.contains("git -C \"$tmp\" reset --hard abc123"));
+    assert!(command.contains("test -d $dest/.git"));
+    assert!(command.contains("rev-parse HEAD)\" = abc123"));
     assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
     assert!(command.contains("exit 97"));
 }
@@ -73,9 +80,15 @@ fn workspace_materializer_builds_direct_git_checkout_command() {
         .op(WorkspaceMaterializationOperation::SyncGitCheckout {
             remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
             head: "abc123".to_string(),
+            branch: None,
             changed_since_base: Some("origin/main".to_string()),
             fetch_refs: vec!["refs/pull/123/head:refs/remotes/pull/123".to_string()],
             allow_dirty: false,
+        })
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: "https://github.com/Extra-Chill/homeboy.git".to_string(),
+            head: "abc123".to_string(),
+            changed_since_base: Some("origin/main".to_string()),
         })
         .restore_owner()
         .command();
@@ -91,6 +104,8 @@ fn workspace_materializer_builds_direct_git_checkout_command() {
     assert!(command.contains("rev-parse --verify -q 'origin/main^{commit}'"));
     assert!(command.contains("checkout --detach abc123"));
     assert!(command.contains("git -C \"$dest\" clean -ffdqx"));
+    assert!(command.contains("test -d $dest/.git"));
+    assert!(command.contains("config --get remote.origin.url"));
     assert!(command.contains("chown -R \"$owner\" $dest"));
 }
 

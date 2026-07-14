@@ -62,7 +62,7 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
         });
     }
 
-    let git = |args: &[&str]| git_checked(path, args);
+    let git = |args: &[&str]| run_git(path, args);
     let head = text(git(&["rev-parse", "HEAD"])?).trim().to_string();
     let parents = text(git(&["rev-list", "--parents", "-n", "1", "HEAD"])?);
     let parent_ids = parents.split_whitespace().collect::<Vec<_>>();
@@ -102,7 +102,11 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
-    let output = git_output(path, &["rev-parse", "--is-inside-work-tree"])?;
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if output.status.success() {
         return Ok(text(output.stdout).trim() == "true");
     }
@@ -199,8 +203,12 @@ fn hash_record(hasher: &mut Sha256, kind: &[u8], bytes: &[u8]) {
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
-fn git_checked(path: &str, args: &[&str]) -> Result<Vec<u8>> {
-    let output = git_output(path, args)?;
+fn run_git(path: &str, args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -208,14 +216,6 @@ fn git_checked(path: &str, args: &[&str]) -> Result<Vec<u8>> {
             String::from_utf8_lossy(&output.stderr).to_string(),
         ))
     }
-}
-
-fn git_output(path: &str, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))
 }
 
 #[cfg(test)]

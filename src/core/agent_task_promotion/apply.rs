@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 use crate::core::agent_task_gate::{
     run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
@@ -120,11 +121,36 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
         ));
     }
     validate_provider_workspace_path(workspace)?;
+    // The provider can run in a different materialized workspace from the
+    // producer, so prefer the patch carried through the stdin request.
+    let inline_patch = request
+        .patch
+        .as_deref()
+        .map(|patch| {
+            let mut file = NamedTempFile::new().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("create inline agent-task promotion patch".to_string()),
+                )
+            })?;
+            file.write_all(patch.as_bytes()).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write inline agent-task promotion patch".to_string()),
+                )
+            })?;
+            Ok::<_, Error>(file)
+        })
+        .transpose()?;
+    let patch_path = inline_patch
+        .as_ref()
+        .map(|file| file.path().to_string_lossy().into_owned())
+        .unwrap_or_else(|| request.patch_path.clone());
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(workspace)
-        .args(["apply", "--whitespace=nowarn", &request.patch_path]);
+        .args(["apply", "--whitespace=nowarn", &patch_path]);
     if request.dry_run {
         command.arg("--check");
     }
@@ -163,6 +189,10 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
 pub(crate) struct AgentTaskPromotionApplyRequest {
     pub(crate) schema: String,
     pub(crate) to_workspace: String,
+    /// Inline patch payload for providers that do not share artifact storage
+    /// with the producer. `patch_path` remains provenance and a legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) patch: Option<String>,
     pub(crate) patch_path: String,
     pub(crate) changed_files: Vec<String>,
     #[serde(default)]

@@ -125,6 +125,7 @@ pub(super) fn deploy_components(
         .collect();
     for checkout in &exact_ref_checkouts {
         checkout.verify()?;
+        checkout.hydrate_dependencies(config.skip_deps_hydration)?;
     }
     let components = if exact_ref_checkouts.is_empty() {
         components
@@ -408,9 +409,10 @@ mod tests {
     use crate::core::deploy::planning::{load_project_components, ExtensionSkippedComponent};
     use crate::core::deploy::types::ComponentDeployResult;
     use crate::core::project::ProjectComponentAttachment;
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{home_env_guard, with_isolated_home};
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     use super::modes::{extension_skipped_results, run_dry_run_mode};
@@ -458,6 +460,7 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
             head: false,
@@ -1224,6 +1227,24 @@ mod tests {
 
     #[test]
     fn exact_ref_preflight_packages_verified_subpath_not_stale_checkout_artifact() {
+        let _home_env = home_env_guard();
+        exact_ref_preflight_fixture(None);
+    }
+
+    #[test]
+    fn exact_ref_hydration_fixtures_build_concurrently_without_crossing_worktrees() {
+        let _home_env = home_env_guard();
+        let barrier = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || exact_ref_preflight_fixture(Some(barrier)));
+            }
+        });
+    }
+
+    fn exact_ref_preflight_fixture(barrier: Option<Arc<Barrier>>) {
         let repo = TempDir::new().expect("repo");
         let root = repo.path();
         let component_path = root.join("packages/plugin");
@@ -1234,6 +1255,18 @@ mod tests {
 
         std::fs::write(component_path.join("target-marker.txt"), "target\n")
             .expect("target marker");
+        std::fs::write(
+            root.join("homeboy-deps.json"),
+            r#"{
+                "provider": "fixture-workspace",
+                "commands": {
+                    "install": {
+                        "argv": ["sh", "-c", "mkdir -p packages/plugin/node_modules/.bin && printf '#!/bin/sh\\ncat target-marker.txt\\n' > packages/plugin/node_modules/.bin/fixture-tool && chmod +x packages/plugin/node_modules/.bin/fixture-tool"]
+                    }
+                }
+            }"#,
+        )
+        .expect("workspace dependency provider");
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-q", "-m", "target"]);
         run_git(root, &["branch", "target"]);
@@ -1260,13 +1293,43 @@ mod tests {
         let component = Component {
             id: "plugin".to_string(),
             local_path: component_path.to_string_lossy().to_string(),
+            remote_path: "plugins/plugin".to_string(),
             build_artifact: Some(stale_artifact.to_string_lossy().to_string()),
             extract_command: Some("unzip -o {{artifact}}".to_string()),
+            scripts: Some(ComponentScriptsConfig {
+                build: vec![
+                    "mkdir -p dist && node_modules/.bin/fixture-tool > dist/target-marker.txt && (cd dist && zip -q plugin.zip target-marker.txt)".to_string(),
+                ],
+                ..ComponentScriptsConfig::default()
+            }),
             ..Component::default()
         };
         let checkout =
             ExactRefCheckout::materialize(&component, "target").expect("materialize target ref");
         checkout.verify().expect("verify target ref");
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+        let hydration = checkout
+            .hydrate_dependencies(false)
+            .expect("hydrate the materialized workspace dependencies");
+        assert_eq!(
+            hydration
+                .expect("workspace provider must be discovered")
+                .component_path,
+            Path::new(&checkout.component.local_path)
+                .ancestors()
+                .nth(2)
+                .expect("repository root")
+                .display()
+                .to_string()
+        );
+        assert!(
+            Path::new(&checkout.component.local_path)
+                .join("node_modules/.bin/fixture-tool")
+                .is_file(),
+            "workspace dependency hydration must create the checkout-local build tool"
+        );
         let mut config = base_deploy_config();
         config.requested_ref = Some("target".to_string());
         config.force = true;
@@ -1280,15 +1343,25 @@ mod tests {
         )
         .expect("prepare exact-ref artifact");
 
-        let file = std::fs::File::open(prepared[0].artifact_path.as_ref().expect("artifact path"))
-            .expect("open artifact");
+        let artifact = prepared[0].artifact_path.as_ref().expect("artifact path");
+        let file = std::fs::File::open(artifact).expect("open artifact");
         let mut archive = zip::ZipArchive::new(file).expect("read artifact");
-        assert!(archive
-            .by_name("plugin/packages/plugin/target-marker.txt")
-            .is_ok());
-        assert!(archive
-            .by_name("plugin/packages/plugin/stale-marker.txt")
-            .is_err());
+        assert_eq!(
+            std::io::read_to_string(archive.by_name("target-marker.txt").expect("target entry"))
+                .expect("target content"),
+            "target\n"
+        );
+        assert!(archive.by_name("stale-marker.txt").is_err());
+        assert!(
+            !Path::new(&component.local_path)
+                .join("node_modules/.bin/fixture-tool")
+                .exists(),
+            "configured checkout must not supply the build tool"
+        );
+        assert!(
+            !artifact.starts_with(&component.local_path),
+            "the stale configured-checkout artifact must not be reused"
+        );
     }
 
     fn deployed_result(id: &str) -> ComponentDeployResult {

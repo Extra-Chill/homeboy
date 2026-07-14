@@ -149,9 +149,14 @@ fn prepare_lab_offload_workspace_stage_inner(
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: sync_mode,
-            // Lab already has the authenticated controller checkout. Ship its
-            // refs instead of requiring the runner to clone or fetch the source.
-            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git,
+            // Retry handoffs must stage the controller checkout before the
+            // runner attempts Git transport: private origins are intentionally
+            // unavailable to the runner, and changed-since must resolve from
+            // the staged bundle.
+            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git
+                && (request.require_controller_git_bundle
+                    || contract.workspace_mode_policy
+                        != LabOffloadWorkspaceModePolicy::GitCheckoutRequired),
             changed_since_base: changed_since_preflight.resolved_base.clone(),
             git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
@@ -298,6 +303,13 @@ fn prepare_lab_offload_workspace_stage_inner(
     // The effective workspace filters define the bytes shipped to Lab and are
     // carried to the runner for deterministic post-materialization verification.
     source_snapshot.sync_excludes = synced.excludes.clone();
+    if sync_mode == RunnerWorkspaceSyncMode::Git {
+        // Git materialization retains repository metadata. It is not source
+        // snapshot state, and it must not be reported as excluded evidence.
+        source_snapshot
+            .sync_excludes
+            .retain(|exclude| exclude != ".git" && exclude != ".git/**");
+    }
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     if contract.routing_policy.requires_extension_parity {
@@ -2067,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_routes_changed_since_private_source_through_controller_bundle() {
+    fn retry_stage_routes_changed_since_private_source_through_controller_bundle() {
         crate::test_support::with_isolated_home(|_| {
             let source = tempfile::tempdir().expect("source checkout");
             let runner_root = tempfile::tempdir().expect("runner workspace root");
@@ -2136,15 +2148,20 @@ mod tests {
                 read_only_polling: false,
                 local_output_file: None,
                 durable_agent_task_plan: None,
+                source_path: None,
+                require_controller_git_bundle: true,
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
-                command: crate::command_contract::LabCommandContract::portable(
-                    "audit",
-                    None,
-                    false,
-                    &[],
-                ),
+                command: crate::command_contract::LabCommandContract {
+                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                    ..crate::command_contract::LabCommandContract::portable(
+                        "audit",
+                        None,
+                        false,
+                        &[],
+                    )
+                },
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
@@ -2186,9 +2203,20 @@ mod tests {
                 Some(base.as_str())
             );
             assert!(stage.remapped_args.contains(&base));
+            let provenance = stage
+                .synced
+                .materialization_plan
+                .controller_git_bundle
+                .as_ref()
+                .expect("retry stage must emit controller bundle provenance");
+            assert_eq!(provenance.provenance, "controller_git_bundle");
             assert_eq!(
                 git_output(Path::new(&stage.remote_cwd), &["rev-parse", &base]),
                 base
+            );
+            assert_eq!(
+                git_output(Path::new(&stage.remote_cwd), &["rev-parse", "HEAD"]),
+                git_output(source.path(), &["rev-parse", "HEAD"])
             );
         });
     }
@@ -2212,6 +2240,15 @@ mod tests {
             .expect("write fixture manifest");
             git(repository.path(), &["add", "."]);
             git(repository.path(), &["commit", "-m", "base"]);
+            git(
+                repository.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    repository.path().to_str().expect("repo path"),
+                ],
+            );
             let source = worktree_parent.path().join("homeboy-fix-8009");
             git(
                 repository.path(),
@@ -2263,9 +2300,11 @@ mod tests {
                 read_only_polling: false,
                 local_output_file: None,
                 durable_agent_task_plan: None,
+                source_path: Some(source.as_path()),
+                require_controller_git_bundle: false,
                 job_overrides: LabJobOverrides::default(),
             };
-            let contract = LabOffloadCommand {
+            let mut contract = LabOffloadCommand {
                 command: crate::command_contract::LabCommandContract::portable(
                     "agent-task",
                     None,
@@ -2276,6 +2315,8 @@ mod tests {
                 required_capabilities: Vec::new(),
                 workload: None,
             };
+            contract.command.workspace_mode_policy =
+                LabOffloadWorkspaceModePolicy::GitCheckoutRequired;
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
@@ -2298,6 +2339,33 @@ mod tests {
             );
             assert!(stage.remapped_args.contains(&"cook-8009".to_string()));
             assert!(stage.remapped_args.contains(&canonical_attempt_id));
+            assert_eq!(stage.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(
+                stage.path_materialization_plan.entries[0].materialization_mode,
+                "git"
+            );
+            assert!(
+                !stage
+                    .source_snapshot
+                    .sync_excludes
+                    .iter()
+                    .any(|exclude| exclude == ".git" || exclude == ".git/**"),
+                "a .git-excluded snapshot cannot claim git materialization"
+            );
+            assert_eq!(
+                git_output(
+                    Path::new(&stage.remote_cwd),
+                    &["rev-parse", "--is-inside-work-tree"]
+                ),
+                "true"
+            );
+            std::fs::write(Path::new(&stage.remote_cwd).join("captured.txt"), "patch\n")
+                .expect("write remote mutation");
+            git(Path::new(&stage.remote_cwd), &["add", "-N", "captured.txt"]);
+            assert!(
+                git_output(Path::new(&stage.remote_cwd), &["diff", "--binary"])
+                    .contains("captured.txt")
+            );
 
             crate::core::agent_task_lifecycle::record_lab_offload_phase(
                 &canonical_attempt_id,

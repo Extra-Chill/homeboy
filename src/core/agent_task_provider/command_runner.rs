@@ -1,4 +1,8 @@
-use super::outcome_normalization::{normalize_provider_outcome_roles, push_unique_diagnostic};
+use super::artifact_finalization::finalize_provider_file_artifacts;
+use super::outcome_normalization::{
+    normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
+    push_unique_diagnostic,
+};
 use super::runner_readiness::{
     executable_file, provider_executable_env, resolve_executable_candidate,
 };
@@ -228,7 +232,7 @@ pub(super) fn run_materialized_provider_command_once(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
-    let Some((program, args, cwd)) = provider_command_parts(provider) else {
+    let Some((program, args, provider_cwd)) = provider_command_parts(provider) else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -238,6 +242,17 @@ pub(super) fn run_materialized_provider_command_once(
             json!({ "provider": provider.id }),
         );
     };
+
+    // The scheduler may replace a task workspace with an isolated attempt
+    // worktree. That task root is the execution cwd; a manifest cwd is only a
+    // fallback for requests without a workspace.
+    let cwd = request
+        .request
+        .workspace
+        .root
+        .as_deref()
+        .map(PathBuf::from)
+        .or(provider_cwd);
 
     if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
     {
@@ -469,6 +484,23 @@ pub(super) fn run_materialized_provider_command_once(
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
             normalize_provider_outcome_roles(&mut outcome, provider);
+            if let Err(error) =
+                finalize_provider_file_artifacts(&mut outcome, &request.artifacts_root_identity)
+            {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::Failed,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.artifact_finalization_failed",
+                    error.message,
+                    json!({ "provider": provider.id, "details": error.details }),
+                );
+            }
+            normalize_homeboy_local_artifact_sizes(
+                &mut outcome,
+                &request.artifacts_path,
+                &request.artifacts_path_provenance,
+            );
             surface_provider_process_failure(
                 &mut outcome,
                 request,
@@ -523,11 +555,15 @@ pub(super) fn run_provider_command_once(
 
 #[cfg(test)]
 fn test_executor_request(request: &AgentTaskRequest) -> AgentTaskExecutorRequest {
+    let artifacts_path = std::env::temp_dir()
+        .join("homeboy-agent-task-provider-tests")
+        .join(crate::core::paths::sanitize_path_segment(&request.task_id))
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&artifacts_path).expect("test executor artifact root");
     AgentTaskExecutorRequest {
         request: request.clone(),
-        artifacts_path: std::env::temp_dir()
-            .join("homeboy-agent-task-provider-tests")
-            .join(crate::core::paths::sanitize_path_segment(&request.task_id)),
+        artifacts_root_identity: crate::core::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("test artifact identity"),
+        artifacts_path,
         artifacts_path_provenance: AgentTaskArtifactsPathProvenance {
             owner: "homeboy".to_string(),
             locality: "runner".to_string(),

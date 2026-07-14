@@ -164,4 +164,9 @@ pub struct AgentTaskLimits {
     pub liveness_timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_bytes: Option<u64>,
+    /// Stable, non-secret identifiers for exclusive host resources required by
+    /// this attempt. The scheduler acquires these only when it dispatches the
+    /// executor, so queue and resource wait do not consume `timeout_ms`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusive_resource_keys: Vec<String>,
 }

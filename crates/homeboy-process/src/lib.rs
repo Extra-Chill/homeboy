@@ -1,4 +1,4 @@
-use crate::core::error::{Error, Result};
+use homeboy_error::{Error, Result};
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;

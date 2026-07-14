@@ -80,13 +80,17 @@ pub mod deps;
 pub mod deterministic_loop;
 pub mod engine;
 pub mod env_materialization_plan;
-pub mod error;
+// error moved to the internal `homeboy-error` crate. Re-exported here so existing
+// `crate::core::error::*` call sites keep working unchanged.
+pub use homeboy_error as error;
 pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub(crate) mod expand;
 pub mod extension;
-pub mod finding;
+// finding moved to the internal `homeboy-finding` crate. Re-exported so existing
+// `crate::core::finding::*` call sites keep working unchanged.
+pub use homeboy_finding as finding;
 pub mod fleet;
 pub mod fuzz;
 pub mod gate;
@@ -108,7 +112,9 @@ pub mod matrix_artifact_summary;
 pub mod notification_route;
 pub mod notify;
 pub mod observation;
-pub mod output;
+// output moved to the internal `homeboy-output` crate. Re-exported so existing
+// `crate::core::output::*` call sites keep working unchanged.
+pub use homeboy_output as output;
 pub(crate) mod ownership;
 pub mod performance_hotspots;
 pub mod phase_timing;
@@ -118,13 +124,19 @@ pub mod preview_consumer;
 pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
-pub mod process;
-pub mod product_identity;
+// process moved to the internal `homeboy-process` crate. Re-exported so existing
+// `crate::core::process::*` call sites keep working unchanged.
+pub use homeboy_process as process;
+// product_identity moved to the internal `homeboy-product-identity` crate.
+// Re-exported so `crate::core::product_identity::*` call sites keep working.
+pub use homeboy_product_identity as product_identity;
 pub mod project;
 pub mod proof;
 pub mod publication_artifacts;
 pub mod quality;
-pub mod redaction;
+// redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
+// existing `crate::core::redaction::*` call sites keep working unchanged.
+pub use homeboy_redaction as redaction;
 pub mod refactor;
 pub mod release;
 pub mod report_compare;

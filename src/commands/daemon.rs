@@ -73,6 +73,14 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
+    /// Supervise one daemon child and persist its termination evidence.
+    #[command(hide = true)]
+    Supervise {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+        #[arg(long)]
+        startup_token: String,
+    },
     /// Stop the background daemon recorded in the state file
     Stop,
     /// Show daemon state and selected local address
@@ -163,6 +171,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
+        DaemonCommand::Supervise { addr, startup_token } => {
+            daemon::supervise(&addr, &startup_token)?;
+            Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
+        }
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
         DaemonCommand::BrokerConfig {

@@ -7,9 +7,9 @@ const PATCH: &str =
     "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
 #[test]
-fn promotion_provider_validates_git_workspace_and_applies_patch() {
+fn promotion_provider_applies_a_typed_patch_request() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace with spaces");
+    let workspace = temp.path().join("materialized managed target");
     std::fs::create_dir(&workspace).expect("workspace");
     git(&workspace, &["init"]);
     git(&workspace, &["config", "user.email", "test@example.com"]);
@@ -43,7 +43,13 @@ fn promotion_provider_validates_git_workspace_and_applies_patch() {
     );
 
     let applied = promotion_provider(&workspace, &patch, false);
-    assert_eq!(applied.status.code(), Some(0));
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
     let applied = output(&applied);
     assert_eq!(applied["workspace_path"], workspace.display().to_string());
     assert_eq!(

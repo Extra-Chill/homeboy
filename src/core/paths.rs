@@ -28,6 +28,41 @@ pub fn set_artifact_root_override(path: Option<PathBuf>) {
     *guard = path;
 }
 
+/// Resolver hook for the config-level `artifact_root` value.
+///
+/// `paths` is a foundation layer and must not depend on the config/`defaults`
+/// layer (that would create a paths <-> defaults dependency cycle, blocking the
+/// crate split). Instead, the config layer registers a resolver here at startup
+/// via [`set_config_artifact_root_resolver`]; `artifact_root()` calls it to
+/// honor the global config override without an inbound dependency on `defaults`.
+type ConfigArtifactRootResolver = fn() -> Option<String>;
+
+fn config_artifact_root_resolver() -> &'static Mutex<Option<ConfigArtifactRootResolver>> {
+    static RESOLVER: OnceLock<Mutex<Option<ConfigArtifactRootResolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the resolver that supplies the config-level `artifact_root` override.
+///
+/// Called once during startup by the config layer. Keeps `paths` free of any
+/// compile-time dependency on `defaults`.
+pub fn set_config_artifact_root_resolver(resolver: ConfigArtifactRootResolver) {
+    let mut guard = config_artifact_root_resolver()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(resolver);
+}
+
+fn resolved_config_artifact_root() -> Option<String> {
+    let resolver = {
+        let guard = config_artifact_root_resolver()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard
+    };
+    resolver.and_then(|f| f())
+}
+
 /// Base product config directory (universal ~/.config/homeboy/ on all platforms)
 pub fn homeboy() -> Result<PathBuf> {
     #[cfg(windows)]
@@ -124,7 +159,7 @@ pub fn artifact_root() -> Result<PathBuf> {
         }
     }
 
-    if let Some(path) = crate::core::defaults::load_config().artifact_root {
+    if let Some(path) = resolved_config_artifact_root() {
         if !path.trim().is_empty() {
             return Ok(expand_tilde_path(path));
         }
@@ -443,6 +478,11 @@ mod tests {
     #[test]
     fn artifact_root_uses_configured_value() {
         with_isolated_home(|home| {
+            // Mirror production startup wiring: register the config resolver so
+            // artifact_root() can read the config-level override.
+            set_config_artifact_root_resolver(|| {
+                crate::core::defaults::load_config().artifact_root
+            });
             let configured = home.path().join("custom-artifacts");
             crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {
                 artifact_root: Some(configured.to_string_lossy().to_string()),
@@ -457,6 +497,9 @@ mod tests {
     #[test]
     fn artifact_root_prefers_env_over_config() {
         with_isolated_home(|home| {
+            set_config_artifact_root_resolver(|| {
+                crate::core::defaults::load_config().artifact_root
+            });
             let configured = home.path().join("config-artifacts");
             let env_root = home.path().join("env-artifacts");
             crate::core::defaults::save_config(&crate::core::defaults::HomeboyConfig {

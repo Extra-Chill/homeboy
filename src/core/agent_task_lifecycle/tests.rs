@@ -3,15 +3,16 @@
 
 use super::*;
 use crate::core::agent_task::{
-    AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
-    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
-    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
+    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
+    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
+    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use crate::core::api_jobs::{JobEvent, JobEventKind};
 use crate::test_support::with_isolated_home;
 
 #[test]
@@ -79,6 +80,31 @@ fn submit_plan_persists_queued_status() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn submit_plan_persists_owner_only_plan_file_before_observation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("private-plan")).expect("submitted");
+
+        assert_eq!(
+            std::fs::metadata(&record.plan_path)
+                .expect("plan metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            status(&record.run_id)
+                .expect("observation record")
+                .plan_path,
+            record.plan_path
+        );
+    });
+}
+
 #[test]
 fn active_pinned_run_blocks_controller_binary_replacement() {
     with_isolated_home(|_| {
@@ -97,40 +123,47 @@ fn active_pinned_run_blocks_controller_binary_replacement() {
 #[test]
 fn detached_lab_handoff_persists_inspectable_running_record() {
     with_isolated_home(|_| {
-        let record = record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "agent-task-detached",
-            runner_id: "homeboy-lab",
-            runner_job_id: "job-123",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &[
+        for (run_id, handoff) in [
+            ("agent-task-detached-cook", "cook"),
+            ("agent-task-detached-batch", "cook-batch"),
+            ("agent-task-detached-retry", "run-plan"),
+        ] {
+            let command = vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
-                "cook".to_string(),
-            ],
-        })
-        .expect("detached handoff recorded");
+                handoff.to_string(),
+            ];
+            let record = record_detached_lab_run(DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "job-123",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            })
+            .expect("detached handoff recorded");
 
-        let loaded = status("agent-task-detached").expect("status resolves");
-        let log = logs("agent-task-detached").expect("logs resolve");
-        let artifacts = artifacts("agent-task-detached").expect("artifacts resolve");
+            let loaded = status(run_id).expect("status resolves");
+            let log = logs(run_id).expect("logs resolve");
+            let artifacts = artifacts(run_id).expect("artifacts resolve");
 
-        assert_eq!(record.run_id, "agent-task-detached");
-        assert_eq!(loaded.state, AgentTaskRunState::Running);
-        assert_eq!(loaded.tasks[0].state, AgentTaskState::Running);
-        assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
-        assert_eq!(loaded.metadata["runner_job_id"], "job-123");
-        assert!(loaded.metadata.get("stale_running").is_none());
-        assert!(loaded.lifecycle.heartbeat.is_some());
-        assert_eq!(
-            loaded
-                .lifecycle
-                .heartbeat
-                .as_ref()
-                .map(|heartbeat| heartbeat.last_seen_at.as_str()),
-            loaded.updated_at.as_deref()
-        );
-        assert_eq!(log.events.len(), 1);
-        assert!(artifacts.evidence_refs.is_empty());
+            assert_eq!(record.run_id, run_id);
+            assert_eq!(loaded.state, AgentTaskRunState::Running);
+            assert_eq!(loaded.tasks[0].state, AgentTaskState::Running);
+            assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
+            assert_eq!(loaded.metadata["runner_job_id"], "job-123");
+            assert!(loaded.metadata.get("stale_running").is_none());
+            assert!(loaded.lifecycle.heartbeat.is_some());
+            assert_eq!(
+                loaded
+                    .lifecycle
+                    .heartbeat
+                    .as_ref()
+                    .map(|heartbeat| heartbeat.last_seen_at.as_str()),
+                loaded.updated_at.as_deref()
+            );
+            assert_eq!(log.events.len(), 1);
+            assert!(artifacts.evidence_refs.is_empty());
+        }
     });
 }
 
@@ -266,6 +299,56 @@ fn detached_cook_preacceptance_failure_terminalizes_attempt_proxy() {
 }
 
 #[test]
+fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
+    with_isolated_home(|_| {
+        let run_id = "cook-8096-attempt-1";
+        let plan = test_plan();
+        let record = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "materializing",
+            None,
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("controller attempt persisted");
+        std::fs::remove_file(&record.plan_path).expect("remove interrupted plan");
+
+        let recovered = record_lab_offload_phase(
+            run_id,
+            "homeboy-lab",
+            "dispatching",
+            Some("/runner/workspace/homeboy"),
+            None,
+            None,
+            Some(&plan),
+        )
+        .expect("controller plan recovery");
+        assert_eq!(load_plan(run_id).expect("recovered plan"), plan);
+
+        std::fs::remove_file(&recovered.plan_path).expect("remove unrecoverable plan");
+        let error = record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-8096",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &[],
+        })
+        .expect_err("handoff without plan must not become running");
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+
+        let terminal = status(run_id).expect("terminal recovery record");
+        assert_eq!(terminal.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            terminal.metadata["pre_execution_failure"]["phase"],
+            "lab_attempt_plan_recovery"
+        );
+        assert!(terminal.metadata.get("runner_job_id").is_none());
+    });
+}
+
+#[test]
 fn failed_lab_handoff_retry_recovers_the_materialized_user_plan() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
@@ -362,6 +445,47 @@ fn controller_proxy_records_pre_execution_phase_progress() {
         let loaded = status("agent-task-pre-execution").expect("status resolves during setup");
         assert_eq!(loaded.metadata["phase"], "hydrating");
         assert_eq!(loaded.metadata["provider_state"], "pending");
+        let phases = loaded.metadata["phase_history"]
+            .as_array()
+            .expect("phase history");
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0]["phase"], "materializing");
+        assert!(phases[0].get("started_at").is_some());
+        assert!(phases[0].get("ended_at").is_some());
+        assert_eq!(phases[1]["phase"], "hydrating");
+        assert!(phases[1].get("started_at").is_some());
+    });
+}
+
+#[test]
+fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "live-runner-events",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-live",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        record.metadata["runner_job_events"] = json!([JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::new_v4(),
+            kind: JobEventKind::Progress,
+            timestamp_ms: 42,
+            message: Some("provider started".to_string()),
+            data: Some(json!({"provider": "openai/gpt-5.6-terra"})),
+        }]);
+        store::write_record(&record).expect("persist mirrored event");
+
+        let log = logs("live-runner-events").expect("live logs resolve");
+
+        assert_eq!(log.events.len(), 1);
+        assert!(log.events[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider started")));
     });
 }
 
@@ -560,6 +684,58 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
         assert!(record.metadata.get("stale_running_reason").is_none());
         assert!(record.metadata.get("retryable").is_none());
         assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-live-provider",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = crate::core::api_jobs::JobStatus::Running;
+        snapshot.events = vec![crate::core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id: snapshot.job.id,
+            kind: crate::core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: 2,
+            message: Some("provider dispatch accepted".to_string()),
+            data: Some(json!({
+                "metadata": {
+                    "provider_handle": AgentTaskExecutionHandle {
+                        kind: crate::core::agent_task::AgentTaskExecutionHandleKind::ProviderRun,
+                        task_id: "task-a".to_string(),
+                        backend: "openai/gpt-5.6-terra".to_string(),
+                        run_id: "provider-run-live".to_string(),
+                        stream_uri: Some("provider://runs/provider-run-live/events".to_string()),
+                        metadata: json!({"progress": "accepted"}),
+                    }
+                }
+            })),
+        }];
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("live reconciliation");
+
+        assert_eq!(record.metadata["phase"], "executing");
+        assert_eq!(record.metadata["provider_state"], "active");
+        assert_eq!(record.provider_handles.len(), 1);
+        assert_eq!(
+            record.provider_handles[0].provider_run_id,
+            "provider-run-live"
+        );
+        let log = logs(&record.run_id).expect("live logs");
+        assert_eq!(log.events.len(), 1);
+        assert!(log.events[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider dispatch accepted")));
     });
 }
 
@@ -880,6 +1056,185 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
         assert_eq!(loaded.state, AgentTaskRunState::Running);
         assert_eq!(observation.metadata_json["lab"]["remote_job_id"], "job-123");
         assert!(observation.metadata_json.get("agent_task_run").is_some());
+    });
+}
+
+#[test]
+fn terminal_executor_artifacts_are_projected_under_logical_ids() {
+    with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("executor artifact root");
+        let patch = root.path().join("patch.diff");
+        std::fs::write(&patch, "patch bytes").expect("write patch");
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some(patch.display().to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(11),
+            sha256: Some(crate::core::artifact_metadata::sha256_file(&patch).expect("sha")),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        });
+        submit_plan(&plan, Some("projection-parity")).expect("submit");
+        record_run_aggregate("projection-parity", &plan, &aggregate).expect("record aggregate");
+
+        let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
+        let artifact = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            "projection-parity",
+            "patch",
+        )
+        .expect("resolve logical patch id");
+        assert_eq!(artifact.run_id, "projection-parity");
+        assert_eq!(artifact.kind, "patch");
+        assert_eq!(
+            std::fs::read(&artifact.path).expect("projected bytes"),
+            b"patch bytes"
+        );
+        let fetched = crate::core::observation::runs_service::copy_local_file_artifact(
+            crate::core::observation::runs_service::resolve_artifact_for_run(
+                &store,
+                "projection-parity",
+                "patch",
+            )
+            .expect("resolve runs artifact token"),
+            Some(root.path().join("retrieved.patch")),
+        )
+        .expect("retrieve projected artifact");
+        assert_eq!(
+            std::fs::read(fetched.output_path).expect("retrieved bytes"),
+            b"patch bytes"
+        );
+    });
+}
+
+#[test]
+fn controller_projects_runner_artifact_aliases_with_encoded_retrieval_tokens() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts = vec![
+            AgentTaskArtifact {
+                schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("/runner/private/one.patch".to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(3),
+                sha256: Some("one".to_string()),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            },
+            AgentTaskArtifact {
+                schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "report".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("/runner/private/two.json".to_string()),
+                url: None,
+                mime: Some("application/json".to_string()),
+                size_bytes: Some(3),
+                sha256: Some("two".to_string()),
+                metadata: json!({ "executor_artifact_finalized": true }),
+            },
+        ];
+        let submitted = submit_plan(&plan, Some("projection/run with space")).expect("submit");
+        record_runner_job_identity(&submitted.run_id, "runner/a:lab", "job-1")
+            .expect("runner identity");
+        record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("controller projection");
+
+        let store = crate::core::observation::ObservationStore::open_initialized().expect("store");
+        let patch = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            &submitted.run_id,
+            "patch",
+        )
+        .expect("patch alias");
+        let report = crate::core::observation::runs_service::resolve_artifact_for_run(
+            &store,
+            &submitted.run_id,
+            "task-a-patch",
+        )
+        .expect("duplicate alias");
+        assert_eq!(patch.artifact_type, "remote_file");
+        assert_eq!(
+            patch.path,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .artifacts
+                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "patch")
+        );
+        assert_eq!(
+            report.path,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .artifacts
+                .runner_artifact_ref("runner/a:lab", &submitted.run_id, "task-a-patch")
+        );
+    });
+}
+
+#[test]
+fn running_observation_projects_each_terminal_aggregate_state() {
+    with_isolated_home(|_| {
+        let cases = [
+            (
+                "terminal-success",
+                AgentTaskAggregateStatus::Succeeded,
+                AgentTaskOutcomeStatus::Succeeded,
+                "succeeded",
+            ),
+            (
+                "terminal-failure",
+                AgentTaskAggregateStatus::Failed,
+                AgentTaskOutcomeStatus::Failed,
+                "failed",
+            ),
+            (
+                "terminal-partial",
+                AgentTaskAggregateStatus::PartialFailure,
+                AgentTaskOutcomeStatus::Failed,
+                "partial_failure",
+            ),
+            (
+                "terminal-cancelled",
+                AgentTaskAggregateStatus::Cancelled,
+                AgentTaskOutcomeStatus::Cancelled,
+                "cancelled",
+            ),
+        ];
+        for (run_id, aggregate_status, outcome_status, terminal_state) in cases {
+            let plan = test_plan();
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.status = aggregate_status;
+            aggregate.outcomes[0].status = outcome_status;
+            submit_plan(&plan, Some(run_id)).expect("submit");
+            mark_running(run_id).expect("running");
+            record_run_aggregate(run_id, &plan, &aggregate).expect("terminal aggregate");
+
+            let observation = crate::core::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(run_id)
+                .expect("observation")
+                .expect("existing running observation transitioned");
+            assert_ne!(observation.status, "running");
+            assert_eq!(
+                observation.metadata_json["agent_task_terminal_state"],
+                terminal_state
+            );
+        }
     });
 }
 

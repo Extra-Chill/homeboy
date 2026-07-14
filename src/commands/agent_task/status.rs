@@ -488,11 +488,35 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         .collect::<Vec<_>>();
 
     let candidate_count = candidates.len();
-    let selected_index = candidates
+    let Some((evidence_ref, task_id, hydrated)) = candidates
         .iter()
-        .position(|(evidence_ref, _)| !evidence_ref.uri.contains("/plan#"))
-        .unwrap_or(0);
-    let Some((evidence_ref, task_id)) = candidates.into_iter().nth(selected_index) else {
+        .filter(|(evidence_ref, _)| !evidence_ref.uri.contains("/plan#"))
+        .find_map(|(evidence_ref, task_id)| {
+            let hydrated = agent_task_service::hydrate_evidence_ref(
+                &args.run_id,
+                evidence_ref,
+                task_id.as_deref(),
+                plan.as_ref(),
+                aggregate.as_ref(),
+            );
+            (hydrated.status == "ok"
+                && !hydrated.truncated
+                && hydrated.content.get("format").and_then(Value::as_str) == Some("json"))
+            .then(|| (evidence_ref.clone(), task_id.clone(), hydrated))
+        })
+        .or_else(|| {
+            candidates.first().map(|(evidence_ref, task_id)| {
+                let hydrated = agent_task_service::hydrate_evidence_ref(
+                    &args.run_id,
+                    evidence_ref,
+                    task_id.as_deref(),
+                    plan.as_ref(),
+                    aggregate.as_ref(),
+                );
+                (evidence_ref.clone(), task_id.clone(), hydrated)
+            })
+        })
+    else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "agent-task replay-provider-boundary",
             "no executor-input evidence was found for this run",
@@ -504,13 +528,6 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         ));
     };
 
-    let hydrated = agent_task_service::hydrate_evidence_ref(
-        &args.run_id,
-        &evidence_ref,
-        task_id.as_deref(),
-        plan.as_ref(),
-        aggregate.as_ref(),
-    );
     let input = hydrated_executor_input_value(&hydrated)?;
     let boundary = provider_boundary_projection(&input);
     let report = json!({

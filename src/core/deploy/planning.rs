@@ -12,7 +12,8 @@ use crate::core::release::version;
 use crate::core::server::SshClient;
 
 use super::types::{
-    ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+    compare_deployed_versions, ComponentStatus, DeployConfig, ReleaseState, ReleaseStateBuckets,
+    ReleaseStateStatus,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
 
@@ -206,10 +207,9 @@ fn plan_outdated_steps(
         .map(|component| {
             let local_version = version::get_component_version(component);
             let remote_version = remote_versions.get(&component.id).cloned();
-            let needs_update = match (&local_version, &remote_version) {
-                (Some(local), Some(remote)) => local != remote,
-                _ => true,
-            };
+            let version_status =
+                compare_deployed_versions(local_version.as_deref(), remote_version.as_deref());
+            let needs_update = version_status.requires_deploy();
             let status = if needs_update {
                 PlanStepStatus::Ready
             } else {
@@ -217,11 +217,7 @@ fn plan_outdated_steps(
             };
             let mut step = deploy_step(&component.id, status, "outdated").output_value(
                 "component_status",
-                serde_json::json!(if needs_update {
-                    "needs_update"
-                } else {
-                    "up_to_date"
-                }),
+                serde_json::to_value(&version_status).expect("component status serializes"),
             );
             if let Some(version) = local_version {
                 step = step.output_value("local_version", serde_json::json!(version));
@@ -230,7 +226,14 @@ fn plan_outdated_steps(
                 step = step.output_value("remote_version", serde_json::json!(version));
             }
             if !needs_update {
-                step = step.skip_reason("Component is up to date");
+                step = step.skip_reason(match version_status {
+                    ComponentStatus::UpToDate => "Component is up to date",
+                    ComponentStatus::BehindRemote => {
+                        "Remote deployment is newer than configured source"
+                    }
+                    ComponentStatus::Unknown => "Component version comparison is unknown",
+                    _ => "Component does not need an update",
+                });
             }
             step.build()
         })
@@ -470,6 +473,16 @@ pub(super) struct GitProbeCache {
 }
 
 impl GitProbeCache {
+    fn component_is_detached(&mut self, component: &Component) -> bool {
+        if component.is_file_component() {
+            return false;
+        }
+
+        component_git_root(component).is_some_and(|git_root| {
+            git_output(Path::new(&git_root), &["branch", "--show-current"]).is_none()
+        })
+    }
+
     fn component_is_behind_upstream(&mut self, component: &Component) -> bool {
         if component.is_file_component() {
             return false;
@@ -553,18 +566,8 @@ pub(super) fn calculate_component_status_with_git_cache(
     let local_version = version::get_component_version(component);
     let remote_version = remote_versions.get(&component.id);
 
-    let version_status = match (local_version, remote_version) {
-        (None, None) => ComponentStatus::Unknown,
-        (None, Some(_)) => ComponentStatus::NeedsUpdate,
-        (Some(_), None) => ComponentStatus::NeedsUpdate,
-        (Some(local), Some(remote)) => {
-            if local == *remote {
-                ComponentStatus::UpToDate
-            } else {
-                ComponentStatus::NeedsUpdate
-            }
-        }
-    };
+    let version_status =
+        compare_deployed_versions(local_version.as_deref(), remote_version.map(String::as_str));
 
     if !matches!(version_status, ComponentStatus::UpToDate) {
         return version_status;
@@ -574,7 +577,9 @@ pub(super) fn calculate_component_status_with_git_cache(
         return ComponentStatus::BehindUpstream;
     }
 
-    if git_probe_cache.component_is_behind_default_branch(component) {
+    if git_probe_cache.component_is_detached(component)
+        || git_probe_cache.component_is_behind_default_branch(component)
+    {
         return ComponentStatus::SourceStale;
     }
 
@@ -966,6 +971,7 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
             head: false,
@@ -1261,6 +1267,26 @@ mod tests {
     }
 
     #[test]
+    fn component_status_reports_source_stale_for_detached_checkout_at_default() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source");
+        let local = temp.path().join("local");
+        std::fs::create_dir(&source).expect("source dir");
+
+        init_source_repo(&source);
+        clone_repo(&source, &local);
+        run_git(&local, &["checkout", "--detach", "HEAD"]);
+
+        let stale = versioned_component("stale", &local, "1.0.0");
+        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
+
+        assert!(matches!(
+            calculate_component_status(&stale, &remote_versions),
+            ComponentStatus::SourceStale
+        ));
+    }
+
+    #[test]
     fn component_status_reports_source_stale_for_untracked_branch_behind_default() {
         let temp = TempDir::new().expect("temp dir");
         let source = temp.path().join("source");
@@ -1297,7 +1323,28 @@ mod tests {
 
         assert!(matches!(
             calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::NeedsUpdate
+            ComponentStatus::BehindRemote
+        ));
+    }
+
+    #[test]
+    fn component_status_reports_remote_newer_when_detached_checkout_is_stale() {
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source");
+        let local = temp.path().join("local");
+        std::fs::create_dir(&source).expect("source dir");
+
+        init_source_repo(&source);
+        clone_repo(&source, &local);
+        run_git(&local, &["checkout", "--detach", "HEAD"]);
+        commit_upstream_change(&source);
+
+        let stale = versioned_component("stale", &local, "0.12.2");
+        let remote_versions = HashMap::from([("stale".to_string(), "0.12.15".to_string())]);
+
+        assert!(matches!(
+            calculate_component_status(&stale, &remote_versions),
+            ComponentStatus::BehindRemote
         ));
     }
 

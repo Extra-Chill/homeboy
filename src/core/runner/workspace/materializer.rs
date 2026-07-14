@@ -11,6 +11,7 @@ pub(super) enum WorkspaceMaterializationOperation {
     RecreateTempDir,
     ExtractTarStdinToTemp,
     WriteStdinToBundle,
+    VerifyBundleDigest(String),
     CloneBundleToTemp,
     SetGitOrigin(String),
     CheckoutGitRef {
@@ -23,9 +24,15 @@ pub(super) enum WorkspaceMaterializationOperation {
     GuardCleanGitWorkspace {
         allow_dirty: bool,
     },
+    VerifyGitBaseline {
+        remote_url: String,
+        head: String,
+        changed_since_base: Option<String>,
+    },
     SyncGitCheckout {
         remote_url: String,
         head: String,
+        branch: Option<String>,
         changed_since_base: Option<String>,
         fetch_refs: Vec<String>,
         allow_dirty: bool,
@@ -134,6 +141,10 @@ impl WorkspaceMaterializationOperation {
             Self::WriteStdinToBundle => {
                 "rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\"".to_string()
             }
+            Self::VerifyBundleDigest(expected) => format!(
+                "test \"$(shasum -a 256 \"$bundle\" | awk '{{print $1}}')\" = {expected}",
+                expected = shell::quote_arg(expected)
+            ),
             Self::CloneBundleToTemp => "git clone \"$bundle\" \"$tmp\"".to_string(),
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
@@ -147,15 +158,27 @@ impl WorkspaceMaterializationOperation {
             Self::GuardCleanGitWorkspace { allow_dirty } => {
                 dirty_git_workspace_guard("$dest", *allow_dirty)
             }
+            Self::VerifyGitBaseline {
+                remote_url,
+                head,
+                changed_since_base,
+            } => verify_git_baseline_command(
+                "$dest",
+                remote_url,
+                head,
+                changed_since_base.as_deref(),
+            ),
             Self::SyncGitCheckout {
                 remote_url,
                 head,
+                branch,
                 changed_since_base,
                 fetch_refs,
                 allow_dirty,
             } => sync_git_checkout_command(
                 remote_url,
                 head,
+                branch.as_deref(),
                 changed_since_base.as_deref(),
                 fetch_refs,
                 *allow_dirty,
@@ -188,6 +211,32 @@ impl WorkspaceMaterializationOperation {
             Self::AtomicReplaceTemp => "rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"".to_string(),
         }
     }
+}
+
+fn verify_git_baseline_command(
+    dest: &str,
+    remote_url: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+) -> String {
+    let status = format!(
+        "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
+        dest = dest,
+    );
+    let changed_since = changed_since_base.map_or_else(String::new, |base| {
+        format!(
+            " && git -C {dest} rev-parse --verify -q {base}^{{commit}} >/dev/null && test \"$(git -C {dest} merge-base {base} HEAD)\" = {base}",
+            base = shell::quote_arg(base),
+        )
+    });
+    format!(
+        "test -d {dest}/.git && test \"$(git -C {dest} rev-parse HEAD)\" = {head} && test \"$(git -C {dest} config --get remote.origin.url)\" = {remote_url}{changed_since} && test -z \"$({status})\"",
+        dest = dest,
+        head = shell::quote_arg(head),
+        remote_url = shell::quote_arg(remote_url),
+        changed_since = changed_since,
+        status = status,
+    )
 }
 
 pub(crate) fn dependency_cache_restore_command(
@@ -276,6 +325,7 @@ pub(super) fn dirty_git_workspace_guard(dest: &str, allow_dirty: bool) -> String
 fn sync_git_checkout_command(
     remote_url: &str,
     head: &str,
+    branch: Option<&str>,
     changed_since_base: Option<&str>,
     fetch_refs: &[String],
     allow_dirty: bool,
@@ -300,9 +350,25 @@ fn sync_git_checkout_command(
         .collect::<String>();
     let dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty);
 
+    let checkout = branch.map_or_else(
+        || {
+            format!(
+                "git -C \"$dest\" checkout --detach {head}",
+                head = shell::quote_arg(head)
+            )
+        },
+        |branch| {
+            format!(
+                "git -C \"$dest\" checkout -B {branch} {head}",
+                branch = shell::quote_arg(branch),
+                head = shell::quote_arg(head),
+            )
+        },
+    );
     format!(
-        "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {remote_url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && git -C \"$dest\" checkout --detach {head} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
+        "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {remote_url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && {checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
         remote_url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
+        checkout = checkout,
     )
 }

@@ -40,6 +40,10 @@ pub struct ResolvedAgentTaskProviderPolicy {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    /// Whether the resolved rotation's first entry is the initial provider
+    /// attempt, rather than a fallback after the request's executor.
+    #[serde(default)]
+    pub rotation_starts_with_first_entry: bool,
     pub retry: AgentTaskRetryPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_timeout_ms: Option<u64>,

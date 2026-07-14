@@ -61,15 +61,25 @@ pub fn collect_check(
                         Some(deploy::ComponentStatus::Unknown) | None => "unknown",
                     };
 
-                    match status_str {
-                        "up_to_date" => summary.components_up_to_date += 1,
-                        "needs_update" | "behind_remote" | "behind_upstream" | "source_stale" => {
+                    match &comp_result.component_status {
+                        Some(deploy::ComponentStatus::UpToDate) => {
+                            summary.components_up_to_date += 1
+                        }
+                        Some(status) if status.requires_deploy() => {
                             summary.components_needs_update += 1
                         }
-                        _ => summary.components_unknown += 1,
+                        Some(deploy::ComponentStatus::Unknown) | None => {
+                            summary.components_unknown += 1
+                        }
+                        Some(_) => {}
                     }
 
-                    if only_outdated && status_str == "up_to_date" {
+                    if only_outdated
+                        && !comp_result
+                            .component_status
+                            .as_ref()
+                            .is_some_and(deploy::ComponentStatus::requires_deploy)
+                    {
                         continue;
                     }
 

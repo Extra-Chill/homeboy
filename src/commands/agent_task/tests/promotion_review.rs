@@ -48,6 +48,7 @@ fn review_reports_queued_run_without_chat_state() {
             run_id: "run-review-queued".to_string(),
             to_worktree: None,
             provider_command: None,
+            provider_argv: Vec::new(),
         })
         .expect("review loaded");
 
@@ -79,6 +80,7 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             run_id: "run-review-completed".to_string(),
             to_worktree: Some("homeboy@fix-review-flow".to_string()),
             provider_command: None,
+            provider_argv: Vec::new(),
         })
         .expect("review loaded");
 
@@ -143,6 +145,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                     },
                 },
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
+                attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
@@ -197,17 +200,28 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
         request: AgentTaskRequest,
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
-        std::fs::write(self.workspace.join("agent-change.txt"), "committed work\n")
+        let workspace = std::path::PathBuf::from(
+            request
+                .workspace
+                .root
+                .as_deref()
+                .expect("isolated workspace"),
+        );
+        assert_ne!(
+            workspace, self.workspace,
+            "executor must not receive the source workspace"
+        );
+        std::fs::write(workspace.join("agent-change.txt"), "committed work\n")
             .expect("write executor change");
         let status = Command::new("git")
             .args(["add", "agent-change.txt"])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .status()
             .expect("stage executor change");
         assert!(status.success());
         let status = Command::new("git")
             .args(["commit", "-m", "agent: make committed change"])
-            .current_dir(&self.workspace)
+            .current_dir(&workspace)
             .status()
             .expect("commit executor change");
         assert!(status.success());
@@ -227,7 +241,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
                     label: None,
                     role: None,
                     semantic_key: None,
-                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    path: Some(workspace.join("plugin.php").display().to_string()),
                     url: None,
                     mime: Some("application/json".to_string()),
                     size_bytes: None,
@@ -242,7 +256,7 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
                     label: None,
                     role: None,
                     semantic_key: None,
-                    path: Some(self.workspace.join("plugin.php").display().to_string()),
+                    path: Some(workspace.join("plugin.php").display().to_string()),
                     url: None,
                     mime: Some("text/plain".to_string()),
                     size_bytes: None,
@@ -279,6 +293,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             .expect("clone target");
         assert!(status.success());
         let expected_patch = temp.path().join("expected.patch");
+        let promotion_request = temp.path().join("promotion-request.json");
         std::fs::write(
             &expected_patch,
             "diff --git a/agent-change.txt b/agent-change.txt\nnew file mode 100644\nindex 0000000..f3f8b32\n--- /dev/null\n+++ b/agent-change.txt\n@@ -0,0 +1 @@\n+committed work\n",
@@ -288,7 +303,8 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\nset -eu\ncat >/dev/null\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                "#!/bin/sh\nset -eu\ncat > {}\ngit -C {} apply {}\nprintf '%s\\n' '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{}\"}}'\n",
+                promotion_request.display(),
                 target.display(),
                 expected_patch.display(),
                 target.display(),
@@ -323,10 +339,11 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                     },
                 },
                 attempt_run_id: None,
+                attempt_plan: None,
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
-                provider_command: Some(format!("sh {}", provider.display())),
-                provider_argv: Vec::new(),
+                provider_command: None,
+                provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
                     verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
@@ -352,7 +369,7 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         assert_eq!(value["status"], "green_no_finalize");
         assert_eq!(
             value["attempts"][0]["promotion"]["patch_artifact"]["id"],
-            "committed-changes"
+            "cook-fixture-component-attempt-1-committed-changes"
         );
         assert_eq!(
             value["attempts"][0]["promotion"]["changed_files"],
@@ -361,6 +378,11 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         assert_eq!(
             value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["change_source"],
             "local_commits"
+        );
+        assert_eq!(
+            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]
+                ["artifact_provenance"],
+            "homeboy_generated_committed_patch"
         );
         assert_eq!(
             value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["commits"]
@@ -378,5 +400,19 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
             "committed work\n"
         );
+        let request: Value = serde_json::from_str(
+            &std::fs::read_to_string(&promotion_request).expect("read promotion request"),
+        )
+        .expect("typed promotion request");
+        assert_eq!(
+            request["schema"],
+            "homeboy/agent-task-promotion-apply-request/v1"
+        );
+        assert_eq!(request["to_workspace"], "fixture-component@promoted");
+        assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
+        assert!(request["patch"]
+            .as_str()
+            .expect("inline selected patch")
+            .contains("committed work"));
     });
 }

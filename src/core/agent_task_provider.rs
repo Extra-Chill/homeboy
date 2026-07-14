@@ -30,6 +30,7 @@ use crate::core::engine::shell;
 use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
+pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;
@@ -87,7 +88,8 @@ use command_runner::{
 use fixtures::fixture_artifact;
 #[cfg(test)]
 use outcome_normalization::{
-    normalize_provider_outcome_roles, surface_provider_run_result_diagnostics,
+    normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
+    surface_provider_run_result_diagnostics,
 };
 #[cfg(test)]
 use resolution::{

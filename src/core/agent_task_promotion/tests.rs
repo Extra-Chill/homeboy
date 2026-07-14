@@ -175,7 +175,7 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn materialized_workspace_promotion_adapter_applies_patch_and_returns_workspace() {
+fn materialized_workspace_promotion_adapter_applies_inline_patch_when_artifact_is_remote() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("create workspace");
@@ -185,19 +185,16 @@ fn materialized_workspace_promotion_adapter_applies_patch_and_returns_workspace(
     std::fs::write(workspace.join("src.txt"), "old\n").expect("write source");
     git(&workspace, &["add", "src.txt"]);
     git(&workspace, &["commit", "-m", "initial"]);
-    let patch = temp.path().join("changes.patch");
-    std::fs::write(
-        &patch,
-        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n",
-    )
-    .expect("write patch");
+    let patch =
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
     let response = super::apply_materialized_workspace_patch(
         &workspace,
         &serde_json::json!({
             "schema": AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
             "to_workspace": "homeboy@fix-7913",
-            "patch_path": patch,
+            "patch": patch,
+            "patch_path": "runner-artifact://homeboy-lab/run-1/changes.patch",
             "changed_files": ["src.txt"]
         })
         .to_string(),
@@ -691,9 +688,70 @@ fn promote_dry_run_validates_provider_request_without_applying() {
     assert_eq!(report.patch_artifact.id, "patch");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.apply_calls[0].patch.as_deref(), Some(VALID_PATCH));
     assert!(provider.apply_calls[0].dry_run);
     assert_eq!(report.command_evidence.len(), 1);
     assert!(report.deterministic_gates.is_empty());
+}
+
+#[test]
+fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = write_patch_source(&temp);
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    source["artifacts"][0]["id"] = Value::String("task-1-attempt-1-committed-changes".to_string());
+    source["artifacts"][0]["metadata"] = serde_json::json!({
+        "artifact_provenance": "homeboy_generated_committed_patch",
+        "task_id": "task-1",
+        "producer_attempt": 1
+    });
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("controlled-worktree")),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source: source.to_string(),
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@promoted-task".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: true,
+            gates: VerifyGateOptions {
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("dry-run promotion report");
+
+    assert_eq!(
+        report.patch_artifact.id,
+        "task-1-attempt-1-committed-changes"
+    );
+}
+
+#[test]
+fn review_only_patch_cannot_be_selected_for_promotion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (_, source) = write_patch_source(&temp);
+    let mut outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
+    outcome.artifacts[0].size_bytes = Some(128);
+    outcome.artifacts[0].metadata = serde_json::json!({ "review_only": true });
+
+    let error = select_patch_artifact(&outcome, Some("patch"))
+        .expect_err("review-only external patch must not be selectable");
+
+    assert!(error.message.contains("no matching patch artifact"));
 }
 
 #[test]
@@ -1132,17 +1190,27 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         .to_string(),
     )
     .expect("write response");
+    let request_path = temp.path().join("request.json");
 
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: temp.path().join("changes.patch").display().to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,
     };
     let workspace = run_provider_command(
         &CommandInvocation {
-            argv: vec!["cat".to_string(), response_path.display().to_string()],
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "cat > {}; cat {}",
+                    request_path.display(),
+                    response_path.display()
+                ),
+            ],
             ..Default::default()
         },
         &request,
@@ -1154,6 +1222,13 @@ fn provider_command_response_supplies_workspace_and_evidence() {
         workspace.command_evidence[0].command,
         vec!["provider", "apply"]
     );
+    assert_eq!(
+        serde_json::from_str::<AgentTaskPromotionApplyRequest>(
+            &std::fs::read_to_string(request_path).expect("typed stdin request"),
+        )
+        .expect("decode typed request"),
+        request
+    );
 }
 
 #[test]
@@ -1161,6 +1236,7 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,
@@ -1195,6 +1271,7 @@ fn provider_response_overflow_is_terminated_with_bounded_evidence() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: "target-workspace".to_string(),
+        patch: None,
         patch_path: "changes.patch".to_string(),
         changed_files: vec!["src/lib.rs".to_string()],
         dry_run: false,

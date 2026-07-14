@@ -130,6 +130,35 @@ structures; adapters are responsible for interpreting backend-specific payloads
 and returning normalized Homeboy artifacts, diagnostics, evidence refs, and
 status values.
 
+## Provider file artifacts
+
+Homeboy creates the executor artifact root before provider execution and records
+its directory identity. Providers may declare regular files beneath that root.
+At completion, Homeboy rejects a replaced root, symlink root, symlink artifact,
+or path that traverses a symlink. On Unix it opens the leaf with `O_NOFOLLOW`,
+then verifies the opened file's device/inode against its canonical in-root path
+before copying only from that descriptor into Homeboy's canonical artifact
+store. It rechecks the root identity after finalization and records the copied
+byte count and SHA-256. Finalized files are immutable evidence: an identical
+replay is accepted, while a reused artifact id with different bytes fails
+instead of overwriting evidence. On platforms without reliable file identity,
+file declarations remain review-only with a diagnostic.
+
+Declarations that resolve outside the executor root are retained in the outcome
+for review with a diagnostic and `review_only: true`; they are not promotable or
+projected into the persisted run artifact registry. Existing providers should
+migrate file artifacts by writing them below the supplied executor artifact root
+and returning a safe logical `id` and `kind` (`A-Z`, `a-z`, `0-9`, `.`, `_`, and
+`-`). Provider identifiers are never used as filesystem path segments.
+
+The recorded MIME value is inferred from the finalized filename extension only.
+It is transport metadata, not a content validation or trust decision.
+
+This boundary is evidence provenance and contract enforcement, not a hostile-code
+sandbox. Command executors run with the caller's operating-system permissions;
+the confinement prevents accidental or out-of-contract artifact promotion, but
+does not make a provider command untrusted-code safe.
+
 ## Portable runtime manifest contract
 
 Provider manifests may include `runtime_contract` when a runtime returns stable

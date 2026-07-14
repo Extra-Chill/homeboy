@@ -220,6 +220,75 @@ fn provider_command_parts_uses_argv() {
 }
 
 #[test]
+fn opencode_provider_boundary_uses_task_workspace_for_cwd_and_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let original = temp.path().join("promotion-target");
+    let candidate = temp.path().join("attempt-candidate");
+    std::fs::create_dir_all(&original).expect("original workspace");
+    std::fs::create_dir_all(&candidate).expect("candidate workspace");
+    let script = script(
+        r#"const fs = require('fs');
+let input = '';
+process.stdin.on('data', (chunk) => input += chunk);
+process.stdin.on('end', () => {
+  const request = JSON.parse(input);
+  fs.writeFileSync('provider-observation.json', JSON.stringify({
+    cwd: process.cwd(),
+    workspace: request.workspace.root,
+    config_workspace: request.executor.config.workspace.root,
+    config_workspace_root: request.executor.config.workspace_root
+  }));
+  process.stderr.write('permission denied');
+});"#,
+    );
+    let (mut request, mut provider) = request("opencode-boundary", format!("node {script}"));
+    provider.id = "opencode.agent-task-executor".to_string();
+    provider.backend = "opencode".to_string();
+    request.executor.backend = "opencode".to_string();
+    request.workspace.root = Some(candidate.display().to_string());
+    request.executor.config = json!({
+        "workspace": { "root": candidate.display().to_string() },
+        "workspace_root": candidate.display().to_string(),
+    });
+
+    let outcome = run_provider_command_once(&request, &provider);
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.diagnostics[0].class, "agent_task.provider_empty_stdout",
+        "{:?}",
+        outcome.diagnostics
+    );
+    assert!(
+        candidate.join("provider-observation.json").is_file(),
+        "candidate missing provider observation; original exists: {}; diagnostics: {:?}",
+        original.join("provider-observation.json").is_file(),
+        outcome.diagnostics
+    );
+    let observation: Value = serde_json::from_slice(
+        &std::fs::read(candidate.join("provider-observation.json")).expect("provider observation"),
+    )
+    .expect("observation json");
+
+    assert_eq!(
+        observation["cwd"],
+        std::fs::canonicalize(&candidate)
+            .expect("canonical candidate")
+            .display()
+            .to_string()
+    );
+    assert_eq!(observation["workspace"], candidate.display().to_string());
+    assert_eq!(
+        observation["config_workspace"],
+        candidate.display().to_string()
+    );
+    assert_eq!(
+        observation["config_workspace_root"],
+        candidate.display().to_string()
+    );
+    assert!(!original.join("provider-observation.json").exists());
+}
+
+#[test]
 fn provider_manifest_rejects_deprecated_string_command() {
     let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
         "id": "legacy.provider",
@@ -435,6 +504,14 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
 
 #[test]
 fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
+    let artifact_root = std::env::temp_dir()
+        .join("homeboy-agent-task-provider-tests")
+        .join("task-runtime-normalization");
+    std::fs::create_dir_all(&artifact_root).expect("create executor artifact root");
+    let patch = artifact_root.join("runtime.patch");
+    let report = artifact_root.join("report.json");
+    std::fs::write(&patch, "patch bytes").expect("write patch");
+    std::fs::write(&report, "{}").expect("write report");
     let provider_output = json!({
         "schema": AGENT_TASK_OUTCOME_SCHEMA,
         "task_id": "task-runtime-normalization",
@@ -444,8 +521,8 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
                 "status": "done",
                 "summary": "runtime finished",
                 "artifacts": {
-                    "patch": "/tmp/runtime.patch",
-                    "report": { "path": "/tmp/report.json" }
+                    "patch": patch,
+                    "report": { "path": report }
                 }
             }
         }
@@ -499,15 +576,11 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
     assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
     assert_eq!(outcome.artifacts.len(), 2);
     assert_eq!(outcome.artifacts[0].kind, "patch");
-    assert_eq!(
-        outcome.artifacts[0].path.as_deref(),
-        Some("/tmp/runtime.patch")
-    );
+    assert_eq!(outcome.artifacts[0].metadata["review_only"], true);
     assert_eq!(outcome.artifacts[1].kind, "report");
-    assert_eq!(
-        outcome.artifacts[1].path.as_deref(),
-        Some("/tmp/report.json")
-    );
+    assert_eq!(outcome.artifacts[1].metadata["review_only"], true);
+    assert_eq!(outcome.artifacts[0].size_bytes, None);
+    assert_eq!(outcome.artifacts[0].sha256, None);
     assert_eq!(outcome.typed_artifacts.len(), 2);
     assert_eq!(outcome.typed_artifacts[0].name, "patch");
     assert_eq!(

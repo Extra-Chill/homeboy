@@ -101,16 +101,30 @@ where
         );
     }
     dispatch_args.core.queue_only = false;
-    let (dispatch_value, _dispatch_exit) =
-        dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
-    let run_id = dispatch_value["run_id"]
-        .as_str()
-        .ok_or_else(|| {
+    let run_id = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+        let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
-                "agent-task cook dispatch step did not return a run_id".to_string(),
+                "agent-task cook attempt plan requires an attempt run id".to_string(),
             )
-        })?
-        .to_string();
+        })?;
+        let plan = agent_task_service::read_plan(attempt_plan)?;
+        // Submit the controller-compiled plan before provider execution. The
+        // durable record and its plan are therefore visible together to the
+        // runner-side cook loop and handoff observers.
+        agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
+        run_id
+    } else {
+        let (dispatch_value, _dispatch_exit) =
+            dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
+        dispatch_value["run_id"]
+            .as_str()
+            .ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "agent-task cook dispatch step did not return a run_id".to_string(),
+                )
+            })?
+            .to_string()
+    };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Keep this cook on one runtime generation through provider work and PR finalization.
     let _runtime_generation = homeboy::core::runtime_promotion::pin_cook_generation(&cook_id)?;

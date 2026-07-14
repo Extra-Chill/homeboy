@@ -2,11 +2,14 @@ use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 
+use sha2::{Digest, Sha256};
+
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
+use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
 use super::util::{git_output, run_shell_command, ssh_args, ssh_client_for_runner};
 
@@ -20,9 +23,6 @@ pub(super) fn git_snapshot(
     let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .filter(|branch| branch != "HEAD");
-    if !controller_routed_git {
-        ensure_clean_git_working_tree(local_path, changed_since_base)?;
-    }
     let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])?;
     if remote_url.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -32,18 +32,20 @@ pub(super) fn git_snapshot(
             None,
         ));
     }
+    super::super::source_materialization::validate_sanitized_git_remote(&remote_url)?;
     if controller_routed_git
         || branch.is_none()
         || super::super::source_materialization::requires_controller_routed_workspace_sync(
             &remote_url,
         )
+        // A partial controller checkout may need its selected HEAD hydrated
+        // before Git can even evaluate cleanliness.
+        || promisor_remote(local_path)?.is_some()
     {
         let refs = controller_bundle_refs(&head, changed_since_base, &git_fetch_refs);
         repair_controller_bundle_commit_closure(local_path, &refs)?;
     }
-    if controller_routed_git {
-        ensure_clean_git_working_tree(local_path, changed_since_base)?;
-    }
+    ensure_clean_git_working_tree(local_path, changed_since_base)?;
 
     Ok(GitSnapshot {
         remote_url,
@@ -97,6 +99,7 @@ pub(super) fn materialize_git(
     remote_path: &str,
     remote_url: &str,
     head: &str,
+    branch: Option<&str>,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
@@ -105,6 +108,7 @@ pub(super) fn materialize_git(
         remote_path,
         remote_url,
         head,
+        branch,
         changed_since_base,
         git_fetch_refs,
         allow_dirty_lab_workspace,
@@ -143,7 +147,7 @@ pub(super) fn materialize_git_from_controller_bundle(
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
-) -> Result<()> {
+) -> Result<ControllerGitBundleProvenance> {
     validate_controller_git_bundle_source(local_path)?;
 
     let bundle_dir = tempfile::tempdir().map_err(|err| {
@@ -154,6 +158,8 @@ pub(super) fn materialize_git_from_controller_bundle(
     })?;
     let bundle_path = bundle_dir.path().join("workspace.bundle");
 
+    // `HEAD` preserves the complete selected ancestry in a bundle. The exact
+    // resolved SHA is recorded separately in provenance and verified on Lab.
     let refs = controller_bundle_refs("HEAD", changed_since_base, git_fetch_refs);
     hydrate_controller_bundle_objects(local_path, &refs)?;
 
@@ -173,12 +179,15 @@ pub(super) fn materialize_git_from_controller_bundle(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
+    let sha256 = sha256_file(&bundle_path)?;
 
     let install_command = git_bundle_install_command(
         remote_path,
         head,
         branch,
         remote_url,
+        changed_since_base,
+        &sha256,
         allow_dirty_lab_workspace,
     );
     let result = match runner.kind {
@@ -212,7 +221,26 @@ pub(super) fn materialize_git_from_controller_bundle(
         }
     };
 
-    result
+    result?;
+    Ok(ControllerGitBundleProvenance {
+        provenance: "controller_git_bundle",
+        source_sha: head.to_string(),
+        source_refs: refs,
+        sha256,
+        cleanup_owner: "controller",
+        // The controller tempdir is removed as soon as the transfer finishes.
+        cleanup_ttl: "PT0S",
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("read git bundle for digest".to_string()),
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 /// Resolve the exact object closure locally before `git bundle` can invoke a
@@ -423,6 +451,8 @@ pub(crate) fn git_bundle_install_command(
     head: &str,
     branch: Option<&str>,
     remote_url: &str,
+    changed_since_base: Option<&str>,
+    expected_sha256: &str,
     allow_dirty_lab_workspace: bool,
 ) -> String {
     WorkspaceMaterializer::new(remote_path)
@@ -434,6 +464,9 @@ pub(crate) fn git_bundle_install_command(
             "\"$bundle\"".to_string(),
         ]))
         .op(WorkspaceMaterializationOperation::WriteStdinToBundle)
+        .op(WorkspaceMaterializationOperation::VerifyBundleDigest(
+            expected_sha256.to_string(),
+        ))
         .op(WorkspaceMaterializationOperation::CloneBundleToTemp)
         .op(WorkspaceMaterializationOperation::SetGitOrigin(
             remote_url.to_string(),
@@ -449,6 +482,11 @@ pub(crate) fn git_bundle_install_command(
             allow_dirty: allow_dirty_lab_workspace,
         })
         .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
+        })
         .restore_owner()
         .command()
 }
@@ -457,6 +495,7 @@ pub(super) fn materialize_git_command(
     remote_path: &str,
     remote_url: &str,
     head: &str,
+    branch: Option<&str>,
     changed_since_base: Option<&str>,
     git_fetch_refs: &[String],
     allow_dirty_lab_workspace: bool,
@@ -467,9 +506,15 @@ pub(super) fn materialize_git_command(
         .op(WorkspaceMaterializationOperation::SyncGitCheckout {
             remote_url: remote_url.to_string(),
             head: head.to_string(),
+            branch: branch.map(str::to_string),
             changed_since_base: changed_since_base.map(str::to_string),
             fetch_refs: git_fetch_refs.to_vec(),
             allow_dirty: allow_dirty_lab_workspace,
+        })
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
         })
         .restore_owner()
         .command()

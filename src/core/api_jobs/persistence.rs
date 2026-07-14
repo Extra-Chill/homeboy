@@ -218,6 +218,13 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
         .iter()
         .map(|artifact| artifact.id.clone())
         .collect::<Vec<_>>();
+    let linked_agent_task_run_id = stored
+        .remote_runner
+        .as_ref()
+        .and_then(|remote_runner| remote_runner.request.runner_workload.as_ref())
+        .and_then(|workload| workload.agent_task.as_ref())
+        .map(|agent_task| agent_task.run_id.trim())
+        .filter(|run_id| !run_id.is_empty());
 
     serde_json::json!({
         "kind": "orphaned_after_control_plane_loss",
@@ -235,6 +242,11 @@ pub(super) fn stale_after_restart_classification(stored: &StoredJob) -> Value {
             "terminal_result_recorded": false,
             "last_known_event": last_child_event.map(last_known_child_event),
             "output_observed": last_child_event.is_some(),
+            "linked_durable_run": linked_agent_task_run_id.map(|run_id| serde_json::json!({
+                "kind": "agent_task",
+                "run_id": run_id,
+                "terminal_result_observed": false,
+            })),
         },
         "remote_runner": stored.remote_runner.as_ref().map(|remote_runner| serde_json::json!({
             "runner_id": remote_runner.request.runner_id.clone(),

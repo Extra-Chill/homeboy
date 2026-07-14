@@ -280,8 +280,10 @@ mod tests {
 
     fn executor_test_request() -> AgentTaskExecutorRequest {
         let request = test_request();
+        let artifacts_path = std::env::temp_dir();
         AgentTaskExecutorRequest {
-            artifacts_path: PathBuf::from("/runner/artifacts/task"),
+            artifacts_root_identity: crate::core::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture(&artifacts_path).expect("artifact root identity"),
+            artifacts_path,
             artifacts_path_provenance: crate::core::agent_task::AgentTaskArtifactsPathProvenance {
                 owner: "homeboy".to_string(),
                 locality: "runner".to_string(),

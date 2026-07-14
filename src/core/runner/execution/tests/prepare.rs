@@ -211,7 +211,15 @@ fn ssh_runner_prep_marks_remote_placement_as_resolved() {
 }
 
 #[test]
-fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
+fn local_runner_prep_marks_placement_as_resolved() {
+    // Regression for #8115: a local runner exec must stamp the dispatch-only
+    // placement-resolved markers so nested Homeboy subprocesses (parity
+    // preflight `extension show`, extension materialization, ready_check
+    // chains) recognize that placement is already resolved and short-circuit
+    // routing instead of re-dispatching. Without these markers a local exec
+    // carrying an explicit `--placement` recursively spawns
+    // `homeboy component show` / `extension show` plus the extension
+    // ready_check and saturates the host.
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
@@ -238,9 +246,20 @@ fn local_runner_prep_does_not_mark_commands_as_runner_hosted() {
         })
         .expect("prepare local runner process");
 
-        assert!(!plan.env.contains_key(RUNNER_HOSTED_EXEC_ENV));
-        assert!(!plan.env.contains_key(RUNNER_PLACEMENT_RESOLVED_ENV));
-        assert!(!plan.env.contains_key(RUNNER_ID_ENV));
+        assert_eq!(
+            plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            plan.env
+                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            plan.env.get(RUNNER_ID_ENV).map(String::as_str),
+            Some("local")
+        );
     });
 }
 

@@ -83,7 +83,7 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
       "id": "<component_id>",
       "status": "deployed|failed|skipped|planned|checked",
       "deploy_reason": "explicitly_selected|all_selected|version_mismatch|unknown_local_version|unknown_remote_version",
-      "component_status": "up_to_date|needs_update|behind_remote|behind_upstream|unknown",
+      "component_status": "up_to_date|needs_update|behind_remote|behind_upstream|source_stale|unknown",
       "local_version": "<v>|null",
       "remote_version": "<v>|null",
       "error": "<string>|null",
@@ -128,7 +128,10 @@ When using `--check`, each component result includes a `component_status` field:
 - `needs_update`: local version ahead of remote (needs deployment)
 - `behind_remote`: remote version ahead of local (local is behind)
 - `behind_upstream`: local checkout is behind its upstream branch
+- `source_stale`: deployed version matches, but the configured checkout is detached or stale against its default branch
 - `unknown`: cannot determine status (missing version information)
+
+Deployment health is compared independently from configured-source freshness. A newer remote release is `behind_remote`, never `needs_update`; check output retains source checkout warnings such as `configured_source_detached` and `configured_source_behind_upstream`.
 
 ### Release state
 

@@ -91,16 +91,6 @@ impl Language {
         &["rs", "php", "ts", "js", "go"]
     }
 
-    /// The ecosystem tokens whose builtin version-compare guard defaults ship
-    /// with Homeboy. Version-compatibility guard syntax (`version_compare(...)`)
-    /// is ecosystem-specific, so the concrete token set lives here in the
-    /// agnostic conventions home rather than hardcoded inside a detector under
-    /// `code_audit::detectors`. Components that opt into builtin defaults
-    /// inherit these; others declare their own via config.
-    pub fn builtin_version_guard_tokens() -> &'static [&'static str] {
-        &["php"]
-    }
-
     /// Extension tokens whose source files embed unit tests inline in the same
     /// file (e.g. Rust's `#[cfg(test)] mod tests { ... }`). Detectors that parse
     /// production structure must strip these inline test modules first so test

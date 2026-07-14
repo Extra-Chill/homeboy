@@ -4,6 +4,79 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.285.2] - 2026-07-14
+
+### Changed
+- format engine primitive re-export
+- extract output aggregation types into homeboy-output crate
+- extract product identity literals into homeboy-product-identity crate
+- Prepare Lab snapshots for committed harvest
+- extract engine execution primitives into homeboy-engine-primitives crate
+- extract error types into internal homeboy-error crate
+- isolate exact-ref hydration fixtures
+- extract redaction into internal homeboy-redaction crate
+
+### Fixed
+- Fix detached agent task handoff timeout
+- bundle retry workspaces before runner clone
+- Fix Lab cook artifact promotion and retrieval
+- don't offer local bypass as primary rerun to non-interactive agents (#6384)
+
+## [0.285.1] - 2026-07-14
+
+### Changed
+- drop redundant native-tls stack from reqwest
+
+### Fixed
+- separate deploy health from source freshness
+
+## [0.285.0] - 2026-07-14
+
+### Added
+- add typed review dossiers
+
+### Changed
+- source version-guard language tokens from extension defaults (#6759)
+- make extension script tests noexec-tmp portable and race-free (#6760)
+- Harden agent-task plan files and redaction
+
+### Fixed
+- hydrate exact-ref deploy worktrees
+- preserve promotion provider requests
+- recover linked agent-task results after daemon loss
+- preserve local agent artifact sizes
+- materialize changed-since base without runner origin access
+
+## [0.284.8] - 2026-07-14
+
+### Changed
+- split status command god file into focused modules (#7551)
+
+### Fixed
+- Fix private Git workspace materialization fallback
+- align bench/build diagnostic assertions with actionable contract (#7975)
+- enforce embedded docs list/resolve contract (#7607)
+
+## [0.284.7] - 2026-07-14
+
+### Changed
+- Propagate Lab workspace verification metadata
+
+### Fixed
+- mark local runner execs as placement-resolved (#8115)
+- Fix terminal child reconciliation during lease adoption
+- materialize retry git baselines
+- carry Lab promotion patch content
+- persist Lab cook attempt plan before handoff
+- Fix cook retry workspace isolation
+
+## [0.284.6] - 2026-07-14
+
+### Fixed
+- materialize retry primary checkout on Lab
+- preserve live child jobs during lease recovery
+- isolate provider rotation attempt worktrees
+
 ## [0.284.5] - 2026-07-14
 
 ### Changed

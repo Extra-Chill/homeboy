@@ -22,9 +22,9 @@ pub use planning::{
     classify_release_state,
 };
 pub use types::{
-    parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployConfig,
-    DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult, MultiDeploySummary,
-    ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+    compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
+    DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
+    MultiDeploySummary, ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
@@ -166,6 +166,7 @@ pub fn run_multi(
             force: config.force,
             skip_build: config.skip_build,
             keep_deps: config.keep_deps,
+            skip_deps_hydration: config.skip_deps_hydration,
             expected_version: config.expected_version.clone(),
             no_pull: config.no_pull,
             head: config.head,
@@ -300,6 +301,7 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
             head: false,

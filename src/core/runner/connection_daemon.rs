@@ -374,6 +374,7 @@ fn daemon_freshness_report(
         daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
         runtime_paths: None,
         active_jobs: 0,
+        termination_evidence: None,
         repair_plan: Vec::new(),
     })
 }
@@ -461,6 +462,7 @@ mod tests {
                 daemon_build_identity: Some("homeboy 0.1.0+stale".to_string()),
                 runtime_paths: None,
                 active_jobs: 1,
+                termination_evidence: None,
                 repair_plan: Vec::new(),
             },
             pid: Some(pid),

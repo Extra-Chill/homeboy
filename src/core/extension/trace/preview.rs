@@ -1108,7 +1108,15 @@ mod tests {
 
     #[test]
     fn starts_homeboy_native_client_and_records_lifecycle_metadata() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        // Serialize against env-mutating tests: building the native client
+        // command derives runtime paths from HOME / HOMEBOY_RUNTIME_TMPDIR, so
+        // a parallel `with_isolated_home` neighbor flipping those mid-run
+        // intermittently corrupts this child's env (#6760). Holding the shared
+        // home guard globally serializes this test against them.
+        let _home = crate::test_support::HomeGuard::new();
+        // Exec-capable tempdir: the fixture client script is executed, so a
+        // `noexec` $TMPDIR would fail before the lifecycle assertions (#6760).
+        let temp = crate::test_support::exec_capable_tempdir();
         let client = temp.path().join("homeboy-preview-client-fixture.sh");
         std::fs::write(
             &client,

@@ -269,6 +269,12 @@ fn hydrate_homeboy_evidence_ref(
         }),
     };
 
+    let content = if parsed.section == "plan" {
+        json!({ "format": "json", "value": content })
+    } else {
+        content
+    };
+
     Ok(HydratedContent {
         source: "homeboy".to_string(),
         truncated: false,

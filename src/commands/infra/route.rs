@@ -77,7 +77,7 @@ pub fn route_after_parse(
         }
     }
 
-    let lab_command = lab_offload_command(&cli.command)?;
+    let mut lab_command = lab_offload_command(&cli.command)?;
 
     let inferred_runner_id = if lab_command.is_some() {
         cli.runner
@@ -92,6 +92,14 @@ pub fn route_after_parse(
     } else {
         None
     };
+    if retry_handoff.is_some() {
+        if let Some(command) = lab_command.as_mut() {
+            // A retry's task primary must be a real checkout so the provider can
+            // capture a bounded git diff instead of receiving a source snapshot.
+            command.command.workspace_mode_policy =
+                homeboy::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired;
+        }
+    }
     let normalized_args = retry_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
@@ -101,11 +109,12 @@ pub fn route_after_parse(
     } else {
         None
     };
+    let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
     let durable_agent_task_plan = retry_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
         .or(cook_plan.as_ref());
-    let observer = lab_dispatch_observer(cli, normalized_args, inferred_runner_id.as_deref());
+    let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
         .map(str::to_string)
@@ -122,8 +131,8 @@ pub fn route_after_parse(
     // the positional component to the runner's registered checkout and writes
     // fixes there — so the source-tree mutation lands outside the captured
     // workspace and the runner returns no patch to apply (#4315).
-    let scoped_args = inject_lab_changed_files(&cli.command, normalized_args)?;
-    let normalized_args = scoped_args.as_deref().unwrap_or(normalized_args);
+    let scoped_args = inject_lab_changed_files(&cli.command, &normalized_args)?;
+    let normalized_args = scoped_args.as_deref().unwrap_or(&normalized_args);
 
     let rewritten_args =
         lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
@@ -141,7 +150,7 @@ pub fn route_after_parse(
             skip_deps_hydration: cli.skip_deps_hydration,
             capture_patch: capture_mutation_patch,
             mutation_flag,
-            timeout: lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
+            timeout: lab_route_dispatch_timeout(&cli.command),
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
@@ -151,6 +160,10 @@ pub fn route_after_parse(
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             durable_agent_task_plan,
+            source_path: retry_handoff
+                .as_ref()
+                .map(|handoff| handoff.primary_workspace.as_path()),
+            require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
         },
         inferred_runner_id.as_deref(),
@@ -190,6 +203,39 @@ pub fn route_after_parse(
     }
 }
 
+/// Transfer the exact controller-compiled cook plan rather than asking the
+/// runner to rebuild it from command-line inputs after the durable handoff.
+fn inject_agent_task_cook_attempt_plan(
+    args: &[String],
+    plan: Option<&homeboy::core::agent_tasks::scheduler::AgentTaskPlan>,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(plan) = plan else {
+        return Ok(args.to_vec());
+    };
+    let agent_task_index = args.iter().position(|arg| arg == "agent-task");
+    let cook_index = agent_task_index.and_then(|index| {
+        args[index + 1..]
+            .iter()
+            .position(|arg| arg == "cook")
+            .map(|offset| index + offset + 1)
+    });
+    let Some(cook_index) = cook_index else {
+        return Ok(args.to_vec());
+    };
+    let serialized = serde_json::to_string(plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize agent-task cook attempt plan for Lab handoff".to_string()),
+        )
+    })?;
+    let mut rewritten = args.to_vec();
+    rewritten.splice(
+        cook_index + 1..cook_index + 1,
+        ["--attempt-plan".to_string(), serialized],
+    );
+    Ok(rewritten)
+}
+
 /// Materialize a cook's scheduler plan on the controller before the Lab
 /// handoff. The handoff record is transport state; this plan is the durable
 /// user task a later retry must execute.
@@ -211,14 +257,8 @@ fn materialize_agent_task_cook_plan(
     homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan(&request).map(Some)
 }
 
-fn lab_route_dispatch_timeout(
-    command: &Commands,
-    detach_after_handoff: bool,
-) -> Option<std::time::Duration> {
+fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {
     if matches!(command, Commands::Trace(_)) {
-        return Some(lab_routing::lab_trace_dispatch_timeout());
-    }
-    if detach_after_handoff && is_detached_agent_task_handoff(command) {
         return Some(lab_routing::lab_trace_dispatch_timeout());
     }
     None
@@ -228,6 +268,7 @@ struct AgentTaskRetryHandoff {
     args: Vec<String>,
     run_id: String,
     plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    primary_workspace: PathBuf,
 }
 
 /// Retries are controller-owned because the source plan lives in the local
@@ -264,10 +305,9 @@ fn materialize_agent_task_retry_handoff(
             Error::internal_unexpected("agent-task retry argv was missing agent-task")
         })?;
     let mut args = retry_handoff_prefix(&normalized_args[..agent_task_index]);
-    // A retry executes the original task, not the controller invocation. Make
-    // its git checkout the Lab primary so the remote cwd and patch capture use
-    // the same materialized worktree.
-    args.extend(["--cwd".to_string(), primary_workspace.display().to_string()]);
+    // A retry executes the original task, not the controller invocation. Carry
+    // its checkout through the route request rather than emitting an unsupported
+    // global --cwd argument; staging makes it the git-backed Lab primary.
     args.extend([
         "agent-task".to_string(),
         "run-plan".to_string(),
@@ -281,6 +321,7 @@ fn materialize_agent_task_retry_handoff(
         args,
         run_id: record.run_id,
         plan,
+        primary_workspace,
     }))
 }
 
@@ -703,33 +744,6 @@ fn agent_task_fanout_cook_batch_dispatch_id(
             args.issues.len()
         )
     })
-}
-
-fn is_agent_task_fanout_cook_batch_run_plan(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Fanout(
-                    crate::commands::agent_task::AgentTaskFanoutArgs {
-                        command:
-                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                    },
-                ),
-        }) if args.run_plan
-    )
-}
-
-fn is_detached_agent_task_handoff(command: &Commands) -> bool {
-    is_agent_task_fanout_cook_batch_run_plan(command)
-        || matches!(
-            command,
-            Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Retry(
-                    crate::commands::agent_task::RetryArgs { run: true, .. },
-                ),
-            })
-        )
 }
 
 fn run_rig_source_management_on_runner(
@@ -1800,15 +1814,33 @@ mod tests {
         let lint_cli = Cli::parse_from(["homeboy", "review", "lint"]);
 
         assert_eq!(
-            lab_route_dispatch_timeout(&trace_cli.command, false),
+            lab_route_dispatch_timeout(&trace_cli.command),
             Some(lab_routing::lab_trace_dispatch_timeout())
         );
-        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command, false), None);
+        assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
     }
 
     #[test]
-    fn detached_agent_task_fanout_cook_batch_run_plan_uses_bounded_handoff_timeout() {
-        let cli = Cli::parse_from([
+    fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
+        let cook = Cli::parse_from([
+            "homeboy",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--repo",
+            "homeboy",
+            "--goal",
+            "Fix the detached handoff",
+            "--to-worktree",
+            "homeboy@fix-7971",
+            "--run-id",
+            "cook-7971",
+            "--runner",
+            "homeboy-lab",
+            "--placement",
+            "lab",
+        ]);
+        let batch = Cli::parse_from([
             "homeboy",
             "--detach-after-handoff",
             "agent-task",
@@ -1821,30 +1853,7 @@ mod tests {
             "--run-plan",
             "https://github.com/Extra-Chill/homeboy/issues/7167",
         ]);
-
-        assert_eq!(
-            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
-            Some(lab_routing::lab_trace_dispatch_timeout())
-        );
-
-        let no_detach = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "cook-batch",
-            "--repo",
-            "homeboy",
-            "--verify",
-            "cargo test --lib",
-            "--run-plan",
-            "https://github.com/Extra-Chill/homeboy/issues/7167",
-        ]);
-        assert_eq!(lab_route_dispatch_timeout(&no_detach.command, false), None);
-    }
-
-    #[test]
-    fn detached_agent_task_retry_uses_bounded_handoff_timeout() {
-        let cli = Cli::parse_from([
+        let retry = Cli::parse_from([
             "homeboy",
             "--detach-after-handoff",
             "agent-task",
@@ -1853,12 +1862,13 @@ mod tests {
             "--run",
             "--runner",
             "homeboy-lab",
+            "--placement",
+            "lab",
         ]);
 
-        assert_eq!(
-            lab_route_dispatch_timeout(&cli.command, cli.detach_after_handoff),
-            Some(lab_routing::lab_trace_dispatch_timeout())
-        );
+        for cli in [&cook, &batch, &retry] {
+            assert_eq!(lab_route_dispatch_timeout(&cli.command), None);
+        }
     }
 
     #[test]
@@ -1908,19 +1918,29 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-            let cli = Cli::parse_from(&normalized);
+            let cli = Cli::parse_from([
+                "homeboy",
+                "--detach-after-handoff",
+                "agent-task",
+                "retry",
+                "failed-run",
+                "--run",
+                "--new-run-id",
+                "failed-run-retry-on-lab",
+                "--runner",
+                "homeboy-lab",
+            ]);
             let handoff = materialize_agent_task_retry_handoff(&cli, &normalized)
                 .expect("retry handoff materialized")
                 .expect("retry handoff");
 
-            let cwd_index = handoff
-                .args
-                .iter()
-                .position(|arg| arg == "--cwd")
-                .expect("canonical task cwd");
+            assert!(!handoff.args.iter().any(|arg| arg == "--cwd"));
             assert_eq!(
-                handoff.args[cwd_index + 1],
-                workspace.path().display().to_string()
+                handoff.primary_workspace,
+                workspace
+                    .path()
+                    .canonicalize()
+                    .expect("canonical workspace")
             );
             assert!(!handoff.args.iter().any(|arg| arg == "/controller/homeboy"));
             let agent_task_index = handoff
@@ -1949,6 +1969,10 @@ mod tests {
             let remote_plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan =
                 serde_json::from_str(&remote.plan).expect("serialized retry plan");
             assert_eq!(remote_plan, handoff.plan);
+            // The emitted command is accepted by the real CLI parser without
+            // inventing a global --cwd. The route carries the selected task
+            // checkout separately, and workspace staging maps it to the job cwd.
+            assert!(remote_cli.detach_after_handoff);
             let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
             assert_eq!(replacement.metadata["retry_of"], "failed-run");
 

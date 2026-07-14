@@ -315,6 +315,17 @@ pub(crate) fn exec_lab_context(
     secret_env_names.dedup();
 
     let pre_dispatch_started = std::time::Instant::now();
+    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "executor_preflight",
+            Some(&remote_cwd),
+            None,
+            None,
+            request.durable_agent_task_plan,
+        )?;
+    }
     preflight_lab_secret_env_handoff(runner_id, context.runner, &env, &context.secret_env_handoff)?;
     if let Some(runner) = context.runner {
         preflight_agent_task_runner_secret_env_plan(
@@ -330,6 +341,17 @@ pub(crate) fn exec_lab_context(
         context.runner,
         context.source_snapshot.as_ref(),
     ) {
+        if let Some(run_id) = context.agent_task_run_id.as_deref() {
+            agent_task_lifecycle::record_lab_offload_phase(
+                run_id,
+                runner_id,
+                "provider_preflight",
+                Some(&remote_cwd),
+                None,
+                None,
+                request.durable_agent_task_plan,
+            )?;
+        }
         preflight_agent_task_provider_on_runner(
             runner_id,
             &provider.command_prefix_argv,
@@ -369,6 +391,15 @@ pub(crate) fn exec_lab_context(
                 remote_command: &context.remote_command,
                 durable_plan: request.durable_agent_task_plan,
             },
+        )?;
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "provider_dispatch",
+            Some(&remote_cwd),
+            None,
+            None,
+            request.durable_agent_task_plan,
         )?;
     }
 
@@ -797,9 +828,11 @@ pub(crate) fn run_lab_offload_inner(
         );
     }
 
-    let source_path =
-        rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?
-            .unwrap_or(lab_offload_source_path(request.normalized_args)?);
+    let source_path = request
+        .source_path
+        .map(std::path::Path::to_path_buf)
+        .or(rig_materialization::lab_offload_rig_component_checkout_root(request.normalized_args)?)
+        .unwrap_or(lab_offload_source_path(request.normalized_args)?);
     // Begin best-effort host-level telemetry capture around the offloaded run
     // boundary (#3258). The opening snapshot of the controller host + watched
     // source/artifact dir is taken now; the closing snapshot and before/after
@@ -881,6 +914,15 @@ pub(crate) fn run_lab_offload_inner(
         serde_json::to_value(crate::core::defaults::load_config().agent_task.rotation)
             .unwrap_or(serde_json::Value::Null);
     if let Some(run_id) = pre_acceptance_run_id.as_deref() {
+        agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            runner_id,
+            "validation",
+            None,
+            Some(&source_checkout),
+            Some(&provider_rotation),
+            request.durable_agent_task_plan,
+        )?;
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,
@@ -1222,17 +1264,16 @@ pub(crate) fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    lab_metadata["source_snapshot"] =
-        serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
-    lab_metadata["workspace_content_hash"] =
-        serde_json::json!(crate::core::runner::workspace_content_hash(
-            Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
-            &source_snapshot.sync_excludes,
-        )?);
+    attach_lab_workspace_metadata(
+        &mut lab_metadata,
+        LabWorkspaceMetadataInputs {
+            source_snapshot: &source_snapshot,
+            legacy_path_materialization_plan: &path_materialization_plan,
+            primary_synced_workspace: &synced,
+        },
+    )?;
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
-    lab_metadata["workspace_materialization_plan"] =
-        serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(

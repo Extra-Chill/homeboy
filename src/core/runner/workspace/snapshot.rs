@@ -90,7 +90,8 @@ fn collect_content_hash_entries(
         let entry_path = entry.path();
         let relative_path = logical.join(entry.file_name());
         let relative = relative_path.to_string_lossy().replace('\\', "/");
-        if relative == ".homeboy/runner-workspace.json"
+        if relative == ".git"
+            || relative == ".homeboy/runner-workspace.json"
             || is_excluded(root, &root.join(&relative_path), excludes, &[])
         {
             continue;

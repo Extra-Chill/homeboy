@@ -24,6 +24,7 @@ mod tests {
     use serde_json::json;
 
     use super::persistence::recovered_terminal_from_result;
+    use super::store::RecoveredTerminalJob;
     use super::*;
     use crate::core::secret_env_plan::SecretEnvPlan;
     use crate::core::source_snapshot::SourceSnapshot;
@@ -466,6 +467,14 @@ mod tests {
                 Some(json!({ "exit_code": 0 })),
             )
             .expect("record successful result");
+        matching
+            .append_event(
+                succeeded_job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record stale child heartbeat after result");
         let failed_result_job = matching.create("runner.exec");
         matching
             .start(failed_result_job.id)
@@ -494,6 +503,14 @@ mod tests {
         matching
             .start(unfinished_job.id)
             .expect("start unfinished job");
+        matching
+            .append_event(
+                unfinished_job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": u32::MAX } })),
+            )
+            .expect("record dead child heartbeat");
 
         let other = JobStore::open_without_reconciliation(&path)
             .expect("open other")
@@ -503,7 +520,7 @@ mod tests {
 
         let store = JobStore::open_without_reconciliation(&path).expect("open recovery store");
         let diagnostics = store
-            .reconcile_dead_daemon_lease_jobs("lease-dead")
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |pid| pid == 4242)
             .expect("reconcile matching lease");
 
         assert_eq!(
@@ -521,6 +538,7 @@ mod tests {
         );
         assert_eq!(diagnostics.other_lease_job_ids, vec![other_job.id]);
         assert!(diagnostics.unowned_job_ids.is_empty());
+        assert!(diagnostics.protected_job_ids.is_empty());
         assert_eq!(
             store.get(succeeded_job.id).expect("succeeded job").status,
             JobStatus::Succeeded
@@ -583,6 +601,196 @@ mod tests {
             store.get(legacy_job.id).expect("legacy job").status,
             JobStatus::Running
         );
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_preserves_a_job_with_a_live_recorded_child() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record child heartbeat");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |pid| pid == 4242)
+            .expect("reconcile dead lease");
+
+        assert_eq!(diagnostics.protected_job_ids, vec![job.id]);
+        assert_eq!(diagnostics.terminalized_count(), 0);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        assert!(store.events(job.id).expect("events").iter().all(|event| {
+            event
+                .data
+                .as_ref()
+                .is_none_or(|data| data["reason"] != json!("dead_daemon_lease"))
+        }));
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_terminalizes_a_job_with_a_dead_recorded_child() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record child heartbeat");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+            .expect("reconcile dead lease");
+
+        assert!(diagnostics.protected_job_ids.is_empty());
+        assert_eq!(diagnostics.terminalized_count(), 1);
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn dead_child_recovers_linked_terminal_result_and_artifacts() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
+            .expect("heartbeat");
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| false,
+                |_| {
+                    Some(RecoveredTerminalJob::test_result(
+                        JobStatus::Succeeded,
+                        "run-success",
+                        json!({ "aggregate": { "status": "succeeded" } }),
+                        vec![JobArtifactMetadata {
+                            id: "artifact-1".to_string(),
+                            name: None,
+                            path: None,
+                            url: Some("artifact://1".to_string()),
+                            mime: None,
+                            size_bytes: None,
+                            sha256: None,
+                            content_base64: None,
+                            metadata: None,
+                        }],
+                    ))
+                },
+            )
+            .expect("reconcile");
+        let recovered = store.get(job.id).expect("job");
+        assert_eq!(recovered.status, JobStatus::Succeeded);
+        assert_eq!(recovered.artifacts[0].id, "artifact-1");
+        assert!(store
+            .events(job.id)
+            .expect("events")
+            .iter()
+            .any(|event| event
+                .data
+                .as_ref()
+                .is_some_and(
+                    |data| data["child_terminal_result"]["aggregate"]["status"] == "succeeded"
+                )));
+    }
+
+    #[test]
+    fn dead_child_recovers_linked_terminal_failure_and_live_child_skips_resolver() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
+            .expect("heartbeat");
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| true,
+                |_| panic!("live child must win"),
+            )
+            .expect("live child deferred");
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+                "lease-dead",
+                |_| false,
+                |_| {
+                    Some(RecoveredTerminalJob::test_result(
+                        JobStatus::Failed,
+                        "run-failure",
+                        json!({ "provider": "failed" }),
+                        Vec::new(),
+                    ))
+                },
+            )
+            .expect("reconcile failure");
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+        assert!(store.get(job.id).expect("job").stale_reason.is_none());
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_refuses_ambiguous_child_state_without_mutation() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        let event_count = store.events(job.id).expect("events").len();
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+            .expect_err("missing child evidence must fail closed");
+
+        assert!(error.message.contains(&job.id.to_string()));
+        assert!(error
+            .message
+            .contains("authoritative terminal result or recorded child PID"));
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        assert_eq!(store.events(job.id).expect("events").len(), event_count);
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "heartbeat", "process": { "root_pid": 4242 } })),
+            )
+            .expect("record child heartbeat");
+
+        let first = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+            .expect("first reconciliation");
+        let event_count = store.events(job.id).expect("events").len();
+        let second = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+            .expect("repeated reconciliation");
+
+        assert_eq!(first.terminalized_count(), 1);
+        assert_eq!(second.matching_count(), 0);
+        assert_eq!(second.terminalized_count(), 0);
+        assert_eq!(store.events(job.id).expect("events").len(), event_count);
     }
 
     #[test]
