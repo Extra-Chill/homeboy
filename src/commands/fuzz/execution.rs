@@ -84,7 +84,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     );
     let selected_workload_id = resolve_profile_workload_id(
         rig_context.as_ref().map(|context| &context.spec),
-        args.profile.as_deref(),
+        args.rig_profile(),
         args.workload_id.as_deref(),
     )?;
     let selected_workload = select_workload(&workloads, selected_workload_id.as_deref())?;
@@ -157,7 +157,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         runner_output.timed_out,
         results.as_ref(),
         combined_results_error,
-        args.gate_profile.as_core(),
+        args.effective_gate_profile().as_core(),
     );
     let exit_code = outcome.exit_code;
     let success = outcome.success;
@@ -217,7 +217,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             requested_settings: fuzz_requested_settings(&args),
             gates: fuzz_run_gates(
                 results.as_ref(),
-                args.gate_profile.as_core(),
+                args.effective_gate_profile().as_core(),
                 &expected_metric_gates,
             ),
             target_inventory: Some(target_inventory),
@@ -246,7 +246,10 @@ pub(super) fn fuzz_run_artifact_validation_error(
     args: &FuzzRunArgs,
     results: Option<&FuzzCampaign>,
 ) -> Option<String> {
-    if !args.require_case_log && !args.require_coverage_summary && !args.require_result_envelope {
+    if !args.effective_require_case_log()
+        && !args.effective_require_coverage_summary()
+        && !args.effective_require_result_envelope()
+    {
         return None;
     }
 
@@ -258,16 +261,18 @@ pub(super) fn fuzz_run_artifact_validation_error(
     };
 
     let mut missing = Vec::new();
-    if args.require_case_log && !campaign_has_artifact(campaign, &["case-log", "case_log"]) {
+    if args.effective_require_case_log()
+        && !campaign_has_artifact(campaign, &["case-log", "case_log"])
+    {
         missing.push("case log (--require-case-log)");
     }
-    if args.require_coverage_summary
+    if args.effective_require_coverage_summary()
         && campaign.coverage_summary.is_none()
         && !campaign_has_artifact(campaign, &["coverage-summary", "coverage_summary"])
     {
         missing.push("coverage summary (--require-coverage-summary)");
     }
-    if args.require_result_envelope
+    if args.effective_require_result_envelope()
         && !campaign_has_artifact(
             campaign,
             &[
@@ -323,8 +328,9 @@ fn fuzz_requested_settings(args: &FuzzRunArgs) -> serde_json::Value {
     serde_json::json!({
         "setting": args.setting_args.setting,
         "setting_json": args.setting_args.setting_json,
-        "allow_destructive": args.allow_destructive,
-        "isolation": args.isolation.as_str(),
+        "profile": args.profile.as_deref(),
+        "allow_destructive": args.effective_allow_destructive(),
+        "isolation": args.effective_isolation().as_str(),
         "expect_metric": args.expect_metric,
     })
 }
@@ -790,12 +796,12 @@ pub(super) fn persist_fuzz_run_evidence(
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
         "gates": fuzz_run_gates(
             input.results,
-            input.args.gate_profile.as_core(),
+            input.args.effective_gate_profile().as_core(),
             input.expected_metric_gates
         ),
         "gate_status": gate_status(&fuzz_run_gates(
             input.results,
-            input.args.gate_profile.as_core(),
+            input.args.effective_gate_profile().as_core(),
             input.expected_metric_gates
         )),
     });
@@ -868,7 +874,7 @@ pub(super) fn persist_fuzz_run_evidence(
             fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
         envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
             campaign,
-            input.args.gate_profile.as_core(),
+            input.args.effective_gate_profile().as_core(),
         ));
         if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
             evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
@@ -1139,13 +1145,16 @@ fn fuzz_run_command(
     if let Some(max_duration) = args.max_duration.as_ref() {
         parts.extend(["--max-duration".to_string(), max_duration.clone()]);
     }
-    if args.require_case_log {
+    if args.is_generic_lab_profile() {
+        parts.extend(["--profile".to_string(), "lab".to_string()]);
+    }
+    if args.effective_require_case_log() {
         parts.push("--require-case-log".to_string());
     }
-    if args.require_coverage_summary {
+    if args.effective_require_coverage_summary() {
         parts.push("--require-coverage-summary".to_string());
     }
-    if args.require_result_envelope {
+    if args.effective_require_result_envelope() {
         parts.push("--require-result-envelope".to_string());
     }
     for (metric, expected) in &args.expect_metric {
@@ -1423,15 +1432,15 @@ pub(super) fn fuzz_runner_env(
     );
     env.push((
         "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
-        args.gate_profile.as_str().to_string(),
+        args.effective_gate_profile().as_str().to_string(),
     ));
     env.push((
         "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string(),
-        args.allow_destructive.to_string(),
+        args.effective_allow_destructive().to_string(),
     ));
     env.push((
         "HOMEBOY_FUZZ_ISOLATION".to_string(),
-        args.isolation.as_str().to_string(),
+        args.effective_isolation().as_str().to_string(),
     ));
     Ok(env)
 }
@@ -1531,7 +1540,8 @@ pub(super) fn build_fuzz_execution_request(
             None,
         )
     })?;
-    let (required_artifacts, gates) = fuzz_gate_profile_contract(args.gate_profile.as_core());
+    let (required_artifacts, gates) =
+        fuzz_gate_profile_contract(args.effective_gate_profile().as_core());
     Ok(FuzzExecutionRequest {
         schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
         version: FUZZ_CONTRACT_VERSION,

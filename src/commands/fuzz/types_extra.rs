@@ -239,6 +239,8 @@ pub struct FuzzCampaignPlanEntryOutput {
     pub tracker_refs: Vec<TrackerRef>,
     pub artifact_requirements: Vec<FuzzRequiredArtifact>,
     pub command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab_command: Option<Vec<String>>,
     pub request: FuzzExecutionRequest,
 }
 
