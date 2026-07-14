@@ -157,3 +157,41 @@ fn collect_doc_topics(dir: &Path, prefix: &str, topics: &mut BTreeSet<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// list/resolve contract: every embedded topic printed by `self docs list`
+    /// MUST be openable via `self docs <that exact string>`. Guards issue #7607,
+    /// where uppercase root doc keys (CHANGELOG, TESTING, ...) were listed but
+    /// unresolvable because the resolver lowercases input before lookup.
+    #[test]
+    fn every_generated_topic_resolves() {
+        for (key, _) in GENERATED_DOCS {
+            let resolved = resolve(&[key.to_string()]);
+            assert!(
+                resolved.is_ok(),
+                "topic '{key}' is listed by GENERATED_DOCS but does not resolve"
+            );
+        }
+    }
+
+    /// Generated keys must already be in normalized (resolver-facing) form, so
+    /// list output and resolver lookups share one casing. A drift here is the
+    /// exact defect issue #7607 documents.
+    #[test]
+    fn generated_keys_are_normalized() {
+        for (key, _) in GENERATED_DOCS {
+            let normalized = key
+                .split('/')
+                .map(text::normalize_doc_segment)
+                .collect::<Vec<_>>()
+                .join("/");
+            assert_eq!(
+                *key, normalized,
+                "generated doc key '{key}' is not in normalized form (expected '{normalized}')"
+            );
+        }
+    }
+}
