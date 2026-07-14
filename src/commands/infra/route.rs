@@ -2934,7 +2934,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_fanout_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_run_plan_coordination_is_controller_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -2949,17 +2949,26 @@ mod tests {
         ];
         let cli = Cli::parse_from(&normalized);
 
+        // Fanout coordination is controller-owned (durable batch state,
+        // worktree ownership, and recovery stay local); the coordinator itself
+        // is not Lab-portable, though the independent cooks it generates may use
+        // their own Lab placement (#8045). It still exposes a Lab contract
+        // (Some), just a local-only one carrying the coordinator reason.
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(cli
+            .command
+            .lab_runner_unsupported_reason()
+            .is_some_and(|reason| reason.contains("controller-owned")));
     }
 
     #[test]
-    fn agent_task_fanout_cook_batch_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_cook_batch_run_plan_coordination_is_controller_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -2978,13 +2987,20 @@ mod tests {
         ];
         let cli = Cli::parse_from(&normalized);
 
+        // Non-dry-run cook-batch is the fanout coordinator: controller-owned so
+        // durable batch state, worktree ownership, and recovery remain
+        // available (#8045). It is not Lab-portable itself.
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout cook-batch");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(cli
+            .command
+            .lab_runner_unsupported_reason()
+            .is_some_and(|reason| reason.contains("controller-owned")));
     }
 
     #[test]
