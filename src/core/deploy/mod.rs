@@ -1,6 +1,7 @@
 mod effect;
 mod execution;
 mod generated_artifacts;
+mod lifecycle;
 mod orchestration;
 mod orchestration_ref_checkout;
 mod orchestration_tag_checkout;
@@ -34,7 +35,9 @@ pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult}
 use crate::core::component;
 use crate::core::context::resolve_project_ssh_with_base_path;
 use crate::core::error::{Error, Result};
+use crate::core::phase_timing::PhaseTimer;
 use crate::core::project;
+use uuid::Uuid;
 
 /// High-level deploy entry point. Resolves SSH context internally.
 ///
@@ -80,8 +83,8 @@ pub fn fetch_project_remote_versions(
 
 /// Deploy components across multiple projects.
 ///
-/// Builds each project independently unless an upstream workflow supplies a
-/// prepared artifact, which is validated once and reused unchanged for every target.
+/// Reuses a validated prepared artifact or verified release asset across targets
+/// while keeping per-target lifecycle state isolated for resumable deployments.
 ///
 /// Unknown project IDs are skipped (not fatal) — fleet configs can
 /// accumulate stale references that shouldn't block the rest.
@@ -153,10 +156,25 @@ pub fn run_multi(
         }
     );
 
+    let identity = lifecycle_identity(project_ids, component_ids, config);
+    let mut lifecycle_run = if config.dry_run || config.check {
+        None
+    } else if let Some(id) = config.resume_run_id.as_deref() {
+        let mut run = lifecycle::load(id)?;
+        run.resume(&identity)?;
+        lifecycle::save(&run)?;
+        Some(run)
+    } else {
+        let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity);
+        lifecycle::save(&run)?;
+        Some(run)
+    };
+    let deploy_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
+
     let mut project_results = Vec::new();
     let mut succeeded: u32 = 0;
     let mut failed: u32 = 0;
-    let skipped: u32 = unknown_projects.len() as u32;
+    let mut skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
     let mut release_artifacts = release_download::ReleaseArtifactStore::default();
     // Record skipped results for unknown projects
@@ -172,6 +190,7 @@ pub fn run_multi(
                 skipped: 0,
                 failed: 0,
             },
+            phase_timings: None,
         });
     }
 
@@ -197,9 +216,50 @@ pub fn run_multi(
             requested_ref: config.requested_ref.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
+            resume_run_id: None,
         };
 
-        match run_with_release_artifacts(project_id, &project_config, &mut release_artifacts) {
+        if lifecycle_run
+            .as_ref()
+            .is_some_and(|run| run.target_is_succeeded(project_id))
+        {
+            let mut timer = PhaseTimer::new();
+            timer.record_skipped("transfer");
+            timer.record_skipped("install");
+            timer.record_skipped("verify");
+            project_results.push(ProjectDeployResult {
+                project_id: project_id.to_string(),
+                status: "skipped".to_string(),
+                error: Some("Already succeeded in the resumed deploy run".to_string()),
+                results: vec![],
+                summary: DeploySummary {
+                    total: 0,
+                    succeeded: 0,
+                    failed: 0,
+                    skipped: 1,
+                },
+                phase_timings: Some(timer.into_report()),
+            });
+            skipped += 1;
+            continue;
+        }
+
+        if let Some(run) = lifecycle_run.as_mut() {
+            run.update_target(
+                project_id,
+                lifecycle::DeployTargetStatus::Running,
+                None,
+                None,
+            );
+            lifecycle::save(run)?;
+        }
+        let mut timer = PhaseTimer::new();
+        let result = timer.time("resolve_source", || {
+            run_with_release_artifacts(project_id, &project_config, &mut release_artifacts)
+        });
+        let timings = timer.into_report();
+
+        match result {
             Ok(result) => {
                 let deploy_failed = result.summary.failed > 0;
                 let is_planned = config.dry_run || config.check;
@@ -217,7 +277,17 @@ pub fn run_multi(
                         error: Some(error_msg),
                         results: result.results,
                         summary: result.summary,
+                        phase_timings: Some(timings.clone()),
                     });
+                    if let Some(run) = lifecycle_run.as_mut() {
+                        run.update_target(
+                            project_id,
+                            lifecycle::DeployTargetStatus::Failed,
+                            project_results.last().and_then(|entry| entry.error.clone()),
+                            Some(timings.clone()),
+                        );
+                        lifecycle::save(run)?;
+                    }
                     failed += 1;
                 } else if is_planned {
                     project_results.push(ProjectDeployResult {
@@ -226,6 +296,7 @@ pub fn run_multi(
                         error: None,
                         results: result.results,
                         summary: result.summary,
+                        phase_timings: Some(timings.clone()),
                     });
                     planned += 1;
                 } else {
@@ -235,7 +306,17 @@ pub fn run_multi(
                         error: None,
                         results: result.results,
                         summary: result.summary,
+                        phase_timings: Some(timings.clone()),
                     });
+                    if let Some(run) = lifecycle_run.as_mut() {
+                        run.update_target(
+                            project_id,
+                            lifecycle::DeployTargetStatus::Succeeded,
+                            None,
+                            Some(timings.clone()),
+                        );
+                        lifecycle::save(run)?;
+                    }
                     succeeded += 1;
                 }
             }
@@ -251,7 +332,17 @@ pub fn run_multi(
                         skipped: 0,
                         failed: 1,
                     },
+                    phase_timings: Some(timings.clone()),
                 });
+                if let Some(run) = lifecycle_run.as_mut() {
+                    run.update_target(
+                        project_id,
+                        lifecycle::DeployTargetStatus::Failed,
+                        Some(e.to_string()),
+                        Some(timings),
+                    );
+                    lifecycle::save(run)?;
+                }
                 failed += 1;
             }
         }
@@ -269,7 +360,51 @@ pub fn run_multi(
             skipped,
             planned,
         },
+        deploy_run_id,
     })
+}
+
+fn lifecycle_identity(
+    project_ids: &[String],
+    component_ids: &[String],
+    config: &DeployConfig,
+) -> lifecycle::DeployRunIdentity {
+    let mut components = component_ids.to_vec();
+    components.sort();
+    let mut targets = project_ids.to_vec();
+    targets.sort();
+    let source = config.requested_ref.clone().unwrap_or_else(|| {
+        if config.head {
+            "HEAD".to_string()
+        } else if let Some(artifact) = config.prepared_artifact.as_ref() {
+            format!("{}@{}", artifact.tag, artifact.source_commit)
+        } else {
+            "release-tag".to_string()
+        }
+    });
+    let artifact = config.prepared_artifact.as_ref().map_or_else(
+        || {
+            config
+                .expected_version
+                .clone()
+                .unwrap_or_else(|| "resolved-at-preflight".to_string())
+        },
+        |prepared| format!("sha256:{};size={}", prepared.sha256, prepared.size_bytes),
+    );
+    lifecycle::DeployRunIdentity {
+        source,
+        // Artifact selection is an input policy before preparation. Per-component
+        // provenance remains in the result after preparation has resolved it.
+        artifact,
+        components,
+        targets,
+        policy: format!(
+            "all={};outdated={};behind_upstream={};force={};skip_build={};keep_deps={};no_pull={};allow_stale_source={};allow_downgrade={};head={};tagged={}",
+            config.all, config.outdated, config.behind_upstream, config.force, config.skip_build,
+            config.keep_deps, config.no_pull, config.allow_stale_source, config.allow_downgrade,
+            config.head, config.tagged
+        ),
+    }
 }
 
 /// Find all projects that use any of the specified components.
@@ -336,6 +471,7 @@ mod tests {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         }
     }
 

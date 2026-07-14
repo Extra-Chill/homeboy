@@ -9,6 +9,7 @@ use crate::core::component::Component;
 use crate::core::config;
 use crate::core::error::Result;
 use crate::core::paths as base_path;
+use crate::core::phase_timing::PhaseTimingReport;
 use crate::core::project::Project;
 use crate::is_zero_u32;
 
@@ -90,6 +91,8 @@ pub struct DeployConfig {
     pub tagged: bool,
     /// An immutable artifact prepared by an upstream workflow.
     pub prepared_artifact: Option<PreparedDeployArtifact>,
+    /// Resume a durable multi-target deploy run after exact identity validation.
+    pub resume_run_id: Option<String>,
 }
 
 impl DeployConfig {
@@ -115,6 +118,7 @@ impl DeployConfig {
             requested_ref: None,
             tagged: false,
             prepared_artifact: None,
+            resume_run_id: None,
         }
     }
 }
@@ -1194,6 +1198,8 @@ pub struct ProjectDeployResult {
     pub error: Option<String>,
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_timings: Option<PhaseTimingReport>,
 }
 
 /// Result of a multi-project deployment.
@@ -1202,6 +1208,8 @@ pub struct MultiDeployResult {
     pub component_ids: Vec<String>,
     pub projects: Vec<ProjectDeployResult>,
     pub summary: MultiDeploySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_run_id: Option<String>,
 }
 
 /// Summary of multi-project deployment.

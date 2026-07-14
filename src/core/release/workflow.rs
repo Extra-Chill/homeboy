@@ -446,6 +446,7 @@ fn run_dry_run_preflights(
                 status: ReleaseStepStatus::Failed,
                 warnings: Vec::new(),
                 summary: None,
+                phase_timings: None,
             },
         }));
     }
@@ -1084,6 +1085,7 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
+                phase_timings: None,
             },
         };
 
@@ -1109,6 +1111,7 @@ mod tests {
                 status: ReleaseStepStatus::PartialSuccess,
                 warnings: vec![],
                 summary: None,
+                phase_timings: None,
             },
         };
 
@@ -1188,6 +1191,7 @@ mod tests {
                 status: ReleaseStepStatus::Success,
                 warnings: vec![],
                 summary: None,
+                phase_timings: None,
             },
         };
 

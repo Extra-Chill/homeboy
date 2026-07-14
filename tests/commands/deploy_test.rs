@@ -102,6 +102,27 @@ fn deploy_parser_accepts_exact_ref() {
 }
 
 #[test]
+fn deploy_resume_run_id_propagates_to_multi_target_config() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "component-a",
+        "--projects",
+        "project-a,project-b",
+        "--resume",
+        "run-123",
+    ])
+    .expect("--resume should parse");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    let (_, config) = resolve_multi_args(&args).expect("deploy config should resolve");
+
+    assert_eq!(config.resume_run_id.as_deref(), Some("run-123"));
+}
+
+#[test]
 fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     let cli = Cli::try_parse_from([
         "homeboy",
@@ -294,6 +315,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         head: false,
         requested_ref: None,
         tagged: false,
+        resume: None,
     };
     customize(&mut args);
     args

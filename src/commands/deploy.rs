@@ -91,6 +91,9 @@ pub struct DeployArgs {
     /// Force local tag-based build/deploy, ignoring reusable release assets
     #[arg(long)]
     pub tagged: bool,
+    /// Resume a prior multi-project deploy run after exact identity validation
+    #[arg(long, value_name = "RUN_ID")]
+    pub resume: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -123,6 +126,8 @@ pub struct MultiProjectDeployOutput {
     pub dry_run: bool,
     pub check: bool,
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_run_id: Option<String>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
@@ -371,6 +376,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         requested_ref: args.requested_ref.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
+        resume_run_id: args.resume.clone(),
     }
 }
 
@@ -394,6 +400,7 @@ fn run_multi_output(
             dry_run: args.dry_run,
             check: args.check,
             force: args.force,
+            deploy_run_id: result.deploy_run_id,
             actionable: Some(actionable),
         }),
         exit_code,
