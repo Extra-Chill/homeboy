@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::core::error::Result;
+use homeboy_error::Result;
 
 use super::{homeboy, homeboy_data, sanitize_path_segment};
 
@@ -37,7 +37,7 @@ pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf
 }
 
 /// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
-pub(crate) fn runner_sessions_dir() -> Result<PathBuf> {
+pub fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("runner-sessions"))
 }
 
