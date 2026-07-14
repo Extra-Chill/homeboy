@@ -29,7 +29,37 @@ source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context
 # shellcheck source=../lib/node-helpers.sh
 source "${BENCH_SCRIPT_DIR}/../lib/node-helpers.sh"
-homeboy_require_package_json
+
+homeboy_require_standalone_bench_workloads() {
+    local workloads="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local workload
+    local workload_path
+    local -a standalone_workloads
+
+    IFS=':' read -r -a standalone_workloads <<< "$workloads"
+    for workload in "${standalone_workloads[@]}"; do
+        [ -n "$workload" ] || continue
+        workload_path="$workload"
+        if [[ "$workload_path" != /* ]]; then
+            workload_path="${PROJECT_PATH}/${workload_path}"
+        fi
+        if [[ "$workload_path" != *.mjs ]] || [ ! -f "$workload_path" ] || [ ! -r "$workload_path" ]; then
+            echo "Error: standalone Node.js bench workload must be a readable .mjs file: ${workload_path}" >&2
+            return 1
+        fi
+    done
+}
+
+# A rig can provide a standalone .mjs benchmark for a component that is not a
+# package, even when an ancestor belongs to an unrelated package. Ordinary
+# package-backed runs retain upward package discovery.
+if [ -f "${PROJECT_PATH}/package.json" ]; then
+    homeboy_require_package_json
+elif [ -n "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ]; then
+    homeboy_require_standalone_bench_workloads
+else
+    homeboy_require_package_json
+fi
 
 FAILURE_TRAP_HELPER="${HOMEBOY_RUNTIME_FAILURE_TRAP:-}"
 BENCH_HELPER_SH="${HOMEBOY_RUNTIME_BENCH_HELPER_SH:?Homeboy core must provide HOMEBOY_RUNTIME_BENCH_HELPER_SH}"
