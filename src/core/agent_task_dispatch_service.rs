@@ -94,6 +94,12 @@ pub struct DispatchCoreInputs {
     pub client_context: Option<String>,
     /// Attempts per task, including the first attempt.
     pub attempts: u32,
+    /// Whether the deprecated attempts alias was supplied by the caller.
+    pub attempts_explicit: bool,
+    /// Explicit execution-budget overrides from the CLI or a controller request.
+    pub max_provider_executions: Option<u32>,
+    pub max_same_provider_retries: Option<u32>,
+    pub max_provider_rotations: Option<u32>,
     /// Persist the run for a daemon/runner but do not execute immediately.
     pub queue_only: bool,
     /// Optional provider wall-clock timeout in milliseconds.

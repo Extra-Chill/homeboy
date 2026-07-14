@@ -23,13 +23,61 @@ static FAIL_NEXT_RECORD_WRITE: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
-    let path = run_dir(run_id)?.join("plan.json");
-    write_private_json(&path, plan)?;
-    Ok(path)
+    crate::core::config::with_config_lock(|| {
+        let mut plan = plan.clone();
+        migrate_execution_budget(&mut plan)?;
+        let path = run_dir(run_id)?.join("plan.json");
+        write_private_json(&path, &plan)?;
+        Ok(path)
+    })
 }
 
 pub(super) fn read_plan_path(path: &str) -> Result<AgentTaskPlan> {
-    read_json(&PathBuf::from(path))
+    let plan = read_json(&PathBuf::from(path))?;
+    validate_execution_budget(&plan)?;
+    Ok(plan)
+}
+
+/// Execution owns the one permitted durable legacy rewrite. Read-only callers
+/// (notably status) use `read_plan_path` and never mutate a plan preview.
+pub(super) fn read_plan_path_for_execution(path: &str) -> Result<AgentTaskPlan> {
+    crate::core::config::with_config_lock(|| {
+        let path = PathBuf::from(path);
+        let mut plan = read_json(&path)?;
+        if migrate_execution_budget(&mut plan)? {
+            write_private_json(&path, &plan)?;
+        }
+        Ok(plan)
+    })
+}
+
+fn validate_execution_budget(plan: &AgentTaskPlan) -> Result<()> {
+    match plan.options.execution_budget.version {
+        0 | crate::core::agent_task_scheduler::AgentTaskExecutionBudget::VERSION => Ok(()),
+        version => Err(Error::validation_invalid_argument(
+            "execution_budget.version",
+            format!(
+                "unsupported agent-task execution budget version {version}; this Homeboy build supports version {}",
+                crate::core::agent_task_scheduler::AgentTaskExecutionBudget::VERSION
+            ),
+            Some(version.to_string()),
+            None,
+        )),
+    }
+}
+
+fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {
+    plan.options
+        .execution_budget
+        .migrate_legacy()
+        .map_err(|message| {
+            Error::validation_invalid_argument(
+                "execution_budget.version",
+                message,
+                Some(plan.options.execution_budget.version.to_string()),
+                None,
+            )
+        })
 }
 
 pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {

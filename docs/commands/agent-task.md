@@ -71,6 +71,22 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 
 ### Cook/Review
 
+### Provider Execution Budgets
+
+Each dispatched plan carries one versioned `execution_budget`: total provider
+executions, same-provider retries, and provider rotations. The total cap applies
+before either category cap, so retry and rotation cannot multiply executions.
+
+```bash
+homeboy agent-task dispatch --prompt @task.md --max-provider-executions 1
+homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
+homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
+```
+
+`--attempts` remains a deprecated alias for the total. It cannot be combined
+with explicit budget fields and resolves both category limits to `N - 1`.
+Status previews the resolved budget without changing durable run data.
+
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |

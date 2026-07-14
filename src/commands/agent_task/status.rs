@@ -48,6 +48,15 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
         Err(error) => return Err(error),
     };
+    // A future durable budget is incompatible, not an absent optional preview.
+    if let Err(error) = agent_task_lifecycle::load_plan(&args.run_id) {
+        if error
+            .message
+            .contains("unsupported agent-task execution budget version")
+        {
+            return Err(error);
+        }
+    }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     if args.full {
@@ -1051,6 +1060,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "risk_flags": risk_flags,
         "execution_location": execution_location(record),
         "queue_visibility": queue_visibility(record),
+        "execution_budget": plan.as_ref().map(|plan| &plan.options.execution_budget),
         "liveness": liveness_summary(record),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });

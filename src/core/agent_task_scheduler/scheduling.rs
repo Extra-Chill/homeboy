@@ -1114,9 +1114,13 @@ impl AgentTaskScheduleSupport {
         policy: &AgentTaskProviderRotationPolicy,
         rotation_index: usize,
         attempt: u32,
+        execution_budget: &AgentTaskExecutionBudget,
+        provider_rotations: u32,
     ) -> bool {
         rotation_index < policy.entries.len()
             && attempt < policy.max_total_attempts()
+            && attempt < execution_budget.max_provider_executions
+            && provider_rotations < execution_budget.max_provider_rotations
             && !matches!(
                 outcome.status,
                 AgentTaskOutcomeStatus::Succeeded
@@ -1242,15 +1246,40 @@ impl AgentTaskScheduleSupport {
             );
     }
 
+    pub(super) fn attach_terminal_executor_evidence(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        if !outcome.metadata.is_object() {
+            outcome.metadata = serde_json::json!({});
+        }
+        outcome
+            .metadata
+            .as_object_mut()
+            .expect("outcome metadata object")
+            .insert(
+                "executor".to_string(),
+                serde_json::json!({
+                    "backend": request.executor.backend,
+                    "selector": request.executor.selector,
+                    "model": request.executor.model(),
+                }),
+            );
+    }
+
     pub(super) fn should_retry(
         outcome: &AgentTaskOutcome,
         attempt: u32,
         max_attempts: u32,
         retry_budget_total: Option<u32>,
         retry_budget_used: u32,
+        execution_budget: &AgentTaskExecutionBudget,
+        same_provider_retries: u32,
         retryable_failure_classifications: &[AgentTaskFailureClassification],
     ) -> bool {
         attempt < max_attempts
+            && attempt < execution_budget.max_provider_executions
+            && same_provider_retries < execution_budget.max_same_provider_retries
             && retry_budget_total
                 .map(|budget| retry_budget_used < budget)
                 .unwrap_or(true)
@@ -1268,6 +1297,49 @@ impl AgentTaskScheduleSupport {
                     | AgentTaskOutcomeStatus::Cancelled
                     | AgentTaskOutcomeStatus::Timeout
             )
+    }
+
+    pub(super) fn attach_budget_exhaustion_diagnostic(
+        outcome: &mut AgentTaskOutcome,
+        budget: &AgentTaskExecutionBudget,
+        executions: u32,
+        same_provider_retries: u32,
+        provider_rotations: u32,
+    ) {
+        if !matches!(
+            outcome.failure_classification,
+            Some(
+                AgentTaskFailureClassification::Provider
+                    | AgentTaskFailureClassification::Transient
+                    | AgentTaskFailureClassification::Timeout
+                    | AgentTaskFailureClassification::Stalled
+                    | AgentTaskFailureClassification::RateLimited
+            )
+        ) {
+            return;
+        }
+        let exhausted = if executions >= budget.max_provider_executions {
+            Some("max_provider_executions")
+        } else if provider_rotations > 0 && provider_rotations >= budget.max_provider_rotations {
+            Some("max_provider_rotations")
+        } else if same_provider_retries >= budget.max_same_provider_retries {
+            Some("max_same_provider_retries")
+        } else {
+            None
+        };
+        if let Some(exhausted) = exhausted {
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.execution_budget_exhausted".to_string(),
+                message: format!("provider execution stopped because {exhausted} was exhausted"),
+                data: serde_json::json!({
+                    "exhausted_budget": exhausted,
+                    "executions": executions,
+                    "same_provider_retries": same_provider_retries,
+                    "provider_rotations": provider_rotations,
+                    "budget": budget,
+                }),
+            });
+        }
     }
 
     pub(super) fn remove_running(
@@ -1419,6 +1491,54 @@ impl AgentTaskScheduleSupport {
 
         totals
     }
+}
+
+/// Decode the scheduler-owned durable rotation evidence once for all lifecycle
+/// consumers. A final outcome contains the failing rotation source plus the
+/// terminal attempt, so callers derive rotations as `len - 1`.
+pub(crate) fn provider_rotation_attempts(
+    outcome: &AgentTaskOutcome,
+) -> Option<Vec<AgentTaskProviderRotationAttempt>> {
+    serde_json::from_value(
+        outcome
+            .metadata
+            .pointer("/provider_rotation/attempts")?
+            .clone(),
+    )
+    .ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentTaskTerminalExecutorIdentity {
+    pub backend: String,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+}
+
+pub(crate) fn terminal_executor_identity(
+    outcome: &AgentTaskOutcome,
+) -> Option<AgentTaskTerminalExecutorIdentity> {
+    if let Some(attempt) =
+        provider_rotation_attempts(outcome).and_then(|attempts| attempts.last().cloned())
+    {
+        return Some(AgentTaskTerminalExecutorIdentity {
+            backend: attempt.backend,
+            selector: attempt.selector,
+            model: attempt.model,
+        });
+    }
+    let executor = outcome.metadata.get("executor")?;
+    Some(AgentTaskTerminalExecutorIdentity {
+        backend: executor.get("backend")?.as_str()?.to_string(),
+        selector: executor
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model: executor
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 fn workspace_is_busy(
