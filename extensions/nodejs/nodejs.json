@@ -1,12 +1,12 @@
 {
   "name": "Node.js",
-  "version": "3.4.2",
+  "version": "3.5.0",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
-    "capabilities": ["format", "validate", "fuzz"]
+    "capabilities": ["format", "validate", "fuzz", "playwright-browser"]
   },
   "source_snapshot": {
     "sync_excludes": ["node_modules/", "node_modules/**"]
@@ -396,6 +396,29 @@
       "payload": {
         "release": "{{payload.release}}",
         "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "browser.playwright.setup",
+      "label": "Install Playwright browser utility",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" setup",
+      "payload": {}
+    },
+    {
+      "id": "browser.playwright.status",
+      "label": "Show Playwright browser utility readiness",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" status",
+      "payload": {}
+    },
+    {
+      "id": "browser.playwright.execute",
+      "label": "Execute a Playwright module",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" action-execute",
+      "payload": {
+        "selected": "{{selected}}"
       }
     }
   ]

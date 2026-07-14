@@ -2,7 +2,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { execFileSync } from 'node:child_process';
 import {
     collectBrowserPhases,
     buildBrowserBenchResult,
@@ -1125,17 +1127,32 @@ function finitePositiveNumber(value) {
 
 async function loadPlaywright() {
     const require = createRequire(import.meta.url);
-    const searchPaths = [process.cwd()];
-    if (process.env.HOMEBOY_COMPONENT_PATH) searchPaths.push(process.env.HOMEBOY_COMPONENT_PATH);
+    const utility = fileURLToPath(new URL('../browser/playwright.sh', import.meta.url));
+    let readiness;
+    try {
+        readiness = JSON.parse(execFileSync('bash', [utility, 'status', '--json'], {
+            encoding: 'utf8',
+            env: process.env,
+        }));
+    } catch (error) {
+        throw new Error(`Playwright runtime readiness check failed. Run: homeboy extension action nodejs browser.playwright.setup\n${error.message}`);
+    }
+    if (readiness.package?.state !== 'ready' || readiness.chromium?.state !== 'ready') {
+        throw new Error([
+            'Playwright is required for runBrowserBench but the extension runtime is not ready.',
+            `Package: ${readiness.package?.state || 'unknown'}; Chromium: ${readiness.chromium?.state || 'unknown'}.`,
+            'Run: homeboy extension action nodejs browser.playwright.setup',
+        ].join('\n'));
+    }
 
     let resolved;
     try {
-        resolved = require.resolve('playwright', { paths: searchPaths });
+        resolved = createRequire(`${readiness.runtime_package_dir}/package.json`).resolve('playwright');
     } catch (err) {
         throw new Error([
             'Playwright is required for runBrowserBench but was not found.',
-            'Install it in the benchmarked project with: npm i -D playwright',
-            'Then install browser binaries with: npx playwright install chromium',
+            'Install the Node.js extension browser utility with:',
+            '  homeboy extension action nodejs browser.playwright.setup',
             `Resolution error: ${err.message}`,
         ].join('\n'));
     }
@@ -1154,7 +1171,7 @@ async function launchBrowser(browserType, config) {
     } catch (err) {
         throw new Error([
             'Playwright browser launch failed.',
-            'If browser binaries are missing, run: npx playwright install chromium',
+            'If browser binaries are missing, run: homeboy extension action nodejs browser.playwright.setup',
             'If system dependencies are missing, run Playwright\'s dependency installer for your platform.',
             `Launch error: ${err.message}`,
         ].join('\n'));

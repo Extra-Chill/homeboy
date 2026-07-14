@@ -32,7 +32,7 @@ EOF
 PROJECT_DIR="$TMP_DIR/project"
 mkdir -p "$PROJECT_DIR/bench" "$PROJECT_DIR/artifacts"
 cat > "$PROJECT_DIR/package.json" <<'EOF'
-{"name":"homeboy-node-browser-bench-smoke","private":true,"devDependencies":{"playwright":"^1.56.0"}}
+{"name":"homeboy-node-browser-bench-smoke","private":true,"type":"module"}
 EOF
 
 NO_DEPS_PROJECT="$TMP_DIR/no-deps-project"
@@ -42,7 +42,7 @@ cat > "$NO_DEPS_PROJECT/package.json" <<'EOF'
 EOF
 
 set +e
-MISSING_DEPS_OUTPUT="$(HOMEBOY_COMPONENT_PATH="$NO_DEPS_PROJECT" HELPER_UNDER_TEST="$SCRIPT_DIR/browser-helper.mjs" node --input-type=module - <<'EOF' 2>&1
+MISSING_DEPS_OUTPUT="$(HOMEBOY_NODEJS_PLAYWRIGHT_RUNTIME_DIR="$TMP_DIR/empty-runtime" HOMEBOY_COMPONENT_PATH="$NO_DEPS_PROJECT" HELPER_UNDER_TEST="$SCRIPT_DIR/browser-helper.mjs" node --input-type=module - <<'EOF' 2>&1
 const { runBrowserBench } = await import(process.env.HELPER_UNDER_TEST);
 try {
   await runBrowserBench({ action: async () => {} });
@@ -60,23 +60,20 @@ if [ "$MISSING_DEPS_EXIT" -ne 42 ]; then
     echo "$MISSING_DEPS_OUTPUT" >&2
     exit 1
 fi
-if [[ "$MISSING_DEPS_OUTPUT" != *"npm i -D playwright"* ]] || [[ "$MISSING_DEPS_OUTPUT" != *"npx playwright install chromium"* ]]; then
+if [[ "$MISSING_DEPS_OUTPUT" != *"homeboy extension action nodejs browser.playwright.setup"* ]]; then
     echo "missing dependency error did not include actionable setup guidance" >&2
     echo "$MISSING_DEPS_OUTPUT" >&2
     exit 1
 fi
 
-if ! npm --prefix "$PROJECT_DIR" install --no-audit --no-fund --silent; then
-    echo "Failed to install Playwright for browser helper smoke." >&2
-    echo "Run manually in a benchmark project with: npm i -D playwright && npx playwright install chromium" >&2
-    exit 1
+# Browser launch is an opt-in integration check. It uses the extension-owned
+# runtime already prepared on the runner and never materializes project deps.
+if [ "${HOMEBOY_RUN_PLAYWRIGHT_INTEGRATION:-0}" != "1" ]; then
+    echo "Node.js browser helper integration smoke skipped (set HOMEBOY_RUN_PLAYWRIGHT_INTEGRATION=1 to run)."
+    exit 0
 fi
 
-if ! npm --prefix "$PROJECT_DIR" exec -- playwright install chromium >/dev/null; then
-    echo "Failed to install Playwright Chromium browser for browser helper smoke." >&2
-    echo "Run manually in a benchmark project with: npx playwright install chromium" >&2
-    exit 1
-fi
+test ! -e "$PROJECT_DIR/node_modules" || { echo "integration project must not have node_modules" >&2; exit 1; }
 
 cat > "$PROJECT_DIR/bench/browser.bench.mjs" <<'EOF'
 import { createServer } from 'node:http';

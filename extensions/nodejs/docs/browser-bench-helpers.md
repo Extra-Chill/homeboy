@@ -3,6 +3,43 @@
 Browser benchmark workloads can import the helper path exported by
 `HOMEBOY_NODEJS_BROWSER_BENCH_HELPER`.
 
+## Extension-Owned Playwright
+
+The Node.js extension owns a pinned Playwright package and its Chromium setup.
+Install or inspect it through the extension actions:
+
+```sh
+homeboy extension action nodejs browser.playwright.setup
+homeboy extension action nodejs browser.playwright.status
+```
+
+The utility stores JavaScript dependencies under the runner cache and lets
+Playwright use its normal runner-wide browser cache. It never installs into a
+project workspace. Browser modules can run without project `node_modules`:
+
+```sh
+homeboy extension action nodejs browser.playwright.execute --data '[{"module":"/absolute/scripts/capture.mjs","args":[]}]'
+```
+
+The module can use `import { chromium } from 'playwright'` or CommonJS
+`require('playwright')`. This explicit utility always resolves the pinned
+extension runtime so its package and Chromium revisions remain paired.
+Project-local Playwright workflows outside this utility are unchanged. Pass
+module arguments after the module path when invoking the wrapper script
+directly: `playwright.sh execute scripts/capture.mjs --target https://example.test/`.
+
+Node.js `>=20.6.0` is required because the wrapper uses `node:module`
+`register()`. The utility verifies that its runtime directory is same-UID,
+non-symlinked, and private before use. This is a same-UID runner trust boundary;
+it does not isolate code that can already run as that user.
+
+For Lab or CI integration coverage, run the real browser check after setup:
+
+```sh
+homeboy extension action nodejs browser.playwright.setup
+HOMEBOY_RUN_PLAYWRIGHT_INTEGRATION=1 bash nodejs/scripts/bench/nodejs-browser-helper-smoke.sh
+```
+
 ```js
 const { buildBrowserBenchResult, runBrowserPageScenario } = await import(process.env.HOMEBOY_NODEJS_BROWSER_BENCH_HELPER);
 
