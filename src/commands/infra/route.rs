@@ -1900,6 +1900,8 @@ mod tests {
                 "retry",
                 "failed-run",
                 "--run",
+                "--new-run-id",
+                "failed-run-retry-on-lab",
                 "--runner",
                 "homeboy-lab",
             ]
@@ -1930,6 +1932,23 @@ mod tests {
             assert_eq!(handoff.args[agent_task_index + 2], "--plan");
             assert_eq!(handoff.args[agent_task_index + 4], "--record-run-id");
             assert_eq!(handoff.args[agent_task_index + 5], handoff.run_id);
+            assert_eq!(handoff.run_id, "failed-run-retry-on-lab");
+            let remote_cli = Cli::try_parse_from(&handoff.args).expect("portable run-plan argv");
+            let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::RunPlan(remote),
+            }) = &remote_cli.command
+            else {
+                panic!(
+                    "Lab handoff must execute the materialized plan, not discover a retry record"
+                );
+            };
+            assert_eq!(
+                remote.record_run_id.as_deref(),
+                Some(handoff.run_id.as_str())
+            );
+            let remote_plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan =
+                serde_json::from_str(&remote.plan).expect("serialized retry plan");
+            assert_eq!(remote_plan, handoff.plan);
             let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
             assert_eq!(replacement.metadata["retry_of"], "failed-run");
 
