@@ -134,7 +134,7 @@ pub fn connect_with_orphan_adoption(
             .filter(|address| parse_loopback_daemon_addr(address).is_ok())
             .unwrap_or("127.0.0.1:0");
         let command = format!(
-            "{} daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
+            "{} daemon reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
             shell::quote_arg(homeboy),
             shell::quote_arg(recovery_addr),
         );
@@ -1859,6 +1859,8 @@ use session_store::*;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use super::super::session::RunnerStaleRuntimePath;
     use super::connection_daemon::{
@@ -2085,6 +2087,72 @@ mod tests {
             child_resource: None,
         });
         assert!(message.contains("daemon status"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_connect_dispatches_compatible_leaseless_recovery_argv() {
+        test_support::with_isolated_home(|home| {
+            let daemon = home.path().join("remote-homeboy");
+            let argv_path = home.path().join("recovery-argv");
+            std::fs::write(
+                &daemon,
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{"success":true,"data":{"version":"0.284.0","display":"test"}}'
+    ;;
+  "daemon reconcile-leaseless-orphans")
+    printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
+    printf '%s\n' '{"success":true,"data":{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{"pid":42,"address":"127.0.0.1:7421","state_path":"/tmp/state.json","lease_id":"lease-new"}}}'
+    ;;
+  "daemon status") exit 1 ;;
+esac
+"#,
+            )
+            .expect("write remote Homeboy shim");
+            let mut permissions = std::fs::metadata(&daemon)
+                .expect("read remote Homeboy shim metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&daemon, permissions)
+                .expect("make remote Homeboy shim executable");
+
+            server::create(
+                &serde_json::json!({
+                    "id": "local-runner",
+                    "host": "localhost",
+                    "user": "test",
+                })
+                .to_string(),
+                false,
+            )
+            .expect("create local server");
+            super::super::create(
+                &serde_json::json!({
+                    "id": "local-runner",
+                    "kind": "ssh",
+                    "homeboy_path": daemon,
+                    "env": { "HOMEBOY_TEST_RECOVERY_ARGV": argv_path },
+                })
+                .to_string(),
+                false,
+            )
+            .expect("enable local runner");
+
+            let (report, exit_code) =
+                connect_with_orphan_adoption("local-runner", None, true).expect("connect result");
+
+            assert_eq!(
+                exit_code, 20,
+                "the shim intentionally rejects status after recovery"
+            );
+            assert!(!report.connected);
+            assert_eq!(
+                std::fs::read_to_string(argv_path).expect("read dispatched recovery argv"),
+                "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--addr\n127.0.0.1:0\n"
+            );
+        });
     }
 
     #[test]
