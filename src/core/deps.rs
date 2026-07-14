@@ -222,7 +222,7 @@ pub fn install_for_resolved(
     component: &Component,
     path: &Path,
 ) -> Result<Option<DependencyInstallResult>> {
-    let providers = provider::resolve_dependency_providers_optional(component, path)?;
+    let (dependency_root, providers) = resolve_dependency_workspace(component, path)?;
     if providers.is_empty() {
         return Ok(None);
     }
@@ -230,8 +230,8 @@ pub fn install_for_resolved(
     let mut installs = Vec::new();
     let mut package_managers = Vec::new();
     for provider in providers {
-        let status = provider.status(component, path, None)?;
-        if let Some(result) = provider.install(component, path)? {
+        let status = provider.status(component, &dependency_root, None)?;
+        if let Some(result) = provider.install(component, &dependency_root)? {
             package_managers.push(status.package_manager);
             installs.push(result);
         }
@@ -245,10 +245,46 @@ pub fn install_for_resolved(
 
     Ok(Some(DependencyInstallResult {
         component_id: component.id.clone(),
-        component_path: path.display().to_string(),
+        component_path: dependency_root.display().to_string(),
         package_manager,
         installs,
     }))
+}
+
+/// Resolve providers from the component path, then walk to the repository root
+/// so monorepo components can use a workspace-level dependency provider.
+fn resolve_dependency_workspace(
+    component: &Component,
+    path: &Path,
+) -> Result<(PathBuf, Vec<provider::DependencyProvider>)> {
+    let repository_root = crate::core::git::get_git_root(&path.display().to_string())
+        .ok()
+        .map(PathBuf::from);
+    let canonical_repository_root = repository_root
+        .as_ref()
+        .and_then(|root| root.canonicalize().ok());
+    let mut candidate = path.to_path_buf();
+
+    loop {
+        let providers = provider::resolve_dependency_providers_optional(component, &candidate)?;
+        if !providers.is_empty() {
+            return Ok((candidate, providers));
+        }
+        if repository_root.as_deref() == Some(candidate.as_path())
+            || candidate.canonicalize().ok().as_ref() == canonical_repository_root.as_ref()
+        {
+            break;
+        }
+        let Some(parent) = candidate.parent() else {
+            break;
+        };
+        candidate = parent.to_path_buf();
+        if repository_root.is_none() {
+            break;
+        }
+    }
+
+    Ok((path.to_path_buf(), Vec::new()))
 }
 
 /// A single provider's dependency-install command for a detected workspace,

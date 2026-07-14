@@ -966,6 +966,7 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
+            skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
             head: false,
