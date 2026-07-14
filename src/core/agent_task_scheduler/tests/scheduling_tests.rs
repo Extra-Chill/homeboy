@@ -848,10 +848,60 @@ mod resource_budget_tests {
 
 mod provider_rotation_tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn digest(content: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
 
     struct DirtyCandidateThenSuccessExecutor {
         observed_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
         calls: AtomicUsize,
+    }
+
+    struct AdoptCandidateThenSuccessExecutor {
+        calls: AtomicUsize,
+        patch: String,
+    }
+
+    impl AgentTaskExecutorAdapter for AdoptCandidateThenSuccessExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let root = std::path::PathBuf::from(request.workspace.root.expect("attempt workspace"));
+            if call == 0 {
+                let path = root.join("candidate.patch");
+                fs::write(&path, &self.patch).expect("candidate patch");
+                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+                outcome.artifacts.push(AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "candidate".to_string(),
+                    kind: "patch".to_string(),
+                    name: None,
+                    label: None,
+                    role: Some("patch".to_string()),
+                    semantic_key: None,
+                    path: Some(path.display().to_string()),
+                    url: None,
+                    mime: None,
+                    size_bytes: Some(self.patch.len() as u64),
+                    sha256: Some(digest(&self.patch)),
+                    metadata: serde_json::Value::Null,
+                });
+                return outcome;
+            }
+            assert_eq!(
+                fs::read_to_string(root.join("candidate.txt")).expect("adopted file"),
+                "candidate\n"
+            );
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
     }
 
     impl AgentTaskExecutorAdapter for DirtyCandidateThenSuccessExecutor {
@@ -932,6 +982,7 @@ mod provider_rotation_tests {
                 selector: Some("fallback-a.agent-task-executor".to_string()),
                 model: Some("fallback-model-a".to_string()),
                 provider_config: json!({ "provider": "fallback-provider-a" }),
+                adoption: None,
             },
             entry("fallback-backend-b"),
         ]));
@@ -1033,6 +1084,72 @@ mod provider_rotation_tests {
             !roots[0].exists() && !roots[1].exists(),
             "attempt checkouts are retired after their executor threads stop"
         );
+    }
+
+    #[test]
+    fn rotation_adopts_only_the_explicit_portable_candidate() {
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::concurrency_tests::init_git_workspace(&workspace);
+        assert!(Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git"
+            ])
+            .current_dir(&workspace)
+            .status()
+            .expect("remote")
+            .success());
+        let patch = "diff --git a/candidate.txt b/candidate.txt\nnew file mode 100644\n--- /dev/null\n+++ b/candidate.txt\n@@ -0,0 +1 @@\n+candidate\n".to_string();
+        let scheduler = AgentTaskScheduler::new(AdoptCandidateThenSuccessExecutor {
+            calls: AtomicUsize::new(0),
+            patch: patch.clone(),
+        })
+        .with_run_id("run-adopt");
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("provider-b".to_string()),
+            adoption: Some(AgentTaskCandidateAdoption {
+                source_run_id: String::new(),
+                source_task_id: String::new(),
+                source_attempt: 0,
+                provider_backend: String::new(),
+                provider_selector: None,
+                provider_model: None,
+                task_base_sha: String::new(),
+                repository_identity: String::new(),
+                workspace_identity: String::new(),
+                artifact_id: String::new(),
+                sha256: String::new(),
+                decision: AgentTaskCandidateAdoptionDecision::AdoptPreviousCandidate,
+                content: None,
+            }),
+            ..Default::default()
+        }]));
+
+        let aggregate = scheduler.run(plan);
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["candidate_adoption"]["artifact_id"],
+            "candidate"
+        );
+        let candidate = aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == "candidate")
+            .expect("candidate");
+        assert!(candidate
+            .url
+            .as_deref()
+            .is_some_and(|url| url.contains("/artifacts#task=task-1")));
     }
 
     #[test]

@@ -1362,7 +1362,11 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     Ok(AgentTaskRunArtifacts {
         schema: schemas::RUN_ARTIFACTS.to_string(),
         run_id,
-        artifacts: aggregate_artifacts(aggregate.as_ref()),
+        artifacts: aggregate
+            .as_ref()
+            .map(crate::core::agent_task_artifacts::reviewer_facing_aggregate)
+            .map(|aggregate| aggregate_artifacts(Some(&aggregate)))
+            .unwrap_or_default(),
         evidence_refs: aggregate_evidence_refs(aggregate.as_ref(), latest_executor_evidence),
     })
 }

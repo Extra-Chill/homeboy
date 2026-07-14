@@ -14,6 +14,7 @@ pub mod activity;
 pub mod agent_runtime_manifest;
 pub mod agent_task;
 pub mod agent_task_aggregate;
+pub(crate) mod agent_task_artifacts;
 pub mod agent_task_batch;
 pub(crate) mod agent_task_config_materialization;
 pub mod agent_task_contract;

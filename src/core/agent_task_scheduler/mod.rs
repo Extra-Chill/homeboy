@@ -1,23 +1,28 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
     AGENT_TASK_OUTCOME_SCHEMA,
 };
+use crate::core::agent_task_promotion::{normalize_promotion_patch, validate_artifact_content};
 pub use crate::core::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
-    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
-    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskCancellationToken, AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
+    AgentTaskChildRun, AgentTaskExecutionContext, AgentTaskOutputBinding,
+    AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
     AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
@@ -109,6 +114,7 @@ where
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
+                    adoption: None,
                 }
             })
             .collect();
@@ -387,6 +393,24 @@ where
                             continue;
                         }
                     };
+                if let Some(adoption) = scheduled.adoption.as_ref() {
+                    if let Err(mut outcome) = validate_and_apply_candidate_adoption(
+                        &request,
+                        adoption,
+                        task_base_sha.as_deref(),
+                    ) {
+                        outcome.task_id = task_id.clone();
+                        drop(attempt_workspace);
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                }
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
@@ -444,6 +468,7 @@ where
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
                     source_provenance: harvest_preflight.source_provenance,
+                    adoption: scheduled.adoption,
                 });
 
                 thread::spawn(move || {
@@ -499,10 +524,16 @@ where
                         continue;
                     };
                     let mut outcome = result.outcome;
+                    attach_candidate_adoption_provenance(
+                        &mut outcome,
+                        running_task.adoption.as_ref(),
+                    );
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
                         outcome = committed_harvest_failure(outcome, error);
+                    } else {
+                        finalize_candidate_artifacts(&mut outcome, &running_task);
                     }
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
@@ -554,6 +585,7 @@ where
                             rotation_attempts: running_task.rotation_attempts,
                             candidate_artifacts,
                             retry_attempts,
+                            adoption: running_task.adoption,
                         });
                         continue;
                     }
@@ -568,7 +600,7 @@ where
                             running_task.rotation_index,
                             result.attempt,
                         ) {
-                            let mut rotation_attempts = running_task.rotation_attempts;
+                            let mut rotation_attempts = running_task.rotation_attempts.clone();
                             rotation_attempts.push(
                                 AgentTaskScheduleSupport::rotation_attempt_record(
                                     &running_task.request,
@@ -578,7 +610,7 @@ where
                                 ),
                             );
                             let entry = &policy.entries[running_task.rotation_index];
-                            let mut candidate_artifacts = running_task.candidate_artifacts;
+                            let mut candidate_artifacts = running_task.candidate_artifacts.clone();
                             append_unique_artifacts(
                                 &mut candidate_artifacts,
                                 outcome
@@ -588,6 +620,30 @@ where
                                     .cloned()
                                     .collect(),
                             );
+                            let adoption = match entry.adoption.as_ref() {
+                                Some(template) => match select_candidate_adoption(
+                                    template,
+                                    &candidate_artifacts,
+                                    &running_task,
+                                ) {
+                                    Ok(adoption) => Some(adoption),
+                                    Err(message) => {
+                                        let mut outcome = outcome;
+                                        outcome.diagnostics.push(AgentTaskDiagnostic {
+                                            class: "agent_task.candidate_adoption".to_string(),
+                                            message,
+                                            data: serde_json::Value::Null,
+                                        });
+                                        record_completed_outcome(
+                                            &mut completed_by_task,
+                                            &mut outcomes,
+                                            outcome,
+                                        );
+                                        continue;
+                                    }
+                                },
+                                None => None,
+                            };
                             let mut request = running_task.request;
                             request.workspace.root = running_task.source_workspace_root.clone();
                             AgentTaskScheduleSupport::apply_rotation_entry(
@@ -616,6 +672,7 @@ where
                                 rotation_attempts,
                                 candidate_artifacts,
                                 retry_attempts: running_task.retry_attempts,
+                                adoption,
                             });
                             continue;
                         }
@@ -699,6 +756,7 @@ struct ScheduledTask {
     candidate_artifacts: Vec<AgentTaskArtifact>,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
+    adoption: Option<AgentTaskCandidateAdoption>,
 }
 
 #[derive(Debug, Clone)]
@@ -720,6 +778,7 @@ struct RunningTask {
     candidate_artifacts: Vec<AgentTaskArtifact>,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
+    adoption: Option<AgentTaskCandidateAdoption>,
     /// The caller-managed workspace used for preflight and as the clean base
     /// for each isolated provider dispatch.
     source_workspace_root: Option<String>,
@@ -767,6 +826,347 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
 enum SchedulerEvent {
     TaskResult(TaskResult),
     Cancellation,
+}
+
+fn select_candidate_adoption(
+    template: &AgentTaskCandidateAdoption,
+    artifacts: &[AgentTaskArtifact],
+    running: &RunningTask,
+) -> Result<AgentTaskCandidateAdoption, String> {
+    let matches = artifacts
+        .iter()
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err("candidate adoption requires exactly one matching artifact id".to_string());
+    }
+    let artifact = matches[0];
+    let expected_run = running.run_id.as_deref().unwrap_or_default();
+    let expected_base = running.task_base_sha.as_deref().unwrap_or_default();
+    let expected_repository = artifact
+        .metadata
+        .get("repository_identity")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "candidate artifact has no canonical repository provenance".to_string())?;
+    let expected_workspace = artifact
+        .metadata
+        .get("workspace_identity")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "candidate artifact has no canonical workspace provenance".to_string())?;
+    if artifact.kind != "patch"
+        || artifact.metadata["run_id"] != expected_run
+        || artifact.metadata["task_id"] != running.task_id
+        || artifact.metadata["producer_attempt"] != running.attempt
+        || artifact.metadata["base_ref"] != expected_base
+        || artifact.metadata["provider_backend"] != running.request.executor.backend
+        || artifact.metadata["provider_selector"]
+            != serde_json::json!(running.request.executor.selector)
+        || artifact.metadata["provider_model"]
+            != serde_json::json!(running.request.executor.model())
+    {
+        return Err(
+            "candidate adoption provenance does not exactly match the producing attempt"
+                .to_string(),
+        );
+    }
+    let expected_url = candidate_artifact_url(expected_run, &running.task_id, &artifact.id);
+    if artifact.url.as_deref() != Some(expected_url.as_str()) {
+        return Err(
+            "candidate adoption artifact must use the run artifacts evidence URL".to_string(),
+        );
+    }
+    let path = artifact
+        .path
+        .as_deref()
+        .ok_or_else(|| "candidate adoption artifact content is unavailable".to_string())?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("read candidate adoption artifact: {error}"))?;
+    let actual_sha = sha256(&content);
+    if artifact.sha256.as_deref() != Some(actual_sha.as_str()) {
+        return Err("candidate adoption SHA-256 does not match artifact content".to_string());
+    }
+    validate_artifact_content(artifact, &content).map_err(|error| error.message)?;
+    Ok(AgentTaskCandidateAdoption {
+        source_run_id: expected_run.to_string(),
+        source_task_id: running.task_id.clone(),
+        source_attempt: running.attempt,
+        provider_backend: running.request.executor.backend.clone(),
+        provider_selector: running.request.executor.selector.clone(),
+        provider_model: running.request.executor.model().map(str::to_string),
+        task_base_sha: expected_base.to_string(),
+        repository_identity: expected_repository.to_string(),
+        workspace_identity: expected_workspace.to_string(),
+        artifact_id: artifact.id.clone(),
+        sha256: actual_sha,
+        content: Some(content),
+        ..template.clone()
+    })
+}
+
+fn validate_and_apply_candidate_adoption(
+    request: &AgentTaskRequest,
+    adoption: &AgentTaskCandidateAdoption,
+    task_base_sha: Option<&str>,
+) -> Result<(), AgentTaskOutcome> {
+    let fail = |message: String| candidate_adoption_failure(message);
+    if adoption.decision != AgentTaskCandidateAdoptionDecision::AdoptPreviousCandidate
+        || adoption.task_base_sha != task_base_sha.unwrap_or_default()
+    {
+        return Err(fail(
+            "candidate adoption identity or base did not verify".to_string(),
+        ));
+    }
+    if canonical_repository_identity_for_root(request.workspace.root.as_deref()).as_deref()
+        != Some(adoption.repository_identity.as_str())
+    {
+        return Err(fail(
+            "candidate adoption repository identity does not match the target workspace"
+                .to_string(),
+        ));
+    }
+    let root = request.workspace.root.as_deref().ok_or_else(|| {
+        fail("candidate adoption requires an isolated attempt workspace".to_string())
+    })?;
+    // Reuse promotion's normalizer and reject a payload that needs rewriting.
+    // The selected artifact is intentionally read only after all provenance
+    // checks above, then applied only to the scheduler-owned checkout.
+    let content = adoption.content.as_deref().ok_or_else(|| {
+        fail("candidate adoption content was not resolved from its artifact".to_string())
+    })?;
+    let normalized =
+        normalize_promotion_patch(content, root).map_err(|error| fail(error.message))?;
+    if normalized.content != content {
+        return Err(fail(
+            "candidate adoption payload must already be promotion-normalized".to_string(),
+        ));
+    }
+    for check in [true, false] {
+        let mut command = Command::new("git");
+        command
+            .args(["apply", "--whitespace=nowarn"])
+            .arg(if check { "--check" } else { "--index" })
+            .arg("-")
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|error| fail(error.to_string()))?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(content.as_bytes())
+            .map_err(|error| fail(error.to_string()))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| fail(error.to_string()))?;
+        if !output.status.success() {
+            return Err(fail(format!(
+                "candidate adoption patch does not apply: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn candidate_adoption_failure(message: String) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: String::new(),
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(message),
+        failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: Vec::new(),
+        outputs: serde_json::Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: serde_json::Value::Null,
+    }
+}
+
+fn attach_candidate_adoption_provenance(
+    outcome: &mut AgentTaskOutcome,
+    adoption: Option<&AgentTaskCandidateAdoption>,
+) {
+    let Some(adoption) = adoption else {
+        return;
+    };
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome.metadata["candidate_adoption"] = serde_json::json!({
+        "source_run_id": adoption.source_run_id,
+        "source_task_id": adoption.source_task_id,
+        "source_attempt": adoption.source_attempt,
+        "provider_backend": adoption.provider_backend,
+        "provider_selector": adoption.provider_selector,
+        "provider_model": adoption.provider_model,
+        "task_base_sha": adoption.task_base_sha,
+        "repository_identity": adoption.repository_identity,
+        "workspace_identity": adoption.workspace_identity,
+        "artifact_id": adoption.artifact_id,
+        "sha256": adoption.sha256,
+        "decision": adoption.decision,
+    });
+}
+
+fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> String {
+    use crate::core::execution_contract::encode_uri_component;
+    format!(
+        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
+        encode_uri_component(run_id),
+        encode_uri_component(task_id),
+        encode_uri_component(artifact_id),
+    )
+}
+
+fn sha256(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn finalize_candidate_artifacts(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
+    let repository_identity = canonical_repository_identity(running);
+    let workspace_identity = running
+        .source_provenance
+        .as_ref()
+        .and_then(|value| value.get("workspace_snapshot_identity"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| repository_identity.clone());
+    let Some(run_id) = running.run_id.as_deref() else {
+        return;
+    };
+    for artifact in &mut outcome.artifacts {
+        if !is_actionable_patch_artifact(artifact) {
+            continue;
+        }
+        let Some(path) = artifact.path.as_deref() else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if !artifact.metadata.is_object() {
+            artifact.metadata = serde_json::json!({});
+        }
+        artifact.sha256 = Some(sha256(&content));
+        let metadata = artifact.metadata.as_object_mut().expect("object metadata");
+        metadata.extend(serde_json::Map::from_iter([
+            ("run_id".to_string(), serde_json::json!(run_id)),
+            ("task_id".to_string(), serde_json::json!(running.task_id)),
+            (
+                "producer_attempt".to_string(),
+                serde_json::json!(running.attempt),
+            ),
+            (
+                "base_ref".to_string(),
+                serde_json::json!(running.task_base_sha),
+            ),
+            (
+                "provider_backend".to_string(),
+                serde_json::json!(running.request.executor.backend),
+            ),
+            (
+                "provider_selector".to_string(),
+                serde_json::json!(running.request.executor.selector),
+            ),
+            (
+                "provider_model".to_string(),
+                serde_json::json!(running.request.executor.model()),
+            ),
+            (
+                "repository_identity".to_string(),
+                serde_json::json!(repository_identity),
+            ),
+            (
+                "workspace_identity".to_string(),
+                serde_json::json!(workspace_identity),
+            ),
+        ]));
+        artifact.url = Some(candidate_artifact_url(
+            run_id,
+            &running.task_id,
+            &artifact.id,
+        ));
+    }
+}
+
+fn canonical_repository_identity(running: &RunningTask) -> Option<String> {
+    running
+        .source_provenance
+        .as_ref()
+        .and_then(|value| value.get("repository_identity"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            canonical_repository_identity_for_root(running.source_workspace_root.as_deref())
+        })
+}
+
+fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> {
+    let remote = crate::core::git::remote_origin_url(Path::new(root?))?;
+    let repository = crate::core::deploy::release_download::parse_github_url(&remote)?;
+    Some(format!(
+        "github://{}/{}/{}",
+        repository.host.to_ascii_lowercase(),
+        repository.owner.to_ascii_lowercase(),
+        repository.repo.to_ascii_lowercase(),
+    ))
+}
+
+#[cfg(test)]
+mod adoption_identity_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_repository_identity_matches_github_ssh_and_https_remotes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (name, remote) in [
+            ("https", "https://github.com/Example/Repo.git"),
+            ("ssh", "git@github.com:Example/Repo.git"),
+        ] {
+            let root = temp.path().join(name);
+            std::fs::create_dir(&root).expect("workspace");
+            assert!(Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("init")
+                .success());
+            assert!(Command::new("git")
+                .args(["remote", "add", "origin", remote])
+                .current_dir(&root)
+                .status()
+                .expect("remote")
+                .success());
+            assert_eq!(
+                canonical_repository_identity_for_root(root.to_str()),
+                Some("github://github.com/example/repo".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_repository_identity_fails_closed_for_missing_or_distinct_remote() {
+        assert_eq!(canonical_repository_identity_for_root(None), None);
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .expect("init")
+            .success());
+        assert_eq!(
+            canonical_repository_identity_for_root(temp.path().to_str()),
+            None
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -1439,6 +1839,7 @@ mod committed_harvest_tests {
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
+            adoption: None,
             source_workspace_root: None,
             _attempt_workspace: None,
             run_id: Some("committed-harvest-test".to_string()),
@@ -1619,6 +2020,7 @@ mod committed_harvest_tests {
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
+            adoption: None,
             source_workspace_root: None,
             _attempt_workspace: None,
             run_id: None,
@@ -1736,7 +2138,10 @@ fn artifact_bindings_for_outcomes(
                     artifact_id: artifact.id.clone(),
                     kind: artifact.kind.clone(),
                     name: artifact.name.clone(),
-                    path: artifact.path.clone(),
+                    // A run-scoped artifact URL is portable evidence; do not
+                    // leak the controller's local artifact path alongside it.
+                    path: crate::core::agent_task_artifacts::reviewer_facing_artifact(artifact)
+                        .path,
                     url: artifact.url.clone(),
                     sha256: artifact.sha256.clone(),
                 })

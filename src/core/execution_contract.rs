@@ -118,6 +118,28 @@ pub fn decode_uri_component(value: &str) -> String {
     String::from_utf8_lossy(&decoded).to_string()
 }
 
+/// Strict counterpart for externally supplied selectors. Unlike the legacy
+/// display decoder, malformed percent escapes and invalid UTF-8 are rejected.
+pub fn decode_uri_component_strict(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= bytes.len() {
+            return None;
+        }
+        let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+        decoded.push(u8::from_str_radix(hex, 16).ok()?);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
