@@ -271,6 +271,7 @@ fn sensitive_whole_value_flag(flag: &str) -> bool {
             | "access_token"
             | "refresh_token"
             | "api_key"
+            | "attempt_plan"
             | "password"
             | "token"
     )
@@ -447,6 +448,9 @@ mod tests {
             "--secret-env=ANTHROPIC_API_KEY=sk-ant".to_string(),
             "--provider-auth-token".to_string(),
             "provider-token".to_string(),
+            "--attempt-plan".to_string(),
+            r#"{"plan_id":"private-plan"}"#.to_string(),
+            "--attempt-plan=@/private/attempt-plan.json".to_string(),
             "--url=https://example.test/?token=query-token&ok=1".to_string(),
         ];
 
@@ -469,6 +473,9 @@ mod tests {
                 "--secret-env=[REDACTED]".to_string(),
                 "--provider-auth-token".to_string(),
                 "[REDACTED]".to_string(),
+                "--attempt-plan".to_string(),
+                "[REDACTED]".to_string(),
+                "--attempt-plan=[REDACTED]".to_string(),
                 "--url=https://example.test/?token=[REDACTED]&ok=1".to_string(),
             ]
         );
