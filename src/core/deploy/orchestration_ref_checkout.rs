@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::core::component::Component;
+use crate::core::deps;
 use crate::core::error::{Error, Result};
 use crate::core::git;
 
@@ -123,6 +124,76 @@ impl ExactRefCheckout {
             ));
         }
         Ok(())
+    }
+
+    /// Hydrate dependencies in the detached source tree, never the configured
+    /// checkout. This makes an exact-ref build self-contained.
+    pub(super) fn hydrate_dependencies(
+        &self,
+        skip: bool,
+    ) -> Result<Option<deps::DependencyInstallResult>> {
+        let started = Instant::now();
+        let path = Path::new(&self.component.local_path);
+        if skip {
+            log_status!(
+                "deploy",
+                "phase=exact_ref_hydration_skipped component={} ref={} commit={} cwd={} reason=--skip-deps-hydration duration_ms={}",
+                self.component.id,
+                self.identity.requested_ref,
+                self.identity.resolved_sha,
+                path.display(),
+                started.elapsed().as_millis()
+            );
+            return Ok(None);
+        }
+        log_status!(
+            "deploy",
+            "phase=exact_ref_hydration component={} ref={} commit={} cwd={}",
+            self.component.id,
+            self.identity.requested_ref,
+            self.identity.resolved_sha,
+            path.display()
+        );
+
+        match deps::install_for_resolved(&self.component, path)? {
+            Some(result) => {
+                for install in &result.installs {
+                    log_status!(
+                        "deploy",
+                        "phase=exact_ref_hydration component={} ref={} commit={} provider={} cwd={} command={} status={:?}",
+                        self.component.id,
+                        self.identity.requested_ref,
+                        self.identity.resolved_sha,
+                        result.package_manager,
+                        result.component_path,
+                        crate::core::redaction::redact_string(&install.command.join(" ")),
+                        install.status
+                    );
+                }
+                log_status!(
+                    "deploy",
+                    "phase=exact_ref_hydration_complete component={} ref={} commit={} cwd={} duration_ms={}",
+                    self.component.id,
+                    self.identity.requested_ref,
+                    self.identity.resolved_sha,
+                    result.component_path,
+                    started.elapsed().as_millis()
+                );
+                Ok(Some(result))
+            }
+            None => {
+                log_status!(
+                    "deploy",
+                    "phase=exact_ref_hydration_skipped component={} ref={} commit={} cwd={} reason=no_dependency_provider duration_ms={}",
+                    self.component.id,
+                    self.identity.requested_ref,
+                    self.identity.resolved_sha,
+                    path.display(),
+                    started.elapsed().as_millis()
+                );
+                Ok(None)
+            }
+        }
     }
 
     fn cleanup(&mut self) {
@@ -701,6 +772,59 @@ mod tests {
         assert!(error
             .message
             .contains("Materialized source verification failed"));
+    }
+
+    #[test]
+    fn hydration_failure_is_actionable_and_removes_only_the_temporary_checkout() {
+        let repo = fixture_repo();
+        std::fs::write(
+            repo.path().join("homeboy-deps.json"),
+            r#"{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}"#,
+        )
+        .expect("dependency provider");
+        git(repo.path(), &["add", "homeboy-deps.json"]);
+        commit(repo.path(), "add failing provider");
+        let component = fixture_component(repo.path());
+
+        let temporary_path = {
+            let checkout =
+                ExactRefCheckout::materialize(&component, "HEAD").expect("materialize exact ref");
+            let temporary_path = PathBuf::from(&checkout.component.local_path);
+            let error = checkout
+                .hydrate_dependencies(false)
+                .expect_err("failed hydration must stop before build or deploy");
+            assert!(error.message.contains("Dependency provider install failed"));
+            assert!(format!("{error:?}").contains("Run manually in"));
+            temporary_path
+        };
+
+        assert!(
+            !temporary_path.exists(),
+            "temporary checkout is removed on failure"
+        );
+        assert!(
+            repo.path().join("homeboy-deps.json").exists(),
+            "configured checkout is never cleaned"
+        );
+    }
+
+    #[test]
+    fn hydration_opt_out_does_not_run_the_materialized_provider() {
+        let repo = fixture_repo();
+        std::fs::write(
+            repo.path().join("homeboy-deps.json"),
+            r#"{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}"#,
+        )
+        .expect("dependency provider");
+        git(repo.path(), &["add", "homeboy-deps.json"]);
+        commit(repo.path(), "add failing provider");
+        let component = fixture_component(repo.path());
+        let checkout = ExactRefCheckout::materialize(&component, "HEAD").expect("materialize");
+
+        assert!(checkout
+            .hydrate_dependencies(true)
+            .expect("explicit opt-out must skip hydration")
+            .is_none());
     }
 
     #[test]

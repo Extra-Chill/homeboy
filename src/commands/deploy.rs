@@ -356,6 +356,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         force: args.force,
         skip_build,
         keep_deps: args.keep_deps,
+        skip_deps_hydration: crate::commands::skip_deps_hydration(),
         expected_version: args.version.clone(),
         no_pull: args.no_pull,
         head: args.head,
