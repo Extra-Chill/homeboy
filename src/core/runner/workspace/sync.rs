@@ -196,7 +196,7 @@ pub fn sync_workspace(
             } else {
                 "clean_remote_required"
             };
-            let materialization_plan = workspace_materialization_plan(
+            let mut materialization_plan = workspace_materialization_plan(
                 workspace_root,
                 &local_path,
                 &remote_path,
@@ -211,17 +211,18 @@ pub fn sync_workspace(
                     &git.remote_url,
                 )
             {
-                materialize_git_from_controller_bundle(
-                    &runner,
-                    &local_path,
-                    &remote_path,
-                    &git.head,
-                    git.branch.as_deref(),
-                    &git.remote_url,
-                    git.changed_since_base.as_deref(),
-                    &git.git_fetch_refs,
-                    options.allow_dirty_lab_workspace,
-                )?;
+                materialization_plan.controller_git_bundle =
+                    Some(materialize_git_from_controller_bundle(
+                        &runner,
+                        &local_path,
+                        &remote_path,
+                        &git.head,
+                        git.branch.as_deref(),
+                        &git.remote_url,
+                        git.changed_since_base.as_deref(),
+                        &git.git_fetch_refs,
+                        options.allow_dirty_lab_workspace,
+                    )?);
             } else {
                 if runner.kind != RunnerKind::Local {
                     source_materialization::validate_runner_git_materialization(
@@ -229,7 +230,7 @@ pub fn sync_workspace(
                         &runner.id,
                     )?;
                 }
-                materialize_git(
+                if let Err(error) = materialize_git(
                     &runner,
                     &remote_path,
                     &git.remote_url,
@@ -238,7 +239,23 @@ pub fn sync_workspace(
                     git.changed_since_base.as_deref(),
                     &git.git_fetch_refs,
                     options.allow_dirty_lab_workspace,
-                )?;
+                ) {
+                    if !is_runner_git_auth_or_network_failure(&error) {
+                        return Err(error);
+                    }
+                    materialization_plan.controller_git_bundle =
+                        Some(materialize_git_from_controller_bundle(
+                            &runner,
+                            &local_path,
+                            &remote_path,
+                            &git.head,
+                            git.branch.as_deref(),
+                            &git.remote_url,
+                            git.changed_since_base.as_deref(),
+                            &git.git_fetch_refs,
+                            options.allow_dirty_lab_workspace,
+                        )?);
+                }
             }
             let metadata = workspace_metadata(
                 &runner.id,
@@ -301,6 +318,24 @@ pub fn sync_workspace(
             ))
         }
     }
+}
+
+fn is_runner_git_auth_or_network_failure(error: &Error) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    [
+        "authentication failed",
+        "permission denied",
+        "could not read from remote repository",
+        "repository not found",
+        "failed to connect",
+        "could not resolve host",
+        "network is unreachable",
+        "connection timed out",
+        "connection refused",
+        "proxy",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 pub(crate) fn workspace_materialization_plan(

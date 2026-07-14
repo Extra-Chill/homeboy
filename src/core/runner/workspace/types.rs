@@ -103,6 +103,18 @@ pub struct RunnerWorkspaceMaterializationContract {
     pub source_provenance: RunnerWorkspaceSourceProvenance,
     pub dirty_policy: RunnerWorkspaceDirtyPolicy,
     pub output_paths: RunnerWorkspaceOutputPaths,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_git_bundle: Option<ControllerGitBundleProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ControllerGitBundleProvenance {
+    pub provenance: &'static str,
+    pub source_sha: String,
+    pub source_refs: Vec<String>,
+    pub sha256: String,
+    pub cleanup_owner: &'static str,
+    pub cleanup_ttl: &'static str,
 }
 
 pub type RunnerWorkspaceMaterializationPlan = RunnerWorkspaceMaterializationContract;
@@ -203,6 +215,7 @@ impl RunnerWorkspaceMaterializationContract {
                 workspace_cleanliness: workspace_cleanliness.to_string(),
             },
             output_paths: RunnerWorkspaceOutputPaths::for_remote_path(&workspace_root, remote_path),
+            controller_git_bundle: None,
         }
     }
 
