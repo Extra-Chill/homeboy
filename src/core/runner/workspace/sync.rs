@@ -234,6 +234,7 @@ pub fn sync_workspace(
                     &remote_path,
                     &git.remote_url,
                     &git.head,
+                    git.branch.as_deref(),
                     git.changed_since_base.as_deref(),
                     &git.git_fetch_refs,
                     options.allow_dirty_lab_workspace,

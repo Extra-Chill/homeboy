@@ -149,9 +149,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         RunnerWorkspaceSyncOptions {
             path: source_path.display().to_string(),
             mode: sync_mode,
-            // Lab already has the authenticated controller checkout. Ship its
-            // refs instead of requiring the runner to clone or fetch the source.
-            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git,
+            // Patch-producing retry primaries must materialize their recorded
+            // remote baseline. Other Git workloads retain controller-routed
+            // bundles for remotes unavailable from the runner.
+            controller_routed_git: sync_mode == RunnerWorkspaceSyncMode::Git
+                && contract.workspace_mode_policy
+                    != LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
             changed_since_base: changed_since_preflight.resolved_base.clone(),
             git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
@@ -298,6 +301,13 @@ fn prepare_lab_offload_workspace_stage_inner(
     // The effective workspace filters define the bytes shipped to Lab and are
     // carried to the runner for deterministic post-materialization verification.
     source_snapshot.sync_excludes = synced.excludes.clone();
+    if sync_mode == RunnerWorkspaceSyncMode::Git {
+        // Git materialization retains repository metadata. It is not source
+        // snapshot state, and it must not be reported as excluded evidence.
+        source_snapshot
+            .sync_excludes
+            .retain(|exclude| exclude != ".git" && exclude != ".git/**");
+    }
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     if contract.routing_policy.requires_extension_parity {
@@ -2287,7 +2297,8 @@ mod tests {
                 required_capabilities: Vec::new(),
                 workload: None,
             };
-            contract.command.workspace_mode_policy = LabOffloadWorkspaceModePolicy::Git;
+            contract.command.workspace_mode_policy =
+                LabOffloadWorkspaceModePolicy::GitCheckoutRequired;
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
@@ -2311,6 +2322,18 @@ mod tests {
             assert!(stage.remapped_args.contains(&"cook-8009".to_string()));
             assert!(stage.remapped_args.contains(&canonical_attempt_id));
             assert_eq!(stage.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(
+                stage.path_materialization_plan.entries[0].materialization_mode,
+                "git"
+            );
+            assert!(
+                !stage
+                    .source_snapshot
+                    .sync_excludes
+                    .iter()
+                    .any(|exclude| exclude == ".git" || exclude == ".git/**"),
+                "a .git-excluded snapshot cannot claim git materialization"
+            );
             assert_eq!(
                 git_output(
                     Path::new(&stage.remote_cwd),
