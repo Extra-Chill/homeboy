@@ -283,7 +283,14 @@ pub fn connect_with_orphan_adoption(
         worker_pid: None,
         last_seen_at: None,
     };
-    write_session(&session)?;
+    if let Err(error) = write_session(&session) {
+        return Ok(session_write_failure_report(
+            runner_id,
+            session_path,
+            error,
+            state_loss_recovery,
+        ));
+    }
 
     Ok((
         RunnerConnectReport {
@@ -339,6 +346,25 @@ fn attach_state_loss_recovery(
     recovery: Option<DaemonStateLossRecoveryResult>,
 ) {
     report.state_loss_recovery = recovery;
+}
+
+fn session_write_failure_report(
+    runner_id: &str,
+    session_path: PathBuf,
+    error: Error,
+    recovery: Option<DaemonStateLossRecoveryResult>,
+) -> (RunnerConnectReport, i32) {
+    let (mut report, exit_code) = failed_connect(
+        runner_id,
+        session_path,
+        RunnerFailureKind::DaemonStartupFailure,
+        format!(
+            "persist runner session after daemon recovery: {}",
+            error.message
+        ),
+    );
+    attach_state_loss_recovery(&mut report, recovery);
+    (report, exit_code)
 }
 
 fn leaseless_recovery_failure_message(output: &crate::core::server::CommandOutput) -> String {
@@ -2243,6 +2269,28 @@ mod tests {
             "tunnel failed".to_string(),
         );
         attach_state_loss_recovery(&mut report, Some(recovery));
+        assert_eq!(
+            report
+                .state_loss_recovery
+                .as_ref()
+                .map(|value| value.replacement.lease_id.as_str()),
+            Some("lease-new")
+        );
+    }
+
+    #[test]
+    fn session_write_failure_report_retains_completed_state_loss_recovery() {
+        let recovery = decode_state_loss_recovery(parse_envelope(r#"{"success":true,"data":{"recovered_lease_id":"lease-old","recorded_dead_pid":42,"recorded_endpoint":"127.0.0.1:7421","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/snapshot","ownership_proof":[],"retry_guidance":"retry","replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state","lease_id":"lease-new"}}}"#).expect("envelope").data).expect("recovery");
+        let (report, _) = session_write_failure_report(
+            "runner",
+            std::path::PathBuf::from("/session"),
+            Error::internal_io("disk full", None),
+            Some(recovery),
+        );
+        assert!(report
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("persist runner session")));
         assert_eq!(
             report
                 .state_loss_recovery

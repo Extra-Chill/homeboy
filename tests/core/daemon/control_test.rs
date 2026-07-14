@@ -667,6 +667,7 @@ fn state_loss_receipt_survives_start_failure_and_replay_starts_once() {
             ownership_proof: vec!["owner lock acquired".to_string()],
             phase: super::StateLossRecoveryPhase::Reconciled,
             replacement: None,
+            replacement_startup_token: None,
         };
         super::write_state_loss_receipt(&receipt_path, &receipt).expect("persist receipt");
         let error = super::complete_state_loss_replacement(&mut receipt, &receipt_path, || {
@@ -708,6 +709,7 @@ fn state_loss_receipt_refuses_mismatched_replay_inputs() {
         ownership_proof: Vec::new(),
         phase: super::StateLossRecoveryPhase::Reconciled,
         replacement: None,
+        replacement_startup_token: None,
     };
     let endpoint = "127.0.0.1:7422".parse().expect("endpoint");
     assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_err());
@@ -732,6 +734,7 @@ fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
         ownership_proof: Vec::new(),
         phase: super::StateLossRecoveryPhase::Reconciled,
         replacement: None,
+        replacement_startup_token: None,
     };
     assert!(super::validate_state_loss_preconditions(
         "lease-old",
@@ -742,6 +745,60 @@ fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
     )
     .is_ok());
     assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_ok());
+}
+
+#[test]
+fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
+    with_isolated_home(|_| {
+        let receipt_path = crate::core::paths::daemon_state_loss_recovery_receipt_file("lease-old")
+            .expect("receipt path");
+        let mut receipt = super::StateLossRecoveryReceipt {
+            lease_id: "lease-old".to_string(),
+            recorded_pid: 4242,
+            recorded_endpoint: "127.0.0.1:7421".to_string(),
+            affected_job_ids: Vec::new(),
+            evidence_snapshot_path: "/snapshot".to_string(),
+            ownership_proof: Vec::new(),
+            phase: super::StateLossRecoveryPhase::Reconciled,
+            replacement: None,
+            replacement_startup_token: None,
+        };
+        let error = super::start_state_loss_replacement_with(&mut receipt, &receipt_path, |_| {
+            Err(crate::core::Error::internal_unexpected(
+                "interrupted after launch intent",
+            ))
+        })
+        .expect_err("interruption leaves replayable starting receipt");
+        assert_eq!(
+            error.details["state_loss_recovery"]["phase"],
+            "replacement_starting"
+        );
+        let token = receipt
+            .replacement_startup_token
+            .clone()
+            .expect("startup token");
+        let mut status = fake_status(Some(fake_daemon(4343, "lease-new")), true);
+        status.state.as_mut().expect("state").startup_token = token;
+        let adopted =
+            super::replay_replacement_starting(receipt, &receipt_path, &status, "127.0.0.1:0")
+                .expect("matching started daemon is adopted without another start");
+        assert_eq!(adopted.replacement.lease_id, "lease-new");
+
+        let mut mismatched = super::read_state_loss_receipt(&receipt_path)
+            .expect("receipt")
+            .expect("receipt");
+        mismatched.phase = super::StateLossRecoveryPhase::ReplacementStarting;
+        mismatched.replacement = None;
+        mismatched.replacement_startup_token = Some("expected-token".to_string());
+        let status = fake_status(Some(fake_daemon(4344, "other-lease")), true);
+        assert!(super::replay_replacement_starting(
+            mismatched,
+            &receipt_path,
+            &status,
+            "127.0.0.1:0"
+        )
+        .is_err());
+    });
 }
 
 #[test]
