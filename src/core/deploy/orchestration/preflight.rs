@@ -1,10 +1,116 @@
+use std::collections::HashMap;
+
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 use crate::core::git;
 use crate::core::release::version;
 
+use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
-use super::super::types::DeployConfig;
+use super::super::types::{compare_deployed_versions, ComponentStatus, DeployConfig};
+
+/// Return the components whose payload depends on local source or a local artifact.
+/// Downloaded release assets are immutable remote inputs and intentionally bypass
+/// local-checkout safety guards.
+pub(super) fn local_build_components(
+    components: &[Component],
+    config: &DeployConfig,
+) -> Vec<Component> {
+    components
+        .iter()
+        .filter(|component| {
+            let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
+            let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
+            matches!(
+                release_artifact_plan(component, config, is_git_deploy, is_file_deploy),
+                ReleaseArtifactPlan::LocalBuild { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Refuse known-stale local source checkouts unless the operator explicitly
+/// accepts that source identity. A failed freshness probe is not treated as stale.
+pub(super) fn guard_local_build_source_freshness(
+    components: &[Component],
+    config: &DeployConfig,
+) -> Result<()> {
+    if config.allow_stale_source {
+        return Ok(());
+    }
+
+    let stale = components
+        .iter()
+        .filter_map(|component| {
+            git::fetch_and_get_behind_count(&component.local_path)
+                .ok()
+                .flatten()
+                .map(|behind| format!("{} ({behind} commit(s) behind upstream)", component.id))
+        })
+        .collect::<Vec<_>>();
+
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "source",
+        format!(
+            "Refusing local-build deploy from stale source checkout(s): {}",
+            stale.join(", ")
+        ),
+        None,
+        Some(vec![
+            "Refresh the source checkout, then deploy again".to_string(),
+            "Use --allow-stale-source only when deploying the known stale checkout is intentional"
+                .to_string(),
+        ]),
+    ))
+}
+
+/// Refuse only proven semantic-version downgrades. Missing and non-semantic
+/// version values remain observable in check/dry-run output but cannot cause a
+/// false deployment refusal.
+pub(super) fn guard_local_build_downgrades(
+    components: &[Component],
+    local_versions: &HashMap<String, String>,
+    remote_versions: &HashMap<String, String>,
+    config: &DeployConfig,
+) -> Result<()> {
+    if config.allow_downgrade {
+        return Ok(());
+    }
+
+    let downgrades = components
+        .iter()
+        .filter_map(|component| {
+            let local = local_versions.get(&component.id)?;
+            let remote = remote_versions.get(&component.id)?;
+            (compare_deployed_versions(Some(local), Some(remote)) == ComponentStatus::BehindRemote)
+                .then(|| format!("{} (remote {remote} > local {local})", component.id))
+        })
+        .collect::<Vec<_>>();
+
+    if downgrades.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "version",
+        format!(
+            "Refusing local-build version downgrade: {}",
+            downgrades.join(", ")
+        ),
+        None,
+        Some(vec![
+            "Refresh the local source or select a version newer than the deployed remote version"
+                .to_string(),
+            "Use --allow-downgrade only when replacing a newer deployed version is intentional"
+                .to_string(),
+        ]),
+    ))
+}
 
 /// Warn when `--head` would deploy from a non-default branch.
 ///
@@ -181,6 +287,181 @@ fn dirty_worktree_path_summary(dirty: &[DirtyComponent]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{
+        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
+    };
+    use crate::core::component::Component;
+    use crate::core::deploy::DeployConfig;
+
+    fn config() -> DeployConfig {
+        DeployConfig {
+            component_ids: vec![],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: None,
+            tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
+        }
+    }
+
+    fn component(path: &Path) -> Component {
+        Component {
+            id: "example".to_string(),
+            local_path: path.to_string_lossy().to_string(),
+            ..Component::default()
+        }
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn stale_local_source_refuses_until_explicitly_allowed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote = temp.path().join("remote.git");
+        let source = temp.path().join("source");
+        let updater = temp.path().join("updater");
+        std::fs::create_dir(&source).expect("source dir");
+        git(
+            temp.path(),
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test"]);
+        std::fs::write(source.join("version.txt"), "1.0.0").expect("version");
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "initial"]);
+        git(&source, &["branch", "-M", "main"]);
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        git(&source, &["push", "-u", "origin", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "-b",
+                "main",
+                remote.to_str().expect("remote path"),
+                updater.to_str().expect("updater path"),
+            ],
+        );
+        git(&updater, &["config", "user.email", "test@example.com"]);
+        git(&updater, &["config", "user.name", "Test"]);
+        std::fs::write(updater.join("version.txt"), "1.1.0").expect("updated version");
+        git(&updater, &["add", "."]);
+        git(&updater, &["commit", "-m", "update"]);
+        git(&updater, &["push"]);
+
+        let component = component(&source);
+        let error = guard_local_build_source_freshness(&[component.clone()], &config())
+            .expect_err("stale source must refuse");
+        assert!(error.message.contains("1 commit(s) behind upstream"));
+        assert!(error.details.to_string().contains("--allow-stale-source"));
+
+        let mut allowed = config();
+        allowed.allow_stale_source = true;
+        guard_local_build_source_freshness(&[component], &allowed)
+            .expect("explicit stale-source override must proceed");
+    }
+
+    #[test]
+    fn semantic_downgrade_refuses_until_explicitly_allowed() {
+        let component = component(Path::new("."));
+        let local = HashMap::from([("example".to_string(), "1.2.3".to_string())]);
+        let remote = HashMap::from([("example".to_string(), "1.3.0".to_string())]);
+        let error = guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
+            .expect_err("remote-newer version must refuse");
+        assert!(error.message.contains("remote 1.3.0 > local 1.2.3"));
+        assert!(error.details.to_string().contains("--allow-downgrade"));
+
+        let mut allowed = config();
+        allowed.allow_downgrade = true;
+        guard_local_build_downgrades(&[component], &local, &remote, &allowed)
+            .expect("explicit downgrade override must proceed");
+    }
+
+    #[test]
+    fn equal_or_newer_local_semantic_versions_are_allowed() {
+        let component = component(Path::new("."));
+        for (local_version, remote_version) in [("1.3.0", "1.3.0"), ("1.4.0", "1.3.0")] {
+            let local = HashMap::from([("example".to_string(), local_version.to_string())]);
+            let remote = HashMap::from([("example".to_string(), remote_version.to_string())]);
+            guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
+                .expect("equal or newer local version must proceed");
+        }
+    }
+
+    #[test]
+    fn unavailable_or_invalid_versions_do_not_create_false_downgrade_refusals() {
+        let component = component(Path::new("."));
+        for (local, remote) in [
+            (
+                HashMap::new(),
+                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
+            ),
+            (
+                HashMap::from([("example".to_string(), "dev".to_string())]),
+                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
+            ),
+        ] {
+            guard_local_build_downgrades(&[component.clone()], &local, &remote, &config())
+                .expect("unavailable or invalid versions are not proven downgrades");
+        }
+    }
+
+    #[test]
+    fn immutable_release_asset_bypasses_local_source_guards() {
+        let component = Component {
+            id: "example".to_string(),
+            local_path: "/not/a/checkout".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("example.zip".to_string()),
+            ..Component::default()
+        };
+        let mut config = config();
+        config.expected_version = Some("1.2.3".to_string());
+
+        assert!(local_build_components(&[component], &config).is_empty());
+    }
 }
 
 /// Fetch and pull latest changes for each component before deploying.

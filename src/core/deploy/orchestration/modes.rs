@@ -296,9 +296,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: Some("reviewed".to_string()),
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let result = run_dry_run_mode(
@@ -333,6 +337,65 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn check_and_dry_run_report_remote_newer_versions_without_safety_refusal() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/not/a/checkout".to_string(),
+            build_artifact: Some("build/fixture.zip".to_string()),
+            ..Component::default()
+        };
+        let local_versions = HashMap::from([("fixture".to_string(), "1.2.3".to_string())]);
+        let remote_versions = HashMap::from([("fixture".to_string(), "1.3.0".to_string())]);
+        let config = DeployConfig {
+            component_ids: vec!["fixture".to_string()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: true,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: None,
+            no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: true,
+            requested_ref: None,
+            tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
+        };
+
+        let checked = run_check_mode(
+            std::slice::from_ref(&component),
+            &local_versions,
+            &remote_versions,
+            &[],
+            &Project::default(),
+            "/srv/site",
+            &config,
+        );
+        assert_eq!(checked.results[0].status, "checked");
+        assert_eq!(checked.results[0].local_version.as_deref(), Some("1.2.3"));
+        assert_eq!(checked.results[0].remote_version.as_deref(), Some("1.3.0"));
+
+        let planned = run_dry_run_mode(
+            &[component],
+            &local_versions,
+            &remote_versions,
+            &Project::default(),
+            "/srv/site",
+            &config,
+        )
+        .expect("dry-run must report rather than refuse a remote-newer version");
+        assert_eq!(planned.results[0].status, "planned");
+        assert_eq!(planned.results[0].local_version.as_deref(), Some("1.2.3"));
+        assert_eq!(planned.results[0].remote_version.as_deref(), Some("1.3.0"));
     }
 
     fn git(path: &Path, args: &[&str]) {

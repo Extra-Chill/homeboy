@@ -2,6 +2,7 @@ use serde::ser::Error as SerializeError;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
+use crate::core::phase_timing::PhaseTimingReport;
 use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus};
 use crate::is_zero_u32;
 
@@ -169,6 +170,8 @@ pub struct ReleaseRunResult {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReleaseRunSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_timings: Option<PhaseTimingReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

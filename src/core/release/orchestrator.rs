@@ -4,6 +4,7 @@
 //! the accumulated step results into the public release run shape.
 
 use crate::core::error::Result;
+use crate::core::phase_timing::PhaseTimer;
 use std::collections::HashSet;
 
 use super::execution_plan::{
@@ -50,16 +51,19 @@ fn run_with_plan_inner(
     let mut results: Vec<ReleaseStepResult> = Vec::new();
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
-    let initial_stop = execute_plan_steps(
-        &initial_plan.plan.steps,
-        component_id,
-        options,
-        &mut results,
-        &HashSet::new(),
-    )?;
+    let mut timer = PhaseTimer::new();
+    let initial_stop = timer.time("package_preflight", || {
+        execute_plan_steps(
+            &initial_plan.plan.steps,
+            component_id,
+            options,
+            &mut results,
+            &HashSet::new(),
+        )
+    })?;
 
     if initial_stop {
-        let run = finalize(component_id, results);
+        let run = finalize(component_id, results, timer.into_report());
         restore_checkout_after_failed_run(checkout_guard, &run)?;
         return Ok((initial_plan, run));
     }
@@ -72,15 +76,17 @@ fn run_with_plan_inner(
     let completed_preflights: HashSet<&'static str> =
         initial_executable_preflight_ids().iter().copied().collect();
 
-    execute_plan_steps(
-        &release_plan.plan.steps,
-        component_id,
-        options,
-        &mut results,
-        &completed_preflights,
-    )?;
+    timer.time("package", || {
+        execute_plan_steps(
+            &release_plan.plan.steps,
+            component_id,
+            options,
+            &mut results,
+            &completed_preflights,
+        )
+    })?;
 
-    let run = finalize(component_id, results);
+    let run = finalize(component_id, results, timer.into_report());
     restore_checkout_after_failed_run(checkout_guard, &run)?;
 
     Ok((release_plan, run))
@@ -88,7 +94,11 @@ fn run_with_plan_inner(
 
 /// Wrap the accumulated step results into a `ReleaseRun` with an overall
 /// status and a human-friendly summary.
-fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
+fn finalize(
+    component_id: &str,
+    results: Vec<ReleaseStepResult>,
+    phase_timings: crate::core::phase_timing::PhaseTimingReport,
+) -> ReleaseRun {
     let status = derive_overall_status(&results);
     let summary = build_summary(component_id, &results, &status);
 
@@ -100,6 +110,7 @@ fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
             status,
             warnings: Vec::new(),
             summary: Some(summary),
+            phase_timings: Some(phase_timings),
         },
     }
 }

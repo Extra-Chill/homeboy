@@ -55,12 +55,13 @@ mod tests {
         artifact_requires_component_extract_command, resolve_preflight_artifact_path,
         validate_predeploy_artifact_version,
     };
-    use super::prepare::failed_component_deploy_result;
+    use super::prepare::{failed_component_deploy_result, prepare_component_deploy};
     use super::release_plan::{release_artifact_plan, should_try_download_release_artifact};
     use super::strategies::cleanup_deploy_build_artifact;
     use super::{bound_captured_read, ReleaseArtifactPlan, ARTIFACT_VERSION_READ_LIMIT_BYTES};
-    use crate::core::component::{ArtifactInput, Component, VersionTarget};
-    use crate::core::deploy::types::DeployConfig;
+    use crate::core::component::{ArtifactInput, Component, ComponentScriptsConfig, VersionTarget};
+    use crate::core::deploy::types::{DeployConfig, PreparedDeployArtifact};
+    use crate::core::project::Project;
     use std::io::Write;
     use std::process::Command;
 
@@ -117,6 +118,73 @@ mod tests {
     }
 
     #[test]
+    fn prepared_artifact_skips_local_build_invocation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let durable_artifact = temp.path().join("release.tar.gz");
+        let build_counter = temp.path().join("build-count");
+        std::fs::write(&durable_artifact, "release payload").expect("artifact");
+        let mut component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().display().to_string(),
+            remote_path: "plugins/fixture".to_string(),
+            build_artifact: Some("build/fixture.tar.gz".to_string()),
+            extract_command: Some("tar -xzf {{artifact}}".to_string()),
+            ..Component::default()
+        };
+        component.scripts = Some(ComponentScriptsConfig {
+            build: vec![format!("printf build >> {}", build_counter.display())],
+            ..ComponentScriptsConfig::default()
+        });
+        let config = DeployConfig {
+            component_ids: vec![component.id.clone()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: true,
+            skip_build: true,
+            keep_deps: false,
+            skip_deps_hydration: false,
+            expected_version: Some("1.2.3".to_string()),
+            no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
+            head: false,
+            requested_ref: None,
+            tagged: false,
+            prepared_artifact: Some(PreparedDeployArtifact {
+                component_id: component.id.clone(),
+                path: "build/fixture.tar.gz".to_string(),
+                durable_path: durable_artifact.display().to_string(),
+                size_bytes: 15,
+                sha256: crate::core::deploy::sha256_file(&durable_artifact).expect("sha"),
+                version: "1.2.3".to_string(),
+                tag: "v1.2.3".to_string(),
+                source_commit: "0123456789abcdef".to_string(),
+            }),
+            resume_run_id: None,
+        };
+
+        let prepared = prepare_component_deploy(
+            &component,
+            &config,
+            "/srv/site",
+            &Project::default(),
+            Some("1.2.3".to_string()),
+            None,
+            None,
+        )
+        .expect("prepared artifact should pass local preflight");
+
+        assert_eq!(prepared.artifact_path, Some(durable_artifact));
+        assert!(
+            !build_counter.exists(),
+            "prepared deployment must not build"
+        );
+    }
+
+    #[test]
     fn archive_artifact_without_component_extract_is_allowed_by_deploy_override() {
         assert!(!artifact_requires_component_extract_command(
             std::path::Path::new("build/example.zip"),
@@ -160,9 +228,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let result = resolve_preflight_artifact_path(
@@ -218,9 +290,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: true,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -249,9 +325,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: true,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(!should_try_download_release_artifact(
@@ -291,9 +371,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -333,9 +417,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -366,9 +454,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         match release_artifact_plan(&component, &config, false, false) {
@@ -412,9 +504,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: Some("1.2.3".to_string()),
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         assert!(should_try_download_release_artifact(
@@ -483,9 +579,13 @@ mod tests {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: false,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: true,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
+            resume_run_id: None,
         };
 
         let artifact = resolve_preflight_artifact_path(
