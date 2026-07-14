@@ -22,9 +22,9 @@ pub use planning::{
     classify_release_state,
 };
 pub use types::{
-    parse_bulk_component_ids, ComponentDeployResult, ComponentStatus, DeployConfig,
-    DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult, MultiDeploySummary,
-    ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
+    compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
+    DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
+    MultiDeploySummary, ProjectDeployResult, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
