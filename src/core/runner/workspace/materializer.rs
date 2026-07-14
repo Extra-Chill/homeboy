@@ -11,6 +11,7 @@ pub(super) enum WorkspaceMaterializationOperation {
     RecreateTempDir,
     ExtractTarStdinToTemp,
     WriteStdinToBundle,
+    VerifyBundleDigest(String),
     CloneBundleToTemp,
     SetGitOrigin(String),
     CheckoutGitRef {
@@ -139,6 +140,10 @@ impl WorkspaceMaterializationOperation {
             Self::WriteStdinToBundle => {
                 "rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\"".to_string()
             }
+            Self::VerifyBundleDigest(expected) => format!(
+                "test \"$(shasum -a 256 \"$bundle\" | awk '{{print $1}}')\" = {expected}",
+                expected = shell::quote_arg(expected)
+            ),
             Self::CloneBundleToTemp => "git clone \"$bundle\" \"$tmp\"".to_string(),
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
