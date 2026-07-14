@@ -390,7 +390,9 @@ fn remote_leaseless_recovery_command(
     contract: RunnerLeaselessRecoveryContract,
 ) -> String {
     let confirmations = match contract {
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner => "--confirm-no-daemon-owner",
+        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
+        | RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner
+        | RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost => "--confirm-no-daemon-owner",
     };
     format!(
         "{} daemon reconcile-leaseless-orphans {confirmations} --addr {}",
@@ -539,7 +541,10 @@ where
         runner_id,
         session_path,
         RunnerFailureKind::DaemonStartupFailure,
-        format!("persist runner session after daemon recovery: {}", error.message),
+        format!(
+            "persist runner session after daemon recovery: {}",
+            error.message
+        ),
     );
     attach_state_loss_recovery(&mut report, recovery);
     (report, exit_code)
@@ -2722,7 +2727,10 @@ esac
 
     #[test]
     fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
-        for (help, expected_contract) in [("Options:\n    --confirm-no-daemon-owner\n", RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner)] {
+        for (help, expected_contract) in [(
+            "Options:\n    --confirm-no-daemon-owner\n",
+            RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
+        )] {
             let contract =
                 negotiate_leaseless_recovery_contract(&command_output(true, help, false))
                     .expect("advertised contract");
@@ -2748,23 +2756,25 @@ esac
 
     #[test]
     fn generated_daemon_recovery_commands_parse_against_the_actual_cli_contract() {
-        let commands = [
-            remote_leaseless_recovery_command(
-                "homeboy",
-                "127.0.0.1:7421",
-                RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
-            ),
-            remote_state_loss_recovery_command(
-                "homeboy",
-                "lease-dead",
-                4242,
-                "127.0.0.1:7421",
-            ),
+        let mut commands = vec![
+            remote_state_loss_recovery_command("homeboy", "lease-dead", 4242, "127.0.0.1:7421"),
             remote_daemon_adopt_orphan_command("homeboy", "lease-dead"),
         ];
+        for contract in [
+            RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
+            RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
+            RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost,
+        ] {
+            commands.push(remote_leaseless_recovery_command(
+                "homeboy",
+                "127.0.0.1:7421",
+                contract,
+            ));
+        }
         for command in commands {
-            crate::cli_surface::Cli::try_parse_from(command.split_whitespace())
-                .unwrap_or_else(|error| panic!("generated recovery command must parse: {command}: {error}"));
+            crate::cli_surface::Cli::try_parse_from(command.split_whitespace()).unwrap_or_else(
+                |error| panic!("generated recovery command must parse: {command}: {error}"),
+            );
         }
     }
 

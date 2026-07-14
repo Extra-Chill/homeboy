@@ -183,6 +183,8 @@ pub struct RunnerActiveJobError {
 #[serde(rename_all = "snake_case")]
 pub enum RunnerLeaselessRecoveryContract {
     ConfirmNoDaemonOwner,
+    ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
+    ConfirmControlPlaneLost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
