@@ -10,6 +10,8 @@ use crate::command_contract::{
 };
 use homeboy::core::fuzz::FuzzGateProfile;
 
+const FUZZ_PLAN_LAB_UNSUPPORTED_REASON: &str = "`fuzz plan` is controller-local planning so operators can inspect the generated request before execution. Use `homeboy fuzz plan --lab-runner <runner> ...` to emit exact Lab run commands, or pass `--execute` / use `fuzz run` with the global `--runner <runner> --lab-only` flags to execute on Lab.";
+
 #[derive(Args)]
 pub struct FuzzArgs {
     #[command(subcommand)]
@@ -35,8 +37,21 @@ impl FuzzArgs {
             return Some(contract);
         }
 
-        self.is_lab_offload_command()
-            .then(|| LabCommandContract::portable_workload(FUZZ_LAB_LABEL, None, true, &[]))
+        if self.is_lab_offload_command() {
+            Some(LabCommandContract::portable_workload(
+                FUZZ_LAB_LABEL,
+                None,
+                true,
+                &[],
+            ))
+        } else if matches!(&self.command, Some(FuzzCommand::Plan(_))) {
+            Some(LabCommandContract::local_only(
+                FUZZ_LAB_LABEL,
+                FUZZ_PLAN_LAB_UNSUPPORTED_REASON,
+            ))
+        } else {
+            None
+        }
     }
 
     pub fn is_run_invocation(&self) -> bool {
@@ -112,8 +127,9 @@ impl FuzzArgs {
     }
 
     pub(crate) fn destructive_local_execution_requires_override(&self) -> bool {
-        self.destructive_run_args()
-            .is_some_and(|run| run.allow_destructive && !run.allow_local_destructive_fuzz)
+        self.destructive_run_args().is_some_and(|run| {
+            run.effective_allow_destructive() && !run.allow_local_destructive_fuzz
+        })
     }
 
     fn destructive_run_args(&self) -> Option<&FuzzRunArgs> {
@@ -234,8 +250,8 @@ pub struct FuzzRunArgs {
     #[arg(long = "workload", value_name = "ID")]
     pub(crate) workload_id: Option<String>,
 
-    /// Rig-defined fuzz profile to select. Profiles resolve to workload ids in
-    /// the selected rig's fuzz_profiles map.
+    /// Rig-defined fuzz profile to select. Without --rig, `lab` expands the
+    /// generic safe Lab evidence-run defaults.
     #[arg(long = "profile", value_name = "ID")]
     pub(crate) profile: Option<String>,
 
@@ -316,6 +332,51 @@ pub struct FuzzRunArgs {
     /// Additional runner arguments reserved for the fuzz extension script.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
+}
+
+impl FuzzRunArgs {
+    // A rig profile named `lab` retains its rig-defined workload selection.
+    pub(crate) fn is_generic_lab_profile(&self) -> bool {
+        self.rig.is_none() && self.profile.as_deref() == Some("lab")
+    }
+
+    pub(crate) fn rig_profile(&self) -> Option<&str> {
+        (!self.is_generic_lab_profile())
+            .then_some(self.profile.as_deref())
+            .flatten()
+    }
+
+    pub(crate) fn effective_allow_destructive(&self) -> bool {
+        self.allow_destructive || self.is_generic_lab_profile()
+    }
+
+    pub(crate) fn effective_isolation(&self) -> FuzzIsolationArg {
+        if self.effective_allow_destructive() || self.isolation.requests_isolation() {
+            FuzzIsolationArg::Isolated
+        } else {
+            FuzzIsolationArg::Shared
+        }
+    }
+
+    pub(crate) fn effective_gate_profile(&self) -> FuzzGateProfileArg {
+        if self.is_generic_lab_profile() && self.gate_profile == FuzzGateProfileArg::Measurement {
+            FuzzGateProfileArg::Evidence
+        } else {
+            self.gate_profile
+        }
+    }
+
+    pub(crate) fn effective_require_case_log(&self) -> bool {
+        self.require_case_log || self.is_generic_lab_profile()
+    }
+
+    pub(crate) fn effective_require_coverage_summary(&self) -> bool {
+        self.require_coverage_summary || self.is_generic_lab_profile()
+    }
+
+    pub(crate) fn effective_require_result_envelope(&self) -> bool {
+        self.require_result_envelope || self.is_generic_lab_profile()
+    }
 }
 
 fn parse_tracker_ref(raw: &str) -> Result<TrackerRef, String> {

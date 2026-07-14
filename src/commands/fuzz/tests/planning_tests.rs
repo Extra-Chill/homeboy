@@ -323,6 +323,7 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
         state: None,
     }];
     args.run.seed = Some("1234".to_string());
+    args.lab_runner = Some("lab-b".to_string());
 
     let plan = build_campaign_plan(
         &args,
@@ -335,7 +336,7 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
 
     assert_eq!(plan.schema, "homeboy/fuzz-campaign-plan/v1");
     assert_eq!(plan.id, "campaign-1");
-    assert_eq!(plan.lab_runner.as_deref(), Some("lab-a"));
+    assert_eq!(plan.lab_runner.as_deref(), Some("lab-b"));
     assert_eq!(plan.entries.len(), 3);
     assert_eq!(plan.entries[0].workload_id, "api-fuzz");
     assert_eq!(plan.entries[1].workload_id, "browser-fuzz");
@@ -381,6 +382,82 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
             "measurement",
         ]
     );
+    assert_eq!(
+        plan.entries[0]
+            .lab_command
+            .as_ref()
+            .expect("lab command")
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "homeboy",
+            "--runner",
+            "lab-b",
+            "--lab-only",
+            "fuzz",
+            "run",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--run-id",
+            "campaign-1-api-fuzz",
+            "--tracker-ref",
+            "github_issue:Extra-Chill/homeboy#123",
+            "--seed",
+            "1234",
+            "--gate-profile",
+            "measurement",
+        ]
+    );
+}
+
+#[test]
+fn generic_lab_profile_expands_safe_destructive_evidence_defaults() {
+    let cli = FuzzCli::try_parse_from([
+        "fuzz",
+        "run",
+        "component-a",
+        "--workload",
+        "api-fuzz",
+        "--profile",
+        "lab",
+    ])
+    .expect("parse generic lab profile");
+    let Some(FuzzCommand::Run(args)) = cli.args.command else {
+        panic!("expected fuzz run command");
+    };
+
+    assert!(args.is_generic_lab_profile());
+    assert!(args.effective_allow_destructive());
+    assert_eq!(args.effective_isolation(), FuzzIsolationArg::Isolated);
+    assert_eq!(args.effective_gate_profile(), FuzzGateProfileArg::Evidence);
+    assert!(args.effective_require_case_log());
+    assert!(args.effective_require_coverage_summary());
+    assert!(args.effective_require_result_envelope());
+
+    let rig_cli = FuzzCli::try_parse_from(["fuzz", "run", "--rig", "rig-a", "--profile", "lab"])
+        .expect("parse rig lab profile");
+    let Some(FuzzCommand::Run(rig_args)) = rig_cli.args.command else {
+        panic!("expected fuzz run command");
+    };
+    assert!(!rig_args.is_generic_lab_profile());
+    assert_eq!(rig_args.rig_profile(), Some("lab"));
+}
+
+#[test]
+fn fuzz_plan_lab_contract_explains_local_planning_path() {
+    let cli =
+        FuzzCli::try_parse_from(["fuzz", "plan", "component-a"]).expect("parse fuzz plan command");
+    let contract = cli.args.lab_contract().expect("fuzz plan lab contract");
+    let crate::command_contract::LabCommandPortability::LocalOnly(reason) = contract.portability
+    else {
+        panic!("plain fuzz plan should be local-only for Lab routing");
+    };
+
+    assert!(reason.contains("`fuzz plan` is controller-local planning"));
+    assert!(reason.contains("--lab-runner <runner>"));
+    assert!(reason.contains("--execute"));
 }
 
 #[test]
