@@ -564,7 +564,7 @@ mod concurrency_tests {
                         && artifact
                             .sha256
                             .as_deref()
-                            .is_some_and(|sha| sha.starts_with("sha256:"))
+                            .is_some_and(|sha| sha.len() == 64)
                         && artifact.metadata["provider_backend"].is_string()
                 })));
         assert!(aggregate.outcomes.iter().any(|outcome| {

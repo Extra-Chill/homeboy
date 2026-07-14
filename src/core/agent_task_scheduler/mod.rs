@@ -1141,7 +1141,11 @@ fn apply_adopted_candidate(
 }
 
 fn fingerprint(contents: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(contents))
+    format!("sha256:{}", sha256_hex(contents))
+}
+
+fn sha256_hex(contents: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(contents))
 }
 
 fn harvest_committed_patch(
@@ -1182,6 +1186,7 @@ fn harvest_uncommitted_patch(
     if patch.trim().is_empty() {
         return Ok(());
     }
+    let changed_files = git_changed_files(root, &["diff", "--cached", "--name-only", "HEAD"])?;
     let path = attempt_patch_path(running, "uncommitted")?;
     std::fs::write(&path, patch.as_bytes()).map_err(|error| HarvestError::ArtifactWrite {
         path: path.clone(),
@@ -1210,6 +1215,8 @@ fn harvest_uncommitted_patch(
             "provider_backend": running.request.executor.backend,
             "provider_model": running.request.executor.model(),
             "attempt_workspace": running.request.workspace.attempt,
+            "source_provenance": running.source_provenance,
+            "changed_files": changed_files,
             "source_provenance": running.source_provenance,
         }),
     });
@@ -1367,6 +1374,7 @@ fn harvest_committed_patch_with_metadata(
         Vec::new(),
     ));
     let commits = collect_metadata(root, &range)?;
+    let changed_files = git_changed_files(root, &["diff", "--name-only", base, "HEAD"])?;
     outcome
         .artifacts
         .last_mut()
@@ -1385,6 +1393,7 @@ fn harvest_committed_patch_with_metadata(
         "provider_backend": running.request.executor.backend,
         "provider_model": running.request.executor.model(),
         "attempt_workspace": &running.request.workspace.attempt,
+        "changed_files": changed_files,
     });
     Ok(())
 }
@@ -1398,6 +1407,14 @@ fn committed_change_metadata_for_range(
         &["log", "--reverse", "--format=%H%x1f%an%x1f%ae%x1f%s", range],
     )?;
     Ok(committed_change_metadata(&output))
+}
+
+fn git_changed_files(cwd: &Path, args: &[&str]) -> Result<Vec<String>, HarvestError> {
+    Ok(git_output(cwd, args)?
+        .lines()
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn committed_patch_artifact(
