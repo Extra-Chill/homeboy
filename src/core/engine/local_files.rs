@@ -131,6 +131,15 @@ pub fn write_file(path: &Path, content: &str, operation: &str) -> Result<()> {
 
 /// Write content to file atomically (write to .tmp, then rename).
 pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<()> {
+    write_file_atomic_with_owner_only(path, content, operation, false)
+}
+
+fn write_file_atomic_with_owner_only(
+    path: &Path,
+    content: &str,
+    operation: &str,
+    owner_only: bool,
+) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::internal_io(
             format!("Invalid path: {}", path.display()),
@@ -147,9 +156,13 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
 
     let tmp_path = unique_temp_path(parent, filename.to_string_lossy().as_ref());
 
-    fs::write(&tmp_path, content).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
-    })?;
+    if owner_only {
+        write_file_owner_only(&tmp_path, content, &format!("{} (write temp)", operation))?;
+    } else {
+        fs::write(&tmp_path, content).map_err(|e| {
+            Error::internal_io(e.to_string(), Some(format!("{} (write temp)", operation)))
+        })?;
+    }
 
     fs::rename(&tmp_path, path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("{} (rename)", operation))))?;
@@ -159,6 +172,19 @@ pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<
 
 /// Create parent directories and atomically persist pretty-printed JSON.
 pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_json_file_with_owner_only(path, value, false)
+}
+
+/// Create parent directories and atomically persist owner-only JSON on Unix.
+pub(crate) fn write_json_file_owner_only<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_json_file_with_owner_only(path, value, true)
+}
+
+fn write_json_file_with_owner_only<T: Serialize>(
+    path: &Path,
+    value: &T,
+    owner_only: bool,
+) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::internal_unexpected(format!("path has no parent: {}", path.display()))
     })?;
@@ -168,7 +194,35 @@ pub(crate) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<()
     let json = serde_json::to_string_pretty(value).map_err(|error| {
         Error::internal_json(error.to_string(), Some(path.display().to_string()))
     })?;
-    write_file_atomic(path, &format!("{json}\n"), &path.display().to_string())
+    write_file_atomic_with_owner_only(
+        path,
+        &format!("{json}\n"),
+        &path.display().to_string(),
+        owner_only,
+    )
+}
+
+/// Create a file owner-only on Unix before writing its contents.
+pub(crate) fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))
+    }
+
+    #[cfg(not(unix))]
+    {
+        write_file(path, content, operation)
+    }
 }
 
 fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {

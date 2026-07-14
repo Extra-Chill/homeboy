@@ -11,7 +11,9 @@ use super::{
     AgentTaskRunState,
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use crate::core::engine::local_files::write_json_file as write_json;
+use crate::core::engine::local_files::{
+    write_json_file as write_json, write_json_file_owner_only as write_private_json,
+};
 use crate::core::observation::{ObservationStore, RunListFilter, RunRecord, RunStatus};
 use crate::core::{paths, Error, ErrorCode, Result};
 
@@ -22,7 +24,7 @@ static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     let path = run_dir(run_id)?.join("plan.json");
-    write_json(&path, plan)?;
+    write_private_json(&path, plan)?;
     Ok(path)
 }
 

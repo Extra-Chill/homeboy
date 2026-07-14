@@ -152,7 +152,9 @@ mod tests {
 
     #[test]
     fn test_run_compiler_warning_contract_script_returns_stdout() {
-        let dir = TempDir::new().expect("temp dir");
+        // Exec-capable tempdir: the test runs `warnings.sh`, which fails with
+        // exit 126 under a `noexec` $TMPDIR otherwise (#6760).
+        let dir = crate::test_support::exec_capable_tempdir();
         let script_path = dir.path().join("warnings.sh");
         write_executable(
             &script_path,

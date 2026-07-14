@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::git;
 use crate::core::runner::workspace::git::{
@@ -11,7 +12,7 @@ use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorks
 use crate::core::runner::workspace::util::git_output;
 
 #[test]
-fn controller_routed_git_sync_materializes_private_unavailable_remote_with_changed_since_base() {
+fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle() {
     crate::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
@@ -84,7 +85,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 "remote",
                 "add",
                 "origin",
-                "https://github.example.invalid/example-org/private-source.git",
+                "https://127.0.0.1:1/example-org/private-source.git",
             ],
         );
         git(source.path(), &["commit-graph", "write", "--reachable"]);
@@ -95,6 +96,28 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
                 .exists(),
             "the fixture must retain a commit graph after its objects are removed"
         );
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            "--changed-since".to_string(),
+            base.clone(),
+        ];
+        let changed_since =
+            crate::core::runner::prepare_git_lab_offload_changed_since(&args, source.path())
+                .expect("preflight must resolve the local base without probing private origin");
+        assert_eq!(changed_since.resolved_base.as_deref(), Some(base.as_str()));
+        assert!(changed_since.git_fetch_refs.is_empty());
+
         remove_local_packs(source.path());
         assert!(
             git_without_lazy_fetch(
@@ -112,22 +135,16 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             .is_err(),
             "the fixture must leave unrelated promisor objects absent locally"
         );
-        crate::core::runner::create(
-            &format!(
-                r#"{{"id":"lab-local-git-bundle","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
 
         let sync_result = sync_workspace(
             "lab-local-git-bundle",
             RunnerWorkspaceSyncOptions {
                 path: source.path().display().to_string(),
                 mode: RunnerWorkspaceSyncMode::Git,
-                controller_routed_git: true,
-                changed_since_base: Some(base.clone()),
+                // The runner first attempts its normal clone. The inaccessible
+                // origin then exercises the controller bundle fallback.
+                controller_routed_git: false,
+                changed_since_base: changed_since.resolved_base,
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
@@ -151,6 +168,16 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             Some(output.snapshot_identity.clone())
         );
         assert_eq!(output.current_workspace.source_dirty, Some(false));
+        let provenance = output
+            .materialization_plan
+            .controller_git_bundle
+            .as_ref()
+            .expect("inaccessible origin falls back to a controller bundle");
+        assert_eq!(provenance.provenance, "controller_git_bundle");
+        assert_eq!(provenance.source_sha, head);
+        assert_eq!(provenance.cleanup_owner, "controller");
+        assert_eq!(provenance.cleanup_ttl, "PT0S");
+        assert_eq!(provenance.sha256.len(), 64);
         let remote = Path::new(&output.remote_path);
         assert_eq!(
             git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
@@ -161,7 +188,7 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
         // proves materialization did not fall back to a network clone.
         assert_eq!(
             git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "https://github.example.invalid/example-org/private-source.git"
+            "https://127.0.0.1:1/example-org/private-source.git"
         );
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
@@ -176,6 +203,10 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
             base
         );
+        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert!(git_output(remote, &["status", "--porcelain=v1"])
+            .expect("read final checkout status")
+            .is_empty());
         assert!(
             !git_output(
                 source.path(),
@@ -200,6 +231,11 @@ fn controller_routed_git_sync_materializes_private_unavailable_remote_with_chang
             )
             .is_err(),
             "the runner bundle must not include unrelated refs"
+        );
+        fs::write(remote.join("file.txt"), "patched\n").expect("write tracked patch");
+        assert_eq!(
+            git_output(remote, &["status", "--porcelain=v1"]).unwrap(),
+            "M file.txt"
         );
     });
 }
@@ -581,10 +617,47 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         "abc123",
         None,
         "https://github.example.invalid/example-org/private-source.git",
+        Some("def456"),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
     );
 
     assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
+    assert!(command.contains("shasum -a 256"));
+    assert!(command.contains("trap 'rm -rf"));
+    assert!(command.contains("rev-parse --verify -q def456^{commit}"));
+    assert!(command.contains("merge-base def456 HEAD"));
+}
+
+#[test]
+fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
+    let root = tempfile::tempdir().expect("runner root");
+    let command = git_bundle_install_command(
+        &root.path().join("workspace").display().to_string(),
+        "abc123",
+        None,
+        "https://github.example.invalid/example-org/private-source.git",
+        None,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        false,
+    );
+    let mut child = Command::new("sh")
+        .args(["-c", &command])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start bundle materialization");
+    child
+        .stdin
+        .take()
+        .expect("bundle stdin")
+        .write_all(b"not a bundle")
+        .expect("write malformed bundle");
+
+    assert!(
+        !child.wait().expect("wait for materialization").success(),
+        "a digest mismatch must fail before Git can clone the transfer"
+    );
+    assert!(!root.path().join("workspace.bundle").exists());
 }
 
 #[test]

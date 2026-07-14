@@ -84,12 +84,18 @@ impl HomeGuard {
         let prior_invocation_runtime =
             std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
-        let dir = TempDir::new().expect("home tempdir");
+        // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
+        // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
+        // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
+        // failing every capability-script test with exit 126 (#6760). Anchor
+        // it (and the runtime tmpdir, which also hosts executables) on an
+        // exec-capable root.
+        let dir = exec_capable_tempdir();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
-        let runtime_dir = TempDir::new().expect("runtime tempdir");
+        let runtime_dir = exec_capable_tempdir();
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", runtime_dir.path());
         crate::core::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
@@ -119,21 +125,133 @@ impl HomeGuard {
 
 /// Return a short-path tempdir suitable for the invocation runtime root.
 ///
-/// On Unix-like systems we anchor to `/tmp` so the path stays well under
-/// `sockaddr_un` even on macOS where `$TMPDIR` typically lives at
-/// `/var/folders/<14>/T/.tmpXXXXXX/`. Falls back to the default tempdir
-/// otherwise (Windows / odd hosts).
+/// Two competing constraints:
+/// 1. The path must be **short** so runtime unix sockets stay within the
+///    `sockaddr_un` budget (~104 bytes) even on macOS, where `$TMPDIR`
+///    typically lives at a long `/var/folders/<14>/T/.tmpXXXXXX/` path.
+/// 2. The path must be **exec-capable** — tests execute capability scripts
+///    from runtime paths, so a `noexec` mount (common for `/tmp` on hardened
+///    VPS hosts, containers, and CI sandboxes) causes deterministic exit-126
+///    "Permission denied" failures (#6760).
+///
+/// Previously this anchored unconditionally to `/tmp`, which satisfies (1) but
+/// silently breaks (2) on `noexec`-`/tmp` hosts. Instead we probe short
+/// candidate roots for real exec capability and use the first that passes,
+/// falling back to the default tempdir if none qualify.
 fn short_invocation_tempdir() -> TempDir {
     #[cfg(unix)]
     {
-        if std::path::Path::new("/tmp").is_dir() {
-            return tempfile::Builder::new()
+        for base in short_tempdir_candidates() {
+            let Ok(candidate) = tempfile::Builder::new()
                 .prefix("hb-test-")
-                .tempdir_in("/tmp")
-                .expect("invocation runtime tempdir under /tmp");
+                .tempdir_in(&base)
+            else {
+                continue;
+            };
+            if dir_allows_exec(candidate.path()) {
+                return candidate;
+            }
+            // Not exec-capable (e.g. `noexec` mount) — drop it and try the
+            // next candidate rather than handing back a dir scripts can't run
+            // from.
         }
     }
     TempDir::new().expect("invocation runtime tempdir")
+}
+
+/// Ordered short base directories to consider for the invocation runtime root.
+///
+/// Honors an explicit `$TMPDIR` first (respecting operator intent, e.g. a
+/// dedicated exec-capable tmp), but only when it is short enough to keep unix
+/// socket paths within budget. Then the conventional short system roots.
+#[cfg(unix)]
+fn short_tempdir_candidates() -> Vec<PathBuf> {
+    // Leave generous headroom under the ~104-byte sockaddr_un limit for the
+    // per-tempdir suffix, socket filename, and run-id segments appended later.
+    const MAX_BASE_LEN: usize = 40;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut push_if_usable = |path: PathBuf| {
+        if path.as_os_str().len() <= MAX_BASE_LEN && path.is_dir() && !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        push_if_usable(PathBuf::from(tmpdir));
+    }
+    push_if_usable(PathBuf::from("/tmp"));
+    push_if_usable(PathBuf::from("/var/tmp"));
+    push_if_usable(PathBuf::from("/dev/shm"));
+    candidates
+}
+
+/// Probe whether files created under `dir` can actually be executed.
+///
+/// A `noexec` mount is invisible in file metadata — the only reliable check is
+/// to write a trivial executable and run it. Returns `false` on any failure so
+/// the caller falls through to the next candidate.
+#[cfg(unix)]
+fn dir_allows_exec(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let probe = dir.join(".hb-exec-probe.sh");
+    if fs::write(&probe, "#!/bin/sh\nexit 0\n").is_err() {
+        return false;
+    }
+    if fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).is_err() {
+        let _ = fs::remove_file(&probe);
+        return false;
+    }
+    let allowed = Command::new(&probe)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let _ = fs::remove_file(&probe);
+    allowed
+}
+
+/// Create a tempdir that is guaranteed exec-capable where possible.
+///
+/// Tests that write a script and then run it (e.g. capability parser scripts)
+/// must not land on a `noexec` filesystem. The default `tempfile::tempdir()`
+/// honors `$TMPDIR`, which on hardened VPS hosts / containers / CI sandboxes is
+/// frequently a `noexec` `/tmp` — producing deterministic exit-126
+/// "Permission denied" failures unrelated to the behavior under test (#6760).
+///
+/// This probes exec-capable roots (honoring an exec-capable `$TMPDIR` first,
+/// then `/tmp`, `/var/tmp`, `/dev/shm`) and returns the first that can actually
+/// run a file. Falls back to the default tempdir when no candidate qualifies
+/// (e.g. non-Unix), so callers keep working on hosts where `/tmp` is fine.
+pub(crate) fn exec_capable_tempdir() -> TempDir {
+    #[cfg(unix)]
+    {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let mut push = |path: PathBuf, roots: &mut Vec<PathBuf>| {
+            if path.is_dir() && !roots.contains(&path) {
+                roots.push(path);
+            }
+        };
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            push(PathBuf::from(tmpdir), &mut roots);
+        }
+        for fixed in ["/tmp", "/var/tmp", "/dev/shm"] {
+            push(PathBuf::from(fixed), &mut roots);
+        }
+
+        for base in roots {
+            let Ok(candidate) = tempfile::Builder::new()
+                .prefix("hb-test-")
+                .tempdir_in(&base)
+            else {
+                continue;
+            };
+            if dir_allows_exec(candidate.path()) {
+                return candidate;
+            }
+        }
+    }
+    TempDir::new().expect("exec-capable tempdir")
 }
 
 impl Drop for HomeGuard {

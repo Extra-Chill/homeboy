@@ -11,6 +11,7 @@ pub(super) enum WorkspaceMaterializationOperation {
     RecreateTempDir,
     ExtractTarStdinToTemp,
     WriteStdinToBundle,
+    VerifyBundleDigest(String),
     CloneBundleToTemp,
     SetGitOrigin(String),
     CheckoutGitRef {
@@ -26,6 +27,7 @@ pub(super) enum WorkspaceMaterializationOperation {
     VerifyGitBaseline {
         remote_url: String,
         head: String,
+        changed_since_base: Option<String>,
     },
     SyncGitCheckout {
         remote_url: String,
@@ -139,6 +141,10 @@ impl WorkspaceMaterializationOperation {
             Self::WriteStdinToBundle => {
                 "rm -rf \"$tmp\" \"$bundle\" && cat > \"$bundle\"".to_string()
             }
+            Self::VerifyBundleDigest(expected) => format!(
+                "test \"$(shasum -a 256 \"$bundle\" | awk '{{print $1}}')\" = {expected}",
+                expected = shell::quote_arg(expected)
+            ),
             Self::CloneBundleToTemp => "git clone \"$bundle\" \"$tmp\"".to_string(),
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
@@ -152,9 +158,16 @@ impl WorkspaceMaterializationOperation {
             Self::GuardCleanGitWorkspace { allow_dirty } => {
                 dirty_git_workspace_guard("$dest", *allow_dirty)
             }
-            Self::VerifyGitBaseline { remote_url, head } => {
-                verify_git_baseline_command("$dest", remote_url, head)
-            }
+            Self::VerifyGitBaseline {
+                remote_url,
+                head,
+                changed_since_base,
+            } => verify_git_baseline_command(
+                "$dest",
+                remote_url,
+                head,
+                changed_since_base.as_deref(),
+            ),
             Self::SyncGitCheckout {
                 remote_url,
                 head,
@@ -200,16 +213,28 @@ impl WorkspaceMaterializationOperation {
     }
 }
 
-fn verify_git_baseline_command(dest: &str, remote_url: &str, head: &str) -> String {
+fn verify_git_baseline_command(
+    dest: &str,
+    remote_url: &str,
+    head: &str,
+    changed_since_base: Option<&str>,
+) -> String {
     let status = format!(
         "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
         dest = dest,
     );
+    let changed_since = changed_since_base.map_or_else(String::new, |base| {
+        format!(
+            " && git -C {dest} rev-parse --verify -q {base}^{{commit}} >/dev/null && test \"$(git -C {dest} merge-base {base} HEAD)\" = {base}",
+            base = shell::quote_arg(base),
+        )
+    });
     format!(
-        "test -d {dest}/.git && test \"$(git -C {dest} rev-parse HEAD)\" = {head} && test \"$(git -C {dest} config --get remote.origin.url)\" = {remote_url} && test -z \"$({status})\"",
+        "test -d {dest}/.git && test \"$(git -C {dest} rev-parse HEAD)\" = {head} && test \"$(git -C {dest} config --get remote.origin.url)\" = {remote_url}{changed_since} && test -z \"$({status})\"",
         dest = dest,
         head = shell::quote_arg(head),
         remote_url = shell::quote_arg(remote_url),
+        changed_since = changed_since,
         status = status,
     )
 }

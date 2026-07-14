@@ -69,6 +69,7 @@ pub struct AgentTaskReconciliationItem {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskReconciliationDecision {
+    NoOp,
     ApplyCandidate,
     IssueReportCandidate,
     RetryCandidate,
@@ -151,6 +152,7 @@ fn aggregate_agent_task_outcomes(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggr
         };
 
         match decision {
+            AgentTaskReconciliationDecision::NoOp => {}
             AgentTaskReconciliationDecision::ApplyCandidate => {
                 report.summary.apply_candidates += 1;
                 report.apply_candidates.push(decision_ref);
@@ -275,6 +277,7 @@ impl AgentTaskOutcomeStatus {
 impl AgentTaskReconciliationDecision {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NoOp => "no_op",
             Self::ApplyCandidate => "apply_candidate",
             Self::IssueReportCandidate => "issue_report_candidate",
             Self::RetryCandidate => "retry_candidate",
@@ -299,6 +302,13 @@ fn count_status(summary: &mut AgentTaskAggregateSummary, status: AgentTaskOutcom
 fn reconcile_outcome(
     outcome: &AgentTaskOutcome,
 ) -> (AgentTaskReconciliationDecision, String, Vec<String>) {
+    if outcome.status == AgentTaskOutcomeStatus::NoOp && has_known_empty_change_set(outcome) {
+        return (
+            AgentTaskReconciliationDecision::NoOp,
+            "known empty change artifact; provider produced no file changes".to_string(),
+            Vec::new(),
+        );
+    }
     let rejected_artifact_ids = outcome
         .artifacts
         .iter()
@@ -380,6 +390,18 @@ fn reconcile_outcome(
         },
         artifact_ids(outcome),
     )
+}
+
+fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
+    let patch_artifacts = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| is_apply_kind_artifact(artifact))
+        .collect::<Vec<_>>();
+    !patch_artifacts.is_empty()
+        && patch_artifacts
+            .iter()
+            .all(|artifact| artifact.size_bytes == Some(0))
 }
 
 fn artifact_ids(outcome: &AgentTaskOutcome) -> Vec<String> {
@@ -594,17 +616,22 @@ mod tests {
 
         let report = aggregate_agent_task_outcomes(&[outcome(
             "empty-patch",
-            AgentTaskOutcomeStatus::Succeeded,
+            AgentTaskOutcomeStatus::NoOp,
             vec![empty_patch],
         )]);
 
         assert!(report.apply_candidates.is_empty());
         assert_eq!(report.summary.apply_candidates, 0);
-        assert_eq!(report.summary.review_candidates, 1);
-        assert_eq!(report.review_candidates[0].task_id, "empty-patch");
+        assert!(report.review_candidates.is_empty());
+        assert_eq!(report.summary.review_candidates, 0);
+        assert_eq!(report.summary.no_op, 1);
         assert_eq!(
-            report.review_candidates[0].reason,
-            "patch artifact was empty (0 bytes); provider produced no file changes"
+            report.tasks[0].decision,
+            AgentTaskReconciliationDecision::NoOp
+        );
+        assert_eq!(
+            report.tasks[0].reason,
+            "known empty change artifact; provider produced no file changes"
         );
     }
 

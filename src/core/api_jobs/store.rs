@@ -17,10 +17,13 @@ use super::persistence::{
 #[cfg(test)]
 use super::persistence::{read_durable_store, reconcile_stale_jobs};
 use super::remote_runner;
+use super::remote_runner::JobArtifactMetadata;
 use super::types::{
     DaemonLeaseJobDiagnostics, Job, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
     LeaselessOrphanJobDiagnostics,
 };
+use crate::core::agent_task_scheduler::AgentTaskAggregateStatus;
+use crate::core::agent_task_service;
 use crate::core::error::{Error, Result};
 use crate::core::process::pid_is_running;
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
@@ -329,6 +332,19 @@ impl JobStore {
         expected_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+            expected_lease_id,
+            pid_is_alive,
+            recovered_terminal_agent_task_result,
+        )
+    }
+
+    pub(super) fn reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+        &self,
+        expected_lease_id: &str,
+        pid_is_alive: impl Fn(u32) -> bool,
+        terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
         let diagnostics = self.daemon_lease_job_diagnostics(expected_lease_id);
         if diagnostics.unowned_count() > 0 {
             return Err(Error::validation_invalid_argument(
@@ -351,11 +367,13 @@ impl JobStore {
             let stored = inner.jobs.get(job_id).expect("diagnosed job exists");
             let disposition =
                 if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
-                    DeadLeaseJobDisposition::RecoveredTerminal(status, exit_code)
+                    DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code)
                 } else if let Some(pid) = last_progress_child_pid(&stored.events) {
                     if pid_is_alive(pid) {
                         diagnostics.protected_job_ids.push(*job_id);
                         DeadLeaseJobDisposition::ProtectedLive
+                    } else if let Some(recovered) = terminal_child_result(stored) {
+                        DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
                     } else {
                         DeadLeaseJobDisposition::TerminalizeDead
                     }
@@ -380,7 +398,7 @@ impl JobStore {
         let now = timestamp_ms();
         for (job_id, disposition) in dispositions {
             let stored = inner.jobs.get_mut(&job_id).expect("diagnosed job exists");
-            if let DeadLeaseJobDisposition::RecoveredTerminal(status, exit_code) = disposition {
+            if let DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code) = disposition {
                 stored.job.status = status;
                 stored.job.updated_at_ms = now;
                 stored.job.finished_at_ms = Some(now);
@@ -406,7 +424,43 @@ impl JobStore {
                 stored.job.event_count = stored.events.len();
                 continue;
             }
-            if disposition == DeadLeaseJobDisposition::ProtectedLive {
+            if let DeadLeaseJobDisposition::RecoveredLinkedRun(recovered) = disposition {
+                stored.job.status = recovered.status;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = None;
+                for artifact in recovered.artifacts {
+                    if !stored
+                        .job
+                        .artifacts
+                        .iter()
+                        .any(|existing| existing.id == artifact.id)
+                    {
+                        stored.job.artifacts.push(artifact);
+                    }
+                }
+                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                stored.events.push(JobEvent {
+                    sequence,
+                    job_id,
+                    kind: JobEventKind::Status,
+                    timestamp_ms: now,
+                    message: Some(format!(
+                        "job terminal status recovered from linked durable run `{}` after dead daemon lease",
+                        recovered.run_id
+                    )),
+                    data: Some(serde_json::json!({
+                        "status": recovered.status,
+                        "reason": "recovered_after_dead_daemon_lease",
+                        "daemon_lease_id": expected_lease_id,
+                        "child_terminal_result": recovered.terminal_result,
+                    })),
+                });
+                apply_event_retention(&mut stored.events, self.event_retention_limit());
+                stored.job.event_count = stored.events.len();
+                continue;
+            }
+            if matches!(disposition, DeadLeaseJobDisposition::ProtectedLive) {
                 continue;
             }
             let reason = "daemon lease owner process was not running".to_string();
@@ -819,11 +873,94 @@ impl JobStore {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum DeadLeaseJobDisposition {
-    RecoveredTerminal(JobStatus, i64),
+    RecoveredOuterResult(JobStatus, i64),
+    RecoveredLinkedRun(RecoveredTerminalJob),
     ProtectedLive,
     TerminalizeDead,
+}
+
+pub(super) struct RecoveredTerminalJob {
+    status: JobStatus,
+    terminal_result: Value,
+    run_id: String,
+    artifacts: Vec<JobArtifactMetadata>,
+}
+
+#[cfg(test)]
+impl RecoveredTerminalJob {
+    pub(super) fn test_result(
+        status: JobStatus,
+        run_id: &str,
+        terminal_result: Value,
+        artifacts: Vec<JobArtifactMetadata>,
+    ) -> Self {
+        Self {
+            status,
+            terminal_result,
+            run_id: run_id.to_string(),
+            artifacts,
+        }
+    }
+}
+
+/// A remote runner workload records its agent-task run ID in a typed execution
+/// envelope. That durable run is authoritative after the runner child exits.
+fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredTerminalJob> {
+    let run_id = stored
+        .remote_runner
+        .as_ref()?
+        .request
+        .runner_workload
+        .as_ref()?
+        .agent_task
+        .as_ref()?
+        .run_id
+        .trim()
+        .to_string();
+    if run_id.is_empty() {
+        return None;
+    }
+
+    let result = agent_task_service::terminal_run_result(&run_id).ok()??;
+    let status = match result.value.status {
+        AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
+        AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
+        AgentTaskAggregateStatus::PartialFailure | AgentTaskAggregateStatus::Failed => {
+            JobStatus::Failed
+        }
+    };
+    let artifacts = result
+        .value
+        .artifact_bindings
+        .iter()
+        .map(|binding| JobArtifactMetadata {
+            id: binding.artifact_id.clone(),
+            name: binding.name.clone(),
+            path: binding.path.clone(),
+            url: binding.url.clone(),
+            mime: None,
+            size_bytes: None,
+            sha256: binding.sha256.clone(),
+            content_base64: None,
+            metadata: Some(serde_json::json!({
+                "kind": binding.kind,
+                "task_id": binding.task_id,
+                "durable_run_id": run_id,
+            })),
+        })
+        .collect();
+    Some(RecoveredTerminalJob {
+        status,
+        terminal_result: serde_json::json!({
+            "kind": "agent_task_aggregate",
+            "run_id": &run_id,
+            "exit_code": result.exit_code,
+            "aggregate": result.value,
+        }),
+        run_id,
+        artifacts,
+    })
 }
 
 /// The reverse runner records the executing child in periodic progress

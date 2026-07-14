@@ -3,7 +3,6 @@ use std::process::Command;
 
 use crate::core::error::{Error, Result};
 
-use super::origin_refs::{advertised_origin_refs_for_commit, best_advertised_ref};
 use super::RunnerWorkspaceSyncMode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,15 +63,14 @@ pub fn prepare_git_lab_offload_changed_since(
 
     let resolved_base = resolve_changed_since_base(source_path, &git_ref)?;
     ensure_local_merge_base(source_path, &git_ref)?;
-    let git_fetch_refs = advertised_origin_ref_for_commit(source_path, &resolved_base)?
-        .into_iter()
-        .collect();
-
     Ok(LabOffloadChangedSincePreflight {
         args: rewrite_changed_since_ref(args, &resolved_base),
         requested_ref: Some(git_ref),
         resolved_base: Some(resolved_base),
-        git_fetch_refs,
+        // The final Git materialization verifies this exact commit. Do not
+        // probe origin here: controller bundles carry it when Lab cannot read
+        // a private remote.
+        git_fetch_refs: Vec::new(),
     })
 }
 
@@ -150,18 +148,6 @@ fn resolve_changed_since_base(path: &Path, git_ref: &str) -> Result<String> {
         path,
         &["rev-parse", "--verify", &format!("{git_ref}^{{commit}}")],
     )
-}
-
-fn advertised_origin_ref_for_commit(path: &Path, commit: &str) -> Result<Option<String>> {
-    let refs = advertised_origin_refs_for_commit(
-        path,
-        commit,
-        "changed_since",
-        "Lab offload could not inspect origin refs for changed-since base materialization",
-        commit.to_string(),
-        vec!["Run with --placement local to execute the changed-since command locally while investigating remote ref availability.".to_string()],
-    )?;
-    Ok(best_advertised_ref(refs))
 }
 
 fn ensure_local_merge_base(path: &Path, git_ref: &str) -> Result<()> {
@@ -360,7 +346,7 @@ mod tests {
 
         assert_eq!(preflight.resolved_base.as_deref(), Some(base_sha.as_str()));
         assert_eq!(preflight.requested_ref.as_deref(), Some("base"));
-        assert_eq!(preflight.git_fetch_refs, vec!["refs/heads/base"]);
+        assert!(preflight.git_fetch_refs.is_empty());
         assert_eq!(
             preflight.args,
             vec![

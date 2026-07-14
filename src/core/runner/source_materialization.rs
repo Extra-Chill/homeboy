@@ -23,6 +23,30 @@ pub(super) fn validate_runner_git_materialization(remote_url: &str, runner_id: &
     validate_runner_git_materialization_with_policy(remote_url, runner_id, &policy)
 }
 
+/// A remote URL is restored as runner metadata after bundle materialization.
+/// Reject URL userinfo rather than risk persisting a token in that checkout.
+pub(super) fn validate_sanitized_git_remote(remote_url: &str) -> Result<()> {
+    let value = remote_url.trim();
+    let credential_bearing = ["https://", "http://"].iter().any(|scheme| {
+        value
+            .strip_prefix(scheme)
+            .and_then(|authority_and_path| authority_and_path.split('/').next())
+            .is_some_and(|authority| authority.contains('@'))
+    });
+    if !credential_bearing {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "remote.origin.url",
+        "git workspace sync refuses credential-bearing remote.origin.url",
+        None,
+        Some(vec![
+            "Configure origin with a sanitized HTTPS or SSH URL; Homeboy never transfers Git credentials to a runner.".to_string(),
+        ]),
+    ))
+}
+
 fn validate_runner_git_materialization_with_policy(
     remote_url: &str,
     runner_id: &str,
@@ -197,6 +221,16 @@ mod tests {
         assert!(err.message.contains("--mode git"));
         assert!(err.message.contains("github.example.com"));
         assert!(err.message.contains("workspace sync"));
+    }
+
+    #[test]
+    fn rejects_credential_bearing_https_remote_without_echoing_the_secret() {
+        let remote = "https://token-value@github.example.com/example/private.git";
+        let error = validate_sanitized_git_remote(remote).expect_err("credential URL is unsafe");
+
+        assert!(error.message.contains("credential-bearing"));
+        assert!(!error.message.contains("token-value"));
+        assert!(!error.details.to_string().contains("token-value"));
     }
 
     #[test]

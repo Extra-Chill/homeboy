@@ -79,6 +79,31 @@ fn submit_plan_persists_queued_status() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn submit_plan_persists_owner_only_plan_file_before_observation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let record = submit_plan(&test_plan(), Some("private-plan")).expect("submitted");
+
+        assert_eq!(
+            std::fs::metadata(&record.plan_path)
+                .expect("plan metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            status(&record.run_id)
+                .expect("observation record")
+                .plan_path,
+            record.plan_path
+        );
+    });
+}
+
 #[test]
 fn active_pinned_run_blocks_controller_binary_replacement() {
     with_isolated_home(|_| {
