@@ -12,6 +12,7 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use crate::core::api_jobs::{JobEvent, JobEventKind};
 use crate::test_support::with_isolated_home;
 
 #[test]
@@ -444,6 +445,47 @@ fn controller_proxy_records_pre_execution_phase_progress() {
         let loaded = status("agent-task-pre-execution").expect("status resolves during setup");
         assert_eq!(loaded.metadata["phase"], "hydrating");
         assert_eq!(loaded.metadata["provider_state"], "pending");
+        let phases = loaded.metadata["phase_history"]
+            .as_array()
+            .expect("phase history");
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0]["phase"], "materializing");
+        assert!(phases[0].get("started_at").is_some());
+        assert!(phases[0].get("ended_at").is_some());
+        assert_eq!(phases[1]["phase"], "hydrating");
+        assert!(phases[1].get("started_at").is_some());
+    });
+}
+
+#[test]
+fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "live-runner-events",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-live",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        record.metadata["runner_job_events"] = json!([JobEvent {
+            sequence: 1,
+            job_id: uuid::Uuid::new_v4(),
+            kind: JobEventKind::Progress,
+            timestamp_ms: 42,
+            message: Some("provider started".to_string()),
+            data: Some(json!({"provider": "openai/gpt-5.6-terra"})),
+        }]);
+        store::write_record(&record).expect("persist mirrored event");
+
+        let log = logs("live-runner-events").expect("live logs resolve");
+
+        assert_eq!(log.events.len(), 1);
+        assert!(log.events[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider started")));
     });
 }
 
@@ -642,6 +684,58 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
         assert!(record.metadata.get("stale_running_reason").is_none());
         assert!(record.metadata.get("retryable").is_none());
         assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-live-provider",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("running proxy");
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.status = crate::core::api_jobs::JobStatus::Running;
+        snapshot.events = vec![crate::core::api_jobs::JobEvent {
+            sequence: 1,
+            job_id: snapshot.job.id,
+            kind: crate::core::api_jobs::JobEventKind::Progress,
+            timestamp_ms: 2,
+            message: Some("provider dispatch accepted".to_string()),
+            data: Some(json!({
+                "metadata": {
+                    "provider_handle": AgentTaskExecutionHandle {
+                        kind: crate::core::agent_task::AgentTaskExecutionHandleKind::ProviderRun,
+                        task_id: "task-a".to_string(),
+                        backend: "openai/gpt-5.6-terra".to_string(),
+                        run_id: "provider-run-live".to_string(),
+                        stream_uri: Some("provider://runs/provider-run-live/events".to_string()),
+                        metadata: json!({"progress": "accepted"}),
+                    }
+                }
+            })),
+        }];
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot).expect("live reconciliation");
+
+        assert_eq!(record.metadata["phase"], "executing");
+        assert_eq!(record.metadata["provider_state"], "active");
+        assert_eq!(record.provider_handles.len(), 1);
+        assert_eq!(
+            record.provider_handles[0].provider_run_id,
+            "provider-run-live"
+        );
+        let log = logs(&record.run_id).expect("live logs");
+        assert_eq!(log.events.len(), 1);
+        assert!(log.events[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider dispatch accepted")));
     });
 }
 
