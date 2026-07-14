@@ -993,32 +993,34 @@ fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
 
 #[test]
 fn dead_lease_reconciliation_reattaches_live_or_refuses_mismatched_daemon() {
-    let live_daemon = fake_daemon(4242, "lease-dead");
-    let live = reconcile_dead_lease_and_ensure_running_with_operations(
-        Duration::from_millis(50),
-        super::super::acquire_daemon_operation_lock_for_ensure,
-        "lease-dead",
-        || Ok(fake_dead_status(live_daemon.clone())),
-        |_| true,
-        || unreachable!("live daemon must not reconcile"),
-        || unreachable!("live daemon must not start replacement"),
-    )
-    .expect("live replacement from a concurrent reconnect is reattached");
-    assert_eq!(live, live_daemon);
+    with_isolated_home(|_| {
+        let live_daemon = fake_daemon(4242, "lease-dead");
+        let live = reconcile_dead_lease_and_ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            "lease-dead",
+            || Ok(fake_dead_status(live_daemon.clone())),
+            |_| true,
+            || unreachable!("live daemon must not reconcile"),
+            || unreachable!("live daemon must not start replacement"),
+        )
+        .expect("live replacement from a concurrent reconnect is reattached");
+        assert_eq!(live, live_daemon);
 
-    let mismatched = reconcile_dead_lease_and_ensure_running_with_operations(
-        Duration::from_millis(50),
-        super::super::acquire_daemon_operation_lock_for_ensure,
-        "lease-expected",
-        || Ok(fake_dead_status(fake_daemon(4242, "lease-other"))),
-        |_| false,
-        || unreachable!("mismatched lease must not reconcile"),
-        || unreachable!("mismatched lease must not start replacement"),
-    )
-    .expect_err("mismatched lease must fail closed");
-    assert!(mismatched
-        .message
-        .contains("does not match expected stale lease"));
+        let mismatched = reconcile_dead_lease_and_ensure_running_with_operations(
+            Duration::from_millis(50),
+            super::super::acquire_daemon_operation_lock_for_ensure,
+            "lease-expected",
+            || Ok(fake_dead_status(fake_daemon(4242, "lease-other"))),
+            |_| false,
+            || unreachable!("mismatched lease must not reconcile"),
+            || unreachable!("mismatched lease must not start replacement"),
+        )
+        .expect_err("mismatched lease must fail closed");
+        assert!(mismatched
+            .message
+            .contains("does not match expected stale lease"));
+    });
 }
 
 fn ensure_with_fake_operations(
