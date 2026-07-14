@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory};
+use clap::{ArgMatches, Command};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
@@ -56,7 +56,7 @@ enum StartupFastPath {
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
     match startup_fast_path(args)? {
         StartupFastPath::Help => {
-            let mut cmd = Cli::command();
+            let mut cmd = Cli::command_with_scoped_lab_args();
             cmd.print_help().expect("Failed to print help");
             println!();
         }
@@ -106,7 +106,7 @@ impl CliRuntime {
     }
 
     fn parse_matches(&self, normalized: Vec<String>) -> ArgMatches {
-        match Cli::command().try_get_matches_from(normalized.clone()) {
+        match Cli::command_with_scoped_lab_args().try_get_matches_from(normalized.clone()) {
             Ok(matches) => matches,
             Err(static_err) => match self
                 .build_augmented_command()
@@ -465,7 +465,7 @@ fn build_augmented_command(
     extension_info: &[ExtensionCliInfo],
     extension_health: &ExtensionCliHealth,
 ) -> Command {
-    let mut cmd = Cli::command();
+    let mut cmd = Cli::command_with_scoped_lab_args();
 
     for info in extension_info {
         let project_id_help = info
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn wrapper_global_runner_preserves_trailing_output_request() {
-        let matches = Cli::command()
+        let matches = Cli::command_with_scoped_lab_args()
             .try_get_matches_from([
                 "homeboy",
                 "--runner",

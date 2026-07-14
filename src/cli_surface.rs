@@ -23,6 +23,8 @@ pub enum Placement {
     Auto,
     Local,
     Lab,
+    #[value(name = "lab-or-local")]
+    LabOrLocal,
 }
 
 impl Default for Placement {
@@ -79,10 +81,6 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "RUNNER_ID")]
     pub runner: Option<String>,
 
-    /// Permit a selected Lab runner to fall back to local execution after offload preflight fails.
-    #[arg(long, global = true)]
-    pub allow_local_fallback: bool,
-
     /// Permit Lab git workspace materialization to overwrite a dirty runner-side checkout.
     #[arg(long, global = true)]
     pub allow_dirty_lab_workspace: bool,
@@ -111,6 +109,12 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Builds the user-facing command tree with Lab options shown only where
+    /// the Lab portability contract can honor them.
+    pub fn command_with_scoped_lab_args() -> Command {
+        crate::command_contract::scope_lab_cli_arguments(Self::command())
+    }
+
     pub fn from_registered_arg_matches(
         matches: &ArgMatches,
     ) -> Result<(Self, &'static crate::command_contract::CommandSpec), clap::Error> {
@@ -1091,14 +1095,25 @@ mod tests {
         for args in [
             ["homeboy", "--placement=local", "bench", "example"].as_slice(),
             ["homeboy", "bench", "--placement", "lab", "example"].as_slice(),
+            ["homeboy", "bench", "--placement", "lab-or-local", "example"].as_slice(),
         ] {
-            let matches = Cli::command()
+            let matches = Cli::command_with_scoped_lab_args()
                 .try_get_matches_from(args)
                 .expect("registered command parses placement");
             let (cli, _) = Cli::from_registered_arg_matches(&matches)
                 .expect("registered parse path accepts placement");
             assert_ne!(cli.placement, Placement::Auto);
         }
+    }
+
+    #[test]
+    fn placement_exposes_explicit_lab_or_local_fallback() {
+        let cli =
+            Cli::try_parse_from(["homeboy", "bench", "example", "--placement", "lab-or-local"])
+                .expect("lab-or-local placement should parse");
+
+        assert_eq!(cli.placement, Placement::LabOrLocal);
+        assert!(cli.placement.allows_local_fallback());
     }
 
     #[test]
@@ -1118,13 +1133,61 @@ mod tests {
     }
 
     #[test]
-    fn placement_is_visible() {
-        let command = Cli::command();
-        let placement = command
-            .get_arguments()
-            .find(|arg| arg.get_id() == "placement")
-            .expect("placement argument");
-        assert!(!placement.is_hide_set());
+    fn lab_flags_are_hidden_from_non_portable_command_help() {
+        let help = scoped_help(&["contract", "manifest"]);
+
+        for flag in [
+            "--placement",
+            "--runner",
+            "--detach-after-handoff",
+            "--allow-dirty-lab-workspace",
+            "--skip-deps-hydration",
+            "--runner-env",
+            "--lab-env-json",
+            "--runner-workspace-root",
+            "--artifact-root",
+        ] {
+            assert!(
+                !help.contains(flag),
+                "contract manifest must not advertise {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn lab_flags_remain_visible_for_portable_command_help() {
+        let help = scoped_help(&["bench"]);
+
+        for flag in [
+            "--placement",
+            "--runner",
+            "--detach-after-handoff",
+            "--allow-dirty-lab-workspace",
+            "--skip-deps-hydration",
+            "--runner-env",
+            "--lab-env-json",
+            "--runner-workspace-root",
+        ] {
+            assert!(help.contains(flag), "bench must advertise {flag}");
+        }
+    }
+
+    #[test]
+    fn portable_review_subcommand_help_keeps_lab_flags() {
+        let help = scoped_help(&["review", "lint"]);
+        assert!(help.contains("--placement"));
+        assert!(help.contains("--runner"));
+    }
+
+    fn scoped_help(path: &[&str]) -> String {
+        let mut command = Cli::command_with_scoped_lab_args();
+        for segment in path {
+            command = command
+                .find_subcommand(segment)
+                .unwrap_or_else(|| panic!("missing command path segment `{segment}`"))
+                .clone();
+        }
+        command.render_help().to_string()
     }
 
     #[test]

@@ -324,8 +324,11 @@ mod install_flows {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
         write_rig(package.path(), "lint-fixture", &minimal_rig("lint-fixture"));
-        fs::write(package.path().join("conflicted.txt"), "<<<<<<< ours\n")
-            .expect("conflict fixture");
+        fs::write(
+            package.path().join("conflicted.txt"),
+            "<<<<<<< ours\n=======\n>>>>>>> theirs\n",
+        )
+        .expect("conflict fixture");
 
         install(package.path().to_str().unwrap(), None, false).expect("install");
         let rig = load("lint-fixture").expect("load rig");
@@ -667,8 +670,11 @@ mod install_flows {
             "lint-conflict",
             &minimal_rig("lint-conflict"),
         );
-        fs::write(package.path().join("conflicted.txt"), "<<<<<<< ours\n")
-            .expect("conflict fixture");
+        fs::write(
+            package.path().join("conflicted.txt"),
+            "<<<<<<< ours\n=======\n>>>>>>> theirs\n",
+        )
+        .expect("conflict fixture");
 
         install(package.path().to_str().unwrap(), None, false).expect("install");
         let rig = load("lint-conflict").expect("load rig");

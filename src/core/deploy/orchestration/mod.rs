@@ -7,12 +7,14 @@ use crate::core::project::Project;
 use crate::core::release::version;
 
 use super::execution::{
-    execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
+    execute_preflighted_component_deploy, prepare_component_deploy, release_artifact_plan,
+    resolve_planned_release_artifact, PreparedComponentDeploy, ReleaseArtifactPlan,
 };
 use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components, plan_components};
+use super::release_download::{ReleaseArtifact, ReleaseArtifactStore};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 use super::version_overrides::fetch_remote_versions_for_project;
 
@@ -35,6 +37,7 @@ pub(super) fn deploy_components(
     project: &Project,
     ctx: &RemoteProjectContext,
     base_path: &str,
+    release_artifacts: &mut ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let loaded = load_project_components(project, &config.component_ids, config.check)?;
     validate_supported_build_configs(&loaded.deployable)?;
@@ -105,6 +108,31 @@ pub(super) fn deploy_components(
     }
 
     validate_effective_remote_paths(&components, &project, base_path)?;
+
+    // Release assets are immutable remote inputs. Resolve and verify them before
+    // touching any configured checkout, then reuse the same run-scoped bytes for
+    // every target/project that requests this component.
+    let mut resolved_release_artifacts: HashMap<String, ReleaseArtifact> = HashMap::new();
+    for component in &components {
+        if let ReleaseArtifactPlan::Reuse { tag, .. } =
+            release_artifact_plan(component, config, false, false)
+        {
+            let artifact = resolve_planned_release_artifact(component, &tag, release_artifacts)
+                .map_err(|error| {
+                    Error::validation_invalid_argument("releaseArtifact", error, None, None)
+                })?;
+            log_status!(
+                "deploy",
+                "Verified release asset: tag={} name={} size={} sha256={} source={}",
+                artifact.tag,
+                artifact.name,
+                artifact.size,
+                artifact.sha256,
+                artifact.url
+            );
+            resolved_release_artifacts.insert(component.id.clone(), artifact);
+        }
+    }
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
@@ -178,37 +206,45 @@ pub(super) fn deploy_components(
         )?);
     }
 
+    // Only local builds require mutable checkout safety checks. Release assets are
+    // resolved and verified above and must not read or alter a source checkout.
+    let local_build_components: Vec<Component> = components
+        .iter()
+        .filter(|component| !resolved_release_artifacts.contains_key(&component.id))
+        .cloned()
+        .collect();
+
     // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
     if config.requested_ref.is_none() && !config.no_pull && !config.skip_build {
-        sync_components(&components)?;
+        sync_components(&local_build_components)?;
     }
 
     guard_local_build_source_freshness(&local_build_components, config)?;
 
     // Warn when --head deploys from a non-default branch (safety guardrail)
     if config.head && !config.skip_build {
-        warn_non_default_branch(&components, config)?;
+        warn_non_default_branch(&local_build_components, config)?;
     }
 
     if config.requested_ref.is_none() && !config.force {
-        check_uncommitted_changes(&components)?;
+        check_uncommitted_changes(&local_build_components)?;
     }
 
     // Check for HEAD-vs-tag gap before the tag checkout.
     if config.requested_ref.is_none() && !config.head && !config.skip_build {
-        check_unreleased_commits(&components, config)?;
+        check_unreleased_commits(&local_build_components, config)?;
     }
 
     // Checkout the deploy tag for each component (unless --head or --skip-build).
     let tag_checkouts = if config.requested_ref.is_none() && !config.head && !config.skip_build {
-        checkout_deploy_tags(&components, config.expected_version.as_deref())?
+        checkout_deploy_tags(&local_build_components, config.expected_version.as_deref())?
     } else {
         Vec::new()
     };
 
     // Verify expected version if --version was specified
     if let Some(ref expected) = config.expected_version {
-        if let Err(err) = verify_expected_version(&components, expected) {
+        if let Err(err) = verify_expected_version(&local_build_components, expected) {
             if !tag_checkouts.is_empty() {
                 restore_branches(&tag_checkouts);
             }
@@ -236,6 +272,7 @@ pub(super) fn deploy_components(
         base_path,
         &local_versions,
         &remote_versions,
+        &resolved_release_artifacts,
     ) {
         Ok(prepared) => prepared,
         Err(failures) => {
@@ -270,6 +307,11 @@ pub(super) fn deploy_components(
         let exact_ref_identity = exact_ref_identities.get(&component.id);
         let deployed_ref = if let Some(identity) = exact_ref_identity {
             Some(identity.requested_ref.clone())
+        } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
+            Some(match artifact.commit.as_deref() {
+                Some(commit) => format!("{} ({commit})", artifact.tag),
+                None => artifact.tag.clone(),
+            })
         } else if let Some(checkout) = tag_checkouts
             .iter()
             .find(|c| c.component_id == component.id)
@@ -304,6 +346,8 @@ pub(super) fn deploy_components(
         build_provenance.built_from_ref = deployed_ref;
         if let Some(identity) = exact_ref_identity {
             build_provenance.built_from_commit = Some(identity.resolved_sha.clone());
+        } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
+            build_provenance.built_from_commit = artifact.commit.clone();
         }
         result = result.with_build_provenance(build_provenance);
 
@@ -368,6 +412,7 @@ fn prepare_component_deployments(
     base_path: &str,
     local_versions: &HashMap<String, String>,
     remote_versions: &HashMap<String, String>,
+    release_artifacts: &HashMap<String, ReleaseArtifact>,
 ) -> std::result::Result<Vec<PreparedComponentDeploy>, Vec<ComponentDeployResult>> {
     let mut prepared_deployments = Vec::new();
     let mut failures = Vec::new();
@@ -389,6 +434,7 @@ fn prepare_component_deployments(
             project,
             local_versions.get(&component.id).cloned(),
             remote_versions.get(&component.id).cloned(),
+            release_artifacts.get(&component.id).cloned(),
         ) {
             Ok(prepared) => prepared_deployments.push(prepared),
             Err(result) => failures.push(result),
@@ -1223,6 +1269,7 @@ mod tests {
             "/srv/site",
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         ) {
             Ok(_) => panic!("a later missing artifact must abort the whole deploy batch"),
             Err(failures) => failures,
@@ -1355,6 +1402,7 @@ mod tests {
             &config,
             &Project::default(),
             "/srv/site",
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -1493,6 +1541,7 @@ mod tests {
                 &config,
                 &project,
                 "/srv/site",
+                &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
             ) {

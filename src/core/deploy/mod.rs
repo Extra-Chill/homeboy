@@ -39,10 +39,24 @@ use crate::core::project;
 /// This is the preferred entry point for callers - it handles project loading
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
+    let mut release_artifacts = release_download::ReleaseArtifactStore::default();
+    run_with_release_artifacts(project_id, config, &mut release_artifacts)
+}
+
+fn run_with_release_artifacts(
+    project_id: &str,
+    config: &DeployConfig,
+    release_artifacts: &mut release_download::ReleaseArtifactStore,
+) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
-    project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
+    // A version-pinned release asset is resolved remotely before orchestration;
+    // requiring its configured checkout to exist would reintroduce a mutable
+    // source gate. Other modes retain the existing early local-path validation.
+    if config.expected_version.is_none() {
+        project::validate_deploy_component_local_paths(&project, &config.component_ids)?;
+    }
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    orchestration::deploy_components(config, &project, &ctx, &base_path)
+    orchestration::deploy_components(config, &project, &ctx, &base_path, release_artifacts)
 }
 
 /// Read deployed component versions without running deploy planning or git
@@ -137,6 +151,7 @@ pub fn run_multi(
     let mut failed: u32 = 0;
     let skipped: u32 = unknown_projects.len() as u32;
     let mut planned: u32 = 0;
+    let mut release_artifacts = release_download::ReleaseArtifactStore::default();
     // Record skipped results for unknown projects
     for pid in &unknown_projects {
         project_results.push(ProjectDeployResult {
@@ -176,7 +191,7 @@ pub fn run_multi(
             tagged: config.tagged,
         };
 
-        match run(project_id, &project_config) {
+        match run_with_release_artifacts(project_id, &project_config, &mut release_artifacts) {
             Ok(result) => {
                 let deploy_failed = result.summary.failed > 0;
                 let is_planned = config.dry_run || config.check;

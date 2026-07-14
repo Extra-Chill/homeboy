@@ -4,7 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::runner::workspace::snapshot::{
-    snapshot_archive_command, snapshot_install_command,
+    copy_snapshot_to_directory, snapshot_archive_command, snapshot_install_command,
+    workspace_content_hash, workspace_content_hash_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
 };
 use crate::core::runner::workspace::sync::{list_workspaces, sync_workspace};
 use crate::core::runner::workspace::types::{
@@ -106,6 +108,74 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
             .exists());
         assert!(!Path::new(&output.remote_path).join("local.state").exists());
     });
+}
+
+#[test]
+fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
+        fs::write(
+            source.path().join(".homeboy/runner-workspace.json"),
+            "user-owned collision\n",
+        )
+        .expect("metadata collision");
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-collision","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let error = sync_workspace(
+            "lab-local-collision",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect_err("reserved runner metadata must reject staging");
+
+        assert!(error.message.contains("reserved runner metadata path"));
+        assert!(error.message.contains("remove or rename"));
+        assert_eq!(
+            fs::read_dir(runner_root.path())
+                .expect("runner root entries")
+                .count(),
+            0,
+            "collision must fail before creating a materialized workspace"
+        );
+    });
+}
+
+#[test]
+fn generic_snapshot_copy_allows_source_owned_runner_workspace_path() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    let destination = tempfile::tempdir().expect("destination tempdir");
+    fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
+    fs::write(
+        source.path().join(".homeboy/runner-workspace.json"),
+        "source-owned generic snapshot content\n",
+    )
+    .expect("source metadata");
+
+    copy_snapshot_to_directory(source.path(), destination.path(), &[])
+        .expect("generic snapshot copy");
+
+    assert_eq!(
+        fs::read_to_string(destination.path().join(".homeboy/runner-workspace.json"))
+            .expect("copied metadata"),
+        "source-owned generic snapshot content\n"
+    );
 }
 
 #[test]
@@ -567,6 +637,303 @@ fn snapshot_archive_command_dereferences_symlinked_dependencies() {
         command.contains("tar --no-xattrs -h "),
         "snapshot tar must dereference symlinks: {command}"
     );
+}
+
+#[test]
+fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_injection() {
+    // This mirrors a Lab snapshot of a repository such as homeboy-extensions:
+    // the runner creates its metadata directory after extracting a source that
+    // has no `.homeboy` directory of its own.
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("homeboy-extensions@fixture");
+    let dependency = controller.path().join("dependency");
+    let destination = controller.path().join("materialized");
+    let excludes = vec![
+        ".git/".to_string(),
+        "generated-state".to_string(),
+        "generated-state/**".to_string(),
+    ];
+
+    fs::create_dir_all(source.join("packages/runtime")).expect("source package directory");
+    fs::create_dir_all(source.join("generated-state")).expect("generated state directory");
+    fs::write(
+        source.join("packages/runtime/runner.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .expect("runner script");
+    fs::write(source.join("generated-state/cache.bin"), "excluded\n").expect("generated state");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let script = source.join("packages/runtime/runner.sh");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("executable mode");
+        fs::create_dir_all(dependency.join("dist")).expect("dependency directory");
+        fs::write(dependency.join("dist/index.js"), "export default {};\n")
+            .expect("dependency file");
+        symlink(&dependency, source.join("packages/runtime/dependency"))
+            .expect("dependency symlink");
+    }
+
+    let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
+    copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
+    fs::create_dir_all(destination.join(".homeboy")).expect("runner metadata directory");
+    fs::write(
+        destination.join(".homeboy/runner-workspace.json"),
+        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
+    )
+    .expect("runner metadata");
+
+    assert!(destination.join("packages/runtime/runner.sh").is_file());
+    assert!(!destination.join("generated-state").exists());
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("materialized hash"),
+        expected,
+        "the controller hash must describe the bytes and structure that the runner verifies"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_normalizes_git_materialization_umask_modes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("controller");
+    let runner = tempfile::tempdir().expect("runner");
+    for root in [controller.path(), runner.path()] {
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(root.join("src/library.rs"), "pub fn fixture() {}\n").expect("source file");
+        fs::write(root.join("src/run.sh"), "#!/bin/sh\n").expect("executable file");
+    }
+    fs::set_permissions(
+        controller.path().join("src"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("controller directory mode");
+    fs::set_permissions(runner.path().join("src"), fs::Permissions::from_mode(0o775))
+        .expect("runner directory mode");
+    fs::set_permissions(
+        controller.path().join("src/library.rs"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("controller file mode");
+    fs::set_permissions(
+        runner.path().join("src/library.rs"),
+        fs::Permissions::from_mode(0o664),
+    )
+    .expect("runner file mode");
+    fs::set_permissions(
+        controller.path().join("src/run.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("controller executable mode");
+    fs::set_permissions(
+        runner.path().join("src/run.sh"),
+        fs::Permissions::from_mode(0o775),
+    )
+    .expect("runner executable mode");
+
+    assert_eq!(
+        workspace_content_hash(controller.path(), &[]).expect("controller hash"),
+        workspace_content_hash(runner.path(), &[]).expect("runner hash"),
+        "Git checkout umask differences must not change materialized content identity"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_portable_policy_is_platform_mode_independent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let file = workspace.path().join("file.txt");
+    fs::write(&file, "portable bytes\n").expect("source file");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
+    let non_executable = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    )
+    .expect("non-executable hash");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+        )
+        .expect("executable hash"),
+        non_executable,
+        "portable v2 identity must not bind platform-specific permission bits"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_unix_policy_binds_executable_bit_without_umask_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let file = workspace.path().join("file.txt");
+    fs::write(&file, "portable bytes\n").expect("source file");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
+    let non_executable = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    )
+    .expect("non-executable hash");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).expect("umask variant");
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        )
+        .expect("umask variant hash"),
+        non_executable
+    );
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        )
+        .expect("executable hash"),
+        non_executable
+    );
+}
+
+#[test]
+#[cfg(not(unix))]
+fn workspace_content_hash_non_unix_rejects_unix_executable_policy() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    fs::write(workspace.path().join("file.txt"), "portable bytes\n").expect("source file");
+    let error = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    )
+    .expect_err("non-Unix cannot verify Unix executable policy");
+    assert!(error.message.contains("unsupported on this platform"));
+}
+
+#[test]
+fn snapshot_content_hash_binds_user_owned_homeboy_files_but_ignores_runner_metadata() {
+    let controller = tempfile::tempdir().expect("controller");
+    let source = controller.path().join("homeboy-extensions@fixture");
+    let destination = controller.path().join("materialized");
+    let excludes = vec![".git/".to_string()];
+    fs::create_dir_all(source.join(".homeboy")).expect("user metadata directory");
+    fs::create_dir_all(source.join("src")).expect("source directory");
+    fs::write(
+        source.join(".homeboy/user-settings.json"),
+        "{\"enabled\":true}\n",
+    )
+    .expect("user metadata");
+    fs::write(source.join("src/lib.rs"), "pub fn fixture() {}\n").expect("source file");
+
+    let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
+    copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
+    fs::write(
+        destination.join(".homeboy/runner-workspace.json"),
+        r#"{"schema":"homeboy/runner-workspace/v1"}"#,
+    )
+    .expect("runner metadata");
+
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("materialized hash"),
+        expected,
+        "runner metadata must not change the controller identity"
+    );
+
+    fs::write(
+        destination.join(".homeboy/runner-workspace.json"),
+        r#"{"schema":"homeboy/runner-workspace/v2","changed":true}"#,
+    )
+    .expect("changed runner metadata");
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("metadata-insensitive hash"),
+        expected,
+        "runner metadata bytes and mode are transport state"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(
+            destination.join(".homeboy/runner-workspace.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("changed runner metadata mode");
+        assert_eq!(
+            workspace_content_hash(&destination, &excludes).expect("mode-insensitive hash"),
+            expected,
+            "runner metadata mode is transport state"
+        );
+    }
+
+    fs::write(
+        destination.join(".homeboy/user-settings.json"),
+        "{\"enabled\":false}\n",
+    )
+    .expect("changed user metadata");
+    assert_ne!(
+        workspace_content_hash(&destination, &excludes).expect("mutated hash"),
+        expected,
+        "user-owned `.homeboy` children must remain fail-closed"
+    );
+
+    fs::write(
+        destination.join(".homeboy/user-settings.json"),
+        "{\"enabled\":true}\n",
+    )
+    .expect("restore user metadata");
+    assert_eq!(
+        workspace_content_hash(&destination, &excludes).expect("restored hash"),
+        expected,
+        "restoring user metadata restores the materialized identity"
+    );
+    fs::write(destination.join("src/lib.rs"), "pub fn changed() {}\n")
+        .expect("changed source file");
+    assert_ne!(
+        workspace_content_hash(&destination, &excludes).expect("changed source hash"),
+        expected,
+        "ordinary workspace files must remain bound by the identity"
+    );
+}
+
+#[test]
+fn snapshot_content_hash_matches_tar_when_homeboy_is_excluded() {
+    for pattern in [".homeboy", ".homeboy/", ".homeboy/**"] {
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("source");
+        let destination = controller.path().join("materialized");
+        let excludes = vec![pattern.to_string()];
+        fs::create_dir_all(source.join(".homeboy")).expect("user metadata directory");
+        fs::create_dir_all(source.join("src")).expect("source directory");
+        fs::write(source.join(".homeboy/user-settings.json"), "user-owned\n")
+            .expect("user metadata");
+        fs::write(source.join("src/lib.rs"), "pub fn fixture() {}\n").expect("source file");
+
+        let expected = workspace_content_hash(&source, &excludes).expect("controller hash");
+        copy_snapshot_to_directory(&source, &destination, &excludes).expect("materialize snapshot");
+        fs::create_dir_all(destination.join(".homeboy")).expect("runner metadata directory");
+        fs::write(
+            destination.join(".homeboy/runner-workspace.json"),
+            "transport metadata\n",
+        )
+        .expect("runner metadata");
+
+        assert_eq!(
+            workspace_content_hash(&destination, &excludes).expect("materialized hash"),
+            expected,
+            "exclude pattern `{pattern}` must hash the same tree tar materializes"
+        );
+    }
 }
 
 #[test]
