@@ -162,10 +162,6 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
             0,
         )),
-        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, addr } => Ok((
-            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
-            0,
-        )),
         DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),

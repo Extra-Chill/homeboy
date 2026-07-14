@@ -289,6 +289,8 @@ pub fn connect_with_orphan_adoption(
             session_path,
             error,
             state_loss_recovery,
+            session.tunnel_pid,
+            session_store::terminate_pid,
         ));
     }
 
@@ -348,12 +350,20 @@ fn attach_state_loss_recovery(
     report.state_loss_recovery = recovery;
 }
 
-fn session_write_failure_report(
+fn session_write_failure_report<Terminate>(
     runner_id: &str,
     session_path: PathBuf,
     error: Error,
     recovery: Option<DaemonStateLossRecoveryResult>,
-) -> (RunnerConnectReport, i32) {
+    tunnel_pid: Option<u32>,
+    terminate: Terminate,
+) -> (RunnerConnectReport, i32)
+where
+    Terminate: FnOnce(u32),
+{
+    if let Some(pid) = tunnel_pid {
+        terminate(pid);
+    }
     let (mut report, exit_code) = failed_connect(
         runner_id,
         session_path,
@@ -2286,6 +2296,8 @@ mod tests {
             std::path::PathBuf::from("/session"),
             Error::internal_io("disk full", None),
             Some(recovery),
+            None,
+            |_| unreachable!("no tunnel PID means no cleanup"),
         );
         assert!(report
             .failure_message
@@ -2298,6 +2310,25 @@ mod tests {
                 .map(|value| value.replacement.lease_id.as_str()),
             Some("lease-new")
         );
+    }
+
+    #[test]
+    fn session_write_failure_terminates_open_tunnel_before_returning_failure() {
+        let terminated = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&terminated);
+        let (report, _) = session_write_failure_report(
+            "runner",
+            std::path::PathBuf::from("/session"),
+            Error::internal_io("disk full", None),
+            None,
+            Some(4242),
+            move |pid| captured.lock().expect("terminated").push(pid),
+        );
+        assert_eq!(*terminated.lock().expect("terminated"), vec![4242]);
+        assert!(report
+            .failure_message
+            .as_deref()
+            .is_some_and(|message| message.contains("persist runner session")));
     }
 
     #[test]
