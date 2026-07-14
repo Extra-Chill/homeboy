@@ -208,6 +208,7 @@ pub(super) fn write_reverse_controller_session(broker_url: &str) {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
+        leaseless_recovery_evidence: None,
     };
     std::fs::write(
         path,
