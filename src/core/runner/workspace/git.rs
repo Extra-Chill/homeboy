@@ -186,6 +186,7 @@ pub(super) fn materialize_git_from_controller_bundle(
         head,
         branch,
         remote_url,
+        changed_since_base,
         &sha256,
         allow_dirty_lab_workspace,
     );
@@ -450,6 +451,7 @@ pub(crate) fn git_bundle_install_command(
     head: &str,
     branch: Option<&str>,
     remote_url: &str,
+    changed_since_base: Option<&str>,
     expected_sha256: &str,
     allow_dirty_lab_workspace: bool,
 ) -> String {
@@ -483,6 +485,7 @@ pub(crate) fn git_bundle_install_command(
         .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
             remote_url: remote_url.to_string(),
             head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
         })
         .restore_owner()
         .command()
@@ -511,6 +514,7 @@ pub(super) fn materialize_git_command(
         .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
             remote_url: remote_url.to_string(),
             head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
         })
         .restore_owner()
         .command()
