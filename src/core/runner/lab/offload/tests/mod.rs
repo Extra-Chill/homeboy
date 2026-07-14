@@ -74,6 +74,7 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),
             last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
+            leaseless_recovery_evidence: None,
         }),
         stale_daemon: None,
         daemon_freshness: None,

@@ -23,14 +23,16 @@ use crate::core::server::{self, Server, SshClient};
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerTunnelMode,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerSession,
+    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use super::{broker_auth, broker_http};
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -190,18 +192,38 @@ pub fn connect_with_orphan_adoption(
         }
         state_loss_recovery = Some(decode_state_loss_recovery(envelope.data)?);
     }
+    let mut recovery_evidence = None;
     if reconcile_leaseless_orphans {
         let recovery_addr = previous_session
             .as_ref()
             .and_then(|session| session.remote_daemon_address.as_deref())
             .filter(|address| parse_loopback_daemon_addr(address).is_ok())
             .unwrap_or("127.0.0.1:0");
-        let command = format!(
-            "{} daemon reconcile-leaseless-orphans --confirm-no-daemon-owner --addr {}",
-            shell::quote_arg(homeboy),
-            shell::quote_arg(recovery_addr),
+        let recovery = execute_remote_leaseless_recovery(
+            || {
+                client.execute_with_timeout(
+                    &remote_leaseless_recovery_help_command(homeboy),
+                    REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT,
+                )
+            },
+            |contract| {
+                client.execute_with_timeout(
+                    &remote_leaseless_recovery_command(homeboy, recovery_addr, contract),
+                    REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+                )
+            },
         );
-        let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+        let (contract, recovery) = match recovery {
+            Ok(recovery) => recovery,
+            Err(message) => {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    format!("remote Homeboy {}: {message}", identity.display),
+                ));
+            }
+        };
         if !recovery.success {
             let message = leaseless_recovery_failure_message(&recovery);
             return Ok(failed_connect(
@@ -225,16 +247,49 @@ pub fn connect_with_orphan_adoption(
                 "remote lease-less daemon recovery returned an error envelope".to_string(),
             ));
         }
-        leaseless_recovery = Some(decode_leaseless_recovery(envelope.data)?);
+        let recovery = decode_leaseless_recovery(envelope.data)?;
+        recovery_evidence = Some(leaseless_recovery_evidence(
+            contract,
+            &identity.display,
+            recovery.clone(),
+        ));
+        leaseless_recovery = Some(recovery);
+    }
+
+    if let (Some(recovery), Some(evidence)) = (&leaseless_recovery, &recovery_evidence) {
+        let replacement = &recovery.replacement;
+        write_session(&RunnerSession {
+            runner_id: runner.id.clone(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some(server_id.clone()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some(replacement.address.clone()),
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: Some(replacement.pid),
+            remote_daemon_lease_id: Some(replacement.lease_id.clone()),
+            homeboy_version: version.clone(),
+            homeboy_build_identity: Some(identity.display.clone()),
+            connected_at: Utc::now().to_rfc3339(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: Some(evidence.clone()),
+        })?;
     }
 
     let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
     let Ok(daemon) = daemon else {
-        let (mut report, exit_code) = failed_connect(
+        let (mut report, exit_code) = failed_connect_after_recovery(
             runner_id,
             session_path,
             RunnerFailureKind::DaemonStartupFailure,
             daemon.err().unwrap(),
+            leaseless_recovery,
+            recovery_evidence,
         );
         attach_state_loss_recovery(&mut report, state_loss_recovery);
         return Ok((report, exit_code));
@@ -258,6 +313,7 @@ pub fn connect_with_orphan_adoption(
         Ok(connection) => connection,
         Err((mut report, exit_code)) => {
             attach_state_loss_recovery(&mut report, state_loss_recovery);
+            attach_leaseless_recovery(&mut report, leaseless_recovery, recovery_evidence);
             return Ok((report, exit_code));
         }
     };
@@ -282,6 +338,7 @@ pub fn connect_with_orphan_adoption(
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
+        leaseless_recovery_evidence: recovery_evidence.clone(),
     };
     write_session(&session)?;
 
@@ -303,11 +360,139 @@ pub fn connect_with_orphan_adoption(
             session_path: Some(session_path.display().to_string()),
             leaseless_recovery,
             state_loss_recovery,
+            leaseless_recovery_evidence: recovery_evidence,
             failure_kind: None,
             failure_message: None,
         },
         0,
     ))
+}
+
+fn remote_leaseless_recovery_help_command(homeboy: &str) -> String {
+    format!(
+        "{} daemon reconcile-leaseless-orphans --help",
+        shell::quote_arg(homeboy),
+    )
+}
+
+fn remote_leaseless_recovery_command(
+    homeboy: &str,
+    addr: &str,
+    contract: RunnerLeaselessRecoveryContract,
+) -> String {
+    let confirmations = match contract {
+        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner => "--confirm-no-daemon-owner",
+        RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner => {
+            "--reconcile-leaseless-orphans --confirm-no-daemon-owner"
+        }
+        RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost => "--confirm-control-plane-lost",
+    };
+    format!(
+        "{} daemon reconcile-leaseless-orphans {confirmations} --addr {}",
+        shell::quote_arg(homeboy),
+        shell::quote_arg(addr),
+    )
+}
+
+fn execute_remote_leaseless_recovery<Probe, Recover>(
+    probe: Probe,
+    recover: Recover,
+) -> std::result::Result<
+    (
+        RunnerLeaselessRecoveryContract,
+        crate::core::server::CommandOutput,
+    ),
+    String,
+>
+where
+    Probe: FnOnce() -> crate::core::server::CommandOutput,
+    Recover: FnOnce(RunnerLeaselessRecoveryContract) -> crate::core::server::CommandOutput,
+{
+    let probe = probe();
+    let contract = negotiate_leaseless_recovery_contract(&probe)?;
+    Ok((contract.clone(), recover(contract)))
+}
+
+fn negotiate_leaseless_recovery_contract(
+    output: &crate::core::server::CommandOutput,
+) -> std::result::Result<RunnerLeaselessRecoveryContract, String> {
+    if !output.success {
+        if output.timed_out {
+            return Err(format!(
+                "lease-less recovery capability probe timed out after {}s; refusing recovery before contract negotiation",
+                REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT.as_secs()
+            ));
+        }
+        return Err(command_failure_message(
+            "lease-less recovery capability probe failed; refusing recovery before contract negotiation",
+            output,
+        ));
+    }
+
+    let options = declared_long_options(&output.stdout);
+    let confirm_no_daemon_owner = options.contains("--confirm-no-daemon-owner");
+    let reconcile_leaseless_orphans = options.contains("--reconcile-leaseless-orphans");
+    let confirm_control_plane_lost = options.contains("--confirm-control-plane-lost");
+    match (
+        confirm_no_daemon_owner,
+        reconcile_leaseless_orphans,
+        confirm_control_plane_lost,
+    ) {
+        (true, false, false) => Ok(RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner),
+        (true, true, false) => Ok(
+            RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
+        ),
+        (false, false, true) => Ok(RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost),
+        (false, false, false) => Err(
+            "lease-less recovery capability probe did not advertise a supported confirmation contract; refusing recovery"
+                .to_string(),
+        ),
+        _ => Err(
+            "lease-less recovery capability probe advertised ambiguous confirmation contracts; refusing recovery"
+                .to_string(),
+        ),
+    }
+}
+
+fn declared_long_options(help: &str) -> std::collections::BTreeSet<&str> {
+    let mut options = std::collections::BTreeSet::new();
+    let mut in_options = false;
+    for line in help.lines() {
+        let trimmed = line.trim();
+        if line == trimmed && trimmed.ends_with(':') {
+            in_options = trimmed.eq_ignore_ascii_case("options:");
+            continue;
+        }
+        if !in_options || line == trimmed {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        let Some(option) = tokens.next() else {
+            continue;
+        };
+        let option = option.trim_end_matches(',');
+        if option.starts_with("--") && tokens.all(is_option_value_placeholder) {
+            options.insert(option);
+        }
+    }
+    options
+}
+
+fn is_option_value_placeholder(token: &str) -> bool {
+    (token.starts_with('<') && token.ends_with('>'))
+        || (token.starts_with("[<") && token.ends_with(">]"))
+}
+
+fn leaseless_recovery_evidence(
+    contract: RunnerLeaselessRecoveryContract,
+    remote_command_identity: &str,
+    recovery: DaemonLeaselessRecoveryResult,
+) -> RunnerLeaselessRecoveryEvidence {
+    RunnerLeaselessRecoveryEvidence {
+        contract,
+        remote_command_identity: remote_command_identity.to_string(),
+        recovery: Some(recovery),
+    }
 }
 
 fn decode_leaseless_recovery(data: Option<Value>) -> Result<DaemonLeaselessRecoveryResult> {
@@ -420,6 +605,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         worker_identity: Some(format!("{}@{}", std::process::id(), hostname_fallback())),
         worker_pid: Some(std::process::id()),
         last_seen_at: Some(now),
+        leaseless_recovery_evidence: None,
     };
     write_session(&session)?;
     let broker_registered = match session.broker_url.as_deref() {
@@ -445,6 +631,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             session_path: Some(session_path.display().to_string()),
             leaseless_recovery: None,
             state_loss_recovery: None,
+            leaseless_recovery_evidence: None,
             failure_kind: None,
             failure_message: None,
         },
@@ -1936,11 +2123,38 @@ mod session_store {
                 session_path: Some(session_path.display().to_string()),
                 leaseless_recovery: None,
                 state_loss_recovery: None,
+                leaseless_recovery_evidence: None,
                 failure_kind: Some(failure_kind),
                 failure_message: Some(failure_message),
             },
             20,
         )
+    }
+
+    pub(super) fn failed_connect_after_recovery(
+        runner_id: &str,
+        session_path: PathBuf,
+        failure_kind: RunnerFailureKind,
+        failure_message: String,
+        leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
+        leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
+    ) -> (RunnerConnectReport, i32) {
+        let mut failure = failed_connect(runner_id, session_path, failure_kind, failure_message);
+        attach_leaseless_recovery(
+            &mut failure.0,
+            leaseless_recovery,
+            leaseless_recovery_evidence,
+        );
+        failure
+    }
+
+    pub(super) fn attach_leaseless_recovery(
+        report: &mut RunnerConnectReport,
+        leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
+        leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
+    ) {
+        report.leaseless_recovery = leaseless_recovery;
+        report.leaseless_recovery_evidence = leaseless_recovery_evidence;
     }
 
     pub(super) fn command_failure_message(
@@ -2269,7 +2483,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn runner_connect_dispatches_compatible_leaseless_recovery_argv() {
+    fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
         test_support::with_isolated_home(|home| {
             let daemon = home.path().join("remote-homeboy");
             let argv_path = home.path().join("recovery-argv");
@@ -2280,9 +2494,13 @@ case "$1 $2" in
   "self identity")
     printf '%s\n' '{"success":true,"data":{"version":"0.284.0","display":"test"}}'
     ;;
-  "daemon reconcile-leaseless-orphans")
-    printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
-    printf '%s\n' '{"success":true,"data":{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{"pid":42,"address":"127.0.0.1:7421","state_path":"/tmp/state.json","lease_id":"lease-new"}}}'
+    "daemon reconcile-leaseless-orphans")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner'
+    else
+      printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
+      printf '%s\n' '{"success":true,"data":{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{"pid":42,"address":"127.0.0.1:7421","state_path":"/tmp/state.json","lease_id":"lease-new"}}}'
+    fi
     ;;
   "daemon status") exit 1 ;;
 esac
@@ -2319,13 +2537,62 @@ esac
             .expect("enable local runner");
 
             let (report, exit_code) =
-                connect_with_orphan_adoption("local-runner", None, true).expect("connect result");
+                connect_with_orphan_adoption("local-runner", None, true, None, None, None)
+                    .expect("connect result");
 
             assert_eq!(
                 exit_code, 20,
                 "the shim intentionally rejects status after recovery"
             );
             assert!(!report.connected);
+            assert_eq!(
+                report.failure_kind,
+                Some(RunnerFailureKind::DaemonStartupFailure)
+            );
+            assert_eq!(
+                report
+                    .leaseless_recovery
+                    .as_ref()
+                    .expect("recovery report")
+                    .replacement
+                    .lease_id,
+                "lease-new"
+            );
+            let evidence = report
+                .leaseless_recovery_evidence
+                .as_ref()
+                .expect("recovery evidence");
+            assert_eq!(
+                evidence.contract,
+                RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
+            );
+            assert_eq!(evidence.remote_command_identity, "test");
+            assert_eq!(
+                evidence
+                    .recovery
+                    .as_ref()
+                    .expect("recovery evidence result")
+                    .replacement
+                    .lease_id,
+                "lease-new"
+            );
+            let session = read_session("local-runner")
+                .expect("read recovery session")
+                .expect("recovery session");
+            assert!(session.local_url.is_none());
+            assert!(session.local_port.is_none());
+            assert_eq!(
+                session
+                    .leaseless_recovery_evidence
+                    .as_ref()
+                    .expect("persisted recovery evidence")
+                    .recovery
+                    .as_ref()
+                    .expect("persisted recovery result")
+                    .replacement
+                    .lease_id,
+                "lease-new"
+            );
             assert_eq!(
                 std::fs::read_to_string(argv_path).expect("read dispatched recovery argv"),
                 "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--addr\n127.0.0.1:0\n"
@@ -2345,6 +2612,248 @@ esac
             command,
             "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0"
         );
+    }
+
+    #[test]
+    fn leaseless_recovery_uses_confirm_no_daemon_owner_contract() {
+        let contract = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "OPTIONS:\n    --confirm-no-daemon-owner\n",
+            false,
+        ))
+        .expect("one-flag contract");
+
+        assert_eq!(
+            contract,
+            RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
+        );
+        let command = remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract);
+        assert!(command.contains("--confirm-no-daemon-owner"));
+        assert!(!command.contains("--reconcile-leaseless-orphans"));
+        assert!(!command.contains("--confirm-control-plane-lost"));
+    }
+
+    #[test]
+    fn leaseless_recovery_uses_two_flag_contract() {
+        let contract = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
+            false,
+        ))
+        .expect("two-flag contract");
+
+        assert_eq!(
+            contract,
+            RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner
+        );
+        let command = remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract);
+        assert!(command.contains("--reconcile-leaseless-orphans"));
+        assert!(command.contains("--confirm-no-daemon-owner"));
+        assert!(!command.contains("--confirm-control-plane-lost"));
+    }
+
+    #[test]
+    fn leaseless_recovery_uses_control_plane_lost_contract() {
+        let contract = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "OPTIONS:\n    --confirm-control-plane-lost\n",
+            false,
+        ))
+        .expect("control-plane-lost contract");
+
+        assert_eq!(
+            contract,
+            RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost
+        );
+        let command = remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract);
+        assert!(command.contains("--confirm-control-plane-lost"));
+        assert!(!command.contains("--confirm-no-daemon-owner"));
+    }
+
+    #[test]
+    fn leaseless_recovery_refuses_unsupported_or_ambiguous_help() {
+        let unsupported = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "OPTIONS:\n    --addr <ADDR>\n",
+            false,
+        ))
+        .expect_err("unsupported contract");
+        assert!(unsupported.contains("did not advertise"));
+
+        let ambiguous = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --confirm-control-plane-lost\n",
+            false,
+        ))
+        .expect_err("ambiguous contract");
+        assert!(ambiguous.contains("ambiguous"));
+    }
+
+    #[test]
+    fn leaseless_recovery_parses_only_exact_option_declarations() {
+        let options = declared_long_options(
+            "OPTIONS:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n    --addr <ADDR>\n",
+        );
+        assert!(options.contains("--reconcile-leaseless-orphans"));
+        assert!(options.contains("--confirm-no-daemon-owner"));
+        assert!(options.contains("--addr"));
+
+        let prose = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "Examples:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
+            false,
+        ))
+        .expect_err("example lines must not advertise a contract");
+        assert!(prose.contains("did not advertise"));
+
+        let prose = negotiate_leaseless_recovery_contract(&command_output(
+            true,
+            "Options:\n    --reconcile-leaseless-orphans after inspection\n    --confirm-no-daemon-owner after inspection\n",
+            false,
+        ))
+        .expect_err("prose in the options section must not advertise a contract");
+        assert!(prose.contains("did not advertise"));
+    }
+
+    #[test]
+    fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
+        for (help, expected_contract) in [
+            (
+                "Options:\n    --confirm-no-daemon-owner\n",
+                RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
+            ),
+            (
+                "Options:\n    --reconcile-leaseless-orphans\n    --confirm-no-daemon-owner\n",
+                RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
+            ),
+            (
+                "OPTIONS:\n    --confirm-control-plane-lost\n",
+                RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost,
+            ),
+        ] {
+            let contract =
+                negotiate_leaseless_recovery_contract(&command_output(true, help, false))
+                    .expect("advertised contract");
+            let evidence = leaseless_recovery_evidence(
+                contract,
+                "homeboy 0.284.1+abc123",
+                sample_leaseless_recovery(),
+            );
+
+            assert_eq!(evidence.contract, expected_contract);
+            assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
+            assert_eq!(
+                evidence
+                    .recovery
+                    .as_ref()
+                    .expect("recovery result")
+                    .replacement
+                    .lease_id,
+                "lease-new"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_session_without_leaseless_recovery_evidence_deserializes() {
+        let session: RunnerSession = serde_json::from_value(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "server_id": null,
+            "tunnel_pid": null,
+            "remote_daemon_pid": null,
+            "homeboy_version": "test",
+            "connected_at": "2026-07-14T00:00:00Z"
+        }))
+        .expect("legacy session");
+
+        assert!(session.leaseless_recovery_evidence.is_none());
+    }
+
+    #[test]
+    fn persisted_recovery_evidence_without_result_deserializes() {
+        let evidence: RunnerLeaselessRecoveryEvidence = serde_json::from_value(serde_json::json!({
+            "contract": "reconcile_leaseless_orphans_and_confirm_no_daemon_owner",
+            "remote_command_identity": "homeboy 0.284.1+abc123"
+        }))
+        .expect("prior recovery evidence");
+
+        assert!(evidence.recovery.is_none());
+    }
+
+    #[test]
+    fn failed_connect_without_recovery_omits_recovery_evidence() {
+        let (report, _) = failed_connect(
+            "runner",
+            PathBuf::from("/session.json"),
+            RunnerFailureKind::DaemonStartupFailure,
+            "daemon failed".to_string(),
+        );
+
+        let serialized = serde_json::to_value(report).expect("serialize failed connect");
+        assert!(serialized.get("leaseless_recovery_evidence").is_none());
+    }
+
+    #[test]
+    fn leaseless_recovery_refuses_failed_or_timed_out_probe() {
+        let failed =
+            negotiate_leaseless_recovery_contract(&command_output(false, String::new(), false))
+                .expect_err("failed probe");
+        assert!(failed.contains("capability probe failed"));
+
+        let timed_out =
+            negotiate_leaseless_recovery_contract(&command_output(false, String::new(), true))
+                .expect_err("timed out probe");
+        assert!(timed_out.contains("timed out"));
+    }
+
+    #[test]
+    fn leaseless_recovery_does_not_mutate_before_successful_negotiation() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let result = execute_remote_leaseless_recovery(
+            || {
+                events.borrow_mut().push("probe");
+                command_output(true, "OPTIONS:\n    --addr <ADDR>\n", false)
+            },
+            |_| {
+                events.borrow_mut().push("recover");
+                command_output(true, String::new(), false)
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(*events.borrow(), vec!["probe"]);
+    }
+
+    fn command_output(
+        success: bool,
+        stdout: impl Into<String>,
+        timed_out: bool,
+    ) -> crate::core::server::CommandOutput {
+        crate::core::server::CommandOutput {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            success,
+            exit_code: if success { 0 } else { 1 },
+            timed_out,
+            child_resource: None,
+        }
+    }
+
+    fn sample_leaseless_recovery() -> DaemonLeaselessRecoveryResult {
+        serde_json::from_value(serde_json::json!({
+            "affected_job_ids": [],
+            "affected_job_count": 0,
+            "evidence_snapshot_path": "/evidence/jobs.snapshot",
+            "ownership_proof": ["owner lock acquired"],
+            "retry_guidance": "retry",
+            "replacement": {
+                "pid": 42,
+                "address": "127.0.0.1:7421",
+                "state_path": "/state.json",
+                "lease_id": "lease-new"
+            }
+        }))
+        .expect("sample recovery")
     }
 
     #[test]
@@ -2771,6 +3280,7 @@ esac
                 worker_identity: None,
                 worker_pid: None,
                 last_seen_at: None,
+                leaseless_recovery_evidence: None,
             };
             write_session(&session).expect("write session");
             let path = session_path("lab-local").expect("session path");
@@ -2959,6 +3469,7 @@ esac
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),
             last_seen_at: Some(Utc::now().to_rfc3339()),
+            leaseless_recovery_evidence: None,
         }
     }
 
@@ -3029,6 +3540,7 @@ esac
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
+            leaseless_recovery_evidence: None,
         }
     }
 
