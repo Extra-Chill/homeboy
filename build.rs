@@ -148,11 +148,34 @@ fn key_for_path(docs_root: &Path, path: &Path) -> String {
         key = without_ext.to_string();
     }
 
+    // Normalize every path segment the same way the resolver normalizes user
+    // input (see homeboy::core::engine::text::normalize_doc_segment). This
+    // guarantees the list/resolve contract by construction: every key emitted
+    // here — and therefore printed by `self docs list` — is reachable via
+    // `self docs <that exact string>`. Without this, an uppercase or
+    // space-bearing doc filename (e.g. CHANGELOG.md) would produce a key the
+    // resolver can never match, since it lowercases input before lookup.
+    let key = key
+        .split('/')
+        .map(normalize_doc_segment)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+
     if key == "index" {
         return "index".to_string();
     }
 
     key
+}
+
+/// Mirror of `homeboy::core::engine::text::normalize_doc_segment`.
+///
+/// build.rs cannot depend on the crate it builds, so this small primitive is
+/// duplicated here. Keep the two in sync — a mismatch reintroduces the
+/// list/resolve drift this normalization exists to prevent.
+fn normalize_doc_segment(input: &str) -> String {
+    input.trim().to_lowercase().replace([' ', '\t'], "-")
 }
 
 fn escape_rust_string(input: &str) -> String {
