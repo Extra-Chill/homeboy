@@ -75,6 +75,10 @@ pub struct DeployConfig {
     pub expected_version: Option<String>,
     /// Skip auto-pulling latest changes before deploy
     pub no_pull: bool,
+    /// Permit a local build from a checkout known to be behind its upstream.
+    pub allow_stale_source: bool,
+    /// Permit a local build whose semantic version is older than the deployed version.
+    pub allow_downgrade: bool,
     /// Deploy from current branch HEAD instead of latest tag
     pub head: bool,
     /// Resolve and deploy this Git ref from each component's declared repository.
@@ -100,6 +104,8 @@ impl DeployConfig {
             skip_deps_hydration: false,
             expected_version: None,
             no_pull: true,
+            allow_stale_source: false,
+            allow_downgrade: false,
             head: true,
             requested_ref: None,
             tagged: false,
