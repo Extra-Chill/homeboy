@@ -2704,7 +2704,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_cook_supports_automatic_explicit_and_lab_placement_routing() {
+    fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
         let automatic = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -2717,8 +2717,8 @@ mod tests {
             "cargo test --locked",
         ]);
         let automatic_command = lab_offload_command(&automatic.command).unwrap().unwrap();
-        assert!(automatic_command.is_portable());
-        assert!(automatic_command.routing_policy.default_lab_offload);
+        assert!(!automatic_command.is_portable());
+        assert!(!automatic_command.routing_policy.default_lab_offload);
 
         let explicit = Cli::parse_from([
             "homeboy",
@@ -2735,7 +2735,7 @@ mod tests {
         ]);
         let explicit_command = lab_offload_command(&explicit.command).unwrap().unwrap();
         assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
-        assert!(explicit_command.is_portable());
+        assert!(!explicit_command.is_portable());
 
         let lab = Cli::parse_from([
             "homeboy",
@@ -2750,7 +2750,7 @@ mod tests {
             "--verify",
             "cargo test --locked",
         ]);
-        assert!(lab_offload_command(&lab.command)
+        assert!(!lab_offload_command(&lab.command)
             .unwrap()
             .unwrap()
             .is_portable());
