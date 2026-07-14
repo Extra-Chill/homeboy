@@ -288,6 +288,37 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         serde_json::to_value(&synced_workspace.materialization_plan)
             .expect("primary sync plan JSON")
     );
+    assert_eq!(
+        metadata["workspace_verification"]["schema"],
+        "homeboy/lab-workspace-verification/v2"
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["content_hash_algorithm"],
+        crate::core::runner::workspace_content_hash_algorithm(
+            crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("default content hash algorithm")
+    );
+    assert_eq!(
+        metadata["workspace_verification"]["permission_policy"],
+        crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY
+    );
+    assert!(metadata["workspace_verification"]
+        .get("content_manifest")
+        .is_none());
+    assert!(metadata["workspace_verification"].get("entries").is_none());
+    let serialized_metadata = serde_json::to_string(&metadata).expect("metadata JSON");
+    assert!(!serialized_metadata.contains("README.md"));
+    assert!(!serialized_metadata.contains("verified contents"));
+
+    std::fs::write(remote.path().join("README.md"), "changed contents\n")
+        .expect("change remote file");
+    let error = verify_lab_workspace_from_env(&remote_path.display().to_string(), remote.path())
+        .expect_err("changed remote content must fail verification");
+    assert!(error.contains("homeboy-workspace-content-v2+"));
+    assert!(error.contains("expected sha256:"));
+    assert!(error.contains("got sha256:"));
+    assert!(error.contains("homeboy runner workspace sync --mode snapshot"));
 
     match prior_lab {
         Some(value) => std::env::set_var(LAB_OFFLOAD_METADATA_ENV, value),

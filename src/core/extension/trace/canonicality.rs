@@ -1265,6 +1265,10 @@ mod tests {
         let workspace_content_hash =
             crate::core::runner::workspace_content_hash(source.path(), &snapshot.sync_excludes)
                 .unwrap();
+        let content_hash_algorithm = crate::core::runner::workspace_content_hash_algorithm(
+            crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .unwrap();
         let lab = serde_json::json!({
             "runner_id": "homeboy-lab",
             "remote_workspace": remote.path().display().to_string(),
@@ -1274,8 +1278,10 @@ mod tests {
             "workspace_content_hash": workspace_content_hash,
             "workspace_materialization_plan": { "identity": "workspace:verified" },
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v1",
+                "schema": "homeboy/lab-workspace-verification/v2",
                 "identity": "workspace:verified",
+                "content_hash_algorithm": content_hash_algorithm,
+                "permission_policy": crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
                 "content_hash": workspace_content_hash,
                 "sync_excludes": [".git", ".git/**"],
                 "source_snapshot": snapshot,

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::core::engine::shell;
 use crate::core::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 use crate::core::source_snapshot::SourceSnapshot;
 
-use super::workspace_content_hash;
+use super::snapshot::{workspace_content_hash_for_policy, workspace_content_hash_v1};
+use super::workspace_content_hash_algorithm;
 
 const LAB_SOURCE_SNAPSHOT_SYNC_MODE: &str = "lab_offload";
 
@@ -233,68 +235,138 @@ pub(crate) fn verify_lab_workspace(
         return Err("source snapshot does not match Lab dispatch evidence".to_string());
     }
     let verification = lab.get("workspace_verification");
-    let (expected_content_hash, verification_identity) = match verification {
-        Some(verification) => {
-            if verification.get("schema").and_then(|value| value.as_str())
-                != Some("homeboy/lab-workspace-verification/v1")
-            {
-                return Err("has an unsupported workspace verification schema".to_string());
-            }
-            let identity = verification
-                .get("identity")
-                .and_then(|value| value.as_str())
-                .ok_or("is missing workspace verification identity")?;
-            let content_hash = verification
-                .get("content_hash")
-                .and_then(|value| value.as_str())
-                .ok_or("is missing workspace verification content hash")?;
-            let excludes = verification
-                .get("sync_excludes")
-                .ok_or("is missing workspace verification sync excludes")?;
-            if excludes != &serde_json::json!(snapshot.sync_excludes) {
-                return Err("sync excludes do not match workspace verification".to_string());
-            }
-            if verification.get("source_snapshot") != Some(lab_snapshot) {
-                return Err("source snapshot does not match workspace verification".to_string());
-            }
-            let primary_workspace = verification
-                .get("primary_workspace")
-                .ok_or("is missing workspace verification primary workspace")?;
-            if primary_workspace
-                .get("identity")
-                .and_then(|value| value.as_str())
-                != Some(identity)
-                || primary_workspace
-                    .get("remote_path")
+    let (expected_content_hash, verification_identity, content_hash_algorithm, permission_policy) =
+        match verification {
+            Some(verification) => {
+                let schema = verification.get("schema").and_then(|value| value.as_str());
+                let content_hash_algorithm = match schema {
+                    Some("homeboy/lab-workspace-verification/v1") => {
+                        "homeboy-workspace-content-v1".to_string()
+                    }
+                    Some("homeboy/lab-workspace-verification/v2") => {
+                        let policy = verification
+                            .get("permission_policy")
+                            .and_then(|value| value.as_str())
+                            .ok_or("is missing v2 workspace content permission policy")?;
+                        let algorithm = workspace_content_hash_algorithm(policy).ok_or_else(|| {
+                        format!("has an unsupported v2 workspace content permission policy `{policy}` on this platform")
+                    })?;
+                        if verification
+                            .get("content_hash_algorithm")
+                            .and_then(|value| value.as_str())
+                            != Some(algorithm.as_str())
+                        {
+                            return Err("v2 workspace content hash algorithm does not bind its permission policy".to_string());
+                        }
+                        algorithm
+                    }
+                    Some(schema) => {
+                        return Err(format!(
+                            "has an unsupported workspace verification schema `{schema}`"
+                        ))
+                    }
+                    None => return Err("is missing workspace verification schema".to_string()),
+                };
+                let identity = verification
+                    .get("identity")
                     .and_then(|value| value.as_str())
-                    != Some(recorded_remote_path)
-            {
-                return Err("primary workspace does not match workspace verification".to_string());
+                    .ok_or("is missing workspace verification identity")?;
+                let content_hash = verification
+                    .get("content_hash")
+                    .and_then(|value| value.as_str())
+                    .ok_or("is missing workspace verification content hash")?;
+                let excludes = verification
+                    .get("sync_excludes")
+                    .ok_or("is missing workspace verification sync excludes")?;
+                if excludes != &serde_json::json!(snapshot.sync_excludes) {
+                    return Err("sync excludes do not match workspace verification".to_string());
+                }
+                if verification.get("source_snapshot") != Some(lab_snapshot) {
+                    return Err("source snapshot does not match workspace verification".to_string());
+                }
+                let primary_workspace = verification
+                    .get("primary_workspace")
+                    .ok_or("is missing workspace verification primary workspace")?;
+                if primary_workspace
+                    .get("identity")
+                    .and_then(|value| value.as_str())
+                    != Some(identity)
+                    || primary_workspace
+                        .get("remote_path")
+                        .and_then(|value| value.as_str())
+                        != Some(recorded_remote_path)
+                {
+                    return Err(
+                        "primary workspace does not match workspace verification".to_string()
+                    );
+                }
+                (
+                    content_hash,
+                    identity,
+                    content_hash_algorithm,
+                    verification
+                        .get("permission_policy")
+                        .and_then(|value| value.as_str()),
+                )
             }
-            (content_hash, identity)
-        }
-        None if materialization_mode == "git" => {
-            let content_hash = lab
-                .get("workspace_content_hash")
-                .and_then(|value| value.as_str())
-                .ok_or("is missing workspace content hash")?;
-            let identity = lab
-                .get("workspace_materialization_plan")
-                .and_then(|value| value.get("identity"))
-                .and_then(|value| value.as_str())
-                .ok_or("is missing workspace materialization identity")?;
-            (content_hash, identity)
-        }
-        None => return Err("is missing workspace verification metadata".to_string()),
-    };
+            None if materialization_mode == "git" => {
+                let content_hash = lab
+                    .get("workspace_content_hash")
+                    .and_then(|value| value.as_str())
+                    .ok_or("is missing workspace content hash")?;
+                let identity = lab
+                    .get("workspace_materialization_plan")
+                    .and_then(|value| value.get("identity"))
+                    .and_then(|value| value.as_str())
+                    .ok_or("is missing workspace materialization identity")?;
+                (
+                    content_hash,
+                    identity,
+                    "homeboy-workspace-content-v1".to_string(),
+                    None,
+                )
+            }
+            None => return Err("is missing workspace verification metadata".to_string()),
+        };
     if workspace_identity != verification_identity {
         return Err("workspace identity does not match workspace verification".to_string());
     }
-    let actual_content_hash =
-        workspace_content_hash(materialized_workspace_path, &snapshot.sync_excludes)
-            .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
+    let actual_content_hash = match content_hash_algorithm.as_str() {
+        "homeboy-workspace-content-v1" => {
+            workspace_content_hash_v1(materialized_workspace_path, &snapshot.sync_excludes)
+        }
+        algorithm if algorithm.starts_with("homeboy-workspace-content-v2+") => {
+            workspace_content_hash_for_policy(
+                materialized_workspace_path,
+                &snapshot.sync_excludes,
+                permission_policy.expect("v2 policy validated above"),
+            )
+        }
+        _ => unreachable!("workspace verification algorithm was validated above"),
+    }
+    .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
     if actual_content_hash != expected_content_hash {
-        return Err("content hash does not match the controller materialization".to_string());
+        let diagnostic = match materialization_mode {
+            "git" | "snapshot-git" => format!(
+                "homeboy runner exec {} --cwd {} -- git status --short",
+                shell::quote_arg(runner_id),
+                shell::quote_arg(recorded_remote_path),
+            ),
+            "snapshot" => format!(
+                "homeboy runner workspace sync --mode snapshot --path {} {}",
+                shell::quote_arg(
+                    snapshot
+                        .local_path
+                        .as_deref()
+                        .expect("source path validated above")
+                ),
+                shell::quote_arg(runner_id),
+            ),
+            _ => unreachable!("materialization mode was validated above"),
+        };
+        return Err(format!(
+            "workspace content hash does not match the controller materialization using {content_hash_algorithm} (expected {expected_content_hash}, got {actual_content_hash}); operator diagnostic: `{diagnostic}`"
+        ));
     }
 
     Ok(VerifiedLabWorkspaceProvenance {
@@ -373,6 +445,9 @@ fn is_git_revision(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::snapshot::{
+        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    };
     use super::*;
 
     fn snapshot(path: &Path) -> SourceSnapshot {
@@ -393,8 +468,8 @@ mod tests {
     }
 
     fn lab(path: &Path, snapshot: &SourceSnapshot) -> serde_json::Value {
-        let content_hash =
-            workspace_content_hash(path, &snapshot.sync_excludes).expect("snapshot content hash");
+        let content_hash = workspace_content_hash_v1(path, &snapshot.sync_excludes)
+            .expect("legacy snapshot content hash");
         serde_json::json!({
             "runner_id": "lab",
             "remote_workspace": path.display().to_string(),
@@ -482,5 +557,119 @@ mod tests {
 
         assert!(error.contains("invalid source revision"));
         assert!(!workspace.path().join(".git").exists());
+    }
+
+    #[test]
+    fn verifier_accepts_legacy_v1_and_current_v2_content_hashes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+
+        verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab(workspace.path(), &snapshot),
+        )
+        .expect("legacy v1 metadata remains valid");
+
+        let content_hash =
+            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
+                .expect("v2 content hash");
+        let mut v2 = lab(workspace.path(), &snapshot);
+        v2["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        v2["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
+        v2["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                .expect("default content hash algorithm")
+        );
+        v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
+        verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            v2,
+        )
+        .expect("v2 metadata verifies with v2 algorithm");
+    }
+
+    #[test]
+    fn verifier_rejects_unknown_or_incomplete_verification_versions_clearly() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let mut newer = lab(workspace.path(), &snapshot);
+        newer["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v3");
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            newer,
+        )
+        .expect_err("older verifier must reject newer schema");
+        assert!(error.contains(
+            "unsupported workspace verification schema `homeboy/lab-workspace-verification/v3`"
+        ));
+
+        let mut incomplete = lab(workspace.path(), &snapshot);
+        incomplete["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            incomplete,
+        )
+        .expect_err("v2 requires explicit algorithm");
+        assert!(error.contains("missing v2 workspace content permission policy"));
+
+        let mut policy_mismatch = lab(workspace.path(), &snapshot);
+        policy_mismatch["workspace_verification"]["schema"] =
+            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        policy_mismatch["workspace_verification"]["permission_policy"] =
+            serde_json::json!(WORKSPACE_CONTENT_PERMISSION_PORTABLE);
+        policy_mismatch["workspace_verification"]["content_hash_algorithm"] =
+            serde_json::json!("homeboy-workspace-content-v2+unix-executable");
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            policy_mismatch,
+        )
+        .expect_err("v2 algorithm must bind the declared policy");
+        assert!(error.contains("does not bind its permission policy"));
+    }
+
+    #[test]
+    fn mismatch_diagnostic_uses_git_status_only_for_git_materializations() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let mut git_materialized = lab(workspace.path(), &snapshot);
+        let snapshot_materialized = lab(workspace.path(), &snapshot);
+        git_materialized["sync_mode"] = serde_json::json!("snapshot-git");
+        std::fs::write(workspace.path().join("file.txt"), "changed\n").expect("change file");
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            git_materialized,
+        )
+        .expect_err("changed snapshot-git workspace must fail");
+        assert!(error.contains("runner exec lab"));
+        assert!(error.contains("git status --short"));
+
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            snapshot_materialized,
+        )
+        .expect_err("changed snapshot workspace must fail");
+        assert!(error.contains("runner workspace sync --mode snapshot"));
+        assert!(!error.contains("git status --short"));
     }
 }

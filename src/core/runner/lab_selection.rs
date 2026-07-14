@@ -499,8 +499,7 @@ pub(super) fn resolve_lab_runner_selection(
         crate::core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
     let default_runner = if explicit_runner.is_none()
         && command.is_portable()
-        && (command.routing_policy.default_lab_offload
-            || placement == crate::cli_surface::Placement::Lab)
+        && (command.routing_policy.default_lab_offload || placement.requests_lab())
     {
         super::resolve_default_lab_runner()?
     } else {
@@ -553,9 +552,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         ));
     }
 
-    if !command.routing_policy.default_lab_offload
-        && placement != crate::cli_surface::Placement::Lab
-    {
+    if !command.routing_policy.default_lab_offload && !placement.requests_lab() {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }

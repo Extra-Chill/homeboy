@@ -316,7 +316,7 @@ pub(crate) fn selected_runner_fallback_error(
     mut remediation: Vec<String>,
 ) -> Error {
     remediation.push(
-        "Pass --allow-local-fallback only when local execution is intentional and safe for this controller."
+        "Pass --placement lab-or-local only when local execution is intentional and safe for this controller."
             .to_string(),
     );
 

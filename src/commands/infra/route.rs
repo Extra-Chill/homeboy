@@ -145,7 +145,7 @@ pub fn route_after_parse(
             normalized_args: routed_args,
             explicit_runner: cli.runner.as_deref(),
             placement: cli.placement,
-            allow_local_fallback: cli.allow_local_fallback,
+            allow_local_fallback: cli.placement.allows_local_fallback(),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             skip_deps_hydration: cli.skip_deps_hydration,
             capture_patch: capture_mutation_patch,
@@ -962,10 +962,7 @@ fn runner_rig_source_management_command(
             iter.next();
             continue;
         }
-        if arg == "--allow-local-fallback"
-            || arg == "--allow-dirty-lab-workspace"
-            || arg == "--detach-after-handoff"
-        {
+        if arg == "--allow-dirty-lab-workspace" || arg == "--detach-after-handoff" {
             continue;
         }
         if arg.starts_with("--runner=")
@@ -2137,7 +2134,8 @@ mod tests {
             "--runner".to_string(),
             "homeboy-lab".to_string(),
             "--output=./sources.json".to_string(),
-            "--allow-local-fallback".to_string(),
+            "--placement".to_string(),
+            "lab-or-local".to_string(),
             "--placement=lab".to_string(),
             "--detach-after-handoff".to_string(),
         ];

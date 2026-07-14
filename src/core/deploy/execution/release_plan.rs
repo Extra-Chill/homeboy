@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::core::component::Component;
 use crate::core::release;
 
@@ -76,34 +74,21 @@ pub(super) fn should_try_download_release_artifact(
     )
 }
 
-/// Try to download a release artifact from GitHub for the selected deploy tag.
-///
-/// Returns `Ok(Some(path))` only when the planned release asset was downloaded.
-/// Once deploy has selected the release asset path, any download miss fails closed
-/// instead of silently rebuilding from the local checkout.
-pub(super) fn try_download_release_artifact(
+pub(crate) fn resolve_planned_release_artifact(
     component: &Component,
     tag: &str,
-) -> std::result::Result<Option<PathBuf>, String> {
-    let Some(remote_url) = component.remote_url.as_ref() else {
-        return Ok(None);
-    };
-    let Some(github) = release_download::parse_github_url(remote_url) else {
-        return Ok(None);
-    };
-    let Some(artifact_name) = release_download::resolve_artifact_name(component) else {
-        return Ok(None);
-    };
-
-    log_status!(
-        "deploy",
-        "Attempting to download release artifact for '{}' tag {} from GitHub...",
-        component.id,
-        tag
-    );
-
-    release_download::download_release_artifact(&github, &component.github, tag, &artifact_name)
-        .map(Some)
+    store: &mut release_download::ReleaseArtifactStore,
+) -> std::result::Result<release_download::ReleaseArtifact, String> {
+    let remote_url = component
+        .remote_url
+        .as_deref()
+        .ok_or_else(|| "component has no remote_url".to_string())?;
+    let github = release_download::parse_github_url(remote_url)
+        .ok_or_else(|| "component remote_url is not a GitHub repository URL".to_string())?;
+    let artifact_name = release_download::resolve_artifact_name(component)
+        .ok_or_else(|| "component has no build_artifact filename".to_string())?;
+    store
+        .resolve(&github, &component.github, tag, &artifact_name)
         .map_err(|error| release_asset_download_error(component, tag, &artifact_name, error))
 }
 

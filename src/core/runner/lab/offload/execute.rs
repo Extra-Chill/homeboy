@@ -103,13 +103,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         contract.routing_policy.default_lab_offload = true;
     }
 
-    if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
-        if request.placement == crate::cli_surface::Placement::Lab {
-            return Err(local_execution_denied_error(
-                "automatic Lab offload disabled",
-                None,
-            ));
-        }
+    if request.explicit_runner.is_none()
+        && !contract.routing_policy.default_lab_offload
+        && !request.placement.requests_lab()
+    {
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
             metadata: None,
