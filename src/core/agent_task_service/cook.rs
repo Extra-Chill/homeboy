@@ -160,8 +160,17 @@ where
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan(&run_id)?;
-        let budget =
-            remaining_execution_budget.get_or_insert_with(|| plan.options.execution_budget.clone());
+        let budget = remaining_execution_budget.get_or_insert_with(|| {
+            let budget = plan.options.execution_budget.clone();
+            if budget.is_legacy_unset() {
+                crate::core::agent_task_scheduler::AgentTaskExecutionBudget::migrate_legacy(
+                    &plan.options.retry,
+                    plan.options.rotation.as_ref(),
+                )
+            } else {
+                budget
+            }
+        });
         let executions_used = provider_executions_used(&record);
         budget.max_total_executions = budget.max_total_executions.saturating_sub(executions_used);
         let Some(source_request) = plan.tasks.first().cloned() else {
