@@ -124,7 +124,9 @@ pub mod project;
 pub mod proof;
 pub mod publication_artifacts;
 pub mod quality;
-pub mod redaction;
+// redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
+// existing `crate::core::redaction::*` call sites keep working unchanged.
+pub use homeboy_redaction as redaction;
 pub mod refactor;
 pub mod release;
 pub mod report_compare;
