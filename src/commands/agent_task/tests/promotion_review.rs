@@ -138,10 +138,9 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                         tasks_json: None,
                         provider_config: None,
                         client_context: None,
-                        attempts: Some(1),
-                        max_provider_executions: None,
-                        max_same_provider_retries: None,
-                        max_provider_rotations: None,
+                        attempts: 1,
+                        same_provider_retries: 0,
+                        provider_rotations: 0,
                         queue_only: false,
                         timeout_ms: None,
                         resolved_provider_policy: None,
@@ -188,7 +187,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("configured worktree provider"));
+            .contains("workspace provider command"));
     });
 }
 
@@ -356,10 +355,9 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                         tasks_json: None,
                         provider_config: None,
                         client_context: None,
-                        attempts: Some(1),
-                        max_provider_executions: None,
-                        max_same_provider_retries: None,
-                        max_provider_rotations: None,
+                        attempts: 1,
+                        same_provider_retries: 0,
+                        provider_rotations: 0,
                         queue_only: false,
                         timeout_ms: None,
                         resolved_provider_policy: None,

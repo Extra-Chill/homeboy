@@ -47,6 +47,27 @@ normalized `runtime_task`, provider config, `runtime_component_paths`,
 inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for
 multi-task runs.
 
+### Provider Execution Budget
+
+Every dispatched plan serializes an `execution_budget` before a provider starts:
+`max_total_executions`, `max_same_provider_retries`, and
+`max_provider_rotations`. The total is a hard cap across both retry paths, so
+`--attempts 1` guarantees exactly one provider execution even when a configured
+rotation chain has fallback entries.
+
+```bash
+# One provider execution; no retry or rotation.
+homeboy agent-task cook --attempts 1 ...
+
+# At most four executions: two retries with the selected provider and one
+# cross-provider rotation, subject to the total execution cap.
+homeboy agent-task cook --attempts 4 --same-provider-retries 2 --provider-rotations 1 ...
+```
+
+`agent-task status <run-id> --full` exposes the serialized budget. Terminal
+provider outcomes include `metadata.execution_budget`, including the exhausted
+budget dimension and the number of executions used.
+
 ### Durable Fanout Batches
 
 Use `agent-task fanout submit-batch` when a caller has many independent tasks and

@@ -29,7 +29,6 @@ use crate::core::agent_task_timeout_artifacts::{
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 use crate::core::config::value_type_name;
-pub(crate) use scheduling::{provider_rotation_attempts, terminal_executor_identity};
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
@@ -77,6 +76,18 @@ where
         cancellation: AgentTaskCancellationToken,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
+        if plan.options.execution_budget.is_legacy_unset() {
+            plan.options.execution_budget = AgentTaskExecutionBudget::migrate_legacy(
+                &plan.options.retry,
+                plan.options.rotation.as_ref(),
+            );
+            if let Some(metadata) = plan.metadata.as_object_mut() {
+                metadata.insert(
+                    "execution_budget_migrated_from_legacy".to_string(),
+                    true.into(),
+                );
+            }
+        }
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
@@ -109,8 +120,6 @@ where
                     rotation_index: 0,
                     rotation_attempts: Vec::new(),
                     candidate_artifacts: Vec::new(),
-                    same_provider_retries: 0,
-                    provider_rotations: 0,
                     retry_attempts: Vec::new(),
                 }
             })
@@ -121,7 +130,8 @@ where
         let mut completed_by_task: HashMap<String, AgentTaskOutcome> = HashMap::new();
         let mut events = Vec::new();
         let mut cancellation_notified = false;
-        let max_attempts = plan.options.retry.max_attempts.max(1);
+        let execution_budget = plan.options.execution_budget.clone();
+        let max_attempts = execution_budget.max_total_executions.max(1);
         let (tx, rx) = mpsc::channel();
         let cancellation_tx = tx.clone();
         cancellation.on_cancel(Arc::new(move || {
@@ -464,8 +474,6 @@ where
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
                     candidate_artifacts: scheduled.candidate_artifacts,
-                    same_provider_retries: scheduled.same_provider_retries,
-                    provider_rotations: scheduled.provider_rotations,
                     retry_attempts: scheduled.retry_attempts,
                     source_workspace_root,
                     _attempt_workspace: attempt_workspace.clone(),
@@ -545,11 +553,10 @@ where
                     if AgentTaskScheduleSupport::should_retry(
                         &outcome,
                         result.attempt,
+                        execution_budget.max_same_provider_retries,
                         max_attempts,
                         retry_budget_total,
                         retry_budget_used,
-                        &plan.options.execution_budget,
-                        running_task.same_provider_retries,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
                         retry_budget_used += 1;
@@ -584,8 +591,6 @@ where
                             rotation_index: running_task.rotation_index,
                             rotation_attempts: running_task.rotation_attempts,
                             candidate_artifacts,
-                            same_provider_retries: running_task.same_provider_retries + 1,
-                            provider_rotations: running_task.provider_rotations,
                             retry_attempts,
                         });
                         continue;
@@ -600,8 +605,8 @@ where
                             policy,
                             running_task.rotation_index,
                             result.attempt,
-                            &plan.options.execution_budget,
-                            running_task.provider_rotations,
+                            max_attempts,
+                            execution_budget.max_provider_rotations,
                         ) {
                             let mut rotation_attempts = running_task.rotation_attempts;
                             rotation_attempts.push(
@@ -650,25 +655,12 @@ where
                                 rotation_index: running_task.rotation_index + 1,
                                 rotation_attempts,
                                 candidate_artifacts,
-                                same_provider_retries: running_task.same_provider_retries,
-                                provider_rotations: running_task.provider_rotations + 1,
                                 retry_attempts: running_task.retry_attempts,
                             });
                             continue;
                         }
                     }
                     let mut outcome = outcome;
-                    AgentTaskScheduleSupport::attach_terminal_executor_evidence(
-                        &mut outcome,
-                        &running_task.request,
-                    );
-                    AgentTaskScheduleSupport::attach_budget_exhaustion_diagnostic(
-                        &mut outcome,
-                        &plan.options.execution_budget,
-                        result.attempt,
-                        running_task.same_provider_retries,
-                        running_task.provider_rotations,
-                    );
                     append_unique_artifacts(
                         &mut outcome.artifacts,
                         running_task.candidate_artifacts,
@@ -693,6 +685,12 @@ where
                             &rotation_attempts,
                         );
                     }
+                    AgentTaskScheduleSupport::attach_execution_budget_evidence(
+                        &mut outcome,
+                        &execution_budget,
+                        result.attempt,
+                        running_task.rotation_index,
+                    );
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
                 Err(Some(mpsc::RecvTimeoutError::Timeout)) => {}
@@ -745,8 +743,6 @@ struct ScheduledTask {
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     /// Patch candidates produced by earlier retry or rotation attempts.
     candidate_artifacts: Vec<AgentTaskArtifact>,
-    same_provider_retries: u32,
-    provider_rotations: u32,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
 }
@@ -768,8 +764,6 @@ struct RunningTask {
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
     candidate_artifacts: Vec<AgentTaskArtifact>,
-    same_provider_retries: u32,
-    provider_rotations: u32,
     /// Structured diagnostics retained from failed retries before finalization.
     retry_attempts: Vec<serde_json::Value>,
     /// The caller-managed workspace used for preflight and as the clean base
@@ -1758,8 +1752,6 @@ mod committed_harvest_tests {
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
-            same_provider_retries: 0,
-            provider_rotations: 0,
             retry_attempts: Vec::new(),
             source_workspace_root: None,
             _attempt_workspace: None,
@@ -1896,17 +1888,11 @@ mod committed_harvest_tests {
         let content_hash =
             crate::core::runner::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
                 .expect("content hash");
-        let content_hash_algorithm = crate::core::runner::workspace_content_hash_algorithm(
-            crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-        )
-        .expect("default content hash algorithm");
         let lab = serde_json::json!({
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
             "source_snapshot": snapshot,
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
-                "content_hash_algorithm": content_hash_algorithm,
-                "permission_policy": crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                "schema": "homeboy/lab-workspace-verification/v1", "identity": "snapshot:provider-ready",
                 "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
                 "source_snapshot": snapshot,
                 "primary_workspace": { "identity": "snapshot:provider-ready", "remote_path": workspace.path().display().to_string() }
@@ -2010,8 +1996,6 @@ mod committed_harvest_tests {
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),
-            same_provider_retries: 0,
-            provider_rotations: 0,
             retry_attempts: Vec::new(),
             source_workspace_root: None,
             _attempt_workspace: None,

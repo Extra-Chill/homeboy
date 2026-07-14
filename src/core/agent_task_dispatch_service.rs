@@ -92,14 +92,12 @@ pub struct DispatchCoreInputs {
     pub provider_config: Option<String>,
     /// Opaque client context JSON object, `@file`, or `-` for stdin.
     pub client_context: Option<String>,
-    /// Attempts per task, including the first attempt.
+    /// Total provider executions per task, including the first attempt.
     pub attempts: u32,
-    /// Whether the deprecated attempts alias was supplied by the caller.
-    pub attempts_explicit: bool,
-    /// Explicit execution-budget overrides from the CLI or a controller request.
-    pub max_provider_executions: Option<u32>,
-    pub max_same_provider_retries: Option<u32>,
-    pub max_provider_rotations: Option<u32>,
+    /// Explicit same-provider retry budget after the initial execution.
+    pub same_provider_retries: u32,
+    /// Explicit cross-provider rotation budget after the initial execution.
+    pub provider_rotations: u32,
     /// Persist the run for a daemon/runner but do not execute immediately.
     pub queue_only: bool,
     /// Optional provider wall-clock timeout in milliseconds.

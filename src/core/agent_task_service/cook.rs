@@ -6,7 +6,6 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::core::agent_task::AgentTaskExecutor;
 use crate::core::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
@@ -24,10 +23,7 @@ use crate::core::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
     AgentTaskReviewTestStep,
 };
-use crate::core::agent_task_scheduler::{
-    provider_rotation_attempts, terminal_executor_identity, AgentTaskExecutionBudget,
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskState,
-};
+use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
@@ -111,9 +107,7 @@ where
     let mut run_id = options.initial_run_id.clone();
     let mut next_plan = Some(options.initial_plan.clone());
     let cook_id = options.cook_id.clone();
-    let mut budget_limit = None;
-    let mut observed_budget_used = ExecutionBudgetUsage::default();
-    let mut remediation_category_usage = ExecutionBudgetUsage::default();
+    let mut remaining_execution_budget = None;
 
     for attempt in 1..=max_attempts {
         let plan = match next_plan.take() {
@@ -165,17 +159,11 @@ where
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
-        let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
-        budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
-        let aggregate = agent_task_lifecycle::read_aggregate(&run_id)?;
-        observed_budget_used.add(execution_budget_usage(&aggregate));
-        let mut budget_used = observed_budget_used;
-        budget_used.same_provider_retries = budget_used
-            .same_provider_retries
-            .saturating_add(remediation_category_usage.same_provider_retries);
-        budget_used.provider_rotations = budget_used
-            .provider_rotations
-            .saturating_add(remediation_category_usage.provider_rotations);
+        let plan = agent_task_lifecycle::load_plan(&run_id)?;
+        let budget =
+            remaining_execution_budget.get_or_insert_with(|| plan.options.execution_budget.clone());
+        let executions_used = provider_executions_used(&record);
+        budget.max_total_executions = budget.max_total_executions.saturating_sub(executions_used);
         let Some(source_request) = plan.tasks.first().cloned() else {
             return Ok(cook_report(
                 cook_id,
@@ -324,61 +312,22 @@ where
                     ));
                 };
                 let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, attempt + 1);
-                let Some(remaining_budget) = budget_limit
-                    .as_ref()
-                    .and_then(|budget| budget_remaining(budget, budget_used))
-                else {
+                if budget.max_total_executions == 0 {
                     return Ok(cook_report(
                         cook_id,
                         "execution_budget_exhausted",
                         attempts,
                         None,
-                        Some("provider execution stopped because max_provider_executions was exhausted".to_string()),
+                        Some("provider execution budget was exhausted before Cook gate remediation could dispatch".to_string()),
                         1,
                     ));
-                };
-                let Some(same_provider) =
-                    terminal_executor_matches(&aggregate, &follow_up_request.executor)
-                else {
-                    return Ok(cook_report(
-                        cook_id,
-                        "policy_failure",
-                        attempts,
-                        None,
-                        Some(
-                            "cannot classify Cook remediation without terminal executor identity"
-                                .to_string(),
-                        ),
-                        1,
-                    ));
-                };
-                let reservation = match reserve_remediation_budget(&remaining_budget, same_provider)
-                {
-                    Ok(reservation) => reservation,
-                    Err(exhausted_budget) => {
-                        return Ok(cook_report(
-                            cook_id,
-                            "execution_budget_exhausted",
-                            attempts,
-                            None,
-                            Some(format!(
-                                "provider execution stopped because {exhausted_budget} was exhausted"
-                            )),
-                            1,
-                        ));
-                    }
-                };
-                let follow_up_plan = AgentTaskPlan::new(
+                }
+                let mut follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
                 );
-                let mut follow_up_plan = follow_up_plan;
-                // The scheduler receives only this reserved execution. Further
-                // remediation capacity is admitted above from durable evidence.
                 follow_up_plan.options = plan.options.clone();
-                follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-                follow_up_plan.options.retry.max_attempts = 1;
-                remediation_category_usage.add(reservation);
+                follow_up_plan.options.execution_budget = budget.clone();
                 run_id = next_run_id;
                 next_plan = Some(follow_up_plan);
             }
@@ -408,114 +357,27 @@ where
     ))
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ExecutionBudgetUsage {
-    pub(crate) executions: u32,
-    pub(crate) same_provider_retries: u32,
-    pub(crate) provider_rotations: u32,
-}
-
-impl ExecutionBudgetUsage {
-    fn add(&mut self, other: Self) {
-        self.executions = self.executions.saturating_add(other.executions);
-        self.same_provider_retries = self
-            .same_provider_retries
-            .saturating_add(other.same_provider_retries);
-        self.provider_rotations = self
-            .provider_rotations
-            .saturating_add(other.provider_rotations);
-    }
-}
-
-/// Aggregate events and retained scheduler diagnostics are authoritative durable
-/// evidence. Cook never infers usage from its own loop counter.
-pub(crate) fn execution_budget_usage(
-    aggregate: &crate::core::agent_task_scheduler::AgentTaskAggregate,
-) -> ExecutionBudgetUsage {
-    let executions = aggregate
-        .events
-        .iter()
-        .filter(|event| event.state == AgentTaskState::Running)
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let same_provider_retries = aggregate
-        .outcomes
-        .iter()
-        .flat_map(|outcome| &outcome.diagnostics)
-        .filter(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX);
-    let provider_rotations = aggregate
-        .outcomes
-        .iter()
-        .filter_map(provider_rotation_attempts)
-        .map(|attempts| attempts.len().saturating_sub(1) as u32)
-        .fold(0, u32::saturating_add);
-    ExecutionBudgetUsage {
-        executions,
-        same_provider_retries,
-        provider_rotations,
-    }
-}
-
-pub(crate) fn budget_remaining(
-    budget: &AgentTaskExecutionBudget,
-    used: ExecutionBudgetUsage,
-) -> Option<AgentTaskExecutionBudget> {
-    let max_provider_executions = budget
-        .max_provider_executions
-        .saturating_sub(used.executions);
-    (max_provider_executions > 0).then(|| {
-        AgentTaskExecutionBudget::new(
-            max_provider_executions,
-            budget
-                .max_same_provider_retries
-                .saturating_sub(used.same_provider_retries),
-            budget
-                .max_provider_rotations
-                .saturating_sub(used.provider_rotations),
-        )
-    })
-}
-
-pub(crate) fn reserve_remediation_budget(
-    remaining: &AgentTaskExecutionBudget,
-    same_provider: bool,
-) -> std::result::Result<ExecutionBudgetUsage, &'static str> {
-    if remaining.max_provider_executions == 0 {
-        return Err("max_provider_executions");
-    }
-    if same_provider {
-        if remaining.max_same_provider_retries == 0 {
-            return Err("max_same_provider_retries");
-        }
-        return Ok(ExecutionBudgetUsage {
-            same_provider_retries: 1,
-            ..Default::default()
-        });
-    }
-    if remaining.max_provider_rotations == 0 {
-        return Err("max_provider_rotations");
-    }
-    Ok(ExecutionBudgetUsage {
-        provider_rotations: 1,
-        ..Default::default()
-    })
-}
-
-fn terminal_executor_matches(
-    aggregate: &crate::core::agent_task_scheduler::AgentTaskAggregate,
-    follow_up: &AgentTaskExecutor,
-) -> Option<bool> {
-    let outcome = aggregate.outcomes.last()?;
-    let terminal = terminal_executor_identity(outcome)?;
-    Some(
-        terminal.backend == follow_up.backend
-            && terminal.selector == follow_up.selector
-            && terminal.model.as_deref() == follow_up.model(),
-    )
+fn provider_executions_used(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
+    let Some(path) = record.aggregate_path.as_deref() else {
+        return 1;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|aggregate| aggregate.get("outcomes").and_then(Value::as_array).cloned())
+        .map(|outcomes| {
+            outcomes
+                .iter()
+                .map(|outcome| {
+                    outcome
+                        .pointer("/metadata/provider_rotation/attempts")
+                        .and_then(Value::as_array)
+                        .map(|attempts| attempts.len() as u32)
+                        .unwrap_or(1)
+                })
+                .sum::<u32>()
+        })
+        .unwrap_or(1)
 }
 
 pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {

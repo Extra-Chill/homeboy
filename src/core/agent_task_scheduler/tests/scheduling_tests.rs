@@ -902,6 +902,14 @@ mod provider_rotation_tests {
         }
     }
 
+    fn enable_rotation(plan: &mut AgentTaskPlan) {
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            max_total_executions: 10,
+            max_same_provider_retries: 0,
+            max_provider_rotations: 10,
+        };
+    }
+
     fn provider_failure() -> (
         AgentTaskOutcomeStatus,
         Option<AgentTaskFailureClassification>,
@@ -920,6 +928,28 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn total_execution_budget_of_one_prevents_provider_rotation() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let calls = Arc::clone(&executor.calls);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        plan.options.execution_budget = AgentTaskExecutionBudget {
+            max_total_executions: 1,
+            max_same_provider_retries: 0,
+            max_provider_rotations: 1,
+        };
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["exhausted"],
+            "total_executions"
+        );
+    }
+
+    #[test]
     fn rotates_to_next_entry_on_provider_failure_and_stops_at_first_success() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let observed = Arc::clone(&executor.observed);
@@ -935,6 +965,7 @@ mod provider_rotation_tests {
             },
             entry("fallback-backend-b"),
         ]));
+        enable_rotation(&mut plan);
 
         let aggregate = scheduler.run(plan);
 
@@ -1111,6 +1142,7 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
 
         let aggregate = scheduler.run(plan);
 
@@ -1159,6 +1191,7 @@ mod provider_rotation_tests {
         let scheduler = AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
 
         let aggregate = scheduler.run(plan);
 
@@ -1189,6 +1222,7 @@ mod provider_rotation_tests {
             let scheduler = AgentTaskScheduler::new(executor);
             let mut plan = plan_with_tasks(1);
             plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+            enable_rotation(&mut plan);
 
             let aggregate = scheduler.run(plan);
 
@@ -1217,6 +1251,7 @@ mod provider_rotation_tests {
             let scheduler = AgentTaskScheduler::new(executor);
             let mut plan = plan_with_tasks(1);
             plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+            enable_rotation(&mut plan);
 
             let aggregate = scheduler.run(plan);
 
@@ -1251,6 +1286,7 @@ mod provider_rotation_tests {
             entry("fallback-backend-a"),
             entry("fallback-backend-b"),
         ]));
+        enable_rotation(&mut plan);
 
         let aggregate = scheduler.run(plan);
 
@@ -1292,6 +1328,7 @@ mod provider_rotation_tests {
             max_attempts: Some(2),
             ..AgentTaskProviderRotationPolicy::default()
         });
+        enable_rotation(&mut plan);
 
         let aggregate = scheduler.run(plan);
 
@@ -1312,6 +1349,7 @@ mod provider_rotation_tests {
         let scheduler = AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(1);
         plan.options.rotation = Some(rotation_policy(vec![entry("plan-fallback")]));
+        enable_rotation(&mut plan);
         plan.tasks[0].metadata = json!({
             "provider_rotation": {
                 "entries": [{ "backend": "request-fallback" }]

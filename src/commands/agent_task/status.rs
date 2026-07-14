@@ -1083,6 +1083,10 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
             summary["aggregate_path"] = aggregate_path.clone();
         }
     }
+    if let Some(plan) = plan {
+        summary["execution_budget"] =
+            serde_json::to_value(&plan.options.execution_budget).unwrap_or(Value::Null);
+    }
     if let Some(latest_promotion) = record
         .get("metadata")
         .and_then(|metadata| metadata.get("latest_promotion"))
