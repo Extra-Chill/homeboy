@@ -44,31 +44,62 @@ pub(crate) fn prepare_component_deploy(
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
     let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
 
+    if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
+        if is_git_deploy || is_file_deploy {
+            return Err(failed_component_deploy_result(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                None,
+                "Prepared artifacts require an artifact deploy strategy".to_string(),
+            ));
+        }
+        if let Err(error) =
+            prepared_artifact.validate(&component.id, config.expected_version.as_deref())
+        {
+            return Err(failed_component_deploy_result(
+                component,
+                base_path,
+                local_version,
+                remote_version,
+                None,
+                error.to_string(),
+            ));
+        }
+    }
+
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
     let release_artifact: Option<PathBuf> =
-        match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
-            ReleaseArtifactPlan::Reuse { tag, .. } => match release_artifact {
-                Some(artifact) => Some(artifact.path),
-                None => return Err(failed_component_deploy_result(
-                    component, base_path, local_version, remote_version, None,
-                    format!("artifact source release_asset failed for '{}' tag {tag}: verified run-scoped artifact is unavailable. Refusing to fall back to local_build", component.id),
-                ).with_artifact_source(DeployArtifactSource::ReleaseAsset)),
-            },
-            ReleaseArtifactPlan::LocalBuild { reason } => {
-                if config.dry_run {
-                    log_status!(
-                        "deploy",
-                        "Local rebuild planned for '{}': {}",
-                        component.id,
-                        reason
-                    );
+        if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
+            Some(PathBuf::from(prepared_artifact.effective_path()))
+        } else {
+            match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
+                ReleaseArtifactPlan::Reuse { tag, .. } => match release_artifact {
+                    Some(artifact) => Some(artifact.path),
+                    None => return Err(failed_component_deploy_result(
+                        component, base_path, local_version, remote_version, None,
+                        format!("artifact source release_asset failed for '{}' tag {tag}: verified run-scoped artifact is unavailable. Refusing to fall back to local_build", component.id),
+                    ).with_artifact_source(DeployArtifactSource::ReleaseAsset)),
+                },
+                ReleaseArtifactPlan::LocalBuild { reason } => {
+                    if config.dry_run {
+                        log_status!(
+                            "deploy",
+                            "Local rebuild planned for '{}': {}",
+                            component.id,
+                            reason
+                        );
+                    }
+                    None
                 }
-                None
             }
         };
     let artifact_source = if is_git_deploy || is_file_deploy {
         None
+    } else if config.prepared_artifact.is_some() {
+        Some(DeployArtifactSource::Prepared)
     } else if release_artifact.is_some() {
         Some(DeployArtifactSource::ReleaseAsset)
     } else {
@@ -184,7 +215,10 @@ pub(crate) fn prepare_component_deploy(
     generated_cleanup_guard.disarm();
 
     let cleanup_local_artifact = artifact_path.as_ref().is_some_and(|_| {
-        release_artifact.is_none() && !config.skip_build && !is_self_deploy(component)
+        config.prepared_artifact.is_none()
+            && release_artifact.is_none()
+            && !config.skip_build
+            && !is_self_deploy(component)
     });
 
     // Capture provenance now, while the source tree is at the built state and the
@@ -195,6 +229,8 @@ pub(crate) fn prepare_component_deploy(
         BuildSource::GitPush
     } else if is_file_deploy {
         BuildSource::FileCopy
+    } else if config.prepared_artifact.is_some() {
+        BuildSource::PreparedArtifact
     } else if release_artifact.is_some() {
         BuildSource::DownloadedRelease
     } else if config.skip_build {

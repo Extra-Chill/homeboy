@@ -362,6 +362,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         head: args.head,
         requested_ref: args.requested_ref.clone(),
         tagged: args.tagged,
+        prepared_artifact: None,
     }
 }
 

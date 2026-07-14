@@ -977,6 +977,7 @@ mod tests {
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
         }
     }
 

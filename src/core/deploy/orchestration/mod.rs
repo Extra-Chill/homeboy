@@ -310,6 +310,8 @@ pub(super) fn deploy_components(
                 &["rev-parse", "--abbrev-ref", "HEAD"],
             )
             .map(|branch| format!("{} (HEAD)", branch))
+        } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
+            Some(prepared_artifact.tag.clone())
         } else {
             None
         };
@@ -325,6 +327,9 @@ pub(super) fn deploy_components(
                 &identity.resolution_mode,
             );
         }
+        if let Some(prepared_artifact) = config.prepared_artifact.clone() {
+            result = result.with_prepared_artifact(prepared_artifact);
+        }
 
         // Attach explicit build provenance to every result, regardless of strategy.
         let mut build_provenance = prepared.build_provenance.clone();
@@ -333,6 +338,8 @@ pub(super) fn deploy_components(
             build_provenance.built_from_commit = Some(identity.resolved_sha.clone());
         } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
             build_provenance.built_from_commit = artifact.commit.clone();
+        } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
+            build_provenance.built_from_commit = Some(prepared_artifact.source_commit.clone());
         }
         result = result.with_build_provenance(build_provenance);
 
@@ -512,6 +519,7 @@ mod tests {
             head: false,
             requested_ref: None,
             tagged: false,
+            prepared_artifact: None,
         }
     }
 

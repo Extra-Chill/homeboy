@@ -1,4 +1,4 @@
-use crate::core::deploy::{self, DeployConfig};
+use crate::core::deploy::{self, DeployConfig, PreparedDeployArtifact};
 
 use super::executor::release_cleanup_paths;
 use super::types::{
@@ -86,7 +86,12 @@ fn execute_deployment(
         projects.len()
     );
 
-    let config = release_deployment_config(component_id, expected_version);
+    let prepared_artifact =
+        match prepared_release_artifact(component_id, local_path, expected_version, artifacts) {
+            Ok(artifact) => artifact,
+            Err(error) => return failed_deployment(&projects, error.to_string()),
+        };
+    let config = release_deployment_config(component_id, expected_version, prepared_artifact);
 
     let deployment = match deploy::run_multi(&projects, &[component_id.to_string()], &config) {
         Ok(result) => ReleaseDeploymentResult {
@@ -129,11 +134,111 @@ fn execute_deployment(
         },
     };
 
-    cleanup_release_artifacts(local_path, artifacts);
+    if should_cleanup_release_artifacts(&deployment) {
+        cleanup_release_artifacts(local_path, artifacts);
+    } else {
+        log_status!(
+            "release",
+            "Retaining release artifacts after a failed deploy so the deployment can be resumed."
+        );
+    }
     deployment
 }
 
-fn release_deployment_config(component_id: &str, expected_version: Option<&str>) -> DeployConfig {
+fn should_cleanup_release_artifacts(deployment: &ReleaseDeploymentResult) -> bool {
+    deployment.summary.failed == 0
+}
+
+fn failed_deployment(projects: &[String], error: String) -> ReleaseDeploymentResult {
+    ReleaseDeploymentResult {
+        projects: projects
+            .iter()
+            .map(|project_id| ReleaseProjectDeployResult {
+                project_id: project_id.clone(),
+                status: "failed".to_string(),
+                error: Some(error.clone()),
+                component_result: None,
+            })
+            .collect(),
+        summary: ReleaseDeploymentSummary {
+            total_projects: projects.len() as u32,
+            failed: projects.len() as u32,
+            ..Default::default()
+        },
+    }
+}
+
+fn prepared_release_artifact(
+    component_id: &str,
+    local_path: &str,
+    expected_version: Option<&str>,
+    artifacts: &[ReleaseArtifact],
+) -> crate::core::error::Result<PreparedDeployArtifact> {
+    let version = expected_version.ok_or_else(|| {
+        crate::core::error::Error::validation_invalid_argument(
+            "version",
+            "Release deployment requires a released version",
+            None,
+            None,
+        )
+    })?;
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.durable_path.is_some())
+        .ok_or_else(|| {
+            crate::core::error::Error::validation_invalid_argument(
+                "release.artifacts",
+                "Release deployment requires a durable package artifact",
+                None,
+                None,
+            )
+        })?;
+    let durable_path = artifact
+        .durable_path
+        .as_ref()
+        .expect("filtered durable path");
+    let path = std::path::Path::new(durable_path);
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        crate::core::error::Error::internal_io(
+            format!("Failed to read durable release artifact: {}", error),
+            Some(durable_path.clone()),
+        )
+    })?;
+    let tag = format!("v{}", version);
+    let source_commit = crate::core::engine::command::run_in_optional(
+        local_path,
+        "git",
+        &["rev-parse", &format!("{}^{{commit}}", tag)],
+    )
+    .filter(|commit| !commit.trim().is_empty())
+    .ok_or_else(|| {
+        crate::core::error::Error::validation_invalid_argument(
+            "release.tag",
+            format!(
+                "Could not resolve released tag '{}' to a source commit",
+                tag
+            ),
+            None,
+            None,
+        )
+    })?;
+    Ok(PreparedDeployArtifact {
+        component_id: component_id.to_string(),
+        path: artifact.path.clone(),
+        durable_path: durable_path.clone(),
+        size_bytes: metadata.len(),
+        sha256: crate::core::deploy::sha256_file(path)?,
+        version: version.to_string(),
+        tag,
+        source_commit: source_commit.trim().to_string(),
+    })
+}
+
+fn release_deployment_config(
+    component_id: &str,
+    expected_version: Option<&str>,
+    prepared_artifact: PreparedDeployArtifact,
+) -> DeployConfig {
     DeployConfig {
         component_ids: vec![component_id.to_string()],
         all: false,
@@ -142,14 +247,15 @@ fn release_deployment_config(component_id: &str, expected_version: Option<&str>)
         dry_run: false,
         check: false,
         force: true,
-        skip_build: false,
+        skip_build: true,
         keep_deps: false,
         skip_deps_hydration: false,
         expected_version: expected_version.map(str::to_string),
         no_pull: false,
         head: false,
         requested_ref: None,
-        tagged: true,
+        tagged: false,
+        prepared_artifact: Some(prepared_artifact),
     }
 }
 
@@ -188,9 +294,10 @@ fn cleanup_release_artifacts(local_path: &str, artifacts: &[ReleaseArtifact]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_deployment_from_run, plan_deployment};
+    use super::{extract_deployment_from_run, plan_deployment, should_cleanup_release_artifacts};
     use crate::core::release::types::{
-        ReleaseArtifact, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+        ReleaseArtifact, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseRun,
+        ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
 
     #[test]
@@ -265,15 +372,24 @@ mod tests {
     }
 
     #[test]
-    fn release_deploy_config_uses_tagged_release_version() {
-        let config = super::release_deployment_config("demo", Some("1.2.3"));
+    fn release_deploy_config_reuses_prepared_release_package() {
+        let artifact = crate::core::deploy::PreparedDeployArtifact {
+            component_id: "demo".to_string(),
+            path: "/source/demo.zip".to_string(),
+            durable_path: "/durable/demo.zip".to_string(),
+            size_bytes: 7,
+            sha256: "hash".to_string(),
+            version: "1.2.3".to_string(),
+            tag: "v1.2.3".to_string(),
+            source_commit: "commit".to_string(),
+        };
+        let config = super::release_deployment_config("demo", Some("1.2.3"), artifact.clone());
 
         assert_eq!(config.component_ids, vec!["demo".to_string()]);
         assert_eq!(config.expected_version, Some("1.2.3".to_string()));
-        assert!(
-            config.tagged,
-            "release deploy must use tagged deploy semantics"
-        );
+        assert!(!config.tagged, "--tagged is an operator rebuild mode");
+        assert!(config.skip_build, "release deploy must not package again");
+        assert_eq!(config.prepared_artifact, Some(artifact));
         assert!(
             !config.head,
             "release deploy must not deploy the registered worktree HEAD"
@@ -282,5 +398,19 @@ mod tests {
             !config.no_pull,
             "release deploy must fetch/pull before checking out the released tag"
         );
+    }
+
+    #[test]
+    fn failed_release_deployment_retains_artifact_for_resume() {
+        let deployment = ReleaseDeploymentResult {
+            projects: vec![],
+            summary: ReleaseDeploymentSummary {
+                total_projects: 2,
+                failed: 1,
+                ..ReleaseDeploymentSummary::default()
+            },
+        };
+
+        assert!(!should_cleanup_release_artifacts(&deployment));
     }
 }
