@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.4] - 2026-07-14
+
+### Changed
+- Follow up exact state-loss recovery crash-window fixes
+- Reattach live stale runner daemons
+
+### Fixed
+- attribute lease-less daemon processes (#8079)
+
 ## [0.284.3] - 2026-07-14
 
 ### Changed
