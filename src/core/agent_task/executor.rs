@@ -35,6 +35,29 @@ pub struct AgentTaskRuntimeSelection {
 }
 
 impl AgentTaskExecutor {
+    /// Remap the explicitly supported provider workspace configuration fields.
+    ///
+    /// Providers receive the task workspace as the authoritative root. Providers
+    /// that retain a workspace root in their config must use one of these
+    /// declared shapes rather than relying on ambient config key matching.
+    pub fn remap_workspace_root(&mut self, root: &str) {
+        let Some(config) = self.config.as_object_mut() else {
+            return;
+        };
+
+        if let Some(workspace) = config.get_mut("workspace").and_then(Value::as_object_mut) {
+            if workspace.contains_key("root") {
+                workspace.insert("root".to_string(), Value::String(root.to_string()));
+            }
+        }
+        if config.contains_key("workspace_root") {
+            config.insert(
+                "workspace_root".to_string(),
+                Value::String(root.to_string()),
+            );
+        }
+    }
+
     pub fn runtime_selection(&self) -> AgentTaskRuntimeSelection {
         let explicit = self.runtime_selection.clone().unwrap_or_default();
         AgentTaskRuntimeSelection {
@@ -78,6 +101,35 @@ impl AgentTaskExecutor {
             .as_ref()
             .and_then(|selection| selection.model.as_deref())
             .or(self.model.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn remaps_only_declared_provider_workspace_fields() {
+        let mut executor = AgentTaskExecutor {
+            backend: "test".to_string(),
+            selector: None,
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: json!({
+                "workspace": { "root": "/original", "label": "keep" },
+                "workspace_root": "/original",
+                "unrelated_root": "/original"
+            }),
+        };
+
+        executor.remap_workspace_root("/candidate");
+
+        assert_eq!(executor.config["workspace"]["root"], "/candidate");
+        assert_eq!(executor.config["workspace_root"], "/candidate");
+        assert_eq!(executor.config["unrelated_root"], "/original");
     }
 }
 

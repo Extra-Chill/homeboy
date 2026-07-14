@@ -474,7 +474,13 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 fn replay_provider_boundary_projects_latest_executor_input() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let stale_evidence_path = evidence_dir.path().join("stale-executor-input.txt");
         let evidence_path = evidence_dir.path().join("executor-input.json");
+        std::fs::write(
+            &stale_evidence_path,
+            "permission denied before JSON capture",
+        )
+        .expect("write stale evidence");
         std::fs::write(
             &evidence_path,
             serde_json::to_string(&json!({
@@ -515,7 +521,10 @@ fn replay_provider_boundary_projects_latest_executor_input() {
             test_plan(),
             Some("run-cli-provider-boundary-replay"),
             ExecutorInputEvidenceExecutor {
-                evidence_uri: format!("file://{}", evidence_path.display()),
+                evidence_uris: vec![
+                    format!("file://{}", stale_evidence_path.display()),
+                    format!("file://{}", evidence_path.display()),
+                ],
             },
         )
         .expect("run completed");
@@ -552,6 +561,52 @@ fn replay_provider_boundary_projects_latest_executor_input() {
             "runtime-package"
         );
         assert_eq!(value["typed_evidence"]["kind"], "provider-boundary-replay");
+        assert_eq!(
+            value["selected_evidence"]["uri"],
+            format!("file://{}", evidence_path.display())
+        );
+    });
+}
+
+#[test]
+fn replay_provider_boundary_hydrates_persisted_plan_executor_input() {
+    with_temp_home(|| {
+        let run_id = "run-cli-provider-boundary-plan-replay";
+        let mut plan = test_plan();
+        plan.tasks[0].executor.config = json!({
+            "workspace": { "root": "/candidate/workspace" },
+            "workspace_root": "/candidate/workspace"
+        });
+        run_loaded_plan(
+            plan,
+            Some(run_id),
+            ExecutorInputEvidenceExecutor {
+                evidence_uris: vec![format!(
+                    "homeboy://agent-task/run/{run_id}/plan#task=task-a"
+                )],
+            },
+        )
+        .expect("run completed");
+
+        let (value, exit_code) = replay_provider_boundary(ReplayProviderBoundaryArgs {
+            run_id: run_id.to_string(),
+            task: Some("task-a".to_string()),
+        })
+        .expect("replay persisted plan input");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["selected_evidence"]["uri"],
+            format!("homeboy://agent-task/run/{run_id}/plan#task=task-a")
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["provider_config"]["workspace"]["root"],
+            "/candidate/workspace"
+        );
+        assert_eq!(
+            value["normalized_provider_boundary"]["provider_config"]["workspace_root"],
+            "/candidate/workspace"
+        );
     });
 }
 
@@ -1088,10 +1143,28 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
             observed.workspace.mode,
             homeboy::core::agent_tasks::AgentTaskWorkspaceMode::Existing
         );
-        assert_eq!(
-            observed.workspace.root.as_deref(),
-            Some(workspace_root.as_str())
+        let executor_workspace = std::path::PathBuf::from(
+            observed
+                .workspace
+                .root
+                .as_deref()
+                .expect("executor workspace"),
         );
+        assert_ne!(executor_workspace, workspace.path());
+        assert!(executor_workspace.is_dir());
+        let source_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace.path())
+            .output()
+            .expect("source revision");
+        let executor_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&executor_workspace)
+            .output()
+            .expect("executor revision");
+        assert!(source_head.status.success());
+        assert!(executor_head.status.success());
+        assert_eq!(source_head.stdout, executor_head.stdout);
         assert_eq!(
             observed.workspace.slug.as_deref(),
             Some("sample-agent-runtime")

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Arc};
@@ -106,6 +107,7 @@ where
                     attempt: 1,
                     rotation_index: 0,
                     rotation_attempts: Vec::new(),
+                    retry_attempts: Vec::new(),
                 }
             })
             .collect();
@@ -351,6 +353,36 @@ where
                         continue;
                     }
                 };
+                let candidate_workspace = match materialize_attempt_workspace(
+                    &request,
+                    task_base_sha.as_deref(),
+                    self.run_id.as_deref(),
+                    scheduled.attempt,
+                ) {
+                    Ok(candidate_workspace) => candidate_workspace,
+                    Err(error) => {
+                        let outcome = committed_harvest_failure(
+                            committed_harvest_preflight_outcome(task_id.clone()),
+                            error,
+                        );
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                };
+                let mut executor_request = request.clone();
+                if let Some(candidate_workspace) = candidate_workspace.as_ref() {
+                    let candidate_root = candidate_workspace.display().to_string();
+                    executor_request.workspace.root = Some(candidate_root.clone());
+                    executor_request
+                        .executor
+                        .remap_workspace_root(&candidate_root);
+                }
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -381,11 +413,13 @@ where
                     timeout_ms: Some(task_timeout_ms),
                     rotation_index: scheduled.rotation_index,
                     rotation_attempts: scheduled.rotation_attempts,
+                    retry_attempts: scheduled.retry_attempts,
                     task_base_sha,
+                    candidate_workspace,
                 });
 
                 thread::spawn(move || {
-                    let outcome = executor.execute(request, context);
+                    let outcome = executor.execute(executor_request, context);
                     let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
                         task_id,
                         attempt,
@@ -434,7 +468,7 @@ where
                         continue;
                     };
                     let mut outcome = result.outcome;
-                    if let Err(error) = harvest_committed_patch(&mut outcome, &running_task) {
+                    if let Err(error) = harvest_workspace_patch(&mut outcome, &running_task) {
                         outcome = committed_harvest_failure(outcome, error);
                     }
                     let outcome =
@@ -455,6 +489,9 @@ where
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
                         retry_budget_used += 1;
+                        let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
+                        let mut retry_attempts = running_task.retry_attempts;
+                        retry_attempts.push(retry_evidence);
                         let mut request = running_task.request;
                         request.parent_plan_id = Some(plan.plan_id.clone());
                         let next_attempt = result.attempt + 1;
@@ -470,6 +507,7 @@ where
                             attempt: next_attempt,
                             rotation_index: running_task.rotation_index,
                             rotation_attempts: running_task.rotation_attempts,
+                            retry_attempts,
                         });
                         continue;
                     }
@@ -518,11 +556,19 @@ where
                                 attempt: next_attempt,
                                 rotation_index: running_task.rotation_index + 1,
                                 rotation_attempts,
+                                retry_attempts: running_task.retry_attempts,
                             });
                             continue;
                         }
                     }
                     let mut outcome = outcome;
+                    for retry_attempt in &running_task.retry_attempts {
+                        outcome.diagnostics.push(AgentTaskDiagnostic {
+                            class: "agent_task.retry_attempt".to_string(),
+                            message: "previous retry attempt failed; its diagnostics and isolated workspace are retained".to_string(),
+                            data: retry_attempt.clone(),
+                        });
+                    }
                     if !running_task.rotation_attempts.is_empty() {
                         let mut rotation_attempts = running_task.rotation_attempts.clone();
                         rotation_attempts.push(AgentTaskScheduleSupport::rotation_attempt_record(
@@ -585,6 +631,8 @@ struct ScheduledTask {
     rotation_index: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
+    /// Structured evidence retained from failed retries before the final outcome.
+    retry_attempts: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -602,9 +650,13 @@ struct RunningTask {
     rotation_index: usize,
     /// Ordered evidence for prior dispatch attempts under a rotation policy.
     rotation_attempts: Vec<AgentTaskProviderRotationAttempt>,
+    retry_attempts: Vec<serde_json::Value>,
     /// Workspace HEAD captured immediately before the executor runs. It bounds
     /// any committed patch candidate to this dispatch attempt.
     task_base_sha: Option<String>,
+    /// Git worktree materialized for this executor attempt. The original source
+    /// workspace stays clean so retries begin from the recorded base state.
+    candidate_workspace: Option<PathBuf>,
 }
 
 struct QuarantinedTask {
@@ -636,42 +688,134 @@ fn prepare_committed_harvest(request: &AgentTaskRequest) -> Result<Option<String
     Ok(Some(git_output(root, &["rev-parse", "HEAD"])?))
 }
 
-fn harvest_committed_patch(
+fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
+    serde_json::json!({
+        "attempt": running.attempt,
+        "status": outcome.status,
+        "failure_classification": outcome.failure_classification,
+        "summary": outcome.summary,
+        "diagnostics": outcome.diagnostics,
+        "artifacts": outcome.artifacts,
+        "evidence_refs": outcome.evidence_refs,
+        "candidate_workspace": running.candidate_workspace,
+    })
+}
+
+fn materialize_attempt_workspace(
+    request: &AgentTaskRequest,
+    base: Option<&str>,
+    run_id: Option<&str>,
+    attempt: u32,
+) -> Result<Option<PathBuf>, HarvestError> {
+    let (Some(source), Some(base)) = (request.workspace.root.as_deref(), base) else {
+        return Ok(None);
+    };
+    let root = crate::core::artifacts::root()
+        .map_err(|error| HarvestError::CandidateWorkspace {
+            message: error.to_string(),
+        })?
+        .join("agent-task")
+        .join("attempt-workspaces")
+        .join(sanitize_workspace_segment(
+            run_id.unwrap_or("unrecorded-run"),
+        ))
+        .join(workspace_identity_segment(source))
+        .join(sanitize_workspace_segment(&request.task_id))
+        .join(attempt.to_string());
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| HarvestError::CandidateWorkspace {
+            message: error.to_string(),
+        })?;
+    }
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            root.to_string_lossy().as_ref(),
+            base,
+        ])
+        .current_dir(source)
+        .output()
+        .map_err(|error| HarvestError::CandidateWorkspace {
+            message: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(HarvestError::CandidateWorkspace {
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    let source_relative_path = git_output(Path::new(source), &["rev-parse", "--show-prefix"])?;
+    let candidate_workspace = root.join(source_relative_path);
+    std::fs::create_dir_all(&candidate_workspace).map_err(|error| {
+        HarvestError::CandidateWorkspace {
+            message: error.to_string(),
+        }
+    })?;
+    Ok(Some(candidate_workspace))
+}
+
+fn sanitize_workspace_segment(value: &str) -> String {
+    let value: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if value.is_empty() {
+        "unknown".to_string()
+    } else {
+        value
+    }
+}
+
+fn workspace_identity_segment(path: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("workspace-{:x}", hasher.finish())
+}
+
+fn harvest_workspace_patch(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
 ) -> Result<(), HarvestError> {
-    harvest_committed_patch_with_metadata(outcome, running, committed_change_metadata_for_range)
+    harvest_workspace_patch_with_metadata(outcome, running, committed_change_metadata_for_range)
 }
 
-fn harvest_committed_patch_with_metadata(
+fn harvest_workspace_patch_with_metadata(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
     collect_metadata: impl FnOnce(&Path, &str) -> Result<Vec<serde_json::Value>, HarvestError>,
 ) -> Result<(), HarvestError> {
-    if outcome.status != AgentTaskOutcomeStatus::Succeeded
-        || outcome.artifacts.iter().any(|artifact| {
-            is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact)
-        })
+    if outcome
+        .artifacts
+        .iter()
+        .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
     {
         return Ok(());
     }
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
     };
-    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
+    let root = running
+        .candidate_workspace
+        .as_deref()
+        .or_else(|| running.request.workspace.root.as_deref().map(Path::new));
+    let Some(root) = root else {
         return Ok(());
     };
     let head = git_output(root, &["rev-parse", "HEAD"])?;
-    if head == base {
-        return Ok(());
-    }
-    if !git_is_ancestor(root, base, "HEAD")? {
+    if head != base && !git_is_ancestor(root, base, "HEAD")? {
         return Err(HarvestError::UnrelatedHead {
             base: base.to_string(),
             head,
         });
     }
-    let patch = git_output(
+    let committed_patch = git_output(
         root,
         &[
             "diff",
@@ -682,6 +826,15 @@ fn harvest_committed_patch_with_metadata(
             "HEAD",
         ],
     )?;
+    // The attempt worktree is Homeboy-owned, so intent-to-add safely includes
+    // untracked provider edits in the recoverable patch without touching the
+    // source or promotion worktree.
+    git_output(root, &["add", "--intent-to-add", "--", "."])?;
+    let working_patch = git_output(
+        root,
+        &["diff", "--binary", "--full-index", "--find-renames", "HEAD"],
+    )?;
+    let patch = format!("{committed_patch}{working_patch}");
     if patch.trim().is_empty() {
         return Ok(());
     }
@@ -691,6 +844,7 @@ fn harvest_committed_patch_with_metadata(
         message: error.to_string(),
     })?;
     let range = format!("{base}..HEAD");
+    let committed_changes = head != base;
     // Retain the patch before collecting optional commit metadata so a later
     // Git failure cannot strand the recoverable artifact.
     outcome.artifacts.push(committed_patch_artifact(
@@ -699,14 +853,19 @@ fn harvest_committed_patch_with_metadata(
         base,
         &range,
         Vec::new(),
+        committed_changes,
     ));
-    let commits = collect_metadata(root, &range)?;
+    let commits = if committed_changes {
+        collect_metadata(root, &range)?
+    } else {
+        Vec::new()
+    };
     outcome
         .artifacts
         .last_mut()
         .expect("committed patch artifact was attached")
         .metadata = serde_json::json!({
-        "change_source": "local_commits",
+        "change_source": if committed_changes { "local_commits" } else { "isolated_workspace" },
         "base_ref": base,
         "commit_range": range,
         "commits": commits,
@@ -731,13 +890,33 @@ fn committed_patch_artifact(
     base: &str,
     range: &str,
     commits: Vec<serde_json::Value>,
+    committed_changes: bool,
 ) -> AgentTaskArtifact {
     AgentTaskArtifact {
         schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: "committed-changes".to_string(),
+        id: if committed_changes {
+            "committed-changes"
+        } else {
+            "attempt-workspace-changes"
+        }
+        .to_string(),
         kind: "patch".to_string(),
-        name: Some("committed-changes.patch".to_string()),
-        label: Some("executor committed changes".to_string()),
+        name: Some(
+            if committed_changes {
+                "committed-changes.patch"
+            } else {
+                "attempt-workspace-changes.patch"
+            }
+            .to_string(),
+        ),
+        label: Some(
+            if committed_changes {
+                "executor committed changes"
+            } else {
+                "isolated executor workspace changes"
+            }
+            .to_string(),
+        ),
         role: Some("patch".to_string()),
         semantic_key: None,
         path: Some(path.display().to_string()),
@@ -746,7 +925,7 @@ fn committed_patch_artifact(
         size_bytes: Some(patch.len() as u64),
         sha256: None,
         metadata: serde_json::json!({
-            "change_source": "local_commits",
+            "change_source": if committed_changes { "local_commits" } else { "isolated_workspace" },
             "base_ref": base,
             "commit_range": range,
             "commits": commits,
@@ -833,6 +1012,7 @@ enum HarvestError {
     Git { command: String, message: String },
     ArtifactDirectory { path: PathBuf, message: String },
     ArtifactWrite { path: PathBuf, message: String },
+    CandidateWorkspace { message: String },
 }
 
 fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -888,6 +1068,11 @@ fn committed_harvest_failure(
             "agent_task.committed_harvest_artifact_failed",
             format!("committed-change harvest could not write patch artifact {}: {message}", path.display()),
             serde_json::json!({ "path": path, "operation": "write", "error": message }),
+        ),
+        HarvestError::CandidateWorkspace { message } => (
+            "agent_task.attempt_workspace_materialization_failed",
+            format!("could not create isolated executor attempt workspace: {message}"),
+            serde_json::json!({ "error": message }),
         ),
     };
     outcome.status = AgentTaskOutcomeStatus::Failed;
@@ -973,11 +1158,13 @@ mod committed_harvest_tests {
             timeout_ms: None,
             rotation_index: 0,
             rotation_attempts: Vec::new(),
+            retry_attempts: Vec::new(),
             task_base_sha: Some(base),
+            candidate_workspace: None,
         };
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
-        let error = harvest_committed_patch_with_metadata(&mut outcome, &running, |_, _| {
+        let error = harvest_workspace_patch_with_metadata(&mut outcome, &running, |_, _| {
             Err(HarvestError::Git {
                 command: "git log injected metadata failure".to_string(),
                 message: "injected failure".to_string(),

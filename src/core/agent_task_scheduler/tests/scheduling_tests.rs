@@ -473,6 +473,157 @@ mod concurrency_tests {
         );
     }
 
+    #[derive(Clone)]
+    struct PermissionDeniedThenCommitExecutor {
+        attempts: Arc<AtomicUsize>,
+        workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for PermissionDeniedThenCommitExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let workspace = std::path::PathBuf::from(
+                request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .expect("isolated workspace"),
+            );
+            self.workspaces
+                .lock()
+                .expect("workspaces")
+                .push(workspace.clone());
+            assert_eq!(
+                request.executor.config["workspace"]["root"],
+                workspace.display().to_string()
+            );
+            assert_eq!(
+                request.executor.config["workspace_root"],
+                workspace.display().to_string()
+            );
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            std::fs::write(
+                workspace.join("agent-change.txt"),
+                format!("attempt {attempt}\n"),
+            )
+            .expect("write agent change");
+            if attempt == 1 {
+                return AgentTaskOutcome {
+                    schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                    task_id: request.task_id,
+                    status: AgentTaskOutcomeStatus::Failed,
+                    summary: Some("permission denied".to_string()),
+                    failure_classification: Some(AgentTaskFailureClassification::Transient),
+                    artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    diagnostics: vec![AgentTaskDiagnostic {
+                        class: "provider.permission_denied".to_string(),
+                        message: "executor was denied the requested operation".to_string(),
+                        data: json!({ "operation": "write_file" }),
+                    }],
+                    outputs: Value::Null,
+                    workflow: None,
+                    follow_up: None,
+                    metadata: Value::Null,
+                };
+            }
+            assert!(Command::new("git")
+                .args(["add", "agent-change.txt"])
+                .current_dir(&workspace)
+                .status()
+                .expect("stage change")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "-m", "agent change"])
+                .current_dir(&workspace)
+                .status()
+                .expect("commit change")
+                .success());
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    #[test]
+    fn retry_uses_clean_isolated_workspace_after_permission_denial() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        init_git_workspace(&source);
+        assert!(Command::new("git")
+            .args([
+                "clone",
+                source.to_str().expect("source path"),
+                target.to_str().expect("target path")
+            ])
+            .status()
+            .expect("clone target")
+            .success());
+        let executor = PermissionDeniedThenCommitExecutor {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            workspaces: Arc::new(Mutex::new(Vec::new())),
+        };
+        let attempts = Arc::clone(&executor.attempts);
+        let workspaces = Arc::clone(&executor.workspaces);
+        let scheduler = AgentTaskScheduler::new(executor).with_run_id("retry-isolation");
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(source.display().to_string());
+        plan.tasks[0].executor.config = json!({
+            "workspace": { "root": source.display().to_string() },
+            "workspace_root": source.display().to_string(),
+        });
+        plan.options.retry.max_attempts = 2;
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Transient];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let workspaces = workspaces.lock().expect("workspaces");
+        assert_eq!(workspaces.len(), 2);
+        assert_ne!(workspaces[0], workspaces[1]);
+        assert!(workspaces.iter().all(|workspace| workspace != &source));
+        assert!(workspaces.iter().all(|workspace| workspace.is_dir()));
+        assert!(Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&source)
+            .output()
+            .expect("source status")
+            .stdout
+            .is_empty());
+        assert!(!target.join("agent-change.txt").exists());
+        assert!(aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.id == "committed-changes"));
+        let retry = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.retry_attempt")
+            .expect("failed retry evidence");
+        assert_eq!(
+            retry.data["diagnostics"][0]["class"],
+            "provider.permission_denied"
+        );
+        assert_eq!(
+            retry.data["diagnostics"][0]["data"]["operation"],
+            "write_file"
+        );
+        assert_eq!(
+            retry.data["artifacts"][0]["id"],
+            "attempt-workspace-changes"
+        );
+        assert_eq!(
+            retry.data["artifacts"][0]["metadata"]["change_source"],
+            "isolated_workspace"
+        );
+        assert_eq!(retry.data["candidate_workspace"], json!(workspaces[0]));
+    }
+
     #[test]
     fn clean_workspace_without_executor_commits_remains_a_no_patch_success() {
         let temp = tempfile::tempdir().expect("tempdir");
