@@ -154,6 +154,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                 promotion_source,
                 args.to_worktree.as_deref(),
                 args.provider_command.as_deref(),
+                &args.provider_argv,
                 review,
             )
         })
@@ -464,6 +465,7 @@ fn promotion_candidates(
     source: &str,
     to_worktree: Option<&str>,
     provider_command: Option<&str>,
+    provider_argv: &[String],
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
     review
@@ -489,6 +491,11 @@ fn promotion_candidates(
                     command.push("--provider-command".to_string());
                     command.push(provider_command.to_string());
                 }
+                command.extend(
+                    provider_argv
+                        .iter()
+                        .map(|argument| format!("--provider-argv={argument}")),
+                );
 
                 serde_json::json!({
                     "task_id": candidate.task_id,
@@ -672,7 +679,62 @@ mod tests {
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
-    use homeboy::core::agent_tasks::AgentTaskAggregateSummary;
+    use homeboy::core::agent_tasks::{
+        AgentTaskAggregateSummary, AgentTaskDecisionRef, AgentTaskReconciliationDecision,
+    };
+
+    #[test]
+    fn promotion_candidates_preserve_provider_argv() {
+        let review = AgentTaskAggregateReport {
+            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
+            summary: AgentTaskAggregateSummary::default(),
+            tasks: Vec::new(),
+            artifact_inventory: Vec::new(),
+            apply_candidates: vec![AgentTaskDecisionRef {
+                task_id: "task-1".to_string(),
+                decision: AgentTaskReconciliationDecision::ApplyCandidate,
+                reason: "patch available".to_string(),
+                artifact_ids: vec!["patch-1".to_string()],
+            }],
+            issue_report_candidates: Vec::new(),
+            retry_plan: Vec::new(),
+            review_candidates: Vec::new(),
+            matrix: Vec::new(),
+        };
+
+        let candidates = promotion_candidates(
+            "aggregate.json",
+            Some("fixture@target"),
+            None,
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "promotion-provider".to_string(),
+                "--workspace=/tmp/target".to_string(),
+            ],
+            &review,
+        );
+
+        assert_eq!(
+            candidates[0]["command"],
+            serde_json::json!([
+                "homeboy",
+                "agent-task",
+                "promote",
+                "aggregate.json",
+                "--task-id",
+                "task-1",
+                "--artifact-id",
+                "patch-1",
+                "--to-worktree",
+                "fixture@target",
+                "--provider-argv=homeboy",
+                "--provider-argv=agent-task",
+                "--provider-argv=promotion-provider",
+                "--provider-argv=--workspace=/tmp/target",
+            ])
+        );
+    }
 
     #[test]
     fn review_next_actions_include_retry_and_lab_run_plan_commands() {

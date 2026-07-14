@@ -323,6 +323,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             run_id: run_id.to_string(),
             to_worktree: None,
             provider_command: None,
+            provider_argv: Vec::new(),
         })
         .expect("review loaded");
 

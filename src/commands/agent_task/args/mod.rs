@@ -779,6 +779,15 @@ pub struct ReviewArgs {
     /// External workspace provider command to include in generated promotion commands.
     #[arg(long, value_name = "COMMAND")]
     pub provider_command: Option<String>,
+
+    /// One argument for an argv-safe external workspace provider invocation.
+    /// Repeat this option in provider argv order.
+    #[arg(
+        long = "provider-argv",
+        value_name = "ARG",
+        conflicts_with = "provider_command"
+    )]
+    pub provider_argv: Vec<String>,
 }
 
 #[derive(Args, Debug)]
