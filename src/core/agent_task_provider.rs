@@ -30,6 +30,7 @@ use crate::core::engine::shell;
 use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
+pub(crate) mod artifact_finalization;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;

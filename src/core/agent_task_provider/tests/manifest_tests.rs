@@ -504,6 +504,14 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
 
 #[test]
 fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
+    let artifact_root = std::env::temp_dir()
+        .join("homeboy-agent-task-provider-tests")
+        .join("task-runtime-normalization");
+    std::fs::create_dir_all(&artifact_root).expect("create executor artifact root");
+    let patch = artifact_root.join("runtime.patch");
+    let report = artifact_root.join("report.json");
+    std::fs::write(&patch, "patch bytes").expect("write patch");
+    std::fs::write(&report, "{}").expect("write report");
     let provider_output = json!({
         "schema": AGENT_TASK_OUTCOME_SCHEMA,
         "task_id": "task-runtime-normalization",
@@ -513,8 +521,8 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
                 "status": "done",
                 "summary": "runtime finished",
                 "artifacts": {
-                    "patch": "/tmp/runtime.patch",
-                    "report": { "path": "/tmp/report.json" }
+                    "patch": patch,
+                    "report": { "path": report }
                 }
             }
         }
@@ -568,15 +576,11 @@ fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
     assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
     assert_eq!(outcome.artifacts.len(), 2);
     assert_eq!(outcome.artifacts[0].kind, "patch");
-    assert_eq!(
-        outcome.artifacts[0].path.as_deref(),
-        Some("/tmp/runtime.patch")
-    );
+    assert_eq!(outcome.artifacts[0].metadata["review_only"], true);
     assert_eq!(outcome.artifacts[1].kind, "report");
-    assert_eq!(
-        outcome.artifacts[1].path.as_deref(),
-        Some("/tmp/report.json")
-    );
+    assert_eq!(outcome.artifacts[1].metadata["review_only"], true);
+    assert_eq!(outcome.artifacts[0].size_bytes, None);
+    assert_eq!(outcome.artifacts[0].sha256, None);
     assert_eq!(outcome.typed_artifacts.len(), 2);
     assert_eq!(outcome.typed_artifacts[0].name, "patch");
     assert_eq!(

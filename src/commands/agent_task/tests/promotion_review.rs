@@ -380,6 +380,11 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             "local_commits"
         );
         assert_eq!(
+            value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]
+                ["artifact_provenance"],
+            "homeboy_generated_committed_patch"
+        );
+        assert_eq!(
             value["attempts"][0]["promotion"]["provenance"]["artifact_metadata"]["commits"]
                 .as_array()
                 .map(Vec::len),

@@ -301,15 +301,25 @@ pub(crate) fn append_unique_evidence_refs(
 }
 
 pub(crate) fn is_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
-    artifact_has_patch_shape(artifact)
+    !artifact_is_review_only(artifact)
+        && artifact_has_patch_shape(artifact)
         && artifact_has_content(artifact)
         && !artifact_has_empty_sha(artifact)
         && artifact.metadata.get("actionable").and_then(Value::as_bool) != Some(false)
 }
 
 pub(crate) fn is_empty_patch_artifact(artifact: &AgentTaskArtifact) -> bool {
-    artifact_has_patch_shape(artifact)
+    !artifact_is_review_only(artifact)
+        && artifact_has_patch_shape(artifact)
         && (!artifact_has_content(artifact) || artifact_has_empty_sha(artifact))
+}
+
+fn artifact_is_review_only(artifact: &AgentTaskArtifact) -> bool {
+    artifact
+        .metadata
+        .get("review_only")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn artifact_has_patch_shape(artifact: &AgentTaskArtifact) -> bool {
@@ -644,6 +654,28 @@ mod tests {
             artifact.kind == "preflight_evidence"
                 && artifact.path.as_deref() == Some(&evidence_path.to_string_lossy())
         }));
+    }
+
+    #[test]
+    fn review_only_patch_is_neither_actionable_nor_empty_candidate() {
+        let artifact = AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "external-patch".to_string(),
+            kind: "patch".to_string(),
+            name: Some("external.patch".to_string()),
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/external/provider.patch".to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(128),
+            sha256: Some("non-empty".to_string()),
+            metadata: serde_json::json!({ "review_only": true }),
+        };
+
+        assert!(!is_actionable_patch_artifact(&artifact));
+        assert!(!is_empty_patch_artifact(&artifact));
     }
 
     #[test]

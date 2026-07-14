@@ -928,12 +928,31 @@ fn harvest_committed_patch_with_metadata(
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
     };
-    let Some(root) = running.request.workspace.root.as_deref().map(Path::new) else {
+    let Some(attempt_root) = running.request.workspace.root.as_deref().map(Path::new) else {
         return Ok(());
     };
-    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    let mut root = attempt_root;
+    let mut head = git_output(root, &["rev-parse", "HEAD"])?;
     if head == base {
-        return Ok(());
+        if let Some(source_root) = running
+            .source_workspace_root
+            .as_deref()
+            .map(Path::new)
+            .filter(|source_root| source_root != &attempt_root)
+        {
+            let source_head = git_output(source_root, &["rev-parse", "HEAD"])?;
+            if source_head != base {
+                // The scheduler owns this bounded Git-derived patch. It is not
+                // a provider-declared runtime file, even though its source
+                // checkout differs from the isolated execution checkout.
+                root = source_root;
+                head = source_head;
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
     }
     if !git_is_ancestor(root, base, "HEAD")? {
         return Err(HarvestError::UnrelatedHead {
@@ -978,6 +997,7 @@ fn harvest_committed_patch_with_metadata(
         .expect("committed patch artifact was attached")
         .metadata = serde_json::json!({
         "change_source": "local_commits",
+        "artifact_provenance": "homeboy_generated_committed_patch",
         "base_ref": base,
         "commit_range": range,
         "commits": commits,

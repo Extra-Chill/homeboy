@@ -20,6 +20,14 @@ impl ObservationStore {
             ));
         }
         if let Some(existing) = self.get_artifact(&artifact.id)? {
+            if artifact.artifact_type == "remote_file"
+                && remote_projection_identity_matches(&existing, &artifact)
+            {
+                // A controller can crash after inserting this row and before it
+                // records the projection marker. Preserve the original lifecycle
+                // timestamp while accepting the identical retry.
+                return Ok(());
+            }
             return ensure_identical("artifact", &artifact.id, &existing, &artifact);
         }
         let metadata_json = serialize_metadata(&artifact.metadata_json)?;
@@ -67,6 +75,36 @@ impl ObservationStore {
         path: impl AsRef<Path>,
         metadata_json: serde_json::Value,
     ) -> Result<ArtifactRecord> {
+        self.record_artifact_with_id_and_metadata(run_id, kind, path, None, metadata_json)
+    }
+
+    /// Record verified file bytes under a caller-provided stable logical id.
+    /// This is used when an owning lifecycle already defines artifact identity.
+    pub fn record_artifact_with_id(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        artifact_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        self.record_artifact_with_id_and_metadata(
+            run_id,
+            kind,
+            path,
+            Some(artifact_id),
+            metadata_json,
+        )
+    }
+
+    fn record_artifact_with_id_and_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        artifact_id: Option<&str>,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
         validate_required("run_id", run_id)?;
         validate_required("kind", kind)?;
         if self.get_run(run_id)?.is_none() {
@@ -102,13 +140,85 @@ impl ObservationStore {
             ));
         }
 
-        let id = Uuid::new_v4().to_string();
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let size_bytes = i64::try_from(metadata.len()).ok();
-        let sha256 = Some(crate::core::artifact_metadata::sha256_file(path)?);
-        let mime = crate::core::artifact_metadata::content_type_from_path(path);
+        let id = artifact_id
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
-        copy_artifact_file(path, &stored_path)?;
+        let staged_path = stored_path.with_file_name(format!(
+            ".{}-{}.staging",
+            stored_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact"),
+            Uuid::new_v4()
+        ));
+        copy_artifact_file(path, &staged_path)?;
+        let staged_metadata = fs::metadata(&staged_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect staged artifact bytes".to_string()),
+            )
+        })?;
+        let size_bytes = i64::try_from(staged_metadata.len()).ok();
+        let sha256 = Some(crate::core::artifact_metadata::sha256_file(&staged_path)?);
+        if let Some(existing) = self.get_artifact(&id)? {
+            let existing_path = Path::new(&existing.path);
+            let existing_matches = existing.run_id == run_id
+                && existing.kind == kind
+                && existing.size_bytes == size_bytes
+                && existing.sha256 == sha256
+                && fs::metadata(existing_path)
+                    .map(|value| value.is_file())
+                    .unwrap_or(false)
+                && crate::core::artifact_metadata::sha256_file(existing_path).ok() == sha256;
+            fs::remove_file(&staged_path).ok();
+            if existing_matches {
+                return Ok(existing);
+            }
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!("stable artifact id '{id}' already records different content or ownership"),
+                Some(id),
+                None,
+            ));
+        }
+        let published_new_file = match fs::hard_link(&staged_path, &stored_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing_matches = fs::metadata(&stored_path)
+                    .map(|value| value.is_file() && i64::try_from(value.len()).ok() == size_bytes)
+                    .unwrap_or(false)
+                    && crate::core::artifact_metadata::sha256_file(&stored_path).ok() == sha256;
+                fs::remove_file(&staged_path).ok();
+                if !existing_matches {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact_id",
+                        format!("stable artifact id '{id}' already publishes different bytes"),
+                        Some(id),
+                        None,
+                    ));
+                }
+                false
+            }
+            Err(error) => {
+                fs::remove_file(&staged_path).ok();
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("publish persisted artifact".to_string()),
+                ));
+            }
+        };
+        if published_new_file {
+            fs::remove_file(&staged_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("remove persisted artifact staging file".to_string()),
+                )
+            })?;
+        }
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let mime = crate::core::artifact_metadata::content_type_from_path(path);
         let path_string = stored_path.to_string_lossy().to_string();
         let mut artifact = ArtifactRecord {
             id: id.clone(),
@@ -130,7 +240,7 @@ impl ObservationStore {
 
         let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
-        execute_with_retry("insert artifact record", || {
+        if let Err(error) = execute_with_retry("insert artifact record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
@@ -153,7 +263,12 @@ impl ObservationStore {
                     created_at,
                 ],
             )
-        })?;
+        }) {
+            if published_new_file {
+                fs::remove_file(&stored_path).ok();
+            }
+            return Err(error);
+        }
 
         let artifact = self.get_artifact(&id)?.ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -163,7 +278,7 @@ impl ObservationStore {
         crate::core::publication_artifacts::index_published_artifact_refs(
             self,
             &artifact,
-            Some(path),
+            Some(&stored_path),
         )?;
         Ok(artifact)
     }
@@ -815,11 +930,87 @@ impl ObservationStore {
     }
 }
 
+fn remote_projection_identity_matches(
+    existing: &ArtifactRecord,
+    incoming: &ArtifactRecord,
+) -> bool {
+    existing.id == incoming.id
+        && existing.run_id == incoming.run_id
+        && existing.kind == incoming.kind
+        && existing.artifact_type == "remote_file"
+        && existing.path == incoming.path
+        && existing.url == incoming.url
+        && existing.public_url == incoming.public_url
+        && existing.viewer_url == incoming.viewer_url
+        && existing.viewer_links == incoming.viewer_links
+        && existing.sha256 == incoming.sha256
+        && existing.size_bytes == incoming.size_bytes
+        && existing.mime == incoming.mime
+        && existing.metadata_json == incoming.metadata_json
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::observation::{ArtifactViewerLink, NewRunRecord};
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn stable_artifact_id_publishes_copied_bytes_and_rejects_conflicts() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("source.patch");
+            fs::write(&source, b"first bytes").expect("write source");
+
+            let first = store
+                .record_artifact_with_id(
+                    &run.id,
+                    "patch",
+                    &source,
+                    "stable-patch",
+                    serde_json::json!({}),
+                )
+                .expect("first publication");
+            assert_eq!(first.size_bytes, Some(11));
+            assert_eq!(
+                first.sha256,
+                Some(crate::core::artifact_metadata::sha256_file(&source).expect("source hash"))
+            );
+            assert_eq!(
+                fs::read(&first.path).expect("persisted bytes"),
+                b"first bytes"
+            );
+
+            let replay = store
+                .record_artifact_with_id(
+                    &run.id,
+                    "patch",
+                    &source,
+                    "stable-patch",
+                    serde_json::json!({}),
+                )
+                .expect("identical replay");
+            assert_eq!(replay.id, first.id);
+
+            fs::write(&source, b"different bytes").expect("rewrite source");
+            assert!(store
+                .record_artifact_with_id(
+                    &run.id,
+                    "patch",
+                    &source,
+                    "stable-patch",
+                    serde_json::json!({}),
+                )
+                .is_err());
+            assert_eq!(
+                fs::read(&first.path).expect("original persisted bytes"),
+                b"first bytes"
+            );
+        });
+    }
 
     #[test]
     fn import_artifact_round_trips_public_link_metadata() {
@@ -876,6 +1067,47 @@ mod tests {
             );
             assert_eq!(artifact.viewer_links.len(), 1);
             assert_eq!(artifact.viewer_links[0].kind, "json");
+        });
+    }
+
+    #[test]
+    fn remote_projection_retry_preserves_inserted_row_lifecycle_time() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let mut artifact = ArtifactRecord {
+                id: "remote-projection".to_string(),
+                run_id: run.id,
+                kind: "patch".to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: "runner-artifact://runner%2Fa/run%20b/patch".to_string(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: Some("abc".to_string()),
+                size_bytes: Some(3),
+                mime: Some("text/x-patch".to_string()),
+                metadata_json: serde_json::json!({ "name": "patch" }),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            };
+            store.import_artifact(&artifact).expect("first projection");
+            artifact.created_at = "2026-01-02T00:00:00Z".to_string();
+            store
+                .import_artifact(&artifact)
+                .expect("retry after row insertion");
+            assert_eq!(
+                store
+                    .get_artifact("remote-projection")
+                    .expect("read projection")
+                    .expect("projection")
+                    .created_at,
+                "2026-01-01T00:00:00Z"
+            );
+            artifact.path = "runner-artifact://runner%2Fa/run%20b/other".to_string();
+            assert!(store.import_artifact(&artifact).is_err());
         });
     }
 }
