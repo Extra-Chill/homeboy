@@ -1,0 +1,144 @@
+use clap::{Args, Subcommand};
+use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+
+use super::super::super::agent_task_dispatch::DispatchArgs;
+use super::super::super::review;
+
+#[derive(Args, Debug, Clone)]
+pub struct VerifyGateArgs {
+    #[arg(long = "verify", value_name = "COMMAND")]
+    pub verify: Vec<String>,
+    #[arg(long = "private-verify", value_name = "COMMAND")]
+    pub private_verify: Vec<String>,
+    #[arg(
+        long = "private-gate-reveal",
+        default_value = "summary-only",
+        value_name = "POLICY"
+    )]
+    pub private_gate_reveal: AgentTaskGateRevealPolicy,
+}
+impl VerifyGateArgs {
+    pub fn has_deterministic_gate(&self) -> bool {
+        !self.verify.is_empty() || !self.private_verify.is_empty()
+    }
+}
+impl From<VerifyGateArgs> for VerifyGateOptions {
+    fn from(args: VerifyGateArgs) -> Self {
+        Self {
+            verify: args.verify,
+            private_verify: args.private_verify,
+            private_gate_reveal: args.private_gate_reveal,
+        }
+    }
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AgentTaskCookArgs {
+    #[command(flatten)]
+    pub dispatch: DispatchArgs,
+    #[arg(long, hide = true)]
+    pub attempt_run_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub attempt_plan: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    pub goal: Option<String>,
+    #[arg(long, value_name = "HANDLE")]
+    pub to_worktree: String,
+    #[arg(long, value_name = "COMMAND")]
+    pub provider_command: Option<String>,
+    #[arg(
+        long = "provider-argv",
+        value_name = "ARG",
+        conflicts_with = "provider_command"
+    )]
+    pub provider_argv: Vec<String>,
+    #[command(flatten)]
+    pub gates: VerifyGateArgs,
+    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
+    pub max_attempts: u32,
+    #[arg(long = "no-finalize")]
+    pub no_finalize: bool,
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
+    #[arg(long, value_name = "BRANCH")]
+    pub head: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: Option<String>,
+    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
+    pub protected_branches: Vec<String>,
+    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
+    pub ai_tool: String,
+    #[arg(
+        long,
+        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
+        value_name = "TEXT"
+    )]
+    pub ai_used_for: String,
+}
+
+#[derive(Args, Debug)]
+pub struct PromotionProviderArgs {
+    #[arg(long, value_name = "PATH")]
+    pub workspace: String,
+}
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopArgs {
+    #[command(subcommand)]
+    pub command: AgentTaskLoopCommand,
+}
+#[derive(Subcommand, Debug)]
+pub enum AgentTaskLoopCommand {
+    Define(AgentTaskLoopDefineArgs),
+    Status(AgentTaskLoopStatusArgs),
+    Resume(AgentTaskLoopResumeArgs),
+    Stop(AgentTaskLoopStatusArgs),
+}
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopDefineArgs {
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
+    #[arg(long, conflicts_with = "off")]
+    pub on: bool,
+    #[arg(long, conflicts_with = "on")]
+    pub off: bool,
+    #[arg(long = "revolution-limit", value_name = "N")]
+    pub revolution_limit: Option<u32>,
+    #[arg(long)]
+    pub resume: bool,
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+    #[arg(
+        long = "dispatch-selector",
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub dispatch_selector: Option<String>,
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
+}
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopStatusArgs {
+    pub loop_id: String,
+}
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopResumeArgs {
+    pub loop_id: String,
+    #[arg(long = "revolution-limit", value_name = "N")]
+    pub revolution_limit: Option<u32>,
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+    #[arg(
+        long = "dispatch-selector",
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub dispatch_selector: Option<String>,
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
+}
