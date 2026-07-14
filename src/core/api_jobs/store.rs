@@ -22,6 +22,7 @@ use super::types::{
     LeaselessOrphanJobDiagnostics,
 };
 use crate::core::error::{Error, Result};
+use crate::core::process::pid_is_running;
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -320,6 +321,14 @@ impl JobStore {
         &self,
         expected_lease_id: &str,
     ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness(expected_lease_id, pid_is_running)
+    }
+
+    pub(super) fn reconcile_dead_daemon_lease_jobs_with_child_liveness(
+        &self,
+        expected_lease_id: &str,
+        pid_is_alive: impl Fn(u32) -> bool,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
         let diagnostics = self.daemon_lease_job_diagnostics(expected_lease_id);
         if diagnostics.unowned_count() > 0 {
             return Err(Error::validation_invalid_argument(
@@ -336,8 +345,13 @@ impl JobStore {
 
         let now = timestamp_ms();
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut diagnostics = diagnostics;
         for job_id in &diagnostics.matching_job_ids {
             let stored = inner.jobs.get_mut(job_id).expect("diagnosed job exists");
+            if last_progress_child_pid(&stored.events).is_some_and(&pid_is_alive) {
+                diagnostics.protected_job_ids.push(*job_id);
+                continue;
+            }
             if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
                 stored.job.status = status;
                 stored.job.updated_at_ms = now;
@@ -403,6 +417,7 @@ impl JobStore {
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
         }
+        diagnostics.protected_job_ids.sort();
         drop(inner);
         self.persist()?;
         Ok(diagnostics)
@@ -412,11 +427,22 @@ impl JobStore {
     /// owns a store whose current daemon lease is missing. Historical job leases
     /// remain evidence; they cannot prove a current owner or be adopted as one.
     pub fn reconcile_leaseless_orphan_jobs(&self) -> Result<LeaselessOrphanJobDiagnostics> {
+        self.reconcile_leaseless_orphan_jobs_with_child_liveness(pid_is_running)
+    }
+
+    fn reconcile_leaseless_orphan_jobs_with_child_liveness(
+        &self,
+        pid_is_alive: impl Fn(u32) -> bool,
+    ) -> Result<LeaselessOrphanJobDiagnostics> {
         let mut diagnostics = LeaselessOrphanJobDiagnostics::default();
         {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             for stored in inner.jobs.values() {
                 if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+                    continue;
+                }
+                if last_progress_child_pid(&stored.events).is_some_and(&pid_is_alive) {
+                    diagnostics.protected_job_ids.push(stored.job.id);
                     continue;
                 }
                 let original_daemon_lease_id = stored.job.daemon_lease_id.clone();
@@ -434,6 +460,7 @@ impl JobStore {
         diagnostics.affected_jobs.sort_by_key(|job| job.job_id);
         diagnostics.historical_lease_ids.sort();
         diagnostics.historical_lease_ids.dedup();
+        diagnostics.protected_job_ids.sort();
 
         let now = timestamp_ms();
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
@@ -759,6 +786,22 @@ impl JobStore {
 
         write_durable_store(&persistence.path, &durable)
     }
+}
+
+/// The reverse runner records the executing child in periodic progress
+/// heartbeats. A live child is still authoritative even after its daemon lease
+/// owner exits, so reconciliation must leave its durable run files intact.
+fn last_progress_child_pid(events: &[JobEvent]) -> Option<u32> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Progress)
+        .and_then(|event| event.data.as_ref())
+        .and_then(|data| data.get("process"))
+        .and_then(|process| process.get("root_pid"))
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
 }
 
 impl JobHandle {
