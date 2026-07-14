@@ -166,6 +166,10 @@ pub struct DaemonOrphanAdoptionResult {
 pub struct DaemonLeaselessRecoveryResult {
     pub affected_job_ids: Vec<Uuid>,
     pub affected_job_count: usize,
+    #[serde(default)]
+    pub affected_jobs: Vec<crate::core::api_jobs::LeaselessOrphanAffectedJob>,
+    #[serde(default)]
+    pub historical_lease_ids: Vec<String>,
     pub evidence_snapshot_path: String,
     pub ownership_proof: Vec<String>,
     pub retry_guidance: String,
