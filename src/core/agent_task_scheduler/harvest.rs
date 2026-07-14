@@ -371,7 +371,7 @@ fn git_is_ancestor(cwd: &Path, base: &str, head: &str) -> Result<bool, HarvestEr
     Ok(output.status.success())
 }
 
-fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
+pub(super) fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
     let output = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
@@ -496,6 +496,7 @@ mod committed_harvest_tests {
     };
     use crate::core::source_snapshot::SourceSnapshot;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
 
     static LAB_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

@@ -161,7 +161,7 @@ fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
 
     assert_eq!(
         contract.hot_label,
-        crate::command_contract::AGENT_TASK_PROMOTE_LAB_LABEL
+        super::super::spec::AGENT_TASK_PROMOTE_LAB_LABEL
     );
     assert_eq!(contract.portability, LabCommandPortability::Portable);
     assert_eq!(

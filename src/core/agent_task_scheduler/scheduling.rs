@@ -10,8 +10,6 @@
 //! widening the crate-public surface.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -21,8 +19,12 @@ use super::outcome::{
     invalid_required_typed_artifacts, mark_generated_from_outputs,
     missing_required_typed_artifacts, missing_typed_artifacts_failure,
     nested_failed_executor_status, provider_run_result_is_empty_incomplete, render_template_string,
-    render_template_value, runtime_result_is_materializable, typed_artifact_from_artifact,
-    typed_artifact_from_evidence, typed_artifact_from_outcome,
+    runtime_result_is_materializable, typed_artifact_from_artifact, typed_artifact_from_evidence,
+    typed_artifact_from_outcome,
+};
+use super::resources::{
+    render_value_templates, resource_capacity_available, resource_is_busy, select_artifact_payload,
+    workspace_is_busy,
 };
 use super::*;
 

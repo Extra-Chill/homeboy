@@ -1,7 +1,6 @@
 //! Scheduler tests organized by scheduling concern.
 
 mod shared;
-use shared::*;
 
 mod adaptive_concurrency;
 mod artifact_binding;

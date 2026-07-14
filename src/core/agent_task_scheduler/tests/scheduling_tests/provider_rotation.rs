@@ -1,22 +1,7 @@
 //! Scheduler dispatch, concurrency, retry, dependency-binding, matrix, and
 //! cancellation behavior.
 
-use super::super::fixtures::*;
-use super::super::*;
-use crate::core::agent_task::{
-    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
-    AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskTypedArtifact,
-    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::fs;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
+use super::shared::*;
 
 mod provider_rotation_tests {
     use super::*;
@@ -217,7 +202,7 @@ mod provider_rotation_tests {
         let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
-        super::concurrency_tests::init_git_workspace(&workspace);
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
         let observed_roots = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(DirtyCandidateThenSuccessExecutor {
             observed_roots: Arc::clone(&observed_roots),
@@ -284,7 +269,7 @@ mod provider_rotation_tests {
     fn explicit_candidate_adoption_materializes_verified_patch_with_provenance() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
-        super::concurrency_tests::init_git_workspace(&workspace);
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
         let candidate_file = workspace.join("adopted.txt");
         fs::write(&candidate_file, "candidate\n").expect("candidate change");
         git_output(&workspace, &["add", "adopted.txt"]).expect("stage candidate");

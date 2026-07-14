@@ -1,27 +1,12 @@
 //! Scheduler dispatch, concurrency, retry, dependency-binding, matrix, and
 //! cancellation behavior.
 
-use super::super::fixtures::*;
-use super::super::*;
-use crate::core::agent_task::{
-    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
-    AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskTypedArtifact,
-    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::fs;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
+use super::shared::*;
 
-mod concurrency_tests {
+pub(super) mod concurrency_tests {
     use super::*;
 
-    pub(super) fn init_git_workspace(path: &std::path::Path) {
+    pub(crate) fn init_git_workspace(path: &std::path::Path) {
         fs::create_dir(path).expect("workspace directory");
         for args in [
             ["init", "-b", "main"].as_slice(),

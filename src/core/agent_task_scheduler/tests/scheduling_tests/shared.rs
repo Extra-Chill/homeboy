@@ -1,24 +1,26 @@
 //! Scheduler dispatch, concurrency, retry, dependency-binding, matrix, and
 //! cancellation behavior.
 
-use super::super::fixtures::*;
-use super::super::*;
-use crate::core::agent_task::{
+// Child modules import this prelude explicitly; parent imports do not propagate.
+pub(super) use super::super::fixtures::*;
+pub(super) use crate::core::agent_task::{
     expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
     AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskTypedArtifact,
-    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_ARTIFACT_SCHEMA,
 };
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::fs;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
+pub(super) use crate::core::agent_task_scheduler::attempt_workspace::fingerprint;
+pub(super) use crate::core::agent_task_scheduler::harvest::git_output_raw;
+pub(super) use crate::core::agent_task_scheduler::*;
+pub(super) use serde_json::{json, Value};
+pub(super) use std::collections::HashMap;
+pub(super) use std::fs;
+pub(super) use std::process::Command;
+pub(super) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+pub(super) use std::sync::{Arc, Mutex};
+pub(super) use std::thread;
+pub(super) use std::time::{Duration, Instant};
 
-fn concept_packet_declaration() -> AgentTaskArtifactDeclaration {
+pub(super) fn concept_packet_declaration() -> AgentTaskArtifactDeclaration {
     AgentTaskArtifactDeclaration {
         name: "concept_packet".to_string(),
         artifact_type: Some("concept_packet".to_string()),
@@ -30,9 +32,9 @@ fn concept_packet_declaration() -> AgentTaskArtifactDeclaration {
     }
 }
 
-struct ConceptPacketExecutor {
-    observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
-    emit_concept_packet: bool,
+pub(super) struct ConceptPacketExecutor {
+    pub(super) observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
+    pub(super) emit_concept_packet: bool,
 }
 
 impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
@@ -75,7 +77,7 @@ impl AgentTaskExecutorAdapter for ConceptPacketExecutor {
     }
 }
 
-struct GenericChildRunExecutor;
+pub(super) struct GenericChildRunExecutor;
 
 impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
     fn execute(

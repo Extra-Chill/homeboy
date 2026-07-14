@@ -7,6 +7,7 @@ use std::sync::{
 
 use sha2::{Digest, Sha256};
 
+use super::harvest::git_is_repository;
 use super::*;
 
 #[derive(Debug)]

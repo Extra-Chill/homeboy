@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 
-use super::super::super::agent_task_dispatch::DispatchArgs;
+use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
 
 #[derive(Args, Debug, Clone)]

@@ -1,12 +1,8 @@
 //! Outcome helpers grouped by normalization, provider-status, and rendering concern.
 
-mod outcome_artifacts;
-mod outcome_status;
-mod outcome_templates;
-
-pub(super) use outcome_artifacts::*;
-pub(super) use outcome_status::*;
-pub(super) use outcome_templates::*;
+pub(super) use super::outcome_artifacts::*;
+pub(super) use super::outcome_status::*;
+pub(super) use super::outcome_templates::*;
 
 use super::*;
 

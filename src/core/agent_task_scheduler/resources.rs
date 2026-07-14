@@ -4,9 +4,10 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use super::outcome::{render_template_string, render_template_value};
 use super::*;
 
-fn workspace_is_busy(
+pub(super) fn workspace_is_busy(
     task: &ScheduledTask,
     running: &[RunningTask],
     quarantined: &[QuarantinedTask],
@@ -28,7 +29,10 @@ fn workspace_is_busy(
 /// Returns the first deterministic exclusive-key conflict. Resource keys are
 /// caller declarations, never inferred from provider configuration or command
 /// text, so the scheduler remains tool-agnostic.
-fn resource_is_busy(task: &ScheduledTask, running: &[RunningTask]) -> Option<(String, String)> {
+pub(super) fn resource_is_busy(
+    task: &ScheduledTask,
+    running: &[RunningTask],
+) -> Option<(String, String)> {
     let keys = AgentTaskScheduleSupport::exclusive_resource_keys(&task.request);
     for key in keys {
         if let Some(holder) = running.iter().find(|running| {
