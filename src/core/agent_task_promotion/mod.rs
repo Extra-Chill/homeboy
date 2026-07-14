@@ -10,7 +10,9 @@
 //! - [`apply`]: the workspace provider trait and external provider transport.
 
 mod apply;
+mod committed_changes;
 mod fingerprint;
+mod patch;
 mod promote;
 mod types;
 

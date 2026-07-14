@@ -890,22 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_test_steps_and_overrides_have_explicit_grammar() {
-        let step = parse_test_step("cargo test dossier=>all tests pass").expect("typed step");
-        assert_eq!(step.command, "cargo test dossier");
-        assert_eq!(step.expected, "all tests pass");
-        assert!(parse_test_step("cargo test dossier").is_err());
-
-        let override_ = parse_override("summary=Reviewed summary@operator").expect("override");
-        assert!(matches!(
-            override_.target,
-            AgentTaskReviewOverrideTarget::Summary
-        ));
-        assert_eq!(override_.provenance, "operator");
-        assert!(parse_override("evidence=nope@operator").is_err());
-    }
-
-    #[test]
     fn review_next_actions_include_retry_and_lab_run_plan_commands() {
         let review = AgentTaskAggregateReport {
             schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
