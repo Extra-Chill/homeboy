@@ -23,6 +23,19 @@ static INTERRUPT_AFTER_TERMINAL_COMMIT: AtomicBool = AtomicBool::new(false);
 pub(super) fn write_plan(run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
     let path = run_dir(run_id)?.join("plan.json");
     write_json(&path, plan)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "restrict agent-task plan permissions {}",
+                    path.display()
+                )),
+            )
+        })?;
+    }
     Ok(path)
 }
 

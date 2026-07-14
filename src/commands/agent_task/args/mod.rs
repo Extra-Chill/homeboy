@@ -468,6 +468,10 @@ pub struct AgentTaskCookArgs {
     #[arg(long, hide = true)]
     pub attempt_run_id: Option<String>,
 
+    /// Controller-materialized first-attempt plan injected for Lab execution.
+    #[arg(long, hide = true)]
+    pub attempt_plan: Option<String>,
+
     /// Repo-cooking goal. Alias for the dispatch prompt when --prompt is omitted.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,

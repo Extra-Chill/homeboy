@@ -88,6 +88,16 @@ pub(super) fn sync_inline_agent_task_file(
             Some("write remapped agent-task plan".to_string()),
         )
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&plan_file, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("restrict remapped agent-task plan permissions".to_string()),
+            )
+        })?;
+    }
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -652,6 +662,44 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
     Some((args, attempt_run_id))
 }
 
+/// Carry the controller-materialized first attempt through Lab. The runner has
+/// its own lifecycle store, so an attempt id alone cannot resolve the
+/// controller-side plan file.
+pub(super) fn inject_agent_task_cook_attempt_plan(
+    args: &[String],
+    attempt_run_id: &str,
+) -> Result<Vec<String>> {
+    let invocation = match CommandInvocation::for_subcommand(args, "agent-task") {
+        Some(invocation) => invocation,
+        None => return Ok(args.to_vec()),
+    };
+    let Some(action_index) = invocation.child_index_matching(&["cook"]) else {
+        return Ok(args.to_vec());
+    };
+    if invocation
+        .option_value_after(action_index, "--attempt-plan")
+        .is_some()
+    {
+        return Ok(args.to_vec());
+    }
+    let record = agent_task_lifecycle::status(attempt_run_id)?;
+    let plan_path = std::path::PathBuf::from(&record.plan_path);
+    if !plan_path.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "attempt_plan",
+            "Lab cook handoff cannot stage the controller attempt plan because its durable plan file does not exist",
+            Some(record.plan_path),
+            None,
+        ));
+    }
+    Ok(ArgEditor::new(args)
+        .insert_after(
+            action_index,
+            [format!("--attempt-plan=@{}", plan_path.display())],
+        )
+        .into_args())
+}
+
 /// Resolves the stable per-run isolation token for an agent-task cook offload:
 /// the explicit `--run-id` when provided, otherwise a freshly generated run id.
 /// Returns `None` for other invocations, which already use unique snapshot
@@ -780,6 +828,90 @@ fn first_quoted_dependency_path(output: &str, path_contains: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cook_handoff_references_controller_attempt_plan_file_without_exposing_contents() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = crate::core::agent_task_scheduler::AgentTaskPlan::new(
+                "controller-plan",
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "exact-controller-task",
+                    "executor": { "backend": "fixture", "config": { "api_key": "attempt-secret" } },
+                    "instructions": "execute the controller plan",
+                    "workspace": { "root": "/controller/worktree" }
+                }))
+                .expect("task")],
+            );
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--run-id".to_string(),
+                "cook-8101".to_string(),
+            ];
+
+            let record = agent_task_lifecycle::submit_plan(&plan, Some("cook-8101-attempt-1"))
+                .expect("controller attempt plan");
+            let injected = inject_agent_task_cook_attempt_plan(&args, &record.run_id)
+                .expect("controller plan reference injected");
+            let spec = injected
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--attempt-plan="))
+                .expect("attempt plan argv");
+            let staged_path = spec.strip_prefix('@').expect("file-backed plan reference");
+
+            assert_eq!(staged_path, record.plan_path);
+            assert!(!injected.iter().any(|arg| arg.contains("attempt-secret")));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(staged_path)
+                        .expect("attempt plan metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            assert_eq!(
+                injected
+                    .iter()
+                    .filter(|arg| arg.starts_with("--attempt-plan="))
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn cook_handoff_reports_missing_controller_attempt_plan_deterministically() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = crate::core::agent_task_scheduler::AgentTaskPlan::new(
+                "missing-controller-plan",
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "test"
+                }))
+                .expect("task")],
+            );
+            let record = agent_task_lifecycle::submit_plan(&plan, Some("cook-missing-plan"))
+                .expect("attempt record");
+            std::fs::remove_file(&record.plan_path).expect("remove isolated plan file");
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ];
+
+            let error = inject_agent_task_cook_attempt_plan(&args, &record.run_id)
+                .expect_err("missing plan must fail before runner handoff");
+
+            assert_eq!(error.details["field"], "attempt_plan");
+            assert!(error.message.contains("durable plan file does not exist"));
+        });
+    }
 
     #[test]
     fn legacy_offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {

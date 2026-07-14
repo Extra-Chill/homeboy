@@ -113,8 +113,21 @@ pub(in crate::core::runner) fn materialize_inline_agent_task_json_specs_in_args<
         "lab.sync_remapped_agent_task_plan",
         |spec| sync_inline_json(spec),
     )?;
+    let (args, attempt_plan_entry) = materialize_inline_json_option(
+        &args,
+        agent_task_subcommand_is(&args, &["cook"]),
+        "--attempt-plan",
+        "agent-task-attempt-plan.json",
+        "agent_task_attempt_plan_remapped",
+        "lab.sync_remapped_agent_task_attempt_plan",
+        |spec| sync_inline_json(spec),
+    )?;
 
-    let workspace_entries = task_entry.into_iter().chain(plan_entry).collect();
+    let workspace_entries = task_entry
+        .into_iter()
+        .chain(plan_entry)
+        .chain(attempt_plan_entry)
+        .collect();
     Ok((args, workspace_entries))
 }
 
@@ -126,16 +139,24 @@ pub(in crate::core::runner) fn remap_agent_task_plan_in_args(
     let ordered = order_mappings_by_specificity(mappings);
 
     try_rewrite_flag_value_args(args, |arg, iter, out| {
-        if arg == "--plan" {
+        if arg == "--plan" || arg == "--attempt-plan" {
             out.push(arg.to_string());
             if let Some(spec) = iter.next() {
                 out.push(remap_agent_task_plan_spec(spec, &ordered, source_path)?);
             }
             return Ok(());
         }
-        if let Some(spec) = arg.strip_prefix("--plan=") {
+        if let Some(spec) = arg
+            .strip_prefix("--plan=")
+            .or_else(|| arg.strip_prefix("--attempt-plan="))
+        {
+            let flag = if arg.starts_with("--attempt-plan=") {
+                "--attempt-plan="
+            } else {
+                "--plan="
+            };
             out.push(format!(
-                "--plan={}",
+                "{flag}{}",
                 remap_agent_task_plan_spec(spec, &ordered, source_path)?
             ));
             return Ok(());

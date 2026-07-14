@@ -101,16 +101,32 @@ where
         );
     }
     dispatch_args.core.queue_only = false;
-    let (dispatch_value, _dispatch_exit) =
-        dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
-    let run_id = dispatch_value["run_id"]
-        .as_str()
-        .ok_or_else(|| {
-            homeboy::core::Error::internal_unexpected(
-                "agent-task cook dispatch step did not return a run_id".to_string(),
+    let run_id = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+        let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "attempt_plan",
+                "agent-task cook requires --run-id when executing a controller-materialized attempt plan",
+                None,
+                None,
             )
-        })?
-        .to_string();
+        })?;
+        // Lab receives the controller's immutable plan because its lifecycle
+        // store is runner-local and cannot resolve the controller's plan path.
+        let plan = agent_task_service::read_plan(attempt_plan)?;
+        agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
+        run_id
+    } else {
+        let (dispatch_value, _dispatch_exit) =
+            dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
+        dispatch_value["run_id"]
+            .as_str()
+            .ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "agent-task cook dispatch step did not return a run_id".to_string(),
+                )
+            })?
+            .to_string()
+    };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Keep this cook on one runtime generation through provider work and PR finalization.
     let _runtime_generation = homeboy::core::runtime_promotion::pin_cook_generation(&cook_id)?;

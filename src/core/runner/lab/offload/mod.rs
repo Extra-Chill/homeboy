@@ -114,6 +114,7 @@ use super::super::{
     RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
 };
+use super::agent_task_bridge::inject_agent_task_cook_attempt_plan;
 
 use super::super::workload::{
     build_runner_workload_for_dispatched_command, runner_workload_agent_task_from_command,

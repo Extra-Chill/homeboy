@@ -262,7 +262,8 @@ fn redact_split_flag_value(flag: &str, value: &str, policy: &RedactionPolicy) ->
 fn sensitive_whole_value_flag(flag: &str) -> bool {
     matches!(
         normalize_flag(flag).as_str(),
-        "secret_env"
+        "attempt_plan"
+            | "secret_env"
             | "provider_auth"
             | "provider_auth_json"
             | "provider_auth_token"
@@ -434,6 +435,10 @@ mod tests {
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
+            "--attempt-plan".to_string(),
+            r#"{"tasks":[{"executor":{"config":{"api_key":"attempt-secret"}}]}"#.to_string(),
+            r#"--attempt-plan={"tasks":[{"executor":{"config":{"api_key":"attempt-secret"}}]}"#
+                .to_string(),
             "--setting".to_string(),
             "api_token=abc123".to_string(),
             "--setting=password=hunter2".to_string(),
@@ -456,6 +461,9 @@ mod tests {
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
+                "--attempt-plan".to_string(),
+                "[REDACTED]".to_string(),
+                "--attempt-plan=[REDACTED]".to_string(),
                 "--setting".to_string(),
                 "api_token=[REDACTED]".to_string(),
                 "--setting=password=[REDACTED]".to_string(),

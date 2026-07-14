@@ -1638,6 +1638,54 @@ mod materialize_specs_tests {
     use super::*;
 
     #[test]
+    fn materialize_agent_task_specs_remaps_cook_attempt_plan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-plan={\"tasks\":[{\"workspace\":{\"root\":\"/controller/worktree\"},\"executor\":{\"config\":{\"api_key\":\"attempt-secret\"}}}]}"
+                .to_string(),
+        ];
+        let mappings = vec![LabPathRemap {
+            local: "/controller/worktree".to_string(),
+            remote: "/runner/worktree".to_string(),
+        }];
+
+        let out = materialize_agent_task_specs_in_args(&args, &mappings, temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-attempt-plan.json");
+            assert_eq!(spec.role, "agent_task_attempt_plan_remapped");
+            let staged: serde_json::Value =
+                serde_json::from_str(spec.spec).expect("staged plan JSON");
+            assert_eq!(staged["tasks"][0]["workspace"]["root"], "/runner/worktree");
+            assert_eq!(
+                staged["tasks"][0]["executor"]["config"]["api_key"],
+                "attempt-secret"
+            );
+            Ok::<Option<(String, String)>, _>(Some((
+                "@/runner/staged/agent-task-attempt-plan.json".to_string(),
+                spec.role.to_string(),
+            )))
+        })
+        .expect("attempt plan remapped");
+
+        let spec = out.argv[3]
+            .strip_prefix("--attempt-plan=")
+            .expect("attempt plan flag");
+        assert_eq!(spec, "@/runner/staged/agent-task-attempt-plan.json");
+        assert!(!out
+            .argv
+            .iter()
+            .any(|arg| arg.contains("/controller/worktree")));
+        assert!(!out.argv.iter().any(|arg| arg.contains("attempt-secret")));
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_attempt_plan"
+        );
+    }
+
+    #[test]
     fn materialize_agent_task_specs_syncs_inline_and_file_plan_json() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan = serde_json::json!({

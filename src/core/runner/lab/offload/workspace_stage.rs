@@ -123,6 +123,12 @@ fn prepare_lab_offload_workspace_stage_inner(
     let offload_args =
         inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
     let offload_args = inject_agent_task_resolved_provider_policy_in_args(&offload_args)?;
+    let offload_args = request
+        .durable_agent_task_plan
+        .zip(preferred_attempt_run_id)
+        .map(|(_, run_id)| inject_agent_task_cook_attempt_plan(&offload_args, run_id))
+        .transpose()?
+        .unwrap_or(offload_args);
     let runner = load(runner_id)?;
     preflight_agent_task_secret_env_before_workspace_stage(
         contract,

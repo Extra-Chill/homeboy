@@ -143,6 +143,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                     },
                 },
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
+                attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
                 to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
                 provider_command: None,
@@ -306,6 +307,18 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
             ),
         )
         .expect("write promotion provider");
+        let mut attempt_plan = test_plan();
+        attempt_plan.plan_id = "controller-materialized-cook-attempt".to_string();
+        attempt_plan.tasks[0].instructions = "commit a change".to_string();
+        attempt_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        attempt_plan.rebuild_homeboy_plan();
+        let attempt_plan_file = temp.path().join("controller-attempt-plan.json");
+        std::fs::write(
+            &attempt_plan_file,
+            serde_json::to_string(&attempt_plan).expect("serialize attempt plan"),
+        )
+        .expect("write controller attempt plan");
+        let attempt_run_id = "cook-committed-work-attempt-1-controller";
 
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
@@ -333,7 +346,8 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                         resolved_provider_policy: None,
                     },
                 },
-                attempt_run_id: None,
+                attempt_run_id: Some(attempt_run_id.to_string()),
+                attempt_plan: Some(format!("@{}", attempt_plan_file.display())),
                 goal: None,
                 to_worktree: "fixture-component@promoted".to_string(),
                 provider_command: Some(format!("sh {}", provider.display())),
@@ -362,8 +376,18 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
         assert_eq!(
+            agent_task_lifecycle::load_plan(attempt_run_id).expect("attempt plan"),
+            attempt_plan
+        );
+        assert_eq!(
             value["attempts"][0]["promotion"]["patch_artifact"]["id"],
-            "cook-fixture-component-attempt-1-committed-changes"
+            "task-a-attempt-1-committed-changes"
+        );
+        assert_eq!(
+            lifecycle_status(attempt_run_id)
+                .expect("attempt status")
+                .state,
+            AgentTaskRunState::Succeeded
         );
         assert_eq!(
             value["attempts"][0]["promotion"]["changed_files"],
