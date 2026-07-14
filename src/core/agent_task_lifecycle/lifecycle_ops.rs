@@ -848,6 +848,16 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
         }
         Err(error) => return Err(error),
     };
+    if let Err(error) = store::read_plan_path(&record.plan_path) {
+        fail_missing_lab_attempt_plan(&mut record, &error)?;
+        return Err(Error::internal_io(
+            format!(
+                "cannot bind Lab runner job because durable attempt plan is unavailable: {}",
+                error.message
+            ),
+            Some(record.plan_path),
+        ));
+    }
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -951,6 +961,22 @@ fn record_lab_offload_proxy(
         }
         Err(error) => return Err(error),
     };
+    // A previous interruption may have committed the record but not its plan.
+    // Repair from the controller-compiled plan before exposing another handoff
+    // phase; without it the runner would later create a fake running attempt.
+    if store::read_plan_path(&record.plan_path).is_err() {
+        if let Some(durable_plan) = durable_plan {
+            let plan_path = store::write_plan(&run_id, durable_plan)?;
+            record.plan_path = plan_path.display().to_string();
+        } else {
+            let error = Error::internal_io(
+                "durable attempt plan is unavailable during Lab handoff recovery",
+                Some(record.plan_path.clone()),
+            );
+            fail_missing_lab_attempt_plan(&mut record, &error)?;
+            return Err(error);
+        }
+    }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
     metadata.insert("runner_id".to_string(), json!(runner_id));
@@ -973,6 +999,26 @@ fn record_lab_offload_proxy(
     );
     store::write_record(&record)?;
     Ok(record)
+}
+
+fn fail_missing_lab_attempt_plan(record: &mut AgentTaskRunRecord, error: &Error) -> Result<()> {
+    record.updated_at = Some(now_timestamp());
+    set_run_state(record, AgentTaskRunState::Failed);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = AgentTaskState::Failed;
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "pre_execution_failure".to_string(),
+        json!({
+            "phase": "lab_attempt_plan_recovery",
+            "error": error.message,
+        }),
+    );
+    metadata.insert("retryable".to_string(), json!(true));
+    store::write_record(record)
 }
 
 fn detached_lab_plan(run_id: &str, input: &DetachedLabRunRecord<'_>) -> AgentTaskPlan {

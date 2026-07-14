@@ -101,11 +101,12 @@ pub fn route_after_parse(
     } else {
         None
     };
+    let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
     let durable_agent_task_plan = retry_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
         .or(cook_plan.as_ref());
-    let observer = lab_dispatch_observer(cli, normalized_args, inferred_runner_id.as_deref());
+    let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
         .map(str::to_string)
@@ -122,8 +123,8 @@ pub fn route_after_parse(
     // the positional component to the runner's registered checkout and writes
     // fixes there — so the source-tree mutation lands outside the captured
     // workspace and the runner returns no patch to apply (#4315).
-    let scoped_args = inject_lab_changed_files(&cli.command, normalized_args)?;
-    let normalized_args = scoped_args.as_deref().unwrap_or(normalized_args);
+    let scoped_args = inject_lab_changed_files(&cli.command, &normalized_args)?;
+    let normalized_args = scoped_args.as_deref().unwrap_or(&normalized_args);
 
     let rewritten_args =
         lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
@@ -191,6 +192,39 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+/// Transfer the exact controller-compiled cook plan rather than asking the
+/// runner to rebuild it from command-line inputs after the durable handoff.
+fn inject_agent_task_cook_attempt_plan(
+    args: &[String],
+    plan: Option<&homeboy::core::agent_tasks::scheduler::AgentTaskPlan>,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(plan) = plan else {
+        return Ok(args.to_vec());
+    };
+    let agent_task_index = args.iter().position(|arg| arg == "agent-task");
+    let cook_index = agent_task_index.and_then(|index| {
+        args[index + 1..]
+            .iter()
+            .position(|arg| arg == "cook")
+            .map(|offset| index + offset + 1)
+    });
+    let Some(cook_index) = cook_index else {
+        return Ok(args.to_vec());
+    };
+    let serialized = serde_json::to_string(plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize agent-task cook attempt plan for Lab handoff".to_string()),
+        )
+    })?;
+    let mut rewritten = args.to_vec();
+    rewritten.splice(
+        cook_index + 1..cook_index + 1,
+        ["--attempt-plan".to_string(), serialized],
+    );
+    Ok(rewritten)
 }
 
 /// Materialize a cook's scheduler plan on the controller before the Lab

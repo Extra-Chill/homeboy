@@ -1712,6 +1712,41 @@ mod materialize_specs_tests {
     }
 
     #[test]
+    fn materialize_agent_task_specs_syncs_controller_attempt_plan_before_cook_handoff() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "controller-plan",
+            "tasks": [{ "task_id": "task-1", "instructions": "test" }]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--attempt-plan".to_string(),
+            plan,
+        ];
+
+        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+            assert_eq!(spec.filename, "agent-task-attempt-plan.json");
+            assert_eq!(spec.role, "agent_task_attempt_plan_remapped");
+            Ok(Some((
+                "@/remote/agent-task-attempt-plan.json".to_string(),
+                spec.role,
+            )))
+        })
+        .expect("materialize controller attempt plan");
+
+        assert_eq!(out.argv[4], "@/remote/agent-task-attempt-plan.json");
+        assert_eq!(out.workspace_entries.len(), 1);
+        assert_eq!(
+            out.workspace_entries[0].step_id,
+            "lab.sync_remapped_agent_task_attempt_plan"
+        );
+    }
+
+    #[test]
     fn materialize_agent_task_specs_rewrites_fanout_child_cwd_to_runner_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let controller = temp.path().join("homeboy@cook-one");

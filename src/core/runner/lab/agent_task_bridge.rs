@@ -52,7 +52,10 @@ fn materialize_inline_agent_task_tasks_arg_with(
     mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
 ) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
     let (rewritten, entries) = materialize_inline_agent_task_json_specs_in_args(args, |spec| {
-        if spec.role == "agent_task_tasks_remapped" {
+        if matches!(
+            spec.role,
+            "agent_task_tasks_remapped" | "agent_task_attempt_plan_remapped"
+        ) {
             sync(spec.spec)
         } else {
             Ok(None)
