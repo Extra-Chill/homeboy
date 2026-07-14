@@ -13,6 +13,12 @@ use homeboy::core::agent_tasks::promotion::{
 use homeboy::core::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
+use homeboy::core::agent_tasks::review_dossier::{
+    resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
+    AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
+    AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
+    AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::command_invocation::CommandInvocation;
@@ -44,7 +50,7 @@ pub struct FinalizePrEvidenceArgs {
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
 
-    /// Actual model identifier for AI disclosure. Use "not recorded" only when provider metadata is missing.
+    /// Actual model identifier for AI disclosure. Finalization requires a recorded model.
     #[arg(long, value_name = "MODEL")]
     pub ai_model: Option<String>,
 
@@ -237,11 +243,87 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 
 pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     let gate_results = parse_gate_results(&args.gate_results)?;
-    let normalized_gate_results = gate_results
+    let normalized_gate_results: Vec<HomeboyGateResult> = gate_results
         .iter()
         .cloned()
         .map(HomeboyGateResult::from)
         .collect();
+    let evidence: AgentTaskPrEvidence = args.evidence.into();
+    let how_to_test = if args.test_steps.is_empty() {
+        let legacy_steps: Vec<AgentTaskReviewTestStep> = evidence
+            .verification
+            .targeted_checks_run
+            .iter()
+            .cloned()
+            .map(|command| AgentTaskReviewTestStep {
+                command,
+                expected: "passes".to_string(),
+            })
+            .chain(
+                evidence
+                    .verification
+                    .manual_reviewer_check
+                    .iter()
+                    .cloned()
+                    .map(|command| AgentTaskReviewTestStep {
+                        command,
+                        expected: "observes the described behavior".to_string(),
+                    }),
+            )
+            .collect();
+        legacy_steps
+    } else {
+        args.test_steps
+            .iter()
+            .map(|step| parse_test_step(step))
+            .collect::<homeboy::core::Result<Vec<_>>>()?
+    };
+    let mut review_dossier = AgentTaskReviewDossier {
+        schema: AGENT_TASK_REVIEW_DOSSIER_SCHEMA.to_string(),
+        summary: args.summary.clone().unwrap_or_else(|| args.title.clone()),
+        what_changed: if args.what_changed.is_empty() {
+            vec![evidence.attempt_summary.clone()]
+        } else {
+            args.what_changed.clone()
+        },
+        how_to_test,
+        compatibility: args.compatibility.clone().unwrap_or_else(|| {
+            "No compatibility impact was recorded by this legacy finalization invocation."
+                .to_string()
+        }),
+        evidence: Vec::new(),
+        ai_assistance: AgentTaskReviewAiAssistance {
+            used: true,
+            tool: evidence.ai_tool.clone(),
+            model: evidence
+                .ai_model
+                .clone()
+                .unwrap_or_else(|| "legacy caller did not record a model".to_string()),
+            used_for: args.ai_used_for.clone(),
+        },
+        source_relationships: args
+            .closes
+            .iter()
+            .cloned()
+            .map(|reference| AgentTaskReviewIssueRelationship {
+                kind: AgentTaskReviewIssueRelationshipKind::Closes,
+                reference,
+            })
+            .chain(args.relates_to.iter().cloned().map(|reference| {
+                AgentTaskReviewIssueRelationship {
+                    kind: AgentTaskReviewIssueRelationshipKind::RelatesTo,
+                    reference,
+                }
+            }))
+            .collect(),
+        overrides: args
+            .review_overrides
+            .iter()
+            .map(|raw| parse_override(raw))
+            .collect::<homeboy::core::Result<Vec<_>>>()?,
+    };
+    review_dossier.apply_overrides()?;
+    let review_profile = resolve_review_profile(&args.path)?;
     let report = finalize_pr(AgentTaskPrFinalizationOptions {
         path: args.path,
         run_id: args.run_id,
@@ -252,8 +334,11 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
         gate_results,
         normalized_gate_results,
         changed_files: args.changed_files,
-        evidence: args.evidence.into(),
+        evidence,
         ai_used_for: args.ai_used_for,
+        review_dossier,
+        review_profile,
+        manual_finalization: args.manual_finalization,
         protected_branches: args.protected_branches,
     })?;
     let exit_code = if report.status == "review_ready" {
@@ -266,6 +351,58 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
 
     Ok((value, exit_code))
+}
+
+fn parse_test_step(raw: &str) -> homeboy::core::Result<AgentTaskReviewTestStep> {
+    let (command, expected) = raw.split_once("=>").ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "test-step",
+            "expected COMMAND=>EXPECTED",
+            None,
+            None,
+        )
+    })?;
+    Ok(AgentTaskReviewTestStep {
+        command: command.trim().to_string(),
+        expected: expected.trim().to_string(),
+    })
+}
+
+fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
+    let (target, value_and_provenance) = raw.split_once('=').ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "review-override",
+            "expected TARGET=VALUE@PROVENANCE",
+            None,
+            None,
+        )
+    })?;
+    let (value, provenance) = value_and_provenance.rsplit_once('@').ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "review-override",
+            "expected TARGET=VALUE@PROVENANCE",
+            None,
+            None,
+        )
+    })?;
+    let target = match target {
+        "summary" => AgentTaskReviewOverrideTarget::Summary,
+        "what_changed" => AgentTaskReviewOverrideTarget::WhatChanged,
+        "compatibility" => AgentTaskReviewOverrideTarget::Compatibility,
+        _ => {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "review-override",
+                "target must be summary, what_changed, or compatibility",
+                None,
+                None,
+            ))
+        }
+    };
+    Ok(AgentTaskReviewOverride {
+        target,
+        value: value.to_string(),
+        provenance: provenance.to_string(),
+    })
 }
 
 pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
@@ -673,6 +810,22 @@ mod tests {
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
     use homeboy::core::agent_tasks::AgentTaskAggregateSummary;
+
+    #[test]
+    fn typed_test_steps_and_overrides_have_explicit_grammar() {
+        let step = parse_test_step("cargo test dossier=>all tests pass").expect("typed step");
+        assert_eq!(step.command, "cargo test dossier");
+        assert_eq!(step.expected, "all tests pass");
+        assert!(parse_test_step("cargo test dossier").is_err());
+
+        let override_ = parse_override("summary=Reviewed summary@operator").expect("override");
+        assert!(matches!(
+            override_.target,
+            AgentTaskReviewOverrideTarget::Summary
+        ));
+        assert_eq!(override_.provenance, "operator");
+        assert!(parse_override("evidence=nope@operator").is_err());
+    }
 
     #[test]
     fn review_next_actions_include_retry_and_lab_run_plan_commands() {

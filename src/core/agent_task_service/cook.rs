@@ -9,13 +9,18 @@ use crate::core::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
 use crate::core::agent_task_finalization::{
-    finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
-    AgentTaskPrSourceRelationship, AgentTaskPrVerification,
+    finalize_pr_with_backend, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
+    AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
+    AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
 };
 use crate::core::agent_task_gate::VerifyGateOptions;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+};
+use crate::core::agent_task_review_dossier::{
+    resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
+    AgentTaskReviewTestStep,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::command_invocation::CommandInvocation;
@@ -197,7 +202,7 @@ where
                         0,
                     ));
                 }
-                let finalization = finalize_cook_pr(&options, &cook_id, &promotion)?;
+                let finalization = finalize_cook_pr(&options, &run_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -343,8 +348,22 @@ fn promote_attempt(
 
 fn finalize_cook_pr(
     options: &AgentTaskCookServiceOptions,
-    cook_id: &str,
+    successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
+) -> Result<Value> {
+    finalize_cook_pr_with_backend(
+        options,
+        successful_run_id,
+        promotion,
+        &mut RealAgentTaskPrFinalizationBackend,
+    )
+}
+
+fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+    options: &AgentTaskCookServiceOptions,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    backend: &mut B,
 ) -> Result<Value> {
     if promotion.status != AgentTaskPromotionStatus::Applied {
         return Err(Error::validation_invalid_argument(
@@ -372,44 +391,82 @@ fn finalize_cook_pr(
         .iter()
         .cloned()
         .chain(std::iter::once(format!(
-            "homeboy://agent-task/run/{cook_id}"
+            "homeboy://agent-task/run/{successful_run_id}"
         )))
         .collect();
     let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
-    let report = finalize_pr(AgentTaskPrFinalizationOptions {
-        path,
-        run_id: cook_id.to_string(),
-        base: options.base.clone(),
-        head: options.head.clone(),
-        title: options.title.clone(),
-        commit_message: options.commit_message.clone(),
-        gate_results: Vec::new(),
-        normalized_gate_results: promotion.gate_results.clone(),
-        changed_files: promotion.changed_files.clone(),
-        evidence: AgentTaskPrEvidence {
-            source_refs,
-            artifact_refs,
-            attempt_summary: format!(
-                "{} deterministic cook gate attempt(s) completed green",
-                promotion.deterministic_gates.len()
-            ),
-            ai_tool: options.ai_tool.clone(),
-            ai_model: options.ai_model.clone(),
-            source_relationship: AgentTaskPrSourceRelationship::default(),
-            verification: AgentTaskPrVerification {
-                targeted_checks_run: options.gates.verify.clone(),
-                targeted_checks_unavailable: None,
-                ci_expected: vec!["Homeboy CI after push".to_string()],
-                manual_reviewer_check: None,
+    crate::core::agent_task_lifecycle::record_promotion(
+        successful_run_id,
+        serde_json::to_value(promotion).unwrap_or(Value::Null),
+    )?;
+    let report = finalize_pr_with_backend(
+        AgentTaskPrFinalizationOptions {
+            path: path.clone(),
+            run_id: successful_run_id.to_string(),
+            base: options.base.clone(),
+            head: options.head.clone(),
+            title: options.title.clone(),
+            commit_message: options.commit_message.clone(),
+            gate_results: Vec::new(),
+            normalized_gate_results: promotion.gate_results.clone(),
+            changed_files: promotion.changed_files.clone(),
+            evidence: AgentTaskPrEvidence {
+                source_refs,
+                artifact_refs,
+                attempt_summary: format!(
+                    "{} deterministic cook gate attempt(s) completed green",
+                    promotion.deterministic_gates.len()
+                ),
+                ai_tool: options.ai_tool.clone(),
+                ai_model: options.ai_model.clone(),
+                source_relationship: AgentTaskPrSourceRelationship::default(),
+                verification: AgentTaskPrVerification {
+                    targeted_checks_run: options.gates.verify.clone(),
+                    targeted_checks_unavailable: None,
+                    ci_expected: vec!["Homeboy CI after push".to_string()],
+                    manual_reviewer_check: None,
+                },
+                runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+                lifecycle: crate::core::agent_task_lifecycle::status(successful_run_id)
+                    .ok()
+                    .map(|record| record.lifecycle),
             },
-            runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
-            lifecycle: crate::core::agent_task_lifecycle::status(cook_id)
-                .ok()
-                .map(|record| record.lifecycle),
+            ai_used_for: options.ai_used_for.clone(),
+            review_dossier: AgentTaskReviewDossier {
+                schema: "homeboy/agent-task-review-dossier/v1".to_string(),
+                summary: options.title.clone(),
+                what_changed: vec!["Applies the verified agent-task candidate.".to_string()],
+                how_to_test: options
+                    .gates
+                    .verify
+                    .iter()
+                    .cloned()
+                    .map(|command| AgentTaskReviewTestStep {
+                        command,
+                        expected: "passes".to_string(),
+                    })
+                    .collect(),
+                compatibility: "No compatibility impact was recorded by the cook workflow."
+                    .to_string(),
+                evidence: Vec::new(),
+                ai_assistance: AgentTaskReviewAiAssistance {
+                    used: true,
+                    tool: options.ai_tool.clone(),
+                    model: options
+                        .ai_model
+                        .clone()
+                        .unwrap_or_else(|| "not recorded".to_string()),
+                    used_for: options.ai_used_for.clone(),
+                },
+                source_relationships: Vec::new(),
+                overrides: Vec::new(),
+            },
+            review_profile: resolve_review_profile(&path)?,
+            manual_finalization: false,
+            protected_branches: options.protected_branches.clone(),
         },
-        ai_used_for: options.ai_used_for.clone(),
-        protected_branches: options.protected_branches.clone(),
-    })?;
+        backend,
+    )?;
     Ok(serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
@@ -454,4 +511,180 @@ fn source_spec_path(spec: &str) -> Option<PathBuf> {
     }
 
     Some(PathBuf::from(spec.strip_prefix('@').unwrap_or(spec)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::agent_task_finalization::{
+        AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
+    };
+    use crate::core::run_lifecycle_record::{
+        ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
+        RunLifecycleRecord,
+    };
+
+    #[derive(Default)]
+    struct CaptureBackend {
+        body: String,
+        committed: bool,
+        pushed: bool,
+        created: bool,
+    }
+
+    impl AgentTaskPrFinalizationBackend for CaptureBackend {
+        fn hydrate_run(&mut self, _run_id: &str) -> Result<RunLifecycleRecord> {
+            Ok(RunLifecycleRecord {
+                execution: RunExecutionLifecycle {
+                    state: RunExecutionState::Succeeded,
+                    started_at: None,
+                    finished_at: Some("2026-07-14T00:00:00Z".to_string()),
+                    updated_at: None,
+                },
+                provider_runtime: vec![ProviderRuntimeLifecycle {
+                    task_id: "task".to_string(),
+                    backend: "opencode".to_string(),
+                    state: ProviderRuntimeState::Succeeded,
+                    stream_uri: None,
+                    external_runtime_ids: Vec::new(),
+                    metadata: serde_json::json!({"model": "openai/gpt-5.6-terra"}),
+                }],
+                ..RunLifecycleRecord::default()
+            })
+        }
+        fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
+            Ok(AgentTaskPrDurableGateProof {
+                run_id: run_id.to_string(),
+                promotion: promotion(run_id),
+            })
+        }
+        fn current_branch(&mut self, _path: &str) -> Result<String> {
+            Ok("fix/8058".to_string())
+        }
+        fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
+            Ok(vec!["src/lib.rs".to_string()])
+        }
+        fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
+            self.committed = true;
+            Ok(())
+        }
+        fn push_branch(&mut self, _path: &str, _head: &str) -> Result<()> {
+            self.pushed = true;
+            Ok(())
+        }
+        fn find_open_pr(
+            &mut self,
+            _path: &str,
+            _base: &str,
+            _head: &str,
+        ) -> Result<Option<AgentTaskPrRef>> {
+            Ok(None)
+        }
+        fn create_pr(
+            &mut self,
+            _path: &str,
+            _base: &str,
+            _head: &str,
+            _title: &str,
+            body: &str,
+        ) -> Result<AgentTaskPrRef> {
+            self.created = true;
+            self.body = body.to_string();
+            Ok(AgentTaskPrRef {
+                number: 8058,
+                url: "https://github.com/Extra-Chill/homeboy/pull/8058".to_string(),
+            })
+        }
+        fn update_pr(
+            &mut self,
+            _path: &str,
+            _number: u64,
+            _title: &str,
+            body: &str,
+        ) -> Result<AgentTaskPrRef> {
+            self.body = body.to_string();
+            unreachable!("test creates a PR")
+        }
+    }
+
+    fn promotion(run_id: &str) -> AgentTaskPromotionReport {
+        serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": {"kind": "aggregate", "task_id": "task", "run_id": run_id},
+            "to_worktree": "homeboy@8058",
+            "target": {"worktree": "homeboy@8058", "path": "/repo"},
+            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+            "changed_files": ["src/lib.rs"],
+            "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
+            "operator_notification": {"status": "completed", "message": "complete"},
+            "provenance": {"worktree_path": "/repo"}
+        })).unwrap()
+    }
+
+    #[test]
+    fn cook_successful_concrete_attempt_publishes_reviewer_body() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = "cook-8058-attempt-1";
+            let plan = AgentTaskPlan::new("cook-8058", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            let options = AgentTaskCookServiceOptions {
+                cook_id: "cook-8058".to_string(),
+                initial_run_id: run_id.to_string(),
+                to_worktree: "homeboy@8058".to_string(),
+                source_worktree_path: None,
+                provider_command: None,
+                provider_invocation: None,
+                gates: VerifyGateOptions {
+                    verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
+                    private_verify: Vec::new(),
+                    private_gate_reveal: Default::default(),
+                },
+                max_attempts: 1,
+                no_finalize: false,
+                base: "main".to_string(),
+                task_base_sha: None,
+                head: Some("fix/8058".to_string()),
+                title: "Close #8058".to_string(),
+                commit_message: "test".to_string(),
+                source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/8058".to_string()],
+                protected_branches: vec!["main".to_string()],
+                ai_tool: "OpenCode".to_string(),
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                ai_used_for: "Drafted test coverage.".to_string(),
+            };
+            let mut backend = CaptureBackend::default();
+            finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend)
+                .unwrap();
+            for section in [
+                "## Summary",
+                "## What changed",
+                "## How to test",
+                "## Compatibility",
+                "## Evidence",
+                "## AI assistance",
+                "openai/gpt-5.6-terra",
+                "1. Run `cargo test --locked agent_task_promotion --lib`; expect passes.",
+            ] {
+                assert!(
+                    backend.body.contains(section),
+                    "missing {section}: {}",
+                    backend.body
+                );
+            }
+            for forbidden in [
+                "Publication intent",
+                "homeboy/agent-task",
+                "Changed files",
+                "Final status",
+            ] {
+                assert!(
+                    !backend.body.contains(forbidden),
+                    "unexpected {forbidden}: {}",
+                    backend.body
+                );
+            }
+            assert!(backend.committed && backend.pushed && backend.created);
+        });
+    }
 }
