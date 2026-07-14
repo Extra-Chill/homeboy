@@ -1171,6 +1171,10 @@ mod provider_rotation_tests {
         assert_eq!(candidate.metadata["provider_rotation_index"], 0);
         assert_eq!(candidate.metadata["provider_backend"], "test");
         assert_eq!(candidate.metadata["provider_model"], "primary-model");
+        assert!(candidate
+            .sha256
+            .as_deref()
+            .is_some_and(|sha256| sha256.len() == 64));
         assert_eq!(candidate.metadata["run_id"], "run-8081");
         assert_eq!(candidate.metadata["task_id"], "task-1");
         let patch = fs::read_to_string(candidate.path.as_deref().expect("candidate path"))

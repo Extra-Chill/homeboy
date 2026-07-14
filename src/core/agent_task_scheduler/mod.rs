@@ -29,6 +29,7 @@ use crate::core::agent_task_timeout_artifacts::{
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 use crate::core::config::value_type_name;
+use sha2::{Digest, Sha256};
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
@@ -1051,7 +1052,7 @@ fn harvest_uncommitted_patch(
         url: None,
         mime: Some("text/x-patch".to_string()),
         size_bytes: Some(patch.len() as u64),
-        sha256: None,
+        sha256: Some(patch_sha256(&patch)),
         metadata: serde_json::json!({
             "change_source": "uncommitted_attempt_workspace",
             "base_ref": base,
@@ -1104,6 +1105,7 @@ fn persist_attempt_patch_artifacts(
         })?;
         artifact.path = Some(path.display().to_string());
         artifact.size_bytes = Some(contents.len() as u64);
+        artifact.sha256 = Some(patch_sha256(&contents));
         if !artifact.metadata.is_object() {
             artifact.metadata = serde_json::json!({});
         }
@@ -1272,7 +1274,7 @@ fn committed_patch_artifact(
         url: None,
         mime: Some("text/x-patch".to_string()),
         size_bytes: Some(patch.len() as u64),
-        sha256: None,
+        sha256: Some(patch_sha256(patch)),
         metadata: serde_json::json!({
             "change_source": "local_commits",
             "base_ref": base,
@@ -1287,6 +1289,10 @@ fn committed_patch_artifact(
             "provider_model": running.request.executor.model(),
         }),
     }
+}
+
+fn patch_sha256(contents: impl AsRef<[u8]>) -> String {
+    format!("{:x}", Sha256::digest(contents.as_ref()))
 }
 
 fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, HarvestError> {
