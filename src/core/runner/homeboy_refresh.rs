@@ -402,8 +402,14 @@ pub fn refresh_homeboy_binary(
             options.force,
         )?;
         let _ = disconnect(&plan.runner_id);
-        let (_report, connect_exit_code) =
-            connect_with_orphan_adoption(&plan.runner_id, refresh_owned_lease.as_deref(), false)?;
+        let (_report, connect_exit_code) = connect_with_orphan_adoption(
+            &plan.runner_id,
+            refresh_owned_lease.as_deref(),
+            false,
+            None,
+            None,
+            None,
+        )?;
         daemon_refreshed = connect_exit_code == 0;
     } else {
         interrupted_job_ids = Vec::new();

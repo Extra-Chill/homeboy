@@ -228,6 +228,22 @@ pub(super) enum RunnerCommand {
         /// Confirm the remote store has no daemon owner before lease-less reconciliation
         #[arg(long)]
         confirm_no_daemon_owner: bool,
+
+        /// Recover this exact lease after the remote daemon state record was lost
+        #[arg(long)]
+        recover_missing_lease_state: Option<String>,
+
+        /// Recorded remote daemon PID paired with --recover-missing-lease-state
+        #[arg(long)]
+        recorded_pid: Option<u32>,
+
+        /// Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state
+        #[arg(long)]
+        recorded_endpoint: Option<String>,
+
+        /// Confirm the remote daemon state record and endpoint are unavailable
+        #[arg(long)]
+        confirm_control_plane_lost: bool,
     },
     /// Show persisted runner tunnel status
     Status {

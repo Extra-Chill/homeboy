@@ -37,7 +37,8 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    reconcile_leaseless_orphans, start_background, ArtifactFetchOutcome,
+    reconcile_leaseless_orphans, recover_missing_lease_state, start_background,
+    ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -170,6 +171,21 @@ pub struct DaemonLeaselessRecoveryResult {
     pub affected_jobs: Vec<crate::core::api_jobs::LeaselessOrphanAffectedJob>,
     #[serde(default)]
     pub historical_lease_ids: Vec<String>,
+    pub evidence_snapshot_path: String,
+    pub ownership_proof: Vec<String>,
+    pub retry_guidance: String,
+    pub replacement: DaemonStartResult,
+}
+
+/// Evidence retained when an operator recovers jobs from a lost daemon state
+/// record using the exact lease and PID captured before the loss.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonStateLossRecoveryResult {
+    pub recovered_lease_id: String,
+    pub recorded_dead_pid: u32,
+    pub recorded_endpoint: String,
+    pub affected_job_ids: Vec<Uuid>,
+    pub affected_job_count: usize,
     pub evidence_snapshot_path: String,
     pub ownership_proof: Vec<String>,
     pub retry_guidance: String,

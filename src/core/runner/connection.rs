@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource};
 use crate::core::daemon::{
     DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode,
+    DaemonStateLossRecoveryResult,
 };
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
@@ -49,7 +50,7 @@ struct CliEnvelope {
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, false)
+    connect_with_orphan_adoption(runner_id, None, false, None, None, None)
 }
 
 /// Connect using an explicit dead-lease or missing-lease selector. A
@@ -67,7 +68,7 @@ pub fn connect_with_recovery(
             None,
         ));
     }
-    connect_with_orphan_adoption(runner_id, orphan_lease_id, false)
+    connect_with_orphan_adoption(runner_id, orphan_lease_id, false, None, None, None)
 }
 
 /// Reconnect after the explicit lease-less recovery transaction has terminalized
@@ -75,7 +76,7 @@ pub fn connect_with_recovery(
 pub fn connect_with_leaseless_orphan_reconciliation(
     runner_id: &str,
 ) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, true)
+    connect_with_orphan_adoption(runner_id, None, true, None, None, None)
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -84,6 +85,9 @@ pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
     reconcile_leaseless_orphans: bool,
+    missing_lease_id: Option<&str>,
+    recorded_pid: Option<u32>,
+    recorded_endpoint: Option<&str>,
 ) -> Result<(RunnerConnectReport, i32)> {
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
@@ -127,6 +131,65 @@ pub fn connect_with_orphan_adoption(
     let previous_session = read_session(runner_id)?;
 
     let mut leaseless_recovery = None;
+    let mut state_loss_recovery = None;
+    if let Some(lease_id) = missing_lease_id {
+        let recorded_pid = recorded_pid.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "recorded_pid",
+                "state-loss recovery requires a recorded PID",
+                None,
+                None,
+            )
+        })?;
+        let recorded_endpoint = recorded_endpoint.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "recorded_endpoint",
+                "state-loss recovery requires a recorded endpoint",
+                None,
+                None,
+            )
+        })?;
+        let capability = format!(
+            "{} daemon recover-missing-lease-state --help",
+            shell::quote_arg(homeboy),
+        );
+        let capability =
+            client.execute_with_timeout(&capability, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+        if !capability.success {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                "remote Homeboy does not support `daemon recover-missing-lease-state`; update the runner to a build with the canonical state-loss recovery contract before retrying".to_string(),
+            ));
+        }
+        let command =
+            remote_state_loss_recovery_command(homeboy, lease_id, recorded_pid, recorded_endpoint);
+        let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+        if !recovery.success {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                state_loss_recovery_failure_message(&recovery),
+            ));
+        }
+        let envelope = parse_envelope(&recovery.stdout).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse state-loss daemon recovery".to_string()),
+            )
+        })?;
+        if !envelope.success {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                "remote exact state-loss recovery returned an error envelope".to_string(),
+            ));
+        }
+        state_loss_recovery = Some(decode_state_loss_recovery(envelope.data)?);
+    }
     if reconcile_leaseless_orphans {
         let recovery_addr = previous_session
             .as_ref()
@@ -167,12 +230,14 @@ pub fn connect_with_orphan_adoption(
 
     let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
     let Ok(daemon) = daemon else {
-        return Ok(failed_connect(
+        let (mut report, exit_code) = failed_connect(
             runner_id,
             session_path,
             RunnerFailureKind::DaemonStartupFailure,
             daemon.err().unwrap(),
-        ));
+        );
+        attach_state_loss_recovery(&mut report, state_loss_recovery);
+        return Ok((report, exit_code));
     };
 
     let expected_version = daemon.version.clone().unwrap_or(version.clone());
@@ -191,7 +256,10 @@ pub fn connect_with_orphan_adoption(
         &session_path,
     ) {
         Ok(connection) => connection,
-        Err(report) => return Ok(report),
+        Err((mut report, exit_code)) => {
+            attach_state_loss_recovery(&mut report, state_loss_recovery);
+            return Ok((report, exit_code));
+        }
     };
 
     let remote_daemon_lease_id = daemon.lease_id.clone();
@@ -234,6 +302,7 @@ pub fn connect_with_orphan_adoption(
             homeboy_build_identity: session.homeboy_build_identity.clone(),
             session_path: Some(session_path.display().to_string()),
             leaseless_recovery,
+            state_loss_recovery,
             failure_kind: None,
             failure_message: None,
         },
@@ -253,6 +322,25 @@ fn decode_leaseless_recovery(data: Option<Value>) -> Result<DaemonLeaselessRecov
     })
 }
 
+fn decode_state_loss_recovery(data: Option<Value>) -> Result<DaemonStateLossRecoveryResult> {
+    serde_json::from_value(data.ok_or_else(|| {
+        Error::internal_unexpected("remote exact state-loss recovery returned no data")
+    })?)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("decode exact state-loss daemon recovery".to_string()),
+        )
+    })
+}
+
+fn attach_state_loss_recovery(
+    report: &mut RunnerConnectReport,
+    recovery: Option<DaemonStateLossRecoveryResult>,
+) {
+    report.state_loss_recovery = recovery;
+}
+
 fn leaseless_recovery_failure_message(output: &crate::core::server::CommandOutput) -> String {
     if output.timed_out {
         format!(
@@ -262,6 +350,32 @@ fn leaseless_recovery_failure_message(output: &crate::core::server::CommandOutpu
     } else {
         command_failure_message("remote lease-less daemon recovery failed", output)
     }
+}
+
+fn state_loss_recovery_failure_message(output: &crate::core::server::CommandOutput) -> String {
+    if output.timed_out {
+        format!(
+            "remote exact state-loss recovery timed out after {}s; inspect `homeboy daemon status` on the runner before retrying",
+            REMOTE_LEASELESS_RECOVERY_TIMEOUT.as_secs()
+        )
+    } else {
+        command_failure_message("remote exact state-loss recovery failed", output)
+    }
+}
+
+fn remote_state_loss_recovery_command(
+    homeboy: &str,
+    lease_id: &str,
+    recorded_pid: u32,
+    recorded_endpoint: &str,
+) -> String {
+    format!(
+        "{} daemon recover-missing-lease-state --lease-id {} --recorded-pid {} --recorded-endpoint {} --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0",
+        shell::quote_arg(homeboy),
+        shell::quote_arg(lease_id),
+        recorded_pid,
+        shell::quote_arg(recorded_endpoint),
+    )
 }
 
 pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
@@ -330,6 +444,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             homeboy_build_identity: session.homeboy_build_identity,
             session_path: Some(session_path.display().to_string()),
             leaseless_recovery: None,
+            state_loss_recovery: None,
             failure_kind: None,
             failure_message: None,
         },
@@ -1820,6 +1935,7 @@ mod session_store {
                 homeboy_build_identity: None,
                 session_path: Some(session_path.display().to_string()),
                 leaseless_recovery: None,
+                state_loss_recovery: None,
                 failure_kind: Some(failure_kind),
                 failure_message: Some(failure_message),
             },
@@ -2077,6 +2193,68 @@ mod tests {
     }
 
     #[test]
+    fn state_loss_recovery_delegation_decodes_and_serializes_auditable_evidence() {
+        let command =
+            remote_state_loss_recovery_command("/opt/homeboy", "lease-old", 4242, "127.0.0.1:7421");
+        assert!(command.contains("--recorded-endpoint 127.0.0.1:7421"));
+        let envelope = parse_envelope(
+            r#"{"success":true,"data":{
+            "recovered_lease_id":"lease-old",
+            "recorded_dead_pid":4242,
+            "recorded_endpoint":"127.0.0.1:7421",
+            "affected_job_ids":["7ab96605-38b7-4a6a-bbb8-99db839fa6dc"],
+            "affected_job_count":1,
+            "evidence_snapshot_path":"/evidence/jobs.snapshot",
+            "ownership_proof":["owner lock acquired","endpoint unreachable"],
+            "retry_guidance":"retry",
+            "replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state.json","lease_id":"lease-new"}
+        }}"#,
+        )
+        .expect("parse daemon envelope");
+        let recovery = decode_state_loss_recovery(envelope.data).expect("decode recovery report");
+        let (mut report, _) = failed_connect(
+            "runner",
+            std::path::PathBuf::from("/session.json"),
+            RunnerFailureKind::DaemonStartupFailure,
+            "test".to_string(),
+        );
+        report.state_loss_recovery = Some(recovery);
+        let data = serde_json::to_value(report).expect("serialize controller report");
+        assert_eq!(
+            data["state_loss_recovery"]["recovered_lease_id"],
+            "lease-old"
+        );
+        assert_eq!(
+            data["state_loss_recovery"]["affected_job_ids"][0],
+            "7ab96605-38b7-4a6a-bbb8-99db839fa6dc"
+        );
+        assert_eq!(
+            data["state_loss_recovery"]["replacement"]["lease_id"],
+            "lease-new"
+        );
+    }
+
+    #[test]
+    fn ensure_or_tunnel_failure_report_retains_completed_state_loss_recovery() {
+        let envelope = parse_envelope(r#"{"success":true,"data":{"recovered_lease_id":"lease-old","recorded_dead_pid":42,"recorded_endpoint":"127.0.0.1:7421","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/snapshot","ownership_proof":[],"retry_guidance":"retry","replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state","lease_id":"lease-new"}}}"#).expect("envelope");
+        let recovery = decode_state_loss_recovery(envelope.data).expect("recovery");
+        let (mut report, _) = failed_connect(
+            "runner",
+            std::path::PathBuf::from("/session"),
+            RunnerFailureKind::TunnelFailure,
+            "tunnel failed".to_string(),
+        );
+        attach_state_loss_recovery(&mut report, Some(recovery));
+        assert_eq!(
+            report
+                .state_loss_recovery
+                .as_ref()
+                .map(|value| value.replacement.lease_id.as_str()),
+            Some("lease-new")
+        );
+    }
+
+    #[test]
     fn remote_leaseless_recovery_timeout_is_actionable() {
         let message = leaseless_recovery_failure_message(&crate::core::server::CommandOutput {
             stdout: String::new(),
@@ -2153,6 +2331,20 @@ esac
                 "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--addr\n127.0.0.1:0\n"
             );
         });
+    }
+
+    #[test]
+    fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
+        let command = remote_state_loss_recovery_command(
+            "/opt/homeboy",
+            "lease exact",
+            4242,
+            "127.0.0.1:4242",
+        );
+        assert_eq!(
+            command,
+            "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0"
+        );
     }
 
     #[test]
