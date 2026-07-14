@@ -1510,11 +1510,17 @@ mod committed_harvest_tests {
         let content_hash =
             crate::core::runner::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
                 .expect("content hash");
+        let content_hash_algorithm = crate::core::runner::workspace_content_hash_algorithm(
+            crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("default content hash algorithm");
         let lab = serde_json::json!({
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
             "source_snapshot": snapshot,
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v1", "identity": "snapshot:provider-ready",
+                "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
+                "content_hash_algorithm": content_hash_algorithm,
+                "permission_policy": crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
                 "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
                 "source_snapshot": snapshot,
                 "primary_workspace": { "identity": "snapshot:provider-ready", "remote_path": workspace.path().display().to_string() }

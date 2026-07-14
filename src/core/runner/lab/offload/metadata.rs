@@ -588,10 +588,14 @@ pub(crate) fn attach_lab_workspace_metadata(
 ) -> Result<()> {
     let source_snapshot = inputs.source_snapshot;
     let primary_workspace_plan = &inputs.primary_synced_workspace.materialization_plan;
+    let permission_policy = crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY;
     let content_hash = crate::core::runner::workspace_content_hash(
         Path::new(&source_snapshot.local_path.clone().unwrap_or_default()),
         &source_snapshot.sync_excludes,
     )?;
+    let content_hash_algorithm =
+        crate::core::runner::workspace_content_hash_algorithm(permission_policy)
+            .expect("default workspace content permission policy is supported");
     lab_metadata["source_snapshot"] =
         serde_json::to_value(source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_content_hash"] = serde_json::json!(content_hash);
@@ -599,8 +603,10 @@ pub(crate) fn attach_lab_workspace_metadata(
         serde_json::to_value(inputs.legacy_path_materialization_plan)
             .unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_verification"] = serde_json::json!({
-        "schema": "homeboy/lab-workspace-verification/v1",
+        "schema": "homeboy/lab-workspace-verification/v2",
         "identity": primary_workspace_plan.identity,
+        "content_hash_algorithm": content_hash_algorithm,
+        "permission_policy": permission_policy,
         "content_hash": content_hash,
         "sync_excludes": source_snapshot.sync_excludes,
         "source_snapshot": source_snapshot,
