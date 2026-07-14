@@ -21,8 +21,82 @@ use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
     DaemonLeaselessOrphanReconciliationResult, DaemonLeaselessRecoveryResult,
-    DaemonOrphanAdoptionResult, DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonOrphanAdoptionResult, DaemonProcessCandidate, DaemonProcessOwnership,
+    DaemonStaleReasonCode, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
+
+/// Enumerate foreground daemon processes without inferring ownership from a
+/// command substring. A candidate is an owner only when its explicit HOME
+/// environment resolves to this durable store and its executable is the active
+/// binary; absent evidence remains ambiguous.
+pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
+    let output = Command::new("ps")
+        .args(["-axeww", "-o", "pid=", "-o", "comm=", "-o", "command="])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect daemon processes".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(
+            "unable to inspect daemon processes",
+        ));
+    }
+    let current_exe = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| parse_daemon_process_candidate(line, jobs_path, current_exe.as_deref()))
+        .collect())
+}
+
+fn parse_daemon_process_candidate(
+    line: &str,
+    jobs_path: &Path,
+    current_exe: Option<&Path>,
+) -> Option<DaemonProcessCandidate> {
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    let executable = fields.next()?.to_string();
+    let cmdline = fields.collect::<Vec<_>>().join(" ");
+    if !cmdline.contains("daemon serve") {
+        return None;
+    }
+    let bind_endpoint = cmdline
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--addr").then(|| pair[1].to_string()));
+    let home = cmdline
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("HOME="));
+    let durable_store_path =
+        home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json"));
+    let executable_matches = current_exe.is_some_and(|current| {
+        Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
+    });
+    let ownership = match durable_store_path.as_deref() {
+        Some(store) if store != jobs_path => DaemonProcessOwnership::Unrelated,
+        Some(_) if executable_matches => DaemonProcessOwnership::Owning,
+        _ => DaemonProcessOwnership::Ambiguous,
+    };
+    Some(DaemonProcessCandidate {
+        pid,
+        executable: executable.clone(),
+        cmdline: normalize_cmdline(&cmdline),
+        bind_endpoint,
+        durable_store_path: durable_store_path.map(|path| path.display().to_string()),
+        build_identity: executable_matches.then_some("current_executable".to_string()),
+        ownership,
+    })
+}
+
+fn normalize_cmdline(cmdline: &str) -> String {
+    cmdline.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// Outcome of a daemon byte-endpoint artifact download.
 #[derive(Debug, Clone)]
@@ -537,6 +611,16 @@ pub fn adopt_orphaned_lease(
             None,
         )
     })?;
+    // Revalidate after taking the lifecycle-critical lock: a PID can be reused
+    // between status inspection and exact orphan adoption.
+    if !pid_is_proven_dead(state.pid, pid_is_running) {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!("recorded daemon PID {} is live or has been reused", state.pid),
+            Some(lease_id.to_string()),
+            Some(vec!["Refusing adoption until the exact recorded PID is proven dead under the lifecycle lock.".to_string()]),
+        ));
+    }
     let store =
         super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
     let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
@@ -609,37 +693,22 @@ pub fn reconcile_leaseless_orphans(
 fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {
     // The owner lock proves no serving daemon owns this store. Refuse any
     // matching process or configured listener as additional ambiguous ownership.
-    let output = Command::new("ps")
-        .args(["-ax", "-o", "command="])
-        .output()
-        .ok();
+    let candidates = daemon_process_candidates(&crate::core::paths::daemon_jobs_file()?)?;
     let parsed: SocketAddr = addr.parse().map_err(|_| {
         Error::validation_invalid_argument("addr", "invalid daemon address", None, None)
     })?;
-    let process = match output {
-        Some(output) if output.status.success() => {
-            let matched = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line.contains("homeboy daemon serve"));
-            if matched {
-                return Err(Error::validation_invalid_argument(
-                    "owner_probe",
-                    "a Homeboy daemon serve process is present; refusing ambiguous missing-lease recovery",
-                    None,
-                    None,
-                ));
-            } else {
-                "supplemental process probe found no matching command"
-            }
-        }
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                "owner_probe",
-                "unable to inspect Homeboy daemon processes; refusing ambiguous missing-lease recovery",
-                None,
-                None,
-            ));
-        }
+    if !candidates_prove_no_owner(&candidates) {
+        return Err(Error::validation_invalid_argument(
+            "owner_probe",
+            "a daemon serve process may own the configured durable store; refusing missing-lease recovery",
+            None,
+            Some(candidates.iter().map(|candidate| format!("pid {}: {:?} ({})", candidate.pid, candidate.ownership, candidate.cmdline)).collect()),
+        ));
+    }
+    let process = if candidates.is_empty() {
+        "supplemental process probe found no daemon serve candidates".to_string()
+    } else {
+        format!("supplemental process probe proved {} daemon candidate(s) unrelated to the configured durable store", candidates.len())
     };
     let listener = if parsed.port() == 0 {
         format!("listener probe has no fixed address for dynamic bind {addr}")
@@ -655,9 +724,19 @@ fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {
     };
     Ok(vec![
         "daemon owner lock acquired non-destructively".to_string(),
-        process.to_string(),
+        process,
         listener,
     ])
+}
+
+fn candidates_prove_no_owner(candidates: &[DaemonProcessCandidate]) -> bool {
+    candidates
+        .iter()
+        .all(|candidate| candidate.ownership == DaemonProcessOwnership::Unrelated)
+}
+
+fn pid_is_proven_dead(pid: u32, is_running: impl FnOnce(u32) -> bool) -> bool {
+    !is_running(pid)
 }
 
 fn read_job_store_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -804,12 +883,73 @@ where
 /// for lease publication without a parent/child startup deadlock.
 fn start_or_return_live_unlocked(addr: &str) -> Result<DaemonStartResult> {
     let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
+    reattach_exact_live_owner()?;
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
         || stop_unlocked().map(|_| ()),
         || spawn_and_wait_for_lease(addr),
     )
+}
+
+/// Restore the lease only for one process whose executable and explicit HOME
+/// environment prove it owns this conventional durable store. The listener is
+/// checked before writing anything; all other candidates remain fail-closed.
+fn reattach_exact_live_owner() -> Result<()> {
+    let state_path = crate::core::paths::daemon_state_file()?;
+    if state_path.exists() {
+        return Ok(());
+    }
+    let candidates = daemon_process_candidates(&crate::core::paths::daemon_jobs_file()?)?;
+    let owners: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| candidate.ownership == DaemonProcessOwnership::Owning)
+        .collect();
+    if owners.len() != 1 {
+        return Ok(());
+    }
+    let owner = &owners[0];
+    let Some(endpoint) = owner.bind_endpoint.as_deref() else {
+        return Ok(());
+    };
+    let Ok(address) = endpoint.parse::<SocketAddr>() else {
+        return Ok(());
+    };
+    if address.port() == 0
+        || TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err()
+    {
+        return Ok(());
+    }
+    if !pid_is_running(owner.pid) {
+        return Ok(());
+    }
+    // Re-read the exact candidate immediately before persisting a lease so PID
+    // reuse cannot turn a previously attributable process into an owner.
+    let revalidated = daemon_process_candidates(&crate::core::paths::daemon_jobs_file()?)?
+        .into_iter()
+        .any(|candidate| {
+            candidate.pid == owner.pid
+                && candidate.ownership == DaemonProcessOwnership::Owning
+                && candidate.cmdline == owner.cmdline
+        });
+    if !revalidated {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let state = super::DaemonState {
+        schema: super::DAEMON_LEASE_SCHEMA.to_string(),
+        lease_id: uuid::Uuid::new_v4().to_string(),
+        startup_token: "reattached".to_string(),
+        address: endpoint.to_string(),
+        pid: owner.pid,
+        state_path: state_path.display().to_string(),
+        started_at: now.clone(),
+        last_seen_at: now,
+        build_identity: crate::core::build_identity::current(),
+        binary_sha256: super::current_binary_sha256()?,
+        runtime_paths: super::capture_daemon_runtime_snapshot(),
+    };
+    super::write_lease(&state_path, &state)
 }
 
 fn start_or_return_live_with_operations<OwnerLock, ReadStatus, AcquireOwner, Cleanup, Spawn>(

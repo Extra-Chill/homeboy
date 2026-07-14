@@ -84,6 +84,32 @@ pub struct DaemonStatus {
     pub state_path: String,
     /// Identity of the lease and durable queue observed by status callers.
     pub state_identity: String,
+    /// Process-level evidence is retained even when the lease is absent so an
+    /// operator can distinguish another runner from an attributable owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub process_candidates: Vec<DaemonProcessCandidate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DaemonProcessCandidate {
+    pub pid: u32,
+    pub executable: String,
+    pub cmdline: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable_store_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    pub ownership: DaemonProcessOwnership,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonProcessOwnership {
+    Owning,
+    Unrelated,
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -460,6 +486,7 @@ pub fn read_status() -> Result<DaemonStatus> {
     let validation = validate_lease_file(&path)?;
     let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
 
+    let jobs_path = paths::daemon_jobs_file()?;
     Ok(DaemonStatus {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
@@ -469,6 +496,7 @@ pub fn read_status() -> Result<DaemonStatus> {
         state: validation.state,
         state_path,
         state_identity,
+        process_candidates: control::daemon_process_candidates(&jobs_path)?,
     })
 }
 
