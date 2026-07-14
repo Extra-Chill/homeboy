@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.285.0] - 2026-07-14
+
+### Added
+- add typed review dossiers
+
+### Changed
+- source version-guard language tokens from extension defaults (#6759)
+- make extension script tests noexec-tmp portable and race-free (#6760)
+- Harden agent-task plan files and redaction
+
+### Fixed
+- hydrate exact-ref deploy worktrees
+- preserve promotion provider requests
+- recover linked agent-task results after daemon loss
+- preserve local agent artifact sizes
+- materialize changed-since base without runner origin access
+
 ## [0.284.8] - 2026-07-14
 
 ### Changed
