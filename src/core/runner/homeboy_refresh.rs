@@ -932,7 +932,7 @@ fn installed_homeboy_env(
 
 fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
     format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
+        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nmkdir -p \"$(dirname \"$dir\")\"\nif [ ! -d \"$dir/.git\" ]; then\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref^{{commit}}\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref^{{commit}}\")\nif [ -z \"$target\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n\"$binary\" self identity\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
@@ -1364,6 +1364,132 @@ mod tests {
             plan.binary_path,
             "/runner/ws/homeboy-clean/target/release/homeboy"
         );
+        assert!(plan
+            .script
+            .contains("rev-parse --verify --quiet \"origin/$ref^{commit}\""));
+    }
+
+    #[test]
+    fn materialize_script_peels_tags_to_commits_and_validates_the_built_identity() {
+        let fixture = tempfile::tempdir().expect("fixture directory");
+        let source = fixture.path().join("source");
+        let tools = fixture.path().join("tools");
+        std::fs::create_dir_all(source.join("src")).expect("source directory");
+        std::fs::create_dir_all(&tools).expect("tools directory");
+        std::fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(source.join("src/main.rs"), "fn main() {}\n").expect("source");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "homeboy@example.test"],
+            vec!["config", "user.name", "Homeboy Test"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=homeboy@example.test",
+                "-c",
+                "user.name=Homeboy Test",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            vec!["tag", "-a", "annotated", "-m", "annotated fixture"],
+            vec!["tag", "lightweight"],
+            vec!["branch", "refresh-branch"],
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git fixture setup succeeds");
+        }
+        let expected_commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&source)
+                .output()
+                .expect("read source SHA")
+                .stdout,
+        )
+        .expect("source SHA is UTF-8")
+        .trim()
+        .to_string();
+        let cargo = tools.join("cargo");
+        std::fs::write(
+            &cargo,
+            r#"#!/bin/sh
+set -e
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--manifest-path" ]; then manifest=$2; shift 2; continue; fi
+  shift
+done
+dir=${manifest%/Cargo.toml}
+mkdir -p "$dir/target/release"
+cat > "$dir/target/release/homeboy" <<'EOF'
+#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+printf '{"data":{"git_commit":"%s","git_dirty":false}}\n' "$(git -C "$dir" rev-parse HEAD)"
+EOF
+chmod 0755 "$dir/target/release/homeboy"
+"#,
+        )
+        .expect("fake cargo");
+        let status = Command::new("chmod")
+            .args(["0755", cargo.to_str().expect("cargo path")])
+            .status()
+            .expect("make fake cargo executable");
+        assert!(status.success(), "fake cargo is executable");
+
+        for git_ref in ["annotated", "lightweight", "refresh-branch"] {
+            let target_dir = fixture.path().join(format!("build-{git_ref}"));
+            let binary_path = target_dir.join("target/release/homeboy");
+            let script = materialize_script(
+                source.to_str().expect("source path"),
+                git_ref,
+                target_dir.to_str().expect("target path"),
+                binary_path.to_str().expect("binary path"),
+            );
+            let output = Command::new("bash")
+                .args(["-c", &script])
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        tools.display(),
+                        std::env::var("PATH").expect("PATH")
+                    ),
+                )
+                .output()
+                .expect("run materialize script");
+            assert!(
+                output.status.success(),
+                "{git_ref} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+            assert_eq!(
+                source_sha_from_output(&stdout).as_deref(),
+                Some(expected_commit.as_str())
+            );
+            let identity = parse_identity(&stdout).expect("identity parses");
+            let plan = HomeboyBinaryRefreshPlan {
+                runner_id: "lab".to_string(),
+                mode: "materialize".to_string(),
+                source: Some(source.display().to_string()),
+                git_ref: Some(git_ref.to_string()),
+                target_dir: Some(target_dir.display().to_string()),
+                binary_path: binary_path.display().to_string(),
+                script,
+                reconnect: false,
+                followup_commands: Vec::new(),
+            };
+            verify_materialized_identity(&plan, &stdout, &identity)
+                .expect("peeled commit identity is accepted");
+        }
     }
 
     #[test]
