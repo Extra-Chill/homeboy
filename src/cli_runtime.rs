@@ -615,6 +615,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         default_lab_runner.as_deref(),
                     ),
                     default_lab_runner.as_deref(),
+                    hot_command,
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);
