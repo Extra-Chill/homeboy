@@ -941,43 +941,6 @@ impl AgentTaskScheduleSupport {
         }
     }
 
-    pub(super) fn timeout_outcome(
-        task_id: String,
-        timeout_ms: u64,
-        request: Option<&AgentTaskRequest>,
-        timeout_kind: &str,
-    ) -> AgentTaskOutcome {
-        let mut outcome = AgentTaskOutcome {
-            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-            task_id,
-            status: AgentTaskOutcomeStatus::Timeout,
-            summary: Some(format!("task exceeded timeout_ms={timeout_ms}")),
-            failure_classification: Some(AgentTaskFailureClassification::Timeout),
-            artifacts: Vec::new(),
-            typed_artifacts: Vec::new(),
-            evidence_refs: vec![AgentTaskEvidenceRef {
-                kind: "scheduler".to_string(),
-                uri: "homeboy://agent-task/timeout".to_string(),
-                label: Some("scheduler timeout".to_string()),
-            }],
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "timeout".to_string(),
-                message: format!("task exceeded timeout_ms={timeout_ms}"),
-                data: Value::Null,
-            }],
-            outputs: Value::Null,
-            workflow: None,
-            follow_up: None,
-            metadata: Value::Null,
-        };
-
-        if let Some(request) = request {
-            Self::reconcile_timeout_artifacts(&mut outcome, request, timeout_kind);
-        }
-
-        outcome
-    }
-
     pub(super) fn reconcile_timeout_artifacts(
         outcome: &mut AgentTaskOutcome,
         request: &AgentTaskRequest,
@@ -1277,6 +1240,22 @@ impl AgentTaskScheduleSupport {
                     "terminal_reason": format!("{:?}", outcome.status).to_lowercase(),
                 }),
             );
+        if let Some(exhausted) = exhausted {
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.execution_budget_exhausted".to_string(),
+                message: "provider execution stopped because its configured execution budget was exhausted"
+                    .to_string(),
+                data: serde_json::json!({
+                    "exhausted_budget": match exhausted {
+                        "total_executions" => "max_provider_executions",
+                        "provider_rotations" => "max_provider_rotations",
+                        _ => "max_same_provider_retries",
+                    },
+                    "executions_used": executions_used,
+                    "provider_rotations_used": rotations_used,
+                }),
+            });
+        }
     }
 
     pub(super) fn should_retry(

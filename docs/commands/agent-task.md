@@ -89,8 +89,9 @@ homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-
 ```
 
 `--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.
-It also sets both category ceilings to `N - 1`, so it never grants an independent
-rotation budget. It cannot be combined with the explicit budget flags. Plan and
+Retry and rotation ceilings remain explicit, so the alias never grants either
+category an independent budget. It cannot be combined with the canonical total
+execution flag. Plan and
 `agent-task status` output show the resolved defaults before provider execution;
 an exhausted run records which budget stopped further execution.
 

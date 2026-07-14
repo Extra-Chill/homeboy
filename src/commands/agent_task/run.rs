@@ -22,6 +22,8 @@ use super::args::{
     SubmitArgs,
 };
 
+const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -43,15 +45,34 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
-    let mut request = String::new();
+    let mut request = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut request)
+        .take(MAX_PROMOTION_PROVIDER_REQUEST_BYTES + 1)
+        .read_to_end(&mut request)
         .map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
                 Some("read agent-task promotion provider request".to_string()),
             )
         })?;
+    if request.len() as u64 > MAX_PROMOTION_PROVIDER_REQUEST_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "promotion-provider request",
+            format!(
+                "promotion provider request exceeds {MAX_PROMOTION_PROVIDER_REQUEST_BYTES} bytes"
+            ),
+            None,
+            None,
+        ));
+    }
+    let request = String::from_utf8(request).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "promotion-provider request",
+            format!("promotion provider request is not UTF-8: {error}"),
+            None,
+            None,
+        )
+    })?;
     homeboy::core::agent_task_promotion::apply_materialized_workspace_patch(
         Path::new(&args.workspace),
         &request,

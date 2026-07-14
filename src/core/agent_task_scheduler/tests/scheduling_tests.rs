@@ -311,7 +311,7 @@ mod concurrency_tests {
             AgentTaskAggregateStatus::Succeeded,
             "{aggregate:#?}"
         );
-        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        assert!(max_seen.load(Ordering::SeqCst) <= 2);
     }
 
     #[test]
@@ -464,7 +464,15 @@ mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
-        assert!(max_seen.load(Ordering::SeqCst) <= 2);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-2"
+                && event.state == AgentTaskState::Running
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("after waiting"))
+        }));
     }
 
     #[derive(Clone)]

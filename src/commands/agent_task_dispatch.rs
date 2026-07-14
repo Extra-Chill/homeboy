@@ -23,15 +23,30 @@ pub struct DispatchCoreArgs {
 
     /// Maximum total provider executions per task, including same-provider
     /// retries and provider rotations. `--attempts 1` runs exactly once.
-    #[arg(long, default_value_t = 1, value_name = "N")]
+    #[arg(
+        long = "max-provider-executions",
+        alias = "attempts",
+        default_value_t = 1,
+        value_name = "N"
+    )]
     pub attempts: u32,
 
     /// Same-provider retries allowed after the first provider execution.
-    #[arg(long, default_value_t = 0, value_name = "N")]
+    #[arg(
+        long = "max-same-provider-retries",
+        alias = "same-provider-retries",
+        default_value_t = 0,
+        value_name = "N"
+    )]
     pub same_provider_retries: u32,
 
     /// Cross-provider rotations allowed after the first provider execution.
-    #[arg(long, default_value_t = 0, value_name = "N")]
+    #[arg(
+        long = "max-provider-rotations",
+        alias = "provider-rotations",
+        default_value_t = 0,
+        value_name = "N"
+    )]
     pub provider_rotations: u32,
 
     /// Persist the run for a daemon/runner but do not execute immediately.

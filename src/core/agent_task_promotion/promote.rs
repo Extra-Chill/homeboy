@@ -28,6 +28,10 @@ use super::types::{
     AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 
+mod gate_run;
+
+use gate_run::PromotionGateRun;
+
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
     let mut report = promote_with_provider(options, &mut provider)?;
@@ -296,24 +300,6 @@ fn promote_committed_changes(
         }),
         operator_notification,
     })
-}
-
-struct PromotionGateRun {
-    status: AgentTaskPromotionStatus,
-    deterministic_gates: Vec<crate::core::agent_task_gate::AgentTaskGateReport>,
-    gate_results: Vec<HomeboyGateResult>,
-    dependencies_materialized: bool,
-}
-
-impl PromotionGateRun {
-    fn without_gates(dry_run: bool) -> Self {
-        Self {
-            status: status_for_report(dry_run, false),
-            deterministic_gates: Vec::new(),
-            gate_results: Vec::new(),
-            dependencies_materialized: false,
-        }
-    }
 }
 
 fn run_promotion_gates(
