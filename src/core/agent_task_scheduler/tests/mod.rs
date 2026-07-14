@@ -8,3 +8,4 @@
 mod fixtures;
 mod outcome_tests;
 mod scheduling_tests;
+mod timeout_propagation_tests;

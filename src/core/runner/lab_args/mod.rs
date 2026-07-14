@@ -20,6 +20,8 @@ mod provider_config;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_contract_tests;
 
 /// Sentinel inserted to mark an explicit user-provided passthrough boundary so
 /// Lab offload rewriting can distinguish it from synthesized passthrough args.

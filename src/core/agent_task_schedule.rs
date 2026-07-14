@@ -132,6 +132,11 @@ mod plan {
         }
 
         pub fn canonicalize(mut self) -> Self {
+            for task in &mut self.tasks {
+                if task.limits.timeout_ms.is_none() {
+                    task.limits.timeout_ms = self.options.timeout_ms;
+                }
+            }
             self.rebuild_homeboy_plan();
             Self::from_homeboy_plan(self.homeboy_plan)
         }
