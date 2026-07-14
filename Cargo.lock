@@ -697,6 +697,7 @@ dependencies = [
  "heck",
  "homeboy-engine-primitives",
  "homeboy-error",
+ "homeboy-product-identity",
  "homeboy-redaction",
  "keyring",
  "libc",
@@ -736,6 +737,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "homeboy-product-identity"
+version = "0.1.0"
 
 [[package]]
 name = "homeboy-redaction"
