@@ -442,27 +442,25 @@ mod concurrency_tests {
     }
 
     #[test]
-    fn canonicalizes_non_git_workspace_paths_without_git_identity() {
+    fn serializes_overlapping_non_git_workspace_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         let child = workspace.join("child");
         fs::create_dir(&workspace).expect("workspace");
         fs::create_dir(&child).expect("child");
-        let mut root_request = request("root");
-        root_request.workspace.root = Some(workspace.display().to_string());
-        let mut equivalent_request = request("equivalent");
-        equivalent_request.workspace.root = Some(workspace.join(".").display().to_string());
-        let mut child_request = request("child");
-        child_request.workspace.root = Some(child.display().to_string());
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(3);
+        plan.options.max_concurrency = 3;
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[1].workspace.root = Some(workspace.join(".").display().to_string());
+        plan.tasks[2].workspace.root = Some(child.display().to_string());
 
-        assert_eq!(
-            AgentTaskScheduleSupport::workspace_key(&root_request),
-            AgentTaskScheduleSupport::workspace_key(&equivalent_request)
-        );
-        assert_ne!(
-            AgentTaskScheduleSupport::workspace_key(&root_request),
-            AgentTaskScheduleSupport::workspace_key(&child_request)
-        );
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert!(max_seen.load(Ordering::SeqCst) <= 2);
     }
 
     #[derive(Clone)]

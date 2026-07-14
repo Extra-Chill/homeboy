@@ -497,17 +497,20 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         .collect::<Vec<_>>();
 
     let candidate_count = candidates.len();
+    let hydrate = |evidence_ref: &AgentTaskEvidenceRef, task_id: &Option<String>| {
+        agent_task_service::hydrate_evidence_ref(
+            &args.run_id,
+            evidence_ref,
+            task_id.as_deref(),
+            plan.as_ref(),
+            aggregate.as_ref(),
+        )
+    };
     let Some((evidence_ref, task_id, hydrated)) = candidates
         .iter()
         .filter(|(evidence_ref, _)| !evidence_ref.uri.contains("/plan#"))
         .find_map(|(evidence_ref, task_id)| {
-            let hydrated = agent_task_service::hydrate_evidence_ref(
-                &args.run_id,
-                evidence_ref,
-                task_id.as_deref(),
-                plan.as_ref(),
-                aggregate.as_ref(),
-            );
+            let hydrated = hydrate(evidence_ref, task_id);
             (hydrated.status == "ok"
                 && !hydrated.truncated
                 && hydrated.content.get("format").and_then(Value::as_str) == Some("json"))
@@ -515,13 +518,7 @@ pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdR
         })
         .or_else(|| {
             candidates.first().map(|(evidence_ref, task_id)| {
-                let hydrated = agent_task_service::hydrate_evidence_ref(
-                    &args.run_id,
-                    evidence_ref,
-                    task_id.as_deref(),
-                    plan.as_ref(),
-                    aggregate.as_ref(),
-                );
+                let hydrated = hydrate(evidence_ref, task_id);
                 (evidence_ref.clone(), task_id.clone(), hydrated)
             })
         })
