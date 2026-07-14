@@ -5,7 +5,8 @@ use std::path::Path;
 
 use crate::core::runner::workspace::snapshot::{
     copy_snapshot_to_directory, snapshot_archive_command, snapshot_install_command,
-    workspace_content_hash,
+    workspace_content_hash, workspace_content_hash_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
 };
 use crate::core::runner::workspace::sync::{list_workspaces, sync_workspace};
 use crate::core::runner::workspace::types::{
@@ -691,6 +692,132 @@ fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_in
         expected,
         "the controller hash must describe the bytes and structure that the runner verifies"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_normalizes_git_materialization_umask_modes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let controller = tempfile::tempdir().expect("controller");
+    let runner = tempfile::tempdir().expect("runner");
+    for root in [controller.path(), runner.path()] {
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(root.join("src/library.rs"), "pub fn fixture() {}\n").expect("source file");
+        fs::write(root.join("src/run.sh"), "#!/bin/sh\n").expect("executable file");
+    }
+    fs::set_permissions(
+        controller.path().join("src"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("controller directory mode");
+    fs::set_permissions(runner.path().join("src"), fs::Permissions::from_mode(0o775))
+        .expect("runner directory mode");
+    fs::set_permissions(
+        controller.path().join("src/library.rs"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("controller file mode");
+    fs::set_permissions(
+        runner.path().join("src/library.rs"),
+        fs::Permissions::from_mode(0o664),
+    )
+    .expect("runner file mode");
+    fs::set_permissions(
+        controller.path().join("src/run.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("controller executable mode");
+    fs::set_permissions(
+        runner.path().join("src/run.sh"),
+        fs::Permissions::from_mode(0o775),
+    )
+    .expect("runner executable mode");
+
+    assert_eq!(
+        workspace_content_hash(controller.path(), &[]).expect("controller hash"),
+        workspace_content_hash(runner.path(), &[]).expect("runner hash"),
+        "Git checkout umask differences must not change materialized content identity"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_portable_policy_is_platform_mode_independent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let file = workspace.path().join("file.txt");
+    fs::write(&file, "portable bytes\n").expect("source file");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
+    let non_executable = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    )
+    .expect("non-executable hash");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+        )
+        .expect("executable hash"),
+        non_executable,
+        "portable v2 identity must not bind platform-specific permission bits"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn workspace_content_hash_unix_policy_binds_executable_bit_without_umask_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let file = workspace.path().join("file.txt");
+    fs::write(&file, "portable bytes\n").expect("source file");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
+    let non_executable = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    )
+    .expect("non-executable hash");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).expect("umask variant");
+    assert_eq!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        )
+        .expect("umask variant hash"),
+        non_executable
+    );
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
+    assert_ne!(
+        workspace_content_hash_for_policy(
+            workspace.path(),
+            &[],
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+        )
+        .expect("executable hash"),
+        non_executable
+    );
+}
+
+#[test]
+#[cfg(not(unix))]
+fn workspace_content_hash_non_unix_rejects_unix_executable_policy() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    fs::write(workspace.path().join("file.txt"), "portable bytes\n").expect("source file");
+    let error = workspace_content_hash_for_policy(
+        workspace.path(),
+        &[],
+        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    )
+    .expect_err("non-Unix cannot verify Unix executable policy");
+    assert!(error.message.contains("unsupported on this platform"));
 }
 
 #[test]
