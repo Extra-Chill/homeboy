@@ -84,24 +84,44 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let client_context = dispatch_client_context(request)?;
     let mut provider_config =
         dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
-    let policy_backend = request
+    let mut policy_backend = request
         .core
         .resolved_provider_policy
         .as_ref()
         .map(|policy| policy.backend.clone())
         .unwrap_or_else(|| request.backend.clone());
-    let policy_selector = request
+    let mut policy_selector = request
         .core
         .resolved_provider_policy
         .as_ref()
         .and_then(|policy| policy.selector.clone())
         .or_else(|| request.selector.clone());
-    let policy_model = request
+    let mut policy_model = request
         .core
         .resolved_provider_policy
         .as_ref()
         .and_then(|policy| policy.model.clone())
         .or_else(|| request.model.clone());
+    let mut resolved_rotation = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .and_then(|policy| policy.rotation.clone());
+    if request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .is_some_and(|policy| policy.rotation_starts_with_first_entry)
+    {
+        if let Some(rotation) = resolved_rotation.as_mut() {
+            if !rotation.entries.is_empty() {
+                let first = rotation.entries.remove(0);
+                policy_backend = first.backend.unwrap_or(policy_backend);
+                policy_selector = first.selector.or(policy_selector);
+                policy_model = first.model.or(policy_model);
+            }
+        }
+    }
     let component_contracts = dispatch_component_contracts(&provider_config, &client_context)?;
     // Resolve + materialize the declared runtime dependency graph at known refs
     // and preflight-fail before dispatch when a required runtime dependency is
@@ -240,7 +260,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     // A submitted controller policy is authoritative, including an explicitly
     // absent rotation. Per-task `metadata.provider_rotation` still overrides it.
     plan.options.rotation = match &request.core.resolved_provider_policy {
-        Some(policy) => policy.rotation.clone(),
+        Some(_) => resolved_rotation,
         None => defaults::load_config().agent_task.rotation,
     };
     if let Some(policy) = &request.core.resolved_provider_policy {
@@ -1040,6 +1060,7 @@ mod tests {
                                     liveness_timeout_ms: Some(45_000),
                                 },
                             ),
+                            rotation_starts_with_first_entry: false,
                             retry: AgentTaskRetryPolicy {
                                 max_attempts: 2,
                                 ..Default::default()
@@ -1124,6 +1145,7 @@ mod tests {
                             selector: None,
                             model: None,
                             rotation: None,
+                            rotation_starts_with_first_entry: false,
                             retry: AgentTaskRetryPolicy {
                                 max_attempts: 1,
                                 ..Default::default()
@@ -1139,6 +1161,58 @@ mod tests {
 
             assert!(plan.options.rotation.is_none());
         });
+    }
+
+    #[test]
+    fn resolved_rotation_can_define_the_initial_provider_attempt() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with the resolved rotation.".to_string()),
+            core: DispatchCoreInputs {
+                timeout_ms: Some(2_700_000),
+                resolved_provider_policy: Some(
+                    crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                        backend: "opencode".to_string(),
+                        selector: None,
+                        model: None,
+                        rotation: Some(
+                            crate::core::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                                entries: ["model-one", "model-two", "model-three"]
+                                    .into_iter()
+                                    .map(|model| crate::core::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                        model: Some(model.to_string()),
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                                ..Default::default()
+                            },
+                        ),
+                        rotation_starts_with_first_entry: true,
+                        retry: AgentTaskRetryPolicy {
+                            max_attempts: 3,
+                            ..Default::default()
+                        },
+                        liveness_timeout_ms: None,
+                    },
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        assert_eq!(plan.options.timeout_ms, Some(2_700_000));
+        assert_eq!(plan.tasks[0].executor.model.as_deref(), Some("model-one"));
+        assert_eq!(
+            plan.options
+                .rotation
+                .as_ref()
+                .expect("remaining rotation")
+                .entries
+                .iter()
+                .filter_map(|entry| entry.model.as_deref())
+                .collect::<Vec<_>>(),
+            ["model-two", "model-three"]
+        );
     }
 
     #[test]
