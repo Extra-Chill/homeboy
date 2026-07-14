@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.284.2] - 2026-07-14
+
+### Changed
+- Refresh disconnected SSH runners
+
+### Fixed
+- derive leaseless recovery intent from subcommand
+- omit redundant leaseless recovery selector
+
 ## [0.284.1] - 2026-07-14
 
 ### Changed
