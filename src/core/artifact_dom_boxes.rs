@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::env;
 use std::io::ErrorKind;
 use std::net::TcpListener;
@@ -13,6 +13,17 @@ use crate::core::{artifact_origin, Error, Result};
 
 pub const ARTIFACT_DOM_BOXES_SCHEMA: &str = "homeboy/static-artifact-dom-boxes/v1";
 const DEFAULT_TEXT_SAMPLE_LIMIT: usize = 160;
+const MAX_DOM_BOX_EVIDENCE_BYTES: usize = 16 * 1024;
+const MAX_DOM_BOX_EVIDENCE_DEPTH: usize = 8;
+const MAX_DOM_BOX_EVIDENCE_KEYS: usize = 64;
+const MAX_DOM_BOX_EVIDENCE_STRING_BYTES: usize = 4 * 1024;
+const DOM_BOX_EVIDENCE_FIELDS: [&str; 5] = [
+    "computed_style",
+    "text_metrics",
+    "asset_state",
+    "visibility",
+    "source",
+];
 
 #[derive(Debug, Clone)]
 pub struct DomBoxCaptureSpec {
@@ -62,6 +73,16 @@ pub struct DomBoxElement {
     pub text_sample: String,
     #[serde(rename = "boundingClientRect")]
     pub bounding_client_rect: DomRect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computed_style: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_metrics: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_state: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -101,6 +122,11 @@ pub(crate) struct BrowserElement {
     text_sample: String,
     #[serde(rename = "boundingClientRect")]
     bounding_client_rect: DomRect,
+    computed_style: Option<Value>,
+    text_metrics: Option<Value>,
+    asset_state: Option<Value>,
+    visibility: Option<Value>,
+    source: Option<Value>,
 }
 
 impl Default for DomBoxCaptureSpec {
@@ -155,7 +181,7 @@ pub fn capture(spec: DomBoxCaptureSpec) -> Result<DomBoxReport> {
     });
 
     let result = run_browser_capture(&base_url, &plan, spec.text_sample_limit)
-        .map(|browser| shape_report(&spec.root, browser, spec.text_sample_limit));
+        .and_then(|browser| shape_report(&spec.root, browser, spec.text_sample_limit));
     stop.store(true, Ordering::Relaxed);
     let _ = server.join();
 
@@ -182,8 +208,9 @@ pub(crate) fn shape_report(
     root: &Path,
     browser: BrowserReport,
     text_sample_limit: usize,
-) -> DomBoxReport {
-    DomBoxReport {
+) -> Result<DomBoxReport> {
+    validate_browser_evidence(&browser)?;
+    Ok(DomBoxReport {
         schema: ARTIFACT_DOM_BOXES_SCHEMA,
         root: root.display().to_string(),
         entrypoints: browser
@@ -216,12 +243,130 @@ pub(crate) fn shape_report(
                                 text_sample_limit,
                             ),
                             bounding_client_rect: element.bounding_client_rect,
+                            computed_style: evidence_object(element.computed_style),
+                            text_metrics: evidence_object(element.text_metrics),
+                            asset_state: evidence_object(element.asset_state),
+                            visibility: evidence_object(element.visibility),
+                            source: evidence_object(element.source),
                         })
                         .collect(),
                 }
             })
             .collect(),
+    })
+}
+
+fn evidence_object(value: Option<Value>) -> Option<Map<String, Value>> {
+    value.map(|value| {
+        value
+            .as_object()
+            .expect("validated DOM-box evidence must be an object")
+            .clone()
+    })
+}
+
+fn validate_browser_evidence(browser: &BrowserReport) -> Result<()> {
+    for (entrypoint_index, entrypoint) in browser.entrypoints.iter().enumerate() {
+        for (element_index, element) in entrypoint.elements.iter().enumerate() {
+            for field in DOM_BOX_EVIDENCE_FIELDS {
+                let value = match field {
+                    "computed_style" => element.computed_style.as_ref(),
+                    "text_metrics" => element.text_metrics.as_ref(),
+                    "asset_state" => element.asset_state.as_ref(),
+                    "visibility" => element.visibility.as_ref(),
+                    "source" => element.source.as_ref(),
+                    _ => unreachable!("DOM-box evidence field list is exhaustive"),
+                };
+                if let Some(value) = value {
+                    validate_evidence_object(value, field, entrypoint_index, element_index)?;
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+fn validate_evidence_object(
+    value: &Value,
+    field: &str,
+    entrypoint_index: usize,
+    element_index: usize,
+) -> Result<()> {
+    let location = format!("{field} at entrypoint {entrypoint_index}, element {element_index}");
+    if !value.is_object() {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} must be a JSON object"
+        )));
+    }
+    let serialized = serde_json::to_vec(value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize DOM-box provider evidence".into()),
+        )
+    })?;
+    if serialized.len() > MAX_DOM_BOX_EVIDENCE_BYTES {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_BYTES}-byte limit"
+        )));
+    }
+
+    let mut key_count = 0;
+    validate_evidence_value(value, 1, &mut key_count, &location)
+}
+
+fn validate_evidence_value(
+    value: &Value,
+    depth: usize,
+    key_count: &mut usize,
+    location: &str,
+) -> Result<()> {
+    if depth > MAX_DOM_BOX_EVIDENCE_DEPTH {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_DEPTH}-level nesting limit"
+        )));
+    }
+    match value {
+        Value::Object(object) => {
+            *key_count += object.len();
+            if *key_count > MAX_DOM_BOX_EVIDENCE_KEYS {
+                return Err(dom_box_evidence_error(format!(
+                    "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_KEYS}-key limit"
+                )));
+            }
+            for (key, value) in object {
+                validate_evidence_string(key, location)?;
+                validate_evidence_value(value, depth + 1, key_count, location)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                validate_evidence_value(value, depth + 1, key_count, location)?;
+            }
+        }
+        Value::String(value) => validate_evidence_string(value, location)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_evidence_string(value: &str, location: &str) -> Result<()> {
+    if value.len() > MAX_DOM_BOX_EVIDENCE_STRING_BYTES {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} contains a string exceeding the {MAX_DOM_BOX_EVIDENCE_STRING_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn dom_box_evidence_error(message: String) -> Error {
+    Error::validation_invalid_argument(
+        "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+        message,
+        None,
+        Some(vec![
+            "Provide bounded JSON object evidence: at most 16384 bytes, 8 nesting levels, 64 keys, and 4096 bytes per string.".to_string(),
+        ]),
+    )
 }
 
 struct NormalizedCaptureDiagnostics {
@@ -358,7 +503,7 @@ fn run_browser_capture(
             stderr.trim()
         )));
     }
-    serde_json::from_slice(&output.stdout).map_err(|err| {
+    let report = serde_json::from_slice(&output.stdout).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some(
@@ -368,7 +513,9 @@ fn run_browser_capture(
                     .collect(),
             ),
         )
-    })
+    })?;
+    validate_browser_evidence(&report)?;
+    Ok(report)
 }
 
 fn missing_browser_error() -> Error {
@@ -417,6 +564,66 @@ mod tests {
         }
     }
 
+    fn provider_payload(evidence: Option<(&str, Value)>) -> Value {
+        let mut element = serde_json::json!({
+            "node_id": "12:34",
+            "node_name": "Hero",
+            "selector": "div[data-figma-node-id=\"12:34\"]",
+            "tag": "div",
+            "text_sample": "Hello world",
+            "boundingClientRect": {
+                "x": 1,
+                "y": 2,
+                "width": 3,
+                "height": 4,
+                "top": 2,
+                "right": 4,
+                "bottom": 6,
+                "left": 1
+            }
+        });
+        if let Some((field, value)) = evidence {
+            element
+                .as_object_mut()
+                .expect("provider element object")
+                .insert(field.to_string(), value);
+        }
+        serde_json::json!({
+            "entrypoints": [{
+                "page_path": "/index.html",
+                "page_url": "http://127.0.0.1/index.html",
+                "viewport": { "width": 1440, "height": 900, "device_scale_factor": 1 },
+                "elements": [element]
+            }]
+        })
+    }
+
+    fn capture_provider_payload(payload: Value) -> Result<BrowserReport> {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = dir.path().join("dom-provider");
+        let payload = serde_json::to_string(&payload).expect("provider payload");
+        std::fs::write(&provider, format!("#!/bin/sh\nprintf '%s' '{payload}'\n"))
+            .expect("provider");
+        let mut perms = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&provider, perms).expect("chmod");
+
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::set_var(
+            "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+            provider.display().to_string(),
+        );
+        let result = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160);
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+        result
+    }
+
     #[test]
     fn shapes_report_and_truncates_text_samples() {
         let report = shape_report(
@@ -440,11 +647,17 @@ mod tests {
                         tag: "p".to_string(),
                         text_sample: "Footer\ntext with    extra words".to_string(),
                         bounding_client_rect: rect(),
+                        computed_style: Some(serde_json::json!({ "display": "block" })),
+                        text_metrics: Some(serde_json::json!({ "line_count": 2 })),
+                        asset_state: Some(serde_json::json!({ "loaded": true })),
+                        visibility: Some(serde_json::json!({ "is_visible": true })),
+                        source: Some(serde_json::json!({ "kind": "generated" })),
                     }],
                 }],
             },
             16,
-        );
+        )
+        .expect("shape");
 
         assert_eq!(report.schema, ARTIFACT_DOM_BOXES_SCHEMA);
         assert_eq!(
@@ -463,6 +676,12 @@ mod tests {
             Some("0px")
         );
         assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+        let element = &report.entrypoints[0].elements[0];
+        assert_eq!(element.computed_style.as_ref().unwrap()["display"], "block");
+        assert_eq!(element.text_metrics.as_ref().unwrap()["line_count"], 2);
+        assert_eq!(element.asset_state.as_ref().unwrap()["loaded"], true);
+        assert_eq!(element.visibility.as_ref().unwrap()["is_visible"], true);
+        assert_eq!(element.source.as_ref().unwrap()["kind"], "generated");
     }
 
     #[test]
@@ -485,7 +704,8 @@ mod tests {
                 }],
             },
             16,
-        );
+        )
+        .expect("shape");
 
         let entrypoint = &report.entrypoints[0];
         assert_eq!(entrypoint.dom_capture_valid, Some(false));
@@ -518,7 +738,8 @@ mod tests {
                 }],
             },
             16,
-        );
+        )
+        .expect("shape");
 
         let entrypoint = &report.entrypoints[0];
         assert_eq!(entrypoint.dom_css_loaded, Some(false));
@@ -561,7 +782,7 @@ mod tests {
         std::fs::write(
             &provider,
             r#"#!/bin/sh
-printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0.0.1/index.html","viewport":{"width":1440,"height":900,"device_scale_factor":1},"elements":[{"node_id":"12:34","node_name":"Hero","selector":"div[data-figma-node-id=\"12:34\"]","tag":"div","text_sample":"Hello world","boundingClientRect":{"x":1,"y":2,"width":3,"height":4,"top":2,"right":4,"bottom":6,"left":1}}]}]}'
+printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0.0.1/index.html","viewport":{"width":1440,"height":900,"device_scale_factor":1},"elements":[{"node_id":"12:34","node_name":"Hero","selector":"div[data-figma-node-id=\"12:34\"]","tag":"div","text_sample":"Hello world","boundingClientRect":{"x":1,"y":2,"width":3,"height":4,"top":2,"right":4,"bottom":6,"left":1},"computed_style":{"display":"block"},"text_metrics":{"line_count":1},"asset_state":{"loaded":true},"visibility":{"is_visible":true},"source":{"kind":"fixture"}}]}]}'
 "#,
         )
         .expect("provider");
@@ -585,6 +806,153 @@ printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0
 
         assert_eq!(report.entrypoints.len(), 1);
         assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+        let shaped = shape_report(Path::new("/artifact"), report, 160).expect("shape");
+        let element =
+            &serde_json::to_value(&shaped).expect("serialize")["entrypoints"][0]["elements"][0];
+        assert_eq!(
+            element["computed_style"],
+            serde_json::json!({ "display": "block" })
+        );
+        assert_eq!(
+            element["text_metrics"],
+            serde_json::json!({ "line_count": 1 })
+        );
+        assert_eq!(
+            element["asset_state"],
+            serde_json::json!({ "loaded": true })
+        );
+        assert_eq!(
+            element["visibility"],
+            serde_json::json!({ "is_visible": true })
+        );
+        assert_eq!(element["source"], serde_json::json!({ "kind": "fixture" }));
+    }
+
+    #[test]
+    fn browser_capture_accepts_legacy_provider_payload_without_evidence() {
+        let browser = capture_provider_payload(provider_payload(None)).expect("legacy capture");
+        let report = shape_report(Path::new("/artifact"), browser, 160).expect("shape");
+        let element =
+            &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];
+        for field in DOM_BOX_EVIDENCE_FIELDS {
+            assert!(element.get(field).is_none(), "{field} should be omitted");
+        }
+    }
+
+    #[test]
+    fn browser_capture_rejects_scalar_and_array_evidence() {
+        for value in [serde_json::json!("not an object"), serde_json::json!([])] {
+            let error = capture_provider_payload(provider_payload(Some(("computed_style", value))))
+                .expect_err("invalid evidence shape");
+            assert!(error.to_string().contains("computed_style"));
+            assert!(error.to_string().contains("must be a JSON object"));
+        }
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_nesting_limit() {
+        let mut value = serde_json::json!({});
+        for _ in 0..MAX_DOM_BOX_EVIDENCE_DEPTH {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let error = capture_provider_payload(provider_payload(Some(("source", value))))
+            .expect_err("excessive depth");
+        assert!(error.to_string().contains("source"));
+        assert!(error.to_string().contains("nesting limit"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_key_limit() {
+        let mut value = Map::new();
+        for index in 0..=MAX_DOM_BOX_EVIDENCE_KEYS {
+            value.insert(format!("key-{index}"), Value::Null);
+        }
+
+        let error = capture_provider_payload(provider_payload(Some((
+            "text_metrics",
+            Value::Object(value),
+        ))))
+        .expect_err("excessive keys");
+        assert!(error.to_string().contains("text_metrics"));
+        assert!(error.to_string().contains("key limit"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_string_limit() {
+        let value = serde_json::json!({
+            "data_url": "x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES + 1)
+        });
+
+        let error = capture_provider_payload(provider_payload(Some(("asset_state", value))))
+            .expect_err("excessive string");
+        assert!(error.to_string().contains("asset_state"));
+        assert!(error.to_string().contains("string exceeding"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_byte_limit() {
+        let mut value = Map::new();
+        for index in 0..5 {
+            value.insert(
+                format!("data-{index}"),
+                Value::String("x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES)),
+            );
+        }
+
+        let error =
+            capture_provider_payload(provider_payload(Some(("visibility", Value::Object(value)))))
+                .expect_err("excessive bytes");
+        assert!(error.to_string().contains("visibility"));
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn omits_missing_optional_provider_evidence() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: Some(true),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!({})),
+                    elements: vec![BrowserElement {
+                        node_id: "12:34".to_string(),
+                        node_name: None,
+                        selector: "p".to_string(),
+                        tag: "p".to_string(),
+                        text_sample: "Hello".to_string(),
+                        bounding_client_rect: rect(),
+                        computed_style: None,
+                        text_metrics: None,
+                        asset_state: None,
+                        visibility: None,
+                        source: None,
+                    }],
+                }],
+            },
+            160,
+        )
+        .expect("shape");
+
+        let element =
+            &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];
+        for field in [
+            "computed_style",
+            "text_metrics",
+            "asset_state",
+            "visibility",
+            "source",
+        ] {
+            assert!(element.get(field).is_none(), "{field} should be omitted");
+        }
     }
 
     #[test]
