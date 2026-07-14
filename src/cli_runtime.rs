@@ -582,10 +582,15 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             } else {
                 None
             };
+            // An explicit runner is a routing decision, not a default-runner
+            // fallback. Let Lab offload report any runner-specific readiness or
+            // capability failure rather than blocking it at controller preflight.
+            let selected_lab_runner =
+                resource_policy_runner_hint(cli, default_lab_runner.as_deref());
             let warning = resource_policy::evaluate_with_runner_hint(
                 hot_command,
                 &resources,
-                default_lab_runner.as_deref(),
+                selected_lab_runner,
             );
             let runner_hosted = resource_policy::is_runner_hosted_exec();
             if let Some(warning) = warning.as_ref() {
@@ -597,7 +602,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
             // Persist the preflight resource policy decision so observation
             // runs (bench, lint, test, etc.) can record it in their metadata
             // for later interpretation. This stays generic to Homeboy core.
-            resource_policy::capture_context(
+            let mut resource_policy_context =
                 resource_policy::ResourcePolicyContext::from_evaluation(
                     hot_command,
                     &resources,
@@ -607,10 +612,16 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         warning.as_ref()
                     },
                     matches!(cli.placement, crate::cli_surface::Placement::Local),
-                    default_lab_runner.as_deref(),
+                    selected_lab_runner,
                     runner_hosted,
-                ),
-            );
+                );
+            if cli.runner.is_some()
+                && hot_command.lab_offload_supported
+                && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+            {
+                resource_policy_context.runner_selection.reason = "explicit_lab_runner".to_string();
+            }
+            resource_policy::capture_context(resource_policy_context);
             if let Some(warning) = warning.as_ref() {
                 if let Some(err) = resource_policy::non_interactive_preflight_error(
                     warning,
@@ -619,9 +630,9 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     resource_policy::rerun_command(
                         hot_command,
                         &std::env::args().collect::<Vec<_>>(),
-                        default_lab_runner.as_deref(),
+                        selected_lab_runner,
                     ),
-                    default_lab_runner.as_deref(),
+                    selected_lab_runner,
                     hot_command,
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
@@ -632,6 +643,13 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     }
 
     None
+}
+
+fn resource_policy_runner_hint<'a>(
+    cli: &'a Cli,
+    default_runner: Option<&'a str>,
+) -> Option<&'a str> {
+    cli.runner.as_deref().or(default_runner)
 }
 
 fn run_startup_update_checks(command: &Commands) {
@@ -1285,6 +1303,26 @@ mod tests {
 
         let (cli, _) = Cli::from_registered_arg_matches(&matches).expect("typed cli");
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn resource_policy_uses_explicit_runner_before_default_runner() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "selected-lab",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "homeboy@fix-explicit-runner",
+            "--prompt",
+            "fix the issue",
+        ]);
+
+        assert_eq!(
+            resource_policy_runner_hint(&cli, Some("default-lab")),
+            Some("selected-lab")
+        );
     }
 
     #[test]

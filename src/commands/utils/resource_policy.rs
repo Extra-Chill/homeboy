@@ -778,6 +778,29 @@ mod tests {
     }
 
     #[test]
+    fn non_interactive_hot_warning_allows_explicit_lab_runner_without_default() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
+        let warning = evaluate_with_runner_hint(
+            command,
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+
+        assert!(non_interactive_preflight_error(
+            &warning,
+            false,
+            false,
+            None,
+            Some("homeboy-lab"),
+            command,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn non_interactive_local_only_refusal_demotes_local_override_and_flags_portability_gap() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
