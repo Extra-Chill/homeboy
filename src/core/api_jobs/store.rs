@@ -1291,7 +1291,9 @@ fn resolve_linked_durable_run(stored: &StoredJob) -> LinkedDurableRunResolution 
         Err(_) => return LinkedDurableRunResolution::Unresolved(run_id),
     };
     let status = match result.value.status {
-        AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
+        AgentTaskAggregateStatus::Succeeded | AgentTaskAggregateStatus::CandidateRecoverable => {
+            JobStatus::Succeeded
+        }
         AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
         AgentTaskAggregateStatus::PartialFailure | AgentTaskAggregateStatus::Failed => {
             JobStatus::Failed

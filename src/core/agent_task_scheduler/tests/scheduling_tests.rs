@@ -1314,7 +1314,7 @@ mod provider_rotation_tests {
         let scheduler = AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(1);
         plan.options.execution_budget = AgentTaskExecutionBudget {
-            max_provider_executions: 1,
+            max_total_executions: 1,
             max_same_provider_retries: 0,
             max_provider_rotations: 0,
         };

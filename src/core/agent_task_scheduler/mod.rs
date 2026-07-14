@@ -34,7 +34,6 @@ use crate::core::agent_task_timeout_artifacts::{
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
 use crate::core::config::value_type_name;
-use sha2::{Digest, Sha256};
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
@@ -2211,6 +2210,7 @@ mod committed_harvest_tests {
             attempt: 1,
             started_at: Instant::now(),
             timeout_ms: None,
+            timeout_cancel_requested: false,
             rotation_index: 0,
             rotation_attempts: Vec::new(),
             candidate_artifacts: Vec::new(),

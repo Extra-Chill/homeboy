@@ -342,6 +342,7 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 detach_after_handoff: false,
                 output_file_requested: false,
                 read_only_polling: false,
+                require_controller_git_bundle: false,
                 local_output_file: None,
                 durable_agent_task_plan: Some(&plan),
                 source_path: self.source_path.as_deref(),
