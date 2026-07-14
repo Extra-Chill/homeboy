@@ -193,9 +193,15 @@ status` also reports controller, configured executable, active daemon version,
 build identity, drift signals, and refresh commands under
 `selected_lab_runner.runner_homeboy`.
 
-Refreshing back to a release clears any `runner dev-sync` provenance from the
-runner record. Use this when a lab runner should stop executing a controller-local
-dev build and return to a clean release/ref-selected binary.
+When a configured SSH runner is disconnected, `refresh-homeboy` automatically
+uses its configured SSH server transport to run the same managed build/select
+script with a bounded deadline. The selected binary and runner configuration are
+updated only after that script reports a clean identity matching the resolved
+source commit. The fallback is restricted to configured SSH runners; local
+runners retain their existing direct execution path.
+
+Refreshing back to a release changes only the selected `homeboy_path`; existing
+runner environment and resource provenance remain intact.
 
 ### `dev-sync`
 

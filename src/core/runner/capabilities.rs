@@ -1,10 +1,13 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
-use crate::core::server::{self, SshClient};
+use crate::core::server::{
+    self, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout, SshClient,
+};
 
 use super::{remote_runner_homeboy_path, Runner, RunnerKind, RunnerToolRegistry};
 
@@ -16,6 +19,7 @@ pub struct RunnerCapabilityPreflight {
     pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
     pub required_components: Vec<String>,
     pub required_env: Vec<String>,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -308,11 +312,11 @@ impl RunnerCapabilitySnapshot {
             .collect::<Result<Vec<_>>>()?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
-        let output = client.execute(&batch_probe_script(
-            &tool_commands,
-            &command_names,
-            &capability_probes,
-        ));
+        let script = batch_probe_script(&tool_commands, &command_names, &capability_probes);
+        let output = preflight
+            .timeout
+            .map(|timeout| client.execute_with_timeout(&script, timeout))
+            .unwrap_or_else(|| client.execute(&script));
         Ok(parse_batch_probe_output(
             &output.stdout,
             &tool_commands,
@@ -345,18 +349,18 @@ impl RunnerCapabilitySnapshot {
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
         let script = batch_probe_script(&tool_commands, &command_names, &capability_probes);
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(script)
-            .envs(runner.env.iter())
-            .output()
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some("probe local runner capabilities".to_string()),
-                )
-            })?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let env = runner
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let output = preflight
+            .timeout
+            .map(|timeout| {
+                execute_local_command_in_dir_with_timeout(&script, None, Some(&env), timeout)
+            })
+            .unwrap_or_else(|| execute_local_command_in_dir(&script, None, Some(&env)));
+        let stdout = output.stdout;
         Ok(parse_batch_probe_output(
             &stdout,
             &tool_commands,
@@ -648,6 +652,7 @@ impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
             required_tool_capabilities: Vec::new(),
             required_components: Vec::new(),
             required_env: Vec::new(),
+            timeout: None,
         }
     }
 }
@@ -783,6 +788,49 @@ mod tests {
                 RunnerRequiredTool::new("workspace-manager"),
             ]
         );
+    }
+
+    #[test]
+    fn local_capability_preflight_timeout_stops_a_blocking_fake_command() {
+        let fixture = tempdir().expect("fixture");
+        let blocker = fixture.path().join("blocker");
+        fs::write(&blocker, "#!/bin/sh\nsleep 5\n").expect("fake blocking command");
+        let status = std::process::Command::new("chmod")
+            .args(["0755", blocker.to_str().expect("blocker path")])
+            .status()
+            .expect("make fake command executable");
+        assert!(status.success());
+        let runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: [("PATH".to_string(), fixture.path().display().to_string())]
+                .into_iter()
+                .collect(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        };
+        let preflight = RunnerCapabilityPreflight {
+            command: "test".to_string(),
+            required_tool_capabilities: vec![RunnerToolCapabilityRequirement {
+                tool: "blocker".to_string(),
+                command: "blocker".to_string(),
+                env: Vec::new(),
+                capabilities: vec!["probe".to_string()],
+            }],
+            timeout: Some(Duration::from_millis(25)),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+
+        let snapshot = RunnerCapabilitySnapshot::from_runner_probe(&runner, &preflight)
+            .expect("bounded preflight returns a capability snapshot");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(snapshot.tool_capabilities.is_empty());
     }
 
     #[test]
@@ -944,6 +992,7 @@ mod tests {
             required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
+            timeout: None,
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
@@ -983,6 +1032,7 @@ mod tests {
             required_tool_capabilities: Vec::new(),
             required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
+            timeout: None,
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [

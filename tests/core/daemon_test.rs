@@ -1799,6 +1799,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
             cwd: Some("/srv/homeboy/project".to_string()),
             project_id: None,
             allow_diagnostic_ssh: false,
+            diagnostic_ssh_timeout: None,
             command: vec![
                 "sh".to_string(),
                 "-c".to_string(),

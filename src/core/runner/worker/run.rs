@@ -406,6 +406,7 @@ fn runner_exec_options_from_envelope(
         cwd: dispatch.cwd,
         project_id: dispatch.project_id,
         allow_diagnostic_ssh: false,
+        diagnostic_ssh_timeout: None,
         command: dispatch.command,
         env: dispatch.env,
         secret_env_names,

@@ -246,6 +246,7 @@ fn lab_runner_exec_options(
         cwd: Some(context.remote_cwd.clone()),
         project_id: None,
         allow_diagnostic_ssh: false,
+        diagnostic_ssh_timeout: None,
         command: context.command.clone(),
         env,
         secret_env_names,

@@ -93,6 +93,7 @@ pub(super) fn exec(
             cwd,
             project_id,
             allow_diagnostic_ssh,
+            diagnostic_ssh_timeout: None,
             command: prepared_command,
             env,
             secret_env_names,

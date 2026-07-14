@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +24,7 @@ use super::{
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
+const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeboyBinaryRefreshMode {
@@ -74,6 +76,19 @@ pub struct HomeboyBinaryRefreshOutput {
     pub followup_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<HomeboyBinaryRefreshFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeboyBootstrapProvenance {
+    pub transport: &'static str,
+    pub requested_ref: Option<String>,
+    pub resolved_source_sha: Option<String>,
+    pub binary_commit: Option<String>,
+    pub binary_identity: Value,
+    pub timeout_ms: Option<u128>,
+    pub config_fields_changed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +112,8 @@ pub struct HomeboyBinaryRefreshFailure {
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +279,7 @@ pub fn refresh_homeboy_binary(
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
                 failure: None,
+                bootstrap_provenance: None,
                 plan,
             },
             0,
@@ -276,19 +294,11 @@ pub fn refresh_homeboy_binary(
     };
 
     promotion_lease.assert_generation()?;
-    let (exec_output, exit_code) = exec(
-        &plan.runner_id,
-        RunnerExecOptions::raw_command(vec![
-            "bash".to_string(),
-            "-lc".to_string(),
-            plan.script.clone(),
-        ])
-        .with_capability_preflight(RunnerCapabilityPreflight {
-            command: "runner.refresh-homeboy".to_string(),
-            required_commands,
-            ..Default::default()
-        }),
-    )?;
+    let runner = load(&plan.runner_id)?;
+    let disconnected_ssh =
+        runner.kind == RunnerKind::Ssh && status_is_disconnected(&plan.runner_id)?;
+    let exec_options = refresh_execution_options(&plan, required_commands, disconnected_ssh);
+    let (exec_output, exit_code) = exec(&plan.runner_id, exec_options)?;
     if exit_code != 0 {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -304,6 +314,7 @@ pub fn refresh_homeboy_binary(
                 reconnect_required: !plan.reconnect,
                 followup_commands: plan.followup_commands.clone(),
                 failure: Some(refresh_failure(&plan, exec_output, exit_code)),
+                bootstrap_provenance: None,
                 plan,
             },
             exit_code,
@@ -311,12 +322,74 @@ pub fn refresh_homeboy_binary(
     }
 
     promotion_lease.assert_generation()?;
-    let identity = parse_identity(&exec_output.stdout)?;
-    let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
-    let updated_fields = match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
-        MergeOutput::Single(result) => result.updated_fields,
-        MergeOutput::Bulk(_) => Vec::new(),
+    let bootstrap = if disconnected_ssh {
+        ssh_bootstrap_promote_with(
+            &plan,
+            || Ok(exec_output.stdout.clone()),
+            |homeboy_path| {
+                crate::core::config::with_config_lock(|| {
+                    let patch = refreshed_runner_patch(&plan.runner_id, homeboy_path)?;
+                    match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
+                        MergeOutput::Single(result) => Ok(result.updated_fields),
+                        MergeOutput::Bulk(_) => Ok(Vec::new()),
+                    }
+                })
+            },
+        )
+    } else {
+        let identity = parse_identity(&exec_output.stdout)?;
+        verify_materialized_identity(&plan, &exec_output.stdout, &identity).map_err(|message| {
+            Error::validation_invalid_argument(
+                "identity",
+                message,
+                Some(plan.runner_id.clone()),
+                None,
+            )
+        })?;
+        let updated_fields = crate::core::config::with_config_lock(|| {
+            let patch = refreshed_runner_patch(&plan.runner_id, &plan.binary_path)?;
+            match merge(Some(&plan.runner_id), &patch.to_string(), &[])? {
+                MergeOutput::Single(result) => Ok(result.updated_fields),
+                MergeOutput::Bulk(_) => Ok(Vec::new()),
+            }
+        })?;
+        Ok(SshBootstrapPromotion {
+            identity,
+            source_sha: source_sha_from_output(&exec_output.stdout).unwrap_or_default(),
+            updated_fields,
+        })
     };
+    let bootstrap = match bootstrap {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => {
+            let verification = error.message;
+            return Ok((
+                HomeboyBinaryRefreshOutput {
+                    variant: "refresh_homeboy",
+                    command: "runner.refresh_homeboy",
+                    runner_id: plan.runner_id.clone(),
+                    dry_run: false,
+                    identity: parse_identity(&exec_output.stdout).ok(),
+                    updated_fields: Vec::new(),
+                    daemon_refreshed: false,
+                    interrupted_job_ids: Vec::new(),
+                    selected_binary_path: plan.binary_path.clone(),
+                    reconnect_required: !plan.reconnect,
+                    followup_commands: plan.followup_commands.clone(),
+                    failure: Some(refresh_verification_failure(
+                        &plan,
+                        exec_output,
+                        verification,
+                    )),
+                    bootstrap_provenance: None,
+                    plan,
+                },
+                1,
+            ));
+        }
+    };
+    let identity = bootstrap.identity;
+    let updated_fields = bootstrap.updated_fields;
 
     let mut daemon_refreshed = false;
     let interrupted_job_ids;
@@ -343,14 +416,34 @@ pub fn refresh_homeboy_binary(
             runner_id: plan.runner_id.clone(),
             dry_run: false,
             plan: plan.clone(),
-            identity: Some(identity),
-            updated_fields,
+            identity: Some(identity.clone()),
+            updated_fields: updated_fields.clone(),
             daemon_refreshed,
             interrupted_job_ids,
             selected_binary_path: plan.binary_path.clone(),
             reconnect_required: !daemon_refreshed,
             followup_commands: plan.followup_commands,
             failure: None,
+            bootstrap_provenance: Some(HomeboyBootstrapProvenance {
+                transport: if disconnected_ssh {
+                    "ssh_bootstrap"
+                } else {
+                    "daemon"
+                },
+                requested_ref: plan.git_ref.clone(),
+                resolved_source_sha: (!bootstrap.source_sha.is_empty())
+                    .then_some(bootstrap.source_sha),
+                binary_commit: identity
+                    .get("data")
+                    .unwrap_or(&identity)
+                    .get("git_commit")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                binary_identity: identity,
+                timeout_ms: disconnected_ssh
+                    .then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT.as_millis()),
+                config_fields_changed: updated_fields.clone(),
+            }),
         },
         0,
     ))
@@ -381,7 +474,112 @@ fn refresh_failure(
         execution_record: execution.execution_record.clone(),
         job_id: execution.job_id.clone(),
         mirror_run_id: execution.mirror_run_id.clone(),
+        verification: None,
     }
+}
+
+fn refresh_verification_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: RunnerExecOutput,
+    verification: String,
+) -> HomeboyBinaryRefreshFailure {
+    let mut failure = refresh_failure(plan, execution, 1);
+    failure.verification = Some(verification);
+    failure
+}
+
+fn status_is_disconnected(runner_id: &str) -> Result<bool> {
+    Ok(!super::status(runner_id)?.connected)
+}
+
+fn refresh_execution_options(
+    plan: &HomeboyBinaryRefreshPlan,
+    required_commands: Vec<String>,
+    disconnected_ssh: bool,
+) -> RunnerExecOptions {
+    let options = if disconnected_ssh {
+        RunnerExecOptions::diagnostic_raw_shell(plan.script.clone())
+            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+    } else {
+        RunnerExecOptions::raw_command(vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            plan.script.clone(),
+        ])
+    };
+    options.with_capability_preflight(RunnerCapabilityPreflight {
+        command: "runner.refresh-homeboy".to_string(),
+        required_commands,
+        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+        ..Default::default()
+    })
+}
+
+#[derive(Debug, Clone)]
+struct SshBootstrapPromotion {
+    identity: Value,
+    source_sha: String,
+    updated_fields: Vec<String>,
+}
+
+/// Own the disconnected bootstrap boundary so transport and config mutation are
+/// independently testable. Promotion is deliberately after exact identity
+/// verification; a failed command or mismatched binary cannot touch config.
+fn ssh_bootstrap_promote_with<Execute, Promote>(
+    plan: &HomeboyBinaryRefreshPlan,
+    execute: Execute,
+    promote: Promote,
+) -> Result<SshBootstrapPromotion>
+where
+    Execute: FnOnce() -> Result<String>,
+    Promote: FnOnce(&str) -> Result<Vec<String>>,
+{
+    let stdout = execute()?;
+    let identity = parse_identity(&stdout)?;
+    verify_materialized_identity(plan, &stdout, &identity).map_err(|message| {
+        Error::validation_invalid_argument("identity", message, Some(plan.runner_id.clone()), None)
+    })?;
+    let source_sha =
+        source_sha_from_output(&stdout).expect("verified materialized identity has SHA");
+    let updated_fields = promote(&plan.binary_path)?;
+    Ok(SshBootstrapPromotion {
+        identity,
+        source_sha,
+        updated_fields,
+    })
+}
+
+fn verify_materialized_identity(
+    plan: &HomeboyBinaryRefreshPlan,
+    stdout: &str,
+    identity: &Value,
+) -> std::result::Result<(), String> {
+    if plan.mode != "materialize" {
+        return Ok(());
+    }
+    let source_sha = source_sha_from_output(stdout)
+        .ok_or_else(|| "materialized refresh did not report its resolved source SHA".to_string())?;
+    let built_commit = identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("git_commit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "materialized refresh identity did not report git_commit".to_string())?;
+    if !source_sha.starts_with(built_commit) {
+        return Err(format!(
+            "materialized refresh built identity commit `{built_commit}` does not match resolved ref `{source_sha}`"
+        ));
+    }
+    if identity
+        .get("data")
+        .unwrap_or(identity)
+        .get("git_dirty")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("materialized refresh identity is not a clean build".to_string());
+    }
+    Ok(())
 }
 
 pub fn plan_runner_dev_sync(options: &RunnerDevSyncOptions) -> Result<RunnerDevSyncPlan> {
@@ -770,13 +968,9 @@ fn refreshed_runner_env(
 }
 
 fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> {
-    let env = refreshed_runner_env(runner_id, homeboy_path)?;
-    let mut resources = load(runner_id)?.resources;
-    resources.remove("dev_sync");
+    let _ = runner_id;
     Ok(serde_json::json!({
         "homeboy_path": homeboy_path,
-        "env": env,
-        "resources": resources,
     }))
 }
 
@@ -1306,6 +1500,91 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transport() {
+        let plan = HomeboyBinaryRefreshPlan {
+            runner_id: "lab".to_string(),
+            mode: "materialize".to_string(),
+            source: Some("https://example.test/homeboy.git".to_string()),
+            git_ref: Some("accepted-sha".to_string()),
+            target_dir: Some("/runner/homeboy".to_string()),
+            binary_path: "/runner/homeboy/target/release/homeboy".to_string(),
+            script: "managed clone fetch build select".to_string(),
+            reconnect: true,
+            followup_commands: Vec::new(),
+        };
+
+        let options = refresh_execution_options(
+            &plan,
+            vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
+            true,
+        );
+
+        assert!(options.allow_diagnostic_ssh);
+        assert_eq!(
+            options.diagnostic_ssh_timeout,
+            Some(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+        );
+        assert_eq!(
+            options.command,
+            vec!["bash", "-lc", "managed clone fetch build select"]
+        );
+        assert_eq!(
+            options
+                .capability_preflight
+                .expect("preflight")
+                .required_commands,
+            vec!["bash", "git", "cargo"]
+        );
+    }
+
+    #[test]
+    fn connected_refresh_keeps_daemon_execution_options() {
+        let plan = HomeboyBinaryRefreshPlan {
+            runner_id: "lab".to_string(),
+            mode: "select".to_string(),
+            source: None,
+            git_ref: None,
+            target_dir: None,
+            binary_path: "/runner/homeboy".to_string(),
+            script: "probe".to_string(),
+            reconnect: false,
+            followup_commands: Vec::new(),
+        };
+
+        let options = refresh_execution_options(&plan, vec!["bash".to_string()], false);
+
+        assert!(!options.allow_diagnostic_ssh);
+        assert_eq!(options.diagnostic_ssh_timeout, None);
+    }
+
+    #[test]
+    fn materialized_identity_must_match_the_resolved_ref_and_be_clean() {
+        let plan = HomeboyBinaryRefreshPlan {
+            runner_id: "lab".to_string(),
+            mode: "materialize".to_string(),
+            source: Some("source".to_string()),
+            git_ref: Some("accepted-sha".to_string()),
+            target_dir: Some("/runner/homeboy".to_string()),
+            binary_path: "/runner/homeboy".to_string(),
+            script: String::new(),
+            reconnect: false,
+            followup_commands: Vec::new(),
+        };
+        let wrong_identity = serde_json::json!({
+            "data": { "git_commit": "badc0ffee", "git_dirty": false }
+        });
+
+        let error = verify_materialized_identity(
+            &plan,
+            "HOMEBOY_REFRESH_SOURCE_SHA=accepted-sha-123456\n",
+            &wrong_identity,
+        )
+        .expect_err("a different built commit must not be selected");
+
+        assert!(error.contains("does not match resolved ref"));
+    }
+
+    #[test]
     fn refreshed_runner_env_prepends_selected_homeboy_dir_to_path() {
         test_support::with_isolated_home(|_| {
             crate::core::runner::create(
@@ -1613,7 +1892,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_patch_clears_dev_sync_provenance() {
+    fn refresh_patch_only_owns_homeboy_path() {
         test_support::with_isolated_home(|_| {
             crate::core::runner::create(
                 r#"{
@@ -1634,8 +1913,163 @@ mod tests {
                 .expect("build refresh patch");
 
             assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
-            assert!(patch["resources"].get("dev_sync").is_none());
-            assert_eq!(patch["resources"]["keep"]["enabled"], true);
+            assert_eq!(
+                patch,
+                serde_json::json!({ "homeboy_path": "/runner/ws/homeboy" })
+            );
+        });
+    }
+
+    fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
+        HomeboyBinaryRefreshPlan {
+            runner_id: "lab-local".to_string(),
+            mode: "materialize".to_string(),
+            source: Some("source".to_string()),
+            git_ref: Some("main".to_string()),
+            target_dir: Some("/runner/homeboy".to_string()),
+            binary_path: "/verified/homeboy".to_string(),
+            script: String::new(),
+            reconnect: false,
+            followup_commands: Vec::new(),
+        }
+    }
+
+    fn verified_bootstrap_output(sha: &str) -> String {
+        format!("HOMEBOY_REFRESH_SOURCE_SHA={sha}\n{{\"data\":{{\"git_commit\":\"{sha}\",\"git_dirty\":false}}}}")
+    }
+
+    #[test]
+    fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let plan = ssh_bootstrap_plan();
+            let result = ssh_bootstrap_promote_with(
+                &plan,
+                || Ok(verified_bootstrap_output("abc123")),
+                |path| {
+                    crate::core::config::with_config_lock(|| {
+                        let patch = refreshed_runner_patch("lab-local", path)?;
+                        match merge(Some("lab-local"), &patch.to_string(), &[])? {
+                            MergeOutput::Single(result) => Ok(result.updated_fields),
+                            MergeOutput::Bulk(_) => Ok(Vec::new()),
+                        }
+                    })
+                },
+            )
+            .expect("verified bootstrap promotes");
+            assert_eq!(result.source_sha, "abc123");
+            assert_eq!(result.identity["data"]["git_commit"], "abc123");
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/verified/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let result = ssh_bootstrap_promote_with(
+                &ssh_bootstrap_plan(),
+                || Err(Error::internal_io("transport failed".to_string(), None)),
+                |_| panic!("must not promote"),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/old")
+            );
+        });
+    }
+
+    #[test]
+    fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let result = ssh_bootstrap_promote_with(
+                &ssh_bootstrap_plan(),
+                || {
+                    Ok("HOMEBOY_REFRESH_SOURCE_SHA=abc123\n{\"data\":{\"git_commit\":\"other\",\"git_dirty\":false}}".to_string())
+                },
+                |_| panic!("must not promote"),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/old")
+            );
+        });
+    }
+
+    #[test]
+    fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"lab-local","kind":"local","homeboy_path":"/old","env":{"OLD":"1"},"resources":{"dev_sync":{"old":true}}}"#, false).expect("runner");
+            let plan = ssh_bootstrap_plan();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                started_rx.recv().expect("executor started");
+                crate::core::runner::merge(
+                    Some("lab-local"),
+                    r#"{"env":{"NEW":"2"},"resources":{"dev_sync":{"new":true}}}"#,
+                    &[],
+                )
+                .expect("concurrent config edit");
+                release_tx.send(()).expect("release executor");
+            });
+            let result = ssh_bootstrap_promote_with(
+                &plan,
+                || {
+                    started_tx.send(()).expect("notify writer");
+                    release_rx.recv().expect("writer completed");
+                    Ok(verified_bootstrap_output("abc123"))
+                },
+                |path| {
+                    crate::core::config::with_config_lock(|| {
+                        let patch = refreshed_runner_patch("lab-local", path)?;
+                        match merge(Some("lab-local"), &patch.to_string(), &[])? {
+                            MergeOutput::Single(result) => Ok(result.updated_fields),
+                            MergeOutput::Bulk(_) => Ok(Vec::new()),
+                        }
+                    })
+                },
+            )
+            .expect("promote");
+            writer.join().expect("writer");
+            let runner = crate::core::runner::load("lab-local").expect("reload");
+            assert_eq!(
+                runner.settings.homeboy_path.as_deref(),
+                Some("/verified/homeboy")
+            );
+            assert_eq!(runner.env.get("NEW").map(String::as_str), Some("2"));
+            assert_eq!(runner.resources["dev_sync"]["new"], true);
+            assert_eq!(result.updated_fields, vec!["homeboy_path"]);
         });
     }
 }
