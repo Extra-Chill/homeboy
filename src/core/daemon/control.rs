@@ -138,6 +138,18 @@ pub fn recover_missing_lease_state(
         if receipt.phase == StateLossRecoveryPhase::ReplacementStarted {
             return receipt.clone().into_result();
         }
+        if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
+            if pid_is_running(recorded_pid) {
+                return Err(Error::validation_invalid_argument(
+                    "recorded_pid",
+                    format!("recorded daemon PID `{recorded_pid}` is still running"),
+                    Some(recorded_pid.to_string()),
+                    None,
+                ));
+            }
+            probe_recorded_daemon_endpoint(recorded_endpoint)?;
+            return replay_replacement_starting(receipt.clone(), &receipt_path, &status, addr);
+        }
     }
     let endpoint_probe = validate_state_loss_preconditions(
         lease_id,
@@ -165,9 +177,7 @@ pub fn recover_missing_lease_state(
             ));
         }
         drop(owner_lock);
-        complete_state_loss_replacement(&mut receipt, &receipt_path, || {
-            start_or_return_live_unlocked(addr)
-        })
+        start_state_loss_replacement(&mut receipt, &receipt_path, addr)
     } else {
         let owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -208,15 +218,14 @@ pub fn recover_missing_lease_state(
             ],
             phase: StateLossRecoveryPhase::Prepared,
             replacement: None,
+            replacement_startup_token: None,
         };
         write_state_loss_receipt(&receipt_path, &receipt)?;
         store.reconcile_dead_daemon_lease_jobs(lease_id)?;
         receipt.phase = StateLossRecoveryPhase::Reconciled;
         write_state_loss_receipt(&receipt_path, &receipt)?;
         drop(owner_lock);
-        complete_state_loss_replacement(&mut receipt, &receipt_path, || {
-            start_or_return_live_unlocked(addr)
-        })
+        start_state_loss_replacement(&mut receipt, &receipt_path, addr)
     }
 }
 
@@ -225,6 +234,7 @@ pub fn recover_missing_lease_state(
 enum StateLossRecoveryPhase {
     Prepared,
     Reconciled,
+    ReplacementStarting,
     ReplacementStarted,
 }
 
@@ -238,6 +248,8 @@ struct StateLossRecoveryReceipt {
     ownership_proof: Vec<String>,
     phase: StateLossRecoveryPhase,
     replacement: Option<super::DaemonStartResult>,
+    #[serde(default)]
+    replacement_startup_token: Option<String>,
 }
 
 impl StateLossRecoveryReceipt {
@@ -361,6 +373,84 @@ fn state_loss_replacement_error(
     error
 }
 
+fn start_state_loss_replacement(
+    receipt: &mut StateLossRecoveryReceipt,
+    receipt_path: &Path,
+    addr: &str,
+) -> Result<super::DaemonStateLossRecoveryResult> {
+    start_state_loss_replacement_with(receipt, receipt_path, |startup_token| {
+        let replacement = start_or_return_live_unlocked_with_startup_token(addr, startup_token)?;
+        let status = read_status()?;
+        if status.running
+            && status
+                .state
+                .as_ref()
+                .is_some_and(|state| state.startup_token == startup_token)
+        {
+            Ok(replacement)
+        } else {
+            Err(Error::validation_invalid_argument(
+                "lease_id",
+                "replacement startup did not publish the expected state-loss startup token",
+                None,
+                None,
+            ))
+        }
+    })
+}
+
+fn start_state_loss_replacement_with<Start>(
+    receipt: &mut StateLossRecoveryReceipt,
+    receipt_path: &Path,
+    start: Start,
+) -> Result<super::DaemonStateLossRecoveryResult>
+where
+    Start: FnOnce(&str) -> Result<super::DaemonStartResult>,
+{
+    let startup_token = receipt
+        .replacement_startup_token
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
+    receipt.replacement_startup_token = Some(startup_token.clone());
+    write_state_loss_receipt(receipt_path, receipt)?;
+    complete_state_loss_replacement(receipt, receipt_path, || start(&startup_token))
+}
+
+fn replay_replacement_starting(
+    mut receipt: StateLossRecoveryReceipt,
+    receipt_path: &Path,
+    status: &super::DaemonStatus,
+    addr: &str,
+) -> Result<super::DaemonStateLossRecoveryResult> {
+    let token = receipt
+        .replacement_startup_token
+        .as_deref()
+        .ok_or_else(|| {
+            Error::internal_unexpected("replacement-starting receipt has no startup token")
+        })?;
+    if let Some(state) = status.state.as_ref() {
+        if status.running && state.startup_token == token {
+            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+            receipt.replacement = Some(super::DaemonStartResult {
+                pid: state.pid,
+                address: state.address.clone(),
+                state_path: state.state_path.clone(),
+                lease_id: state.lease_id.clone(),
+            });
+            write_state_loss_receipt(receipt_path, &receipt)?;
+            return receipt.into_result();
+        }
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "state-loss replay found an ambiguous or mismatched live daemon",
+            Some(receipt.lease_id),
+            None,
+        ));
+    }
+    start_state_loss_replacement(&mut receipt, receipt_path, addr)
+}
+
 fn complete_state_loss_replacement<Start>(
     receipt: &mut StateLossRecoveryReceipt,
     receipt_path: &Path,
@@ -371,9 +461,14 @@ where
 {
     match start() {
         Ok(replacement) => {
+            let previous_phase = receipt.phase.clone();
             receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
             receipt.replacement = Some(replacement);
-            write_state_loss_receipt(receipt_path, receipt)?;
+            if let Err(error) = write_state_loss_receipt(receipt_path, receipt) {
+                receipt.phase = previous_phase;
+                receipt.replacement = None;
+                return Err(state_loss_replacement_error(error, receipt, receipt_path));
+            }
             receipt.clone().into_result()
         }
         Err(error) => Err(state_loss_replacement_error(error, receipt, receipt_path)),
@@ -644,7 +739,7 @@ pub fn reconcile_leaseless_orphans(
 ) -> Result<DaemonLeaselessRecoveryResult> {
     if !confirm_no_daemon_owner {
         return Err(Error::validation_invalid_argument(
-            "confirm_no_daemon_owner",
+            "reconcile_leaseless_orphans",
             "lease-less recovery requires --confirm-no-daemon-owner",
             None,
             None,
@@ -882,13 +977,20 @@ where
 /// does not take that lock: it uses the owner lock, allowing this parent to wait
 /// for lease publication without a parent/child startup deadlock.
 fn start_or_return_live_unlocked(addr: &str) -> Result<DaemonStartResult> {
+    start_or_return_live_unlocked_with_startup_token(addr, &uuid::Uuid::new_v4().to_string())
+}
+
+fn start_or_return_live_unlocked_with_startup_token(
+    addr: &str,
+    startup_token: &str,
+) -> Result<DaemonStartResult> {
     let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     reattach_exact_live_owner()?;
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
         || stop_unlocked().map(|_| ()),
-        || spawn_and_wait_for_lease(addr),
+        || spawn_and_wait_for_lease(addr, startup_token),
     )
 }
 
@@ -988,17 +1090,16 @@ where
     spawn_and_wait()
 }
 
-fn spawn_and_wait_for_lease(addr: &str) -> Result<DaemonStartResult> {
+fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonStartResult> {
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some("resolve current executable".to_string()),
         )
     })?;
-    let startup_token = uuid::Uuid::new_v4().to_string();
     let child = Command::new(exe)
         .args(["daemon", "serve", "--addr", addr])
-        .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
+        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
