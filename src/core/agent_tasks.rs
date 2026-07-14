@@ -222,6 +222,18 @@ pub mod finalization {
     };
 }
 
+/// Typed reviewer dossier contracts and deterministic rendering.
+pub mod review_dossier {
+    pub use super::super::agent_task_review_dossier::{
+        default_profile, enrich_dossier, render_review_dossier, resolve_review_profile,
+        validate_profile, AgentTaskReviewAdditionalSection, AgentTaskReviewAiAssistance,
+        AgentTaskReviewDossier, AgentTaskReviewEvidence, AgentTaskReviewIssueRelationship,
+        AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride,
+        AgentTaskReviewOverrideTarget, AgentTaskReviewProfile, AgentTaskReviewSectionId,
+        AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+    };
+}
+
 /// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
     pub use super::super::agent_task_gate::{

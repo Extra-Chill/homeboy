@@ -831,7 +831,7 @@ pub struct PromoteArgs {
 
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {
-    /// Durable cook/agent-task run id to link in the PR body.
+    /// Durable cook/agent-task run id to hydrate before finalization.
     #[arg(long, value_name = "ID")]
     pub run_id: String,
 
@@ -877,6 +877,38 @@ pub struct FinalizePrArgs {
         value_name = "TEXT"
     )]
     pub ai_used_for: String,
+
+    /// Reviewer-facing summary. When omitted, --title is used for legacy compatibility.
+    #[arg(long, value_name = "TEXT")]
+    pub summary: Option<String>,
+
+    /// Reviewer-relevant behavior change. Repeatable.
+    #[arg(long = "what-changed", value_name = "TEXT")]
+    pub what_changed: Vec<String>,
+
+    /// Runnable reviewer test as COMMAND=>EXPECTED. Legacy targeted checks become COMMAND=>passes.
+    #[arg(long = "test-step", value_name = "TEXT")]
+    pub test_steps: Vec<String>,
+
+    /// Compatibility impact. When omitted, a deterministic legacy disclosure is used.
+    #[arg(long, value_name = "TEXT")]
+    pub compatibility: Option<String>,
+
+    /// Typed issue reference closed by this PR. Repeatable; never inferred from URLs.
+    #[arg(long = "closes", value_name = "REF")]
+    pub closes: Vec<String>,
+
+    /// Typed issue reference related to this PR. Repeatable.
+    #[arg(long = "relates-to", value_name = "REF")]
+    pub relates_to: Vec<String>,
+
+    /// Typed reviewer section override as TARGET=VALUE@PROVENANCE. TARGET is summary, what_changed, or compatibility.
+    #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
+    pub review_overrides: Vec<String>,
+
+    /// Explicit migration mode for a manually prepared candidate without a durable run record.
+    #[arg(long)]
+    pub manual_finalization: bool,
 }
 
 #[derive(Args, Debug)]

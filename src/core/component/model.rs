@@ -7,6 +7,7 @@ use super::config::{
     ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig,
     GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
+use crate::core::agent_task_review_dossier::AgentTaskReviewProfile;
 
 /// Lifecycle state of a component.
 ///
@@ -154,6 +155,9 @@ pub struct Component {
     /// Subsystem-owned architecture audit rule config stored in repo-local portable config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_rules: Option<serde_json::Value>,
+    /// Declarative reviewer-body policy for agent-task PR finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_profile: Option<AgentTaskReviewProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -240,6 +244,8 @@ struct RawComponent {
     baselines: Option<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit_rules: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_profile: Option<AgentTaskReviewProfile>,
 }
 
 impl From<RawComponent> for Component {
@@ -284,6 +290,7 @@ impl From<RawComponent> for Component {
             cleanup_artifacts: raw.cleanup_artifacts,
             baselines: raw.baselines,
             audit_rules: raw.audit_rules,
+            review_profile: raw.review_profile,
         }
     }
 }
@@ -330,6 +337,7 @@ impl From<Component> for RawComponent {
             cleanup_artifacts: c.cleanup_artifacts,
             baselines: c.baselines,
             audit_rules: c.audit_rules,
+            review_profile: c.review_profile,
         }
     }
 }
@@ -381,6 +389,7 @@ impl Component {
             cleanup_artifacts: Vec::new(),
             baselines: None,
             audit_rules: None,
+            review_profile: None,
         }
     }
 

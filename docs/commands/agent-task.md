@@ -99,6 +99,21 @@ structured contracts:
 Extensions and lab runners should delegate PR creation/update and proof assembly
 to this command instead of recreating GitHub publication logic locally.
 
+#### Review Dossier Migration
+
+`finalize-pr` accepts typed reviewer fields without breaking existing invocations.
+Explicit `--summary`, repeated `--what-changed`, `--test-step COMMAND=>EXPECTED`,
+and `--compatibility` take precedence. When omitted, Homeboy derives the dossier
+from the legacy fields: `--title` supplies Summary, `--attempt-summary` supplies
+What changed, each `--targeted-check-run` supplies a `COMMAND=>passes` test step,
+and `--manual-reviewer-check` supplies a reviewer command with its expected
+observation. Compatibility becomes an explicit legacy disclosure. `--closes` and
+`--relates-to` are the only issue-relationship inputs; source URLs never imply
+closure. Use `--review-override TARGET=VALUE@PROVENANCE` only for `summary`,
+`what_changed`, or `compatibility`; override provenance remains in JSON output.
+Normal finalization hydrates `--run-id`; `--manual-finalization` is the explicit
+migration mode for a manually prepared candidate with no durable run.
+
 #### Single-Issue Cook
 
 Use `agent-task cook` for one issue or one workspace task. It is the non-fanout

@@ -8,10 +8,14 @@
 //! - [`apply`]: the workspace provider trait and external provider transport.
 
 mod apply;
+mod fingerprint;
 mod promote;
 mod types;
 
 pub use apply::apply_materialized_workspace_patch;
+pub use fingerprint::{
+    candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
+};
 pub use promote::promote;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
