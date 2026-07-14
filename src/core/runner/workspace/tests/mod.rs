@@ -30,6 +30,19 @@ fn dirty_git_repo() -> tempfile::TempDir {
     git(source.path(), &["init"]);
     git(source.path(), &["config", "user.email", "test@example.com"]);
     git(source.path(), &["config", "user.name", "Test User"]);
+    // git_snapshot requires remote.origin.url before it evaluates working-tree
+    // cleanliness, so the dirty-working-tree tests must configure a remote or
+    // they trip the earlier remote-url guard instead of the dirty check they
+    // assert. A placeholder URL is enough — these tests never fetch.
+    git(
+        source.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.test/dirty-fixture.git",
+        ],
+    );
     std::fs::write(source.path().join("file.txt"), "base\n").expect("write base");
     git(source.path(), &["add", "."]);
     git(source.path(), &["commit", "-m", "base"]);
