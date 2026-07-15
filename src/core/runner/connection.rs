@@ -1325,14 +1325,22 @@ fn disconnect_remote_daemon(
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| format!("build daemon lifecycle client: {error}"))?;
-    let response = client
+    let response = match client
         .post(format!(
             "{}/lifecycle/stop",
             local_url.trim_end_matches('/')
         ))
         .json(&serde_json::json!({ "lease_id": lease_id, "force": force }))
         .send()
-        .map_err(|error| format!("request lease-bound daemon stop: {error}"))?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return recover_remote_daemon_stop_after_transport_error(
+                session,
+                &format!("request lease-bound daemon stop: {error}"),
+            )
+        }
+    };
     let status = response.status();
     let body = response
         .text()
@@ -1345,6 +1353,87 @@ fn disconnect_remote_daemon(
         ));
     }
     Ok(())
+}
+
+fn recover_remote_daemon_stop_after_transport_error(
+    session: &RunnerSession,
+    transport_error: &str,
+) -> std::result::Result<(), String> {
+    let runner = load(&session.runner_id).map_err(|error| {
+        format!(
+            "re-probe runner after stop transport error: {}",
+            error.message
+        )
+    })?;
+    let homeboy =
+        remote_runner_homeboy_path(&runner, "runner disconnect re-probe").map_err(|error| {
+            format!(
+                "re-probe daemon after stop transport error: {}",
+                error.message
+            )
+        })?;
+    let (_, _, client) = remote_daemon::resolve_ssh_runner(&runner)
+        .map_err(|error| {
+            format!(
+                "re-probe daemon after stop transport error: {}",
+                error.message
+            )
+        })?
+        .ok_or_else(|| {
+            "re-probe daemon after stop transport error: runner is not SSH-backed".to_string()
+        })?;
+    let status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
+        format!("{transport_error}; authoritative daemon re-probe failed: {error}")
+    })?;
+
+    confirm_remote_daemon_stopped_after_transport_error(session, &status)
+        .map_err(|error| format!("{transport_error}; {error}"))
+}
+
+fn confirm_remote_daemon_stopped_after_transport_error(
+    session: &RunnerSession,
+    status: &remote_daemon::RemoteDaemonStatus,
+) -> std::result::Result<(), String> {
+    let expected_lease = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        "authoritative daemon re-probe cannot verify stop without the persisted lease".to_string()
+    })?;
+    let expected_pid = session.remote_daemon_pid.ok_or_else(|| {
+        "authoritative daemon re-probe cannot verify stop without the persisted PID".to_string()
+    })?;
+    if status.active_jobs != 0 {
+        return Err(format!(
+            "authoritative daemon re-probe reports {} active job(s); refusing disconnect",
+            status.active_jobs
+        ));
+    }
+    if let Some(daemon) = &status.daemon {
+        if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+            && !status.reachable
+            && daemon.lease_id.as_deref() == Some(expected_lease)
+            && daemon.pid == Some(expected_pid)
+        {
+            return Ok(());
+        }
+        return Err(format!(
+            "authoritative daemon re-probe still reports lease `{}` and PID {}; refusing disconnect",
+            daemon.lease_id.as_deref().unwrap_or("unavailable"),
+            daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable")
+        ));
+    }
+    let clean_stop = status
+        .termination_evidence
+        .as_ref()
+        .is_some_and(|evidence| {
+            evidence.classification
+                == crate::core::daemon::DaemonTerminationClassification::CleanStop
+                && evidence.stop_requested
+                && evidence.lease_id.as_deref() == Some(expected_lease)
+                && evidence.pid == Some(expected_pid)
+        });
+    if clean_stop && !status.reachable {
+        return Ok(());
+    }
+    Err("authoritative daemon re-probe did not prove the exact lease/PID stopped; refusing disconnect".to_string())
 }
 
 fn response_body_excerpt(body: &str) -> String {
@@ -3494,6 +3583,76 @@ esac
 
         disconnect_remote_daemon(&session, false).expect("guarded lifecycle stop accepted");
         server.join().expect("server");
+    }
+
+    #[test]
+    fn transport_drop_after_successful_stop_accepts_matching_clean_stop_evidence() {
+        let session = direct_ssh_session("lease-stopped");
+        let status = RemoteDaemonStatus {
+            daemon: None,
+            stale_reason: None,
+            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
+            fresh: false,
+            reachable: false,
+            active_jobs: 0,
+            endpoint_probe_error: None,
+            termination_evidence: Some(crate::core::daemon::DaemonTerminationEvidence {
+                classification: crate::core::daemon::DaemonTerminationClassification::CleanStop,
+                observed_at: Utc::now().to_rfc3339(),
+                lease_id: Some("lease-stopped".to_string()),
+                pid: Some(4242),
+                binary_identity: None,
+                active_jobs: 0,
+                resource_evidence: "test".to_string(),
+                os_evidence: "test".to_string(),
+                exit_code: None,
+                signal: None,
+                stdout: None,
+                stderr: None,
+                stop_requested: true,
+            }),
+        };
+
+        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
+            .expect("matching clean-stop evidence resolves the transport drop");
+    }
+
+    #[test]
+    fn transport_drop_accepts_already_dead_exact_owner_without_active_jobs() {
+        let session = direct_ssh_session("lease-dead");
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            0,
+            "lease-dead",
+            4242,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+
+        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
+            .expect("the exact already-dead owner is safe to disconnect");
+    }
+
+    #[test]
+    fn transport_drop_refuses_live_or_mismatched_daemon_evidence() {
+        let session = direct_ssh_session("lease-owned");
+        let live = remote_daemon_status_for_test(true, true, 0, "lease-owned", 4242);
+        let live_error = confirm_remote_daemon_stopped_after_transport_error(&session, &live)
+            .expect_err("a live daemon must remain protected");
+        assert!(live_error.contains("still reports lease `lease-owned`"));
+
+        let mismatched = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            0,
+            "lease-other",
+            4242,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
+        let mismatch_error =
+            confirm_remote_daemon_stopped_after_transport_error(&session, &mismatched)
+                .expect_err("a different dead lease must not authorize disconnect");
+        assert!(mismatch_error.contains("lease `lease-other`"));
     }
 
     #[test]
