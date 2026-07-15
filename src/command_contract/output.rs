@@ -11,7 +11,7 @@
 //! [`crate::command_contract::lab`], which post-processes the descriptor
 //! returned from [`Commands::descriptor`].
 
-use super::lab_routing::apply_lab_contract_to_descriptor;
+use super::lab::apply_lab_contract_to_descriptor;
 use super::spec::CommandSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
