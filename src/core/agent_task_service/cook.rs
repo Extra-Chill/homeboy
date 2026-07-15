@@ -461,6 +461,13 @@ fn materialize_follow_up_baseline(
                 None,
             )
         })?;
+    let parent_snapshot = std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+        .ok()
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument("source_snapshot", error.to_string(), None, None)
+        })?;
     let head = git_output(&source_root, &["rev-parse", "HEAD"])?;
     let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
         Error::internal_io(
@@ -525,13 +532,15 @@ fn materialize_follow_up_baseline(
     )?;
     let baseline = CookFollowUpBaseline {
         source_root,
-        path,
+        path: path.clone(),
         provenance: serde_json::json!({
             "source_run_id": source_run_id,
             "source_task_id": promotion.source.task_id,
             "source_patch_artifact_id": promotion.patch_artifact.id,
             "source_patch_artifact_sha256": artifact_sha256,
             "promotion_target_head": head,
+            "derived_workspace_path": path,
+            "parent_snapshot": parent_snapshot,
         }),
     };
     let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");

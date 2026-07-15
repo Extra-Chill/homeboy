@@ -76,7 +76,23 @@ pub(super) fn prepare_committed_harvest(
             source_provenance: None,
         });
     }
-    let source_provenance = if snapshot_signaled {
+    let derived_baseline = request.inputs.pointer("/cook_loop/baseline");
+    let source_provenance = if let Some(baseline) = derived_baseline {
+        validate_derived_cook_baseline(root, baseline)?;
+        let ambient: serde_json::Value =
+            std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .ok_or_else(|| {
+                    snapshot_harvest_error("missing ambient parent snapshot".to_string())
+                })?;
+        if baseline.get("parent_snapshot") != Some(&ambient) {
+            return Err(snapshot_harvest_error(
+                "derived baseline parent snapshot does not match ambient snapshot".to_string(),
+            ));
+        }
+        Some(serde_json::json!({ "parent_snapshot": ambient, "cook_baseline": baseline }))
+    } else if snapshot_signaled {
         let provenance =
             crate::core::runner::verify_lab_workspace_from_env(&root.display().to_string(), root)
                 .map_err(snapshot_harvest_error)?;
@@ -157,6 +173,45 @@ fn snapshot_harvest_error(message: String) -> HarvestError {
         command: "verify Lab snapshot harvest provenance".to_string(),
         message,
     }
+}
+
+fn validate_derived_cook_baseline(
+    root: &Path,
+    baseline: &serde_json::Value,
+) -> Result<(), HarvestError> {
+    let path = baseline
+        .get("derived_workspace_path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            snapshot_harvest_error("derived baseline has no workspace path".to_string())
+        })?;
+    if root.display().to_string() != path
+        || !root.starts_with(std::env::temp_dir().join("homeboy-cook-follow-up-baselines"))
+    {
+        return Err(snapshot_harvest_error(
+            "derived baseline workspace path is not Homeboy-owned".to_string(),
+        ));
+    }
+    let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !status.is_empty() {
+        return Err(HarvestError::DirtyWorkspace { status });
+    }
+    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    let tree = git_output(root, &["rev-parse", "HEAD^{tree}"])?;
+    if baseline
+        .get("baseline_commit")
+        .and_then(serde_json::Value::as_str)
+        != Some(head.as_str())
+        || baseline
+            .get("baseline_tree")
+            .and_then(serde_json::Value::as_str)
+            != Some(tree.as_str())
+    {
+        return Err(snapshot_harvest_error(
+            "derived baseline HEAD/tree does not match its internal contract".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Give each provider dispatch a detached checkout at the caller's clean base.
