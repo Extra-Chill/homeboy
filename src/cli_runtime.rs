@@ -94,6 +94,36 @@ impl CliRuntime {
         crate::core::paths::set_config_artifact_root_resolver(|| {
             crate::core::defaults::load_config().artifact_root
         });
+        // Register the command-label resolver so core::runner can map dispatched
+        // argv to a hot-command label without depending on the full CLI parser.
+        crate::core::runner::set_command_label_resolver(|argv| {
+            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
+            let route_contract = cli.command.lab_route_contract().ok()??;
+            Some(route_contract.command.hot_label.to_string())
+        });
+        // Register the agent-task dispatch resolver so core::runner can extract a
+        // cook dispatch command from argv without depending on the CLI parser.
+        crate::core::runner::set_agent_task_dispatch_resolver(|argv| {
+            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(
+                |error| {
+                    crate::core::error::Error::validation_invalid_argument(
+                        "agent-task",
+                        "failed to parse agent-task arguments while compiling Lab provider policy",
+                        Some(error.to_string()),
+                        None,
+                    )
+                },
+            )?;
+            Ok(match cli.command {
+                crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
+                    crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                        Some(cook.dispatch.into())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+        });
 
         if is_top_level_version_request(&args) {
             println!("{}", upgrade::current_build_version());
@@ -632,8 +662,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
                     ),
-                    selected_lab_runner,
-                    hot_command,
+                    default_lab_runner.as_deref(),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);

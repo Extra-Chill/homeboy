@@ -12,7 +12,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
+use crate::core::api_jobs::{
+    DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, RunnerJobLifecycleMetadata,
+};
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
@@ -88,6 +90,9 @@ pub struct DaemonStatus {
     /// operator can distinguish another runner from an attributable owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_candidates: Vec<DaemonProcessCandidate>,
+    /// Durable evidence only; status never reconciles or mutates active jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_job_recovery_evidence: Vec<DaemonActiveJobRecoveryEvidence>,
     /// Launcher-owned evidence is best effort. A missing record explicitly does
     /// not imply an OS-level cause for a dead daemon.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,6 +408,13 @@ struct FileUploadRequest {
     content_base64: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct LifecycleStopRequest {
+    lease_id: String,
+    #[serde(default)]
+    force: bool,
+}
+
 pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
     let parsed: SocketAddr = addr.parse().map_err(|e| {
         Error::validation_invalid_argument(
@@ -523,9 +535,20 @@ pub fn read_status() -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
     let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
     let validation = validate_lease_file(&path)?;
-    let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
-
     let jobs_path = paths::daemon_jobs_file()?;
+    let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
+    let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
+        (validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead))
+            .then(|| {
+                validation
+                    .state
+                    .as_ref()
+                    .map(|state| state.lease_id.as_str())
+            })
+            .flatten(),
+        pid_is_running,
+    );
+    let active_jobs = active_job_recovery_evidence.len();
     Ok(DaemonStatus {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
@@ -536,6 +559,7 @@ pub fn read_status() -> Result<DaemonStatus> {
         state_path,
         state_identity,
         process_candidates: control::daemon_process_candidates(&jobs_path)?,
+        active_job_recovery_evidence,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
             .transpose()?
@@ -777,11 +801,47 @@ fn runtime_snapshot_stale_reason(snapshot: &DaemonRuntimeSnapshot) -> Option<Str
 }
 
 pub fn stop() -> Result<DaemonStopResult> {
+    stop_with_force(false)
+}
+
+/// Stop a daemon only after preserving its active durable work, unless the
+/// caller supplied an explicit destructive force request.
+pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
-    stop_unlocked()
+    stop_unlocked_with_force(force)
+}
+
+fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<DaemonStopResult> {
+    let _lock = acquire_daemon_operation_lock()?;
+    let path = state_path()?;
+    let validation = validate_lease_file(&path)?;
+    let state = validation.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "daemon lifecycle stop requires a live recorded lease",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != expected_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "daemon lifecycle stop expected lease `{expected_lease_id}` but live lease is `{}`; refusing replacement",
+                state.lease_id
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    stop_unlocked_with_force(force)
 }
 
 fn stop_unlocked() -> Result<DaemonStopResult> {
+    stop_unlocked_with_force(false)
+}
+
+fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> {
     let path = state_path()?;
     let state_path_display = path.display().to_string();
     let validation = validate_lease_file(&path)?;
@@ -841,6 +901,10 @@ fn stop_unlocked() -> Result<DaemonStopResult> {
     }
 
     if pid_is_running(pid) {
+        let active_job_ids = active_daemon_job_ids()?;
+        if !force && !active_job_ids.is_empty() {
+            return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
+        }
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
             observed_at: chrono::Utc::now().to_rfc3339(),
@@ -874,6 +938,37 @@ fn stop_unlocked() -> Result<DaemonStopResult> {
         pid: Some(pid),
         state_path: state_path_display,
     })
+}
+
+fn active_daemon_job_ids() -> Result<Vec<Uuid>> {
+    let mut job_ids = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)?
+        .list()
+        .into_iter()
+        .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+        .map(|job| job.id)
+        .collect::<Vec<_>>();
+    job_ids.sort();
+    Ok(job_ids)
+}
+
+fn active_jobs_block_daemon_stop_error(state: &DaemonState, active_job_ids: &[Uuid]) -> Error {
+    let current_identity = state.build_identity.display.clone();
+    let requested_identity = build_identity::current().display;
+    let mut error = Error::validation_invalid_argument(
+        "daemon_stop",
+        format!(
+            "refusing routine daemon stop for lease `{}` ({current_identity}) while active durable jobs exist: {}. Requested Homeboy identity is `{requested_identity}`; wait for those jobs to finish or use the owning command's explicit --force option",
+            state.lease_id,
+            active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+        ),
+        Some(state.lease_id.clone()),
+        Some(vec!["Inspect `homeboy daemon status` and the listed durable jobs before replacing this daemon.".to_string()]),
+    );
+    error.details["active_job_ids"] = serde_json::json!(active_job_ids);
+    error.details["current_daemon_identity"] = serde_json::json!(current_identity);
+    error.details["requested_homeboy_identity"] = serde_json::json!(requested_identity);
+    error.details["lifecycle_mutation"] = serde_json::json!("stop");
+    error
 }
 
 pub fn serve(addr: SocketAddr) -> Result<DaemonState> {
@@ -1109,6 +1204,19 @@ where
             Ok(body) => daemon_endpoint_response("jobs.exec", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/lifecycle/stop") => match lifecycle_stop_request(body)
+            .and_then(|request| validate_lifecycle_stop_request(&request).map(|_| request))
+        {
+            Ok(request) => daemon_endpoint_response(
+                "lifecycle.stop",
+                json!({
+                    "lease_id": request.lease_id,
+                    "force": request.force,
+                    "accepted": true,
+                }),
+            ),
+            Err(err) => error_response(400, err),
+        },
         ("POST", "/files/mkdir") => match create_runner_file_directory(body, &broker_auth) {
             Ok(body) => daemon_endpoint_response("files.mkdir", body),
             Err(err) => remote_runner::auth_or_bad_request(err),
@@ -1126,6 +1234,7 @@ where
             body: json!({ "error": "method_not_allowed" }),
             artifact: None,
         },
+        ("GET", "/lifecycle/stop") => method_not_allowed(),
         ("GET", "/files/mkdir") | ("GET", "/files/upload") | ("GET", "/files/download") => {
             method_not_allowed()
         }
@@ -1147,6 +1256,58 @@ where
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+fn lifecycle_stop_request(body: Option<serde_json::Value>) -> Result<LifecycleStopRequest> {
+    let request: LifecycleStopRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
+        .map_err(|error| {
+        Error::validation_invalid_argument(
+            "body",
+            format!("invalid daemon lifecycle stop request: {error}"),
+            None,
+            None,
+        )
+    })?;
+    if request.lease_id.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "daemon lifecycle stop requires the exact live lease ID",
+            None,
+            None,
+        ));
+    }
+    Ok(request)
+}
+
+fn validate_lifecycle_stop_request(request: &LifecycleStopRequest) -> Result<()> {
+    let path = state_path()?;
+    let validation = validate_lease_file(&path)?;
+    let state = validation.state.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "daemon lifecycle stop requires a live recorded lease",
+            Some(request.lease_id.clone()),
+            None,
+        )
+    })?;
+    if !validation.running || state.lease_id != request.lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "daemon lifecycle stop expected live lease `{}` but found `{}`; refusing replacement",
+                request.lease_id, state.lease_id
+            ),
+            Some(request.lease_id.clone()),
+            None,
+        ));
+    }
+    if !request.force {
+        let active_job_ids = active_daemon_job_ids()?;
+        if !active_job_ids.is_empty() {
+            return Err(active_jobs_block_daemon_stop_error(&state, &active_job_ids));
+        }
+    }
+    Ok(())
 }
 
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
@@ -1466,9 +1627,7 @@ fn enqueue_exec_job(
                     None
                 };
                 let progress_job = job.clone();
-                let progress_sink = Arc::new(move |data| {
-                    let _ = progress_job.progress(data);
-                });
+                let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
                 let started_job = job.clone();
                 let child_started = Arc::new(move |pid| {
                     let process_group_id = crate::core::process::isolated_process_group_id(pid)
@@ -1485,6 +1644,7 @@ fn enqueue_exec_job(
                     &plan,
                     || job.is_cancelled(),
                     Some(progress_sink),
+                    true,
                     Some(child_started),
                 )?;
                 let stdout = process_output.stdout.clone();
@@ -1666,6 +1826,60 @@ mod tests {
 
         assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+    }
+
+    #[test]
+    fn routine_stop_names_active_jobs_and_daemon_identities() {
+        let state = DaemonState {
+            schema: DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id: "lease-a".to_string(),
+            startup_token: "token-a".to_string(),
+            address: "127.0.0.1:7421".to_string(),
+            pid: 42,
+            state_path: "/tmp/state.json".to_string(),
+            started_at: "now".to_string(),
+            last_seen_at: "now".to_string(),
+            build_identity: build_identity::current(),
+            binary_sha256: None,
+            runtime_paths: DaemonRuntimeSnapshot {
+                loaded_at: "now".to_string(),
+                paths: Vec::new(),
+            },
+        };
+        let job_id = Uuid::parse_str("92e0a4b0-d0c1-4231-a83f-654734792797").expect("job id");
+
+        let error = active_jobs_block_daemon_stop_error(&state, &[job_id]);
+
+        assert!(error.message.contains(&job_id.to_string()));
+        assert_eq!(error.details["active_job_ids"], serde_json::json!([job_id]));
+        assert_eq!(
+            error.details["current_daemon_identity"],
+            state.build_identity.display
+        );
+        assert_eq!(
+            error.details["requested_homeboy_identity"],
+            build_identity::current().display
+        );
+    }
+
+    #[test]
+    fn routine_stop_gate_reads_queued_and_running_durable_jobs() {
+        with_isolated_home(|_| {
+            let store = JobStore::open_without_reconciliation(
+                paths::daemon_jobs_file().expect("daemon jobs path"),
+            )
+            .expect("open daemon jobs");
+            let queued = store.create("runner.exec");
+            let running = store.create("runner.exec");
+            store.start(running.id).expect("start durable job");
+            let mut expected = vec![queued.id, running.id];
+            expected.sort();
+
+            assert_eq!(
+                active_daemon_job_ids().expect("active daemon jobs"),
+                expected
+            );
+        });
     }
 }
 
@@ -1923,6 +2137,11 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
             state.schema
         )));
     }
+    if state.lease_id.trim().is_empty() {
+        return Err(Error::internal_unexpected(
+            "refusing to write a daemon lease without a lease ID; leases are identified by their lease_id",
+        ));
+    }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;
@@ -2169,7 +2388,18 @@ fn read_lease_if_identity_matches(
     Ok(state)
 }
 
+/// Test-only override for the current-binary hash. Hashing the running
+/// executable is cheap for a released ~30-50 MB binary but pathologically slow
+/// for a multi-hundred-MB debug test binary — slow enough to make an in-process
+/// mock-daemon server (which computes it during startup) miss a client's
+/// connect timeout. Tests set this to a fixed value to keep daemon startup fast
+/// and deterministic; it is never consulted in a released binary run.
+pub(crate) const DAEMON_BINARY_SHA_OVERRIDE_ENV: &str = "HOMEBOY_TEST_DAEMON_BINARY_SHA";
+
 fn current_binary_sha256() -> Result<Option<String>> {
+    if let Ok(value) = std::env::var(DAEMON_BINARY_SHA_OVERRIDE_ENV) {
+        return Ok((!value.is_empty()).then_some(value));
+    }
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -2250,6 +2480,16 @@ where
         loopback_bind,
         trusted_local: false,
     };
+    let lifecycle_stop = (method == "POST" && path == "/lifecycle/stop")
+        .then(|| {
+            lifecycle_stop_request(parsed_body.clone())
+                .and_then(|request| validate_lifecycle_stop_request(&request).map(|_| request))
+        })
+        .transpose();
+    let lifecycle_stop = match lifecycle_stop {
+        Ok(request) => request,
+        Err(error) => return write_http_response(stream, error_response(400, error)),
+    };
     let response = route_with_job_store_and_body_and_runner_and_auth(
         method,
         path,
@@ -2258,7 +2498,14 @@ where
         analysis_runner,
         broker_auth,
     );
-    write_http_response(stream, response)
+    write_http_response(stream, response)?;
+    if let Some(request) = lifecycle_stop {
+        // The accepted response reaches the controller before the daemon signals
+        // itself. The exact lease and durable-job gate are rechecked under the
+        // daemon lifecycle lock immediately before that signal.
+        let _ = stop_with_force_for_lease(&request.lease_id, request.force);
+    }
+    Ok(())
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

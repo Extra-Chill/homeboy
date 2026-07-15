@@ -13,7 +13,7 @@ homeboy daemon <COMMAND>
 - `start` — start the local daemon in the background
 - `serve` — run the daemon in the foreground
 - `stop` — stop the background daemon recorded in the state file
-- `status` — show daemon state and selected local address
+- `status` — show daemon state, active-job recovery evidence, and selected local address
 - `broker-config` — render a deployable reverse-runner broker service recipe
 
 ## Local HTTP API
@@ -24,6 +24,37 @@ address and PID to the daemon state file so headless clients can discover it via
 
 Always treat the API as a local UI contract. It is not a hosted or remote
 multi-user service.
+
+## Dead-Lease Recovery
+
+When `status` reports a dead lease, `active_job_recovery_evidence` lists each
+active job's exact ID, lease, timestamps, terminal evidence, child identity,
+and `linked_durable_run_id` plus `linked_durable_run_state` (`terminal`,
+`active`, or `unresolved`). Active and unresolved linked runs are reported as
+blocking evidence. Status is read-only: it never reconciles or changes durable
+jobs.
+
+For an exact PID-dead lease, confirm every reported PID-less blocker after
+independently proving its child is gone:
+
+```sh
+homeboy daemon adopt-orphan --lease-id <dead-lease> --confirm-pid-dead \
+  --confirm-untracked-child-dead <job-id> \
+  --confirm-untracked-child-dead <job-id>
+```
+
+Each confirmation must name one unresolved active job owned by that exact lease
+with no recorded child identity. The operation records the
+`operator_confirmed_untracked_child_dead_after_dead_daemon_lease` audit event.
+The complete lease is classified before one persistence write: linked terminal
+runs reconcile authoritatively, while linked active or unresolved runs, live
+children, missing confirmations, and invalid confirmations block mutation.
+It retains the owner lock, lease confirmation, PID revalidation, and live-child
+protections.
+
+`--recover-missing-child-identity` remains as weaker legacy compatibility: it
+applies to every eligible PID-less job on the adopted lease. Prefer exact
+`--confirm-untracked-child-dead <job-id>` confirmations.
 
 ## VPS Reverse Runner Broker
 

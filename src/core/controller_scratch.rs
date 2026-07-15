@@ -13,9 +13,17 @@ pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
 pub struct ControllerScratchResource {
     pub path: String,
     pub run_id: String,
+    #[serde(default)]
+    pub plan_id: String,
     pub task_id: String,
+    #[serde(default)]
+    pub attempt: u32,
     pub root_bound: String,
     pub owner_pid: u32,
+    #[serde(default)]
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub lease_id: String,
     pub reconstructable: bool,
     pub retention: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,6 +31,120 @@ pub struct ControllerScratchResource {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerScratchAllocation {
+    pub path: PathBuf,
+    pub lease_id: String,
+}
+
+/// Allocate and durably register one scheduler-owned temporary root for a
+/// provider dispatch attempt. Allocation remains separate from terminal lease
+/// handling and retention policy.
+pub fn allocate_attempt(
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let root = paths::homeboy_data()?.join("controller-scratch/attempts");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", root.display())),
+        )
+    })?;
+    let root = root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("canonicalize {}", root.display())),
+        )
+    })?;
+    let lease_id = uuid::Uuid::new_v4().to_string();
+    let path = root
+        .join(paths::sanitize_path_segment(run_id))
+        .join(paths::sanitize_path_segment(plan_id))
+        .join(paths::sanitize_path_segment(task_id))
+        .join(format!("attempt-{attempt}"))
+        .join(&lease_id);
+    fs::create_dir_all(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", path.display())),
+        )
+    })?;
+    let path = path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("canonicalize {}", path.display())),
+        )
+    })?;
+    if path == root || !path.starts_with(&root) {
+        return Err(Error::validation_invalid_argument(
+            "controller_scratch.path",
+            "allocated scratch path must be contained by its root",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+
+    let mut index = read_index()?;
+    index.resources.push(ControllerScratchResource {
+        path: path.display().to_string(),
+        run_id: run_id.to_string(),
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        attempt,
+        root_bound: root.display().to_string(),
+        owner_pid: std::process::id(),
+        lifecycle_state: "active".to_string(),
+        lease_id: lease_id.clone(),
+        reconstructable: true,
+        retention: "P7D".to_string(),
+        source_ref: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        finalized_at: None,
+        terminal_reason: None,
+        terminal_evidence: None,
+    });
+    write_index(&index)?;
+
+    Ok(ControllerScratchAllocation { path, lease_id })
+}
+
+/// Releases one scheduler-owned attempt after its candidate evidence has been
+/// harvested. The first terminal record is authoritative, making retries and
+/// duplicate provider completions safe to replay.
+pub fn release_attempt(
+    allocation: &ControllerScratchAllocation,
+    reason: &str,
+    evidence: serde_json::Value,
+) -> Result<()> {
+    let mut index = read_index()?;
+    let Some(resource) = index.resources.iter_mut().find(|resource| {
+        resource.lease_id == allocation.lease_id
+            && Path::new(&resource.path) == allocation.path.as_path()
+    }) else {
+        return Err(Error::validation_invalid_argument(
+            "controller_scratch.lease_id",
+            "allocated scratch lease is not registered",
+            Some(allocation.lease_id.clone()),
+            None,
+        ));
+    };
+    if resource.finalized_at.is_none() {
+        resource.lifecycle_state = "released".to_string();
+        resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
+        resource.terminal_reason = Some(reason.to_string());
+        resource.terminal_evidence = Some(evidence);
+        write_index(&index)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -116,9 +238,13 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
             let resource = ControllerScratchResource {
                 path: path.display().to_string(),
                 run_id: run_id.to_string(),
+                plan_id: String::new(),
                 task_id: outcome.task_id.clone(),
+                attempt: 0,
                 root_bound: root.display().to_string(),
                 owner_pid: std::process::id(),
+                lifecycle_state: "provider_registered".to_string(),
+                lease_id: String::new(),
                 reconstructable: value
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
@@ -134,6 +260,8 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
                     .map(str::to_string),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 finalized_at: None,
+                terminal_reason: None,
+                terminal_evidence: None,
             };
             index
                 .resources
@@ -412,14 +540,20 @@ mod tests {
         ControllerScratchResource {
             path: path.display().to_string(),
             run_id: "missing-terminal-run".to_string(),
+            plan_id: String::new(),
             task_id: "task-1".to_string(),
+            attempt: 0,
             root_bound: root.display().to_string(),
             owner_pid: u32::MAX,
+            lifecycle_state: "active".to_string(),
+            lease_id: "test-lease".to_string(),
             reconstructable: true,
             retention: "0s".to_string(),
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             finalized_at: Some(chrono::Utc::now().to_rfc3339()),
+            terminal_reason: None,
+            terminal_evidence: None,
         }
     }
 
@@ -435,6 +569,69 @@ mod tests {
             cleanup_block_reason(&resource, &scratch).expect("check"),
             Some("owner process is still running".to_string())
         );
+    }
+
+    #[test]
+    fn allocation_is_unique_contained_and_durably_indexed() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("first");
+            let second = allocate_attempt("run-1", "plan-1", "task-1", 2).expect("second");
+            let index = read_index().expect("index");
+
+            assert_ne!(first.path, second.path);
+            assert!(first.path.is_dir());
+            assert!(second.path.is_dir());
+            let resource = index
+                .resources
+                .iter()
+                .find(|resource| resource.lease_id == first.lease_id)
+                .expect("first resource");
+            assert!(Path::new(&resource.path).starts_with(&resource.root_bound));
+            assert_eq!(resource.run_id, "run-1");
+            assert_eq!(resource.plan_id, "plan-1");
+            assert_eq!(resource.task_id, "task-1");
+            assert_eq!(resource.attempt, 1);
+            assert_eq!(resource.lifecycle_state, "active");
+            assert_eq!(resource.owner_pid, std::process::id());
+            assert!(resource.reconstructable);
+            assert!(!resource.created_at.is_empty());
+        });
+    }
+
+    #[test]
+    fn release_is_idempotent_and_preserves_first_terminal_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("allocate");
+            release_attempt(
+                &allocation,
+                "provider_failure",
+                serde_json::json!({ "artifact": "first" }),
+            )
+            .expect("first release");
+            release_attempt(
+                &allocation,
+                "cancelled",
+                serde_json::json!({ "artifact": "second" }),
+            )
+            .expect("replayed release");
+
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == allocation.lease_id)
+                .expect("resource");
+            assert_eq!(resource.lifecycle_state, "released");
+            assert_eq!(
+                resource.terminal_reason.as_deref(),
+                Some("provider_failure")
+            );
+            assert_eq!(
+                resource.terminal_evidence,
+                Some(serde_json::json!({ "artifact": "first" }))
+            );
+            assert!(resource.finalized_at.is_some());
+        });
     }
 
     #[test]

@@ -496,6 +496,7 @@ mod tests {
                     base_ref: None,
                     task_url: None,
                     cleanup: None,
+                    attempt: None,
                     materialization: Value::Null,
                 },
                 component_contracts: Vec::new(),

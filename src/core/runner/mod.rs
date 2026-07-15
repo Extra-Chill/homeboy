@@ -20,6 +20,11 @@ pub use broker_auth::{
     BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 mod capabilities;
+mod cli_resolver;
+pub use cli_resolver::{
+    resolve_agent_task_dispatch, resolve_command_label, set_agent_task_dispatch_resolver,
+    set_command_label_resolver,
+};
 mod command_path;
 mod connection;
 mod daemon_freshness;
@@ -83,6 +88,7 @@ pub(crate) use command_path::{
     normalize_runner_command_env_for_homeboy_path, quote_runner_env_value,
     remote_shell_path_preamble,
 };
+pub(crate) use connection::disconnect_with_force;
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_orphan_adoption, connect_with_recovery, disconnect, reverse_broker_artifact,

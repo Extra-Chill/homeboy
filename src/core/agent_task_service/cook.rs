@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::core::agent_task::AgentTaskExecutor;
 use crate::core::agent_task_cook_loop::{
@@ -24,8 +25,7 @@ use crate::core::agent_task_review_dossier::{
     AgentTaskReviewTestStep,
 };
 use crate::core::agent_task_scheduler::{
-    provider_rotation_attempts, terminal_executor_identity, AgentTaskExecutionBudget,
-    AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskState,
+    AgentTaskExecutionBudget, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskState,
 };
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
@@ -33,10 +33,19 @@ use crate::core::{config, Error, Result};
 use super::execution::run_loaded_plan;
 use super::AgentTaskRunResult;
 
+/// Executes one provider attempt while cook retains ownership of promotion,
+/// gates, retries, and finalization.
+pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
+    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> Result<()>;
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentTaskCookServiceOptions {
     pub cook_id: String,
     pub initial_run_id: String,
+    /// Controller-compiled first attempt. The cook service owns dispatching it
+    /// through the same local-or-Lab transport used by gate-feedback retries.
+    pub initial_plan: AgentTaskPlan,
     pub to_worktree: String,
     pub source_worktree_path: Option<PathBuf>,
     pub provider_command: Option<String>,
@@ -56,6 +65,8 @@ pub struct AgentTaskCookServiceOptions {
     pub ai_tool: String,
     pub ai_model: Option<String>,
     pub ai_used_for: String,
+    /// The route-selected provider transport. `None` executes locally.
+    pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -97,12 +108,60 @@ where
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
+    let mut next_plan = Some(options.initial_plan.clone());
     let cook_id = options.cook_id.clone();
     let mut budget_limit = None;
     let mut observed_budget_used = ExecutionBudgetUsage::default();
     let mut remediation_category_usage = ExecutionBudgetUsage::default();
 
     for attempt in 1..=max_attempts {
+        let plan = match next_plan.take() {
+            Some(plan) => plan,
+            None => agent_task_lifecycle::load_plan(&run_id)?,
+        };
+        let needs_execution = agent_task_lifecycle::status(&run_id)
+            .map(|record| {
+                !matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                        | agent_task_lifecycle::AgentTaskRunState::Failed
+                        | agent_task_lifecycle::AgentTaskRunState::Cancelled
+                )
+            })
+            .unwrap_or(true);
+        if needs_execution {
+            let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
+                dispatcher.dispatch_attempt(plan.clone(), &run_id)
+            } else {
+                run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
+            };
+            if let Err(error) = execution {
+                let record = agent_task_lifecycle::status(&run_id).ok();
+                if record.is_some() {
+                    agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
+                }
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: record
+                        .as_ref()
+                        .map(|record| format!("{:?}", record.state))
+                        .unwrap_or_else(|| "DispatchFailed".to_string()),
+                    aggregate_path: record.and_then(|record| record.aggregate_path),
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(cook_report(
+                    cook_id,
+                    "provider_failure",
+                    attempts,
+                    None,
+                    Some(error.to_string()),
+                    1,
+                ));
+            }
+        }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
@@ -140,6 +199,7 @@ where
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
+                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         ) {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
@@ -301,26 +361,21 @@ where
                             "execution_budget_exhausted",
                             attempts,
                             None,
-                            Some(format!(
-                                "provider execution stopped because {exhausted_budget} was exhausted"
-                            )),
+                            Some(format!("provider execution stopped because {exhausted_budget} was exhausted")),
                             1,
                         ));
                     }
                 };
-                let follow_up_plan = AgentTaskPlan::new(
+                let mut follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
                 );
-                let mut follow_up_plan = follow_up_plan;
-                // The scheduler receives only this reserved execution. Further
-                // remediation capacity is admitted above from durable evidence.
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
-                run_loaded_plan(follow_up_plan, Some(&next_run_id), executor.clone())?;
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
+                next_plan = Some(follow_up_plan);
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 return Ok(cook_report(
@@ -367,8 +422,6 @@ impl ExecutionBudgetUsage {
     }
 }
 
-/// Aggregate events and retained scheduler diagnostics are authoritative durable
-/// evidence. Cook never infers usage from its own loop counter.
 pub(crate) fn execution_budget_usage(
     aggregate: &crate::core::agent_task_scheduler::AgentTaskAggregate,
 ) -> ExecutionBudgetUsage {
@@ -402,33 +455,33 @@ pub(crate) fn execution_budget_usage(
 
 pub(crate) fn budget_remaining(
     budget: &AgentTaskExecutionBudget,
-    used: ExecutionBudgetUsage,
+    usage: ExecutionBudgetUsage,
 ) -> Option<AgentTaskExecutionBudget> {
     let max_provider_executions = budget
         .max_provider_executions
-        .saturating_sub(used.executions);
+        .saturating_sub(usage.executions);
     (max_provider_executions > 0).then(|| {
         AgentTaskExecutionBudget::new(
             max_provider_executions,
             budget
                 .max_same_provider_retries
-                .saturating_sub(used.same_provider_retries),
+                .saturating_sub(usage.same_provider_retries),
             budget
                 .max_provider_rotations
-                .saturating_sub(used.provider_rotations),
+                .saturating_sub(usage.provider_rotations),
         )
     })
 }
 
 pub(crate) fn reserve_remediation_budget(
-    remaining: &AgentTaskExecutionBudget,
+    budget: &AgentTaskExecutionBudget,
     same_provider: bool,
 ) -> std::result::Result<ExecutionBudgetUsage, &'static str> {
-    if remaining.max_provider_executions == 0 {
+    if budget.max_provider_executions == 0 {
         return Err("max_provider_executions");
     }
     if same_provider {
-        if remaining.max_same_provider_retries == 0 {
+        if budget.max_same_provider_retries == 0 {
             return Err("max_same_provider_retries");
         }
         return Ok(ExecutionBudgetUsage {
@@ -436,7 +489,7 @@ pub(crate) fn reserve_remediation_budget(
             ..Default::default()
         });
     }
-    if remaining.max_provider_rotations == 0 {
+    if budget.max_provider_rotations == 0 {
         return Err("max_provider_rotations");
     }
     Ok(ExecutionBudgetUsage {
@@ -456,6 +509,50 @@ fn terminal_executor_matches(
             && terminal.selector == follow_up.selector
             && terminal.model.as_deref() == follow_up.model(),
     )
+}
+
+fn provider_rotation_attempts(
+    outcome: &crate::core::agent_task::AgentTaskOutcome,
+) -> Option<Vec<crate::core::agent_task_scheduler::AgentTaskProviderRotationAttempt>> {
+    serde_json::from_value(
+        outcome
+            .metadata
+            .pointer("/provider_rotation/attempts")?
+            .clone(),
+    )
+    .ok()
+}
+
+struct TerminalExecutorIdentity {
+    backend: String,
+    selector: Option<String>,
+    model: Option<String>,
+}
+
+fn terminal_executor_identity(
+    outcome: &crate::core::agent_task::AgentTaskOutcome,
+) -> Option<TerminalExecutorIdentity> {
+    if let Some(attempt) =
+        provider_rotation_attempts(outcome).and_then(|attempts| attempts.last().cloned())
+    {
+        return Some(TerminalExecutorIdentity {
+            backend: attempt.backend,
+            selector: attempt.selector,
+            model: attempt.model,
+        });
+    }
+    let executor = outcome.metadata.get("executor")?;
+    Some(TerminalExecutorIdentity {
+        backend: executor.get("backend")?.as_str()?.to_string(),
+        selector: executor
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model: executor
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 pub fn source_worktree_path(cwd: Option<String>, workspace: Option<String>) -> Option<PathBuf> {
@@ -809,6 +906,7 @@ mod tests {
             let options = AgentTaskCookServiceOptions {
                 cook_id: "cook-8058".to_string(),
                 initial_run_id: run_id.to_string(),
+                initial_plan: AgentTaskPlan::new("cook-8058", Vec::new()),
                 to_worktree: "homeboy@8058".to_string(),
                 source_worktree_path: None,
                 provider_command: None,
@@ -830,6 +928,7 @@ mod tests {
                 ai_tool: "OpenCode".to_string(),
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 ai_used_for: "Drafted test coverage.".to_string(),
+                attempt_dispatcher: None,
             };
             let mut backend = CaptureBackend::default();
             finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend)

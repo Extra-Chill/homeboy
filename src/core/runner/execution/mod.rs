@@ -69,7 +69,7 @@ use extension_parity::{
     ensure_extension_materialized, plan_extension_parity, requested_setting_keys_for_command,
     required_extensions_for_command, validate_extension_ready,
 };
-use policy::remote_execution_preflight;
+use policy::{preflight_remote_argv, remote_execution_preflight};
 
 // Cross-submodule visibility: re-export each submodule's `pub(super)` surface so
 // siblings reach one another through `use super::*` without widening the public
@@ -753,6 +753,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         &required_extensions,
         &requested_setting_keys,
         &accepted_extension_settings,
+    )?;
+
+    preflight_remote_argv(
+        runner_id,
+        &options.command,
+        &cwd,
+        options.source_snapshot.as_ref(),
+        options.path_materialization_plan.as_ref(),
     )?;
 
     // Remote capability-parity preflight: derive the contract from the command's

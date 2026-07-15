@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.286.0"
+version = "0.286.4"
 dependencies = [
  "base64",
  "chrono",
@@ -695,10 +695,12 @@ dependencies = [
  "glob",
  "glob-match",
  "heck",
+ "homeboy-cli-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
  "homeboy-output",
+ "homeboy-paths",
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
@@ -719,7 +721,16 @@ dependencies = [
  "tempfile",
  "toml",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "homeboy-cli-contract"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
 ]
 
 [[package]]
@@ -755,6 +766,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-paths"
+version = "0.1.0"
+dependencies = [
+ "homeboy-error",
+ "homeboy-product-identity",
+ "shellexpand",
 ]
 
 [[package]]

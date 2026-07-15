@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 use crate::cli_surface::Commands;
 use crate::command_contract::LabCommandPortability;
 use crate::commands::agent_task;
@@ -206,7 +204,6 @@ pub fn non_interactive_preflight_error(
     interactive: bool,
     local_hot_rerun_command: Option<String>,
     default_runner: Option<&str>,
-    command: HotCommand,
 ) -> Option<crate::core::Error> {
     if local_override || interactive || is_runner_hosted_exec() {
         return None;
@@ -218,7 +215,7 @@ pub fn non_interactive_preflight_error(
     let mut error = crate::core::Error::validation_invalid_argument(
         "resource-policy",
         format!(
-            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Rerun later when `homeboy self doctor` reports ok.",
+            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy self doctor` reports ok.",
             warning.command,
             severity_str(warning.recommendation),
             primary_action(warning, default_runner),
@@ -226,32 +223,9 @@ pub fn non_interactive_preflight_error(
         None,
         None,
     );
-
-    if command.lab_offload_supported {
-        // Portable command: the safe rerun (Lab `--runner`, or explicit local
-        // placement when the operator wants it) is the primary path.
-        if let Some(rerun) = local_hot_rerun_command {
-            error.details["rerun_command"] = serde_json::Value::String(rerun);
-        }
-    } else {
-        // Non-portable command: do NOT surface a local `--placement local`
-        // rerun as the primary path — for a non-interactive agent that turns a
-        // safety refusal into a copy-paste local bypass (#6384). Instead record
-        // the Lab-portability gap and file/fix guidance, and demote the local
-        // rerun to a clearly operator-only override that agents must not take by
-        // default.
-        error.details["lab_portability_gap"] = serde_json::Value::String(format!(
-            "`{}` has no portable Lab offload contract yet: {} A non-interactive agent should stop here and open/track a Lab-portability issue for this command rather than run it locally.",
-            warning.command,
-            command.lab_offload_unsupported_reason.unwrap_or(
-                "this resource-pressure command is currently local-only under resource policy.",
-            ),
-        ));
-        if let Some(rerun) = local_hot_rerun_command {
-            error.details["operator_only_local_override"] = serde_json::Value::String(rerun);
-        }
+    if let Some(command) = local_hot_rerun_command {
+        error.details["rerun_command"] = serde_json::Value::String(command);
     }
-
     Some(error)
 }
 
@@ -307,7 +281,7 @@ fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>)
     if warning.message.contains("--runner") {
         "Pass --runner <id> when Lab offload supports this mode.".to_string()
     } else {
-        "Lab routing is not offered because this command has no portable Lab offload contract yet; it needs Lab-portability work (see the lab_portability_gap detail). The local override is operator-only and is not a safe automated rerun.".to_string()
+        "Lab routing is not offered because this command is currently local-only under resource policy.".to_string()
     }
 }
 
@@ -535,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_agent_task_cook_automatically_selects_default_lab_on_warm_controller() {
+    fn verified_agent_task_cook_keeps_its_controller_on_a_warm_controller() {
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -548,36 +522,8 @@ mod tests {
             "cargo test --locked",
         ]);
         let command = hot_command(&cli.command).expect("verified cook is hot");
-        let resources = resources(ResourceRecommendation::Warm);
-        let warning = evaluate_with_runner_hint(command, &resources, Some("homeboy-lab"))
-            .expect("warm controller warns before routing");
-        let context = ResourcePolicyContext::from_evaluation(
-            command,
-            &resources,
-            Some(&warning),
-            false,
-            Some("homeboy-lab"),
-            false,
-        );
-
-        assert!(command.lab_offload_supported);
+        assert!(!command.lab_offload_supported);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
-        assert_eq!(
-            context.runner_selection,
-            ResourcePolicyRunnerSelection {
-                runner_id: Some("homeboy-lab".to_string()),
-                reason: "default_lab_runner".to_string(),
-            }
-        );
-        assert!(non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            None,
-            Some("homeboy-lab"),
-            lab_supported_hot("agent-task cook/run-plan/retry --run"),
-        )
-        .is_none());
     }
 
     #[test]
@@ -599,15 +545,8 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        let error = non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            None,
-            None,
-            lab_supported_hot("audit"),
-        )
-        .expect("non-interactive hot runs should fail fast");
+        let error = non_interactive_preflight_error(&warning, false, false, None, None)
+            .expect("non-interactive hot runs should fail fast");
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(error.message.contains("Refusing to start `audit`"));
@@ -627,42 +566,14 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            None,
-            Some("homeboy-lab"),
-            lab_supported_hot("agent-task providers"),
-        )
-        .is_none());
+        assert!(
+            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
+                .is_none()
+        );
     }
 
     #[test]
-    fn non_interactive_hot_warning_allows_explicit_lab_runner_without_default() {
-        let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
-        let command = lab_supported_hot("agent-task cook/run-plan/retry --run");
-        let warning = evaluate_with_runner_hint(
-            command,
-            &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
-        )
-        .expect("hot machines warn");
-
-        assert!(non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            None,
-            Some("homeboy-lab"),
-            command,
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn non_interactive_local_only_refusal_demotes_local_override_and_flags_portability_gap() {
+    fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
         let command = local_only_hot(
@@ -683,28 +594,14 @@ mod tests {
             None,
         );
 
-        let error = non_interactive_preflight_error(&warning, false, false, rerun, None, command)
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
             .expect("non-interactive local-only hot runs should fail fast");
 
-        // The local `--placement local` command must NOT be the primary rerun
-        // path handed to a non-interactive agent (#6384). It is demoted to an
-        // explicitly operator-only field, and the refusal records the
-        // Lab-portability gap the agent should stop and track instead.
-        assert!(
-            error.details.get("rerun_command").is_none(),
-            "non-portable refusal must not offer a local rerun as the primary path"
-        );
         assert_eq!(
-            error.details["operator_only_local_override"].as_str(),
+            error.details["rerun_command"].as_str(),
             Some("homeboy --placement local review lint --changed-since origin/main")
         );
-        let gap = error.details["lab_portability_gap"]
-            .as_str()
-            .expect("portability gap recorded");
-        assert!(gap.contains("no portable Lab offload contract yet"));
-        assert!(gap.contains("open/track a Lab-portability issue"));
-        assert!(error.message.contains("needs Lab-portability work"));
-        assert!(error.message.contains("operator-only"));
+        assert!(error.message.contains("Lab routing is not offered"));
     }
 
     #[test]
@@ -740,24 +637,13 @@ mod tests {
             &["homeboy".to_string(), "audit".to_string()],
             None,
         );
-        let error = non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            rerun,
-            None,
-            lab_supported_hot("audit"),
-        )
-        .expect("non-interactive hot runs should fail fast");
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
+            .expect("non-interactive hot runs should fail fast");
 
-        // Portable command with no connected runner: the explicit local rerun
-        // stays the (last-resort) primary path — it is Lab-portable, the runner
-        // is simply not connected. No portability-gap footgun here.
         assert_eq!(
             error.details["rerun_command"].as_str(),
             Some("homeboy --placement local audit")
         );
-        assert!(error.details.get("lab_portability_gap").is_none());
         assert!(error
             .message
             .contains("No eligible Homeboy Lab runner was found"));
@@ -773,15 +659,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(
-            &warning,
-            false,
-            false,
-            None,
-            None,
-            lab_supported_hot("agent-task cook/run-plan"),
-        )
-        .is_none());
+        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_none());
     }
 
     #[test]
@@ -794,24 +672,8 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(
-            &warning,
-            false,
-            true,
-            None,
-            None,
-            lab_supported_hot("audit"),
-        )
-        .is_none());
-        assert!(non_interactive_preflight_error(
-            &warning,
-            true,
-            false,
-            None,
-            None,
-            lab_supported_hot("audit"),
-        )
-        .is_none());
+        assert!(non_interactive_preflight_error(&warning, false, true, None, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, true, false, None, None).is_none());
     }
 
     #[test]

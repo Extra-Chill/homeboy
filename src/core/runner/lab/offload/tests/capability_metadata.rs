@@ -928,15 +928,19 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         metadata["stale_daemon"]["job_command_binary_build_identity"],
         "homeboy 0.229.11+new"
     );
+    // The stale-daemon refresh command now leads with a version-pinned
+    // `refresh-homeboy --ref v<current> --reconnect` step before the
+    // disconnect/connect fallback (matching the connection.rs contract).
+    let expected_refresh = format!(
+        "homeboy runner refresh-homeboy lab --ref v{} --reconnect && homeboy runner disconnect lab && homeboy runner connect lab",
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
         metadata["stale_daemon"]["refresh_command"],
-        "homeboy runner disconnect lab && homeboy runner connect lab"
+        expected_refresh
     );
     assert_eq!(metadata["stale_daemon_severity"], "warning");
-    assert_eq!(
-        metadata["stale_daemon_refresh_command"],
-        "homeboy runner disconnect lab && homeboy runner connect lab"
-    );
+    assert_eq!(metadata["stale_daemon_refresh_command"], expected_refresh);
     assert_eq!(metadata["job_command_binary_version"], "homeboy 0.229.11");
     assert_eq!(
         metadata["job_command_binary_build_identity"],

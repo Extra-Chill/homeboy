@@ -204,6 +204,7 @@ pub(super) struct RunnerConnectInput {
     pub(super) broker_url: Option<String>,
     pub(super) adopt_orphan_lease: Option<String>,
     pub(super) confirm_pid_dead: bool,
+    pub(super) confirm_untracked_child_dead: Vec<uuid::Uuid>,
     pub(super) reconcile_leaseless_orphans: bool,
     pub(super) confirm_no_daemon_owner: bool,
     pub(super) recover_missing_lease_state: Option<String>,
@@ -219,6 +220,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         broker_url,
         adopt_orphan_lease,
         confirm_pid_dead,
+        confirm_untracked_child_dead,
         reconcile_leaseless_orphans,
         confirm_no_daemon_owner,
         recover_missing_lease_state,
@@ -232,6 +234,14 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             "--adopt-orphan-lease requires --confirm-pid-dead",
             None,
             Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
+        ));
+    }
+    if !confirm_untracked_child_dead.is_empty() && adopt_orphan_lease.is_none() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "confirm_untracked_child_dead",
+            "--confirm-untracked-child-dead requires --adopt-orphan-lease",
+            None,
+            None,
         ));
     }
     if reverse && adopt_orphan_lease.is_some() {
@@ -308,6 +318,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         runner::connect_with_orphan_adoption(
             id,
             adopt_orphan_lease.as_deref(),
+            &confirm_untracked_child_dead,
             reconcile_leaseless_orphans,
             recover_missing_lease_state.as_deref(),
             recorded_pid,
@@ -364,6 +375,7 @@ mod tests {
             broker_url: None,
             adopt_orphan_lease: None,
             confirm_pid_dead: false,
+            confirm_untracked_child_dead: Vec::new(),
             reconcile_leaseless_orphans: false,
             confirm_no_daemon_owner: false,
             recover_missing_lease_state: None,
@@ -389,6 +401,19 @@ mod tests {
                 .message
                 .contains("--reconcile-leaseless-orphans requires"));
         }
+    }
+
+    #[test]
+    fn untracked_child_confirmation_requires_exact_orphan_lease_mode() {
+        let error = connect(
+            "runner",
+            RunnerConnectInput {
+                confirm_untracked_child_dead: vec![uuid::Uuid::new_v4()],
+                ..input()
+            },
+        )
+        .expect_err("untracked child confirmation is only valid for exact adoption");
+        assert!(error.message.contains("requires --adopt-orphan-lease"));
     }
 
     #[test]

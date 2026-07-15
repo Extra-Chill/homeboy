@@ -285,14 +285,14 @@ fn run_once_output(
     let progress_options = options.clone();
     let progress_job = claim.job.clone();
     let progress_sink = Arc::new(move |data| {
-        let _ = append_progress_data(
+        append_progress_data(
             &progress_client,
             &progress_options.broker_url,
             progress_options.broker_token.as_deref(),
             &progress_options.runner_id,
             &progress_job,
             data,
-        );
+        )
     });
     let exec_result = exec_worker_local_until_cancelled_with_progress(
         &options.runner_id,

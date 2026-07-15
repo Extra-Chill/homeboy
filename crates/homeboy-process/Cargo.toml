@@ -12,6 +12,6 @@ name = "homeboy_process"
 path = "src/lib.rs"
 
 [dependencies]
-homeboy-error = { path = "../homeboy-error" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 libc = "0.2"
 ctrlc = "3.4"

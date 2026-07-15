@@ -68,11 +68,22 @@ pub fn run_loaded_plan<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    prepare_plan_for_execution(&mut plan, record_run_id)?;
-
     if let Some(run_id) = record_run_id {
+        // A runner has its own lifecycle store. Materialize the handed-off plan
+        // before any preparation can invoke runner-scoped lifecycle commands.
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
+            agent_task_lifecycle::record_pre_execution_failure(
+                run_id,
+                &plan,
+                "prepare_plan_for_execution",
+                &error,
+            )?;
+            return Err(error);
+        }
         agent_task_lifecycle::mark_running(run_id)?;
+    } else {
+        prepare_plan_for_execution(&mut plan, None)?;
     }
 
     let aggregate = run_plan_with_scheduler(plan.clone(), record_run_id, executor);
@@ -174,6 +185,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled

@@ -3,6 +3,8 @@ use serde_json::json;
 use crate::core::error::{Error, ErrorCode, Result};
 
 use crate::core::runner::{Runner, RunnerCapabilityPreflight, RunnerKind};
+use crate::core::runner_execution_envelope::PathMaterializationPlan;
+use crate::core::source_snapshot::SourceSnapshot;
 
 use super::{trim_trailing_slashes, RunnerExecOptions};
 
@@ -40,6 +42,50 @@ pub(super) fn remote_execution_preflight(
         required_commands,
         ..Default::default()
     })
+}
+
+/// Apply the final generic argv path-translation gate before remote dispatch.
+/// Higher-level routes rewrite known path-bearing arguments; this shared guard
+/// rejects any controller path that survives those rewrites.
+pub(super) fn preflight_remote_argv(
+    runner_id: &str,
+    command: &[String],
+    remote_cwd: &str,
+    source_snapshot: Option<&SourceSnapshot>,
+    path_materialization_plan: Option<&PathMaterializationPlan>,
+) -> Result<()> {
+    let mut mappings = path_materialization_plan
+        .into_iter()
+        .flat_map(|plan| plan.entries.iter())
+        .filter_map(|entry| {
+            entry
+                .local_path
+                .as_deref()
+                .map(|local| (local, entry.remote_path.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if let Some(snapshot) = source_snapshot {
+        if let (Some(local), Some(remote)) = (
+            snapshot.local_path.as_deref(),
+            snapshot.remote_path.as_deref(),
+        ) {
+            mappings.push((local, remote));
+        }
+    }
+    for (local, remote) in mappings {
+        crate::core::runner::preflight_remote_argv_path_translation(
+            "runner exec",
+            runner_id,
+            command,
+            std::path::Path::new(local),
+            if remote.trim().is_empty() {
+                remote_cwd
+            } else {
+                remote
+            },
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) struct RunnerPolicyRequest<'a> {

@@ -8,7 +8,7 @@ pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub placement: crate::cli_surface::Placement,
+    pub placement: homeboy_cli_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     /// Skip post-materialization dependency hydration for Lab workspace exec

@@ -180,7 +180,11 @@ pub mod worktree;
 pub mod worktree_providers;
 
 // Internal path resolution helpers.
-pub(crate) mod paths;
+// paths moved to the internal `homeboy-paths` crate. Re-exported so existing
+// `crate::core::paths::*` call sites keep working unchanged.
+pub(crate) use homeboy_paths as paths;
+#[cfg(test)]
+mod paths_tests;
 
 // Public extensions for CLI access
 pub mod defaults;

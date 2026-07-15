@@ -4,6 +4,59 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.4] - 2026-07-15
+
+### Changed
+- relocate output routing from command_contract to commands
+- Release agent-task scratch after evidence harvest
+- move apply_lab_contract_to_descriptor into the output type layer
+- Accept canonical executor evidence during cook publication
+
+### Fixed
+- report real homeboy version in rig-schema error + refresh stale fanout assertions
+- protect active daemon jobs during reconnect
+
+## [0.286.3] - 2026-07-15
+
+### Changed
+- split command_contract output routing from output type definitions
+- Complete the Lab agent-task control plane
+- split command_contract lab routing out of lab type definitions
+
+### Fixed
+- remove duplicate legacy Lab routing
+- canonicalize same-family workload command labels (#7972)
+- remove duplicate lab routing and Placement impls breaking main build
+- unblock reverse-broker mock daemon and restore lease-id validation
+
+## [0.286.2] - 2026-07-15
+
+### Changed
+- Allocate run-scoped agent-task scratch
+- Make PID-less daemon orphan recovery exact and observable
+- Support committed harvest from Lab snapshots
+
+### Fixed
+- verify artifact identity on Windows
+
+## [0.286.1] - 2026-07-15
+
+### Changed
+- repair stale runner exec/handoff/dispatch assertions
+- extract path resolution into homeboy-paths crate
+- invert runner CLI parsing via resolver hooks
+- Close promotion provider scripts before execution
+- update stale-daemon refresh_command assertion for version-pinned refresh
+- Confirm exact untracked orphan jobs
+- Use configured worktree providers for cook promotion
+- extract shared Placement into homeboy-cli-contract crate
+- Preserve lazy promotion and provider failure evidence
+- Add coherent release-set deploy preflight
+
+### Fixed
+- peel refresh refs to commit identity
+- repair trace-variant rig fixture, store migration count, and Lab runtime-path preflight
+
 ## [0.286.0] - 2026-07-15
 
 ### Added

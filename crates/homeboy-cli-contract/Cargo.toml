@@ -1,0 +1,16 @@
+[package]
+name = "homeboy-cli-contract"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Chris Huber <chubes@extrachill.com>"]
+description = "Shared CLI contract types (e.g. execution Placement) used by both the homeboy CLI and core routing"
+repository = "https://github.com/Extra-Chill/homeboy"
+
+[lib]
+name = "homeboy_cli_contract"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "string"] }
+serde = { version = "1.0", features = ["derive"] }

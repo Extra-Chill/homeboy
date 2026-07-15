@@ -52,7 +52,7 @@ struct CliEnvelope {
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, false, None, None, None)
+    connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)
 }
 
 /// Connect using an explicit dead-lease or missing-lease selector. A
@@ -70,7 +70,7 @@ pub fn connect_with_recovery(
             None,
         ));
     }
-    connect_with_orphan_adoption(runner_id, orphan_lease_id, false, None, None, None)
+    connect_with_orphan_adoption(runner_id, orphan_lease_id, &[], false, None, None, None)
 }
 
 /// Reconnect after the explicit lease-less recovery transaction has terminalized
@@ -78,7 +78,7 @@ pub fn connect_with_recovery(
 pub fn connect_with_leaseless_orphan_reconciliation(
     runner_id: &str,
 ) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, true, None, None, None)
+    connect_with_orphan_adoption(runner_id, None, &[], true, None, None, None)
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -86,6 +86,7 @@ pub fn connect_with_leaseless_orphan_reconciliation(
 pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
     reconcile_leaseless_orphans: bool,
     missing_lease_id: Option<&str>,
     recorded_pid: Option<u32>,
@@ -281,7 +282,13 @@ pub fn connect_with_orphan_adoption(
         })?;
     }
 
-    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
+    let daemon = ensure_remote_daemon(
+        &client,
+        homeboy,
+        previous_session.as_ref(),
+        orphan_lease_id,
+        confirmed_no_pid_job_ids,
+    );
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
             runner_id,
@@ -1260,17 +1267,28 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
 }
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
-    let runner = load(runner_id)?;
+    disconnect_with_force(runner_id, false)
+}
+
+pub(crate) fn disconnect_with_force(
+    runner_id: &str,
+    force: bool,
+) -> Result<RunnerDisconnectReport> {
+    let promotion_lease =
+        crate::core::runtime_promotion::acquire("runner daemon disconnect", runner_id.to_string())?;
+    promotion_lease.assert_generation()?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
     if let Some(session) = &session {
         if session.mode == RunnerTunnelMode::DirectSsh {
-            if let Err(err) = disconnect_remote_daemon(&runner, session) {
-                log_status!(
-                    "runner",
-                    "Could not stop remote daemon for runner `{runner_id}` during disconnect: {err}"
-                );
-            }
+            disconnect_remote_daemon(session, force).map_err(|err| {
+                Error::validation_invalid_argument(
+                    "disconnect",
+                    format!("refusing to disconnect runner `{runner_id}` because its remote daemon was not stopped safely: {err}"),
+                    Some(runner_id.to_string()),
+                    Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+                )
+            })?;
         }
         if let Some(pid) = session.tunnel_pid {
             terminate_pid(pid);
@@ -1293,56 +1311,52 @@ pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
 }
 
 fn disconnect_remote_daemon(
-    runner: &Runner,
     session: &RunnerSession,
+    force: bool,
 ) -> std::result::Result<(), String> {
-    let Some((_, _, client)) =
-        remote_daemon::resolve_ssh_runner(runner).map_err(|err| err.message)?
-    else {
-        return Ok(());
-    };
-    let homeboy =
-        remote_runner_homeboy_path(runner, "runner disconnect").map_err(|err| err.message)?;
-    let output = client.execute(&remote_daemon_disconnect_command(
-        homeboy,
-        session.remote_daemon_pid,
-    ));
-    if !output.success {
-        return Err(command_failure_message(
-            "remote daemon stop failed while disconnecting runner",
-            &output,
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        "direct SSH runner session has no live daemon tunnel; refusing unbound remote stop"
+            .to_string()
+    })?;
+    let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        "direct SSH runner session has no daemon lease; refusing unbound remote stop".to_string()
+    })?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("build daemon lifecycle client: {error}"))?;
+    let response = client
+        .post(format!(
+            "{}/lifecycle/stop",
+            local_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({ "lease_id": lease_id, "force": force }))
+        .send()
+        .map_err(|error| format!("request lease-bound daemon stop: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("read lease-bound daemon stop response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "lease-bound daemon stop was refused with HTTP {}: {}",
+            status.as_u16(),
+            response_body_excerpt(&body)
         ));
     }
     Ok(())
 }
 
-fn remote_daemon_disconnect_command(homeboy: &str, remote_daemon_pid: Option<u32>) -> String {
-    let mut command = format!(
-        "{} daemon stop >/dev/null 2>&1 || true",
-        shell::quote_arg(homeboy)
-    );
-    if let Some(pid) = remote_daemon_pid {
-        command.push_str("\n");
-        command.push_str(&format!("pid={pid}\n"));
-        command.push_str("if [ -r \"/proc/$pid/cmdline\" ]; then\n");
-        command
-            .push_str("  cmdline=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || true)\n");
-        command.push_str("  case \"$cmdline\" in\n");
-        command.push_str("    *\" daemon serve \"*)\n");
-        command.push_str("      kill -TERM \"$pid\" 2>/dev/null || true\n");
-        command.push_str("      i=0\n");
-        command.push_str("      while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 20 ]; do\n");
-        command.push_str("        i=$((i + 1))\n");
-        command.push_str("        sleep 0.1\n");
-        command.push_str("      done\n");
-        command.push_str("      if kill -0 \"$pid\" 2>/dev/null; then\n");
-        command.push_str("        kill -KILL \"$pid\" 2>/dev/null || true\n");
-        command.push_str("      fi\n");
-        command.push_str("      ;;\n");
-        command.push_str("  esac\n");
-        command.push_str("fi");
+fn response_body_excerpt(body: &str) -> String {
+    const LIMIT: usize = 2_000;
+    let trimmed = body.trim();
+    if trimmed.len() <= LIMIT {
+        return trimmed.to_string();
     }
-    command
+    format!(
+        "{}...<truncated>",
+        trimmed.chars().take(LIMIT).collect::<String>()
+    )
 }
 
 mod remote_daemon {
@@ -1632,6 +1646,7 @@ mod remote_daemon {
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
         orphan_lease_id: Option<&str>,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
     ) -> std::result::Result<RemoteDaemon, String> {
         let mut status = remote_daemon_status(client, homeboy)?;
         probe_remote_daemon_endpoint(client, &mut status);
@@ -1643,8 +1658,19 @@ mod remote_daemon {
                     .and_then(|daemon| daemon.lease_id.as_deref())
                     == Some(lease_id)
             {
-                return remote_daemon_adopt_orphan(client, homeboy, lease_id);
+                return remote_daemon_adopt_orphan(
+                    client,
+                    homeboy,
+                    lease_id,
+                    confirmed_no_pid_job_ids,
+                );
             }
+        }
+        if !confirmed_no_pid_job_ids.is_empty() {
+            return Err(
+                "--confirm-untracked-child-dead applies only when the remote daemon reports the exact requested lease as PID-dead"
+                    .to_string(),
+            );
         }
         let inspected_freshness =
             remote_daemon_recovery_freshness_from_status("<runner-id>", &status);
@@ -2022,8 +2048,10 @@ mod remote_daemon {
         client: &SshClient,
         homeboy: &str,
         lease_id: &str,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
     ) -> std::result::Result<RemoteDaemon, String> {
-        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id);
+        let command =
+            remote_daemon_adopt_orphan_command(homeboy, lease_id, confirmed_no_pid_job_ids);
         let output = client.execute(&command);
         if !output.success {
             return Err(command_failure_message(
@@ -2065,11 +2093,20 @@ mod remote_daemon {
         })
     }
 
-    pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
+    pub(super) fn remote_daemon_adopt_orphan_command(
+        homeboy: &str,
+        lease_id: &str,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
+    ) -> String {
+        let confirmations = confirmed_no_pid_job_ids
+            .iter()
+            .map(|job_id| format!(" --confirm-untracked-child-dead {job_id}"))
+            .collect::<String>();
         format!(
-            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead --addr 127.0.0.1:0",
+            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead{} --addr 127.0.0.1:0",
             shell::quote_arg(homeboy),
             shell::quote_arg(lease_id),
+            confirmations,
         )
     }
 
@@ -2326,6 +2363,7 @@ use session_store::*;
 mod tests {
     use clap::Parser;
     use std::collections::HashMap;
+    use std::io::{Read, Write};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -2720,7 +2758,7 @@ esac
             .expect("enable local runner");
 
             let (report, exit_code) =
-                connect_with_orphan_adoption("local-runner", None, true, None, None, None)
+                connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
                     .expect("connect result");
 
             assert_eq!(
@@ -2914,9 +2952,11 @@ esac
 
     #[test]
     fn generated_daemon_recovery_commands_parse_against_the_actual_cli_contract() {
+        let confirmed_job_id =
+            uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
         let mut commands = vec![
             remote_state_loss_recovery_command("homeboy", "lease-dead", 4242, "127.0.0.1:7421"),
-            remote_daemon_adopt_orphan_command("homeboy", "lease-dead"),
+            remote_daemon_adopt_orphan_command("homeboy", "lease-dead", &[confirmed_job_id]),
         ];
         for contract in [
             RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
@@ -3056,11 +3096,16 @@ esac
 
     #[test]
     fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
-        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead");
+        let job_id =
+            uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
+        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", &[job_id]);
 
         assert!(command.contains("daemon adopt-orphan"));
         assert!(command.contains("--lease-id 'lease dead'"));
         assert!(command.contains("--confirm-pid-dead"));
+        assert!(
+            command.contains("--confirm-untracked-child-dead fbac0390-dbb1-464b-8716-0894ccc05f2f")
+        );
     }
 
     #[test]
@@ -3410,15 +3455,37 @@ esac
     }
 
     #[test]
-    fn remote_daemon_disconnect_command_guards_recorded_pid() {
-        let command = remote_daemon_disconnect_command("/opt/homeboy", Some(42));
+    fn routine_disconnect_refuses_an_unbound_session_without_executing_a_configured_binary() {
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = None;
 
-        assert!(command.contains("/opt/homeboy daemon stop"));
-        assert!(command.contains("pid=42"));
-        assert!(command.contains("/proc/$pid/cmdline"));
-        assert!(command.contains("*\" daemon serve \"*)"));
-        assert!(command.contains("kill -TERM \"$pid\""));
-        assert!(command.contains("kill -KILL \"$pid\""));
+        let error = disconnect_remote_daemon(&session, false)
+            .expect_err("routine disconnect must require the live daemon tunnel and exact lease");
+
+        assert!(error.contains("no live daemon tunnel"));
+    }
+
+    #[test]
+    fn routine_disconnect_posts_the_exact_live_lease_to_the_daemon_tunnel() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8(request[..length].to_vec()).expect("request text");
+            assert!(request.starts_with("POST /lifecycle/stop HTTP/1.1"));
+            assert!(request.contains("\"lease_id\":\"lease-live\""));
+            assert!(request.contains("\"force\":false"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .expect("response");
+        });
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = Some(format!("http://{address}"));
+
+        disconnect_remote_daemon(&session, false).expect("guarded lifecycle stop accepted");
+        server.join().expect("server");
     }
 
     #[test]

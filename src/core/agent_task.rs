@@ -30,8 +30,8 @@ pub use artifacts::{
     AgentTaskFollowUp, AgentTaskTypedArtifact,
 };
 pub use executor::{
-    AgentTaskExecutor, AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace,
-    AgentTaskWorkspaceMode,
+    AgentTaskAttemptWorkspace, AgentTaskCandidateAdoption, AgentTaskExecutor,
+    AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
 };
 pub use outcome::{
     AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus,

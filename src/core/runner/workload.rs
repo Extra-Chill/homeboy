@@ -1,4 +1,3 @@
-use crate::cli_surface::Cli;
 use crate::command_contract::{
     RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
     RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
@@ -132,13 +131,14 @@ impl RunnerWorkloadCommandIdentity {
 
 /// Parse the dispatched argv through the CLI contract so target positionals do
 /// not become part of a command label.
+///
+/// The actual CLI parse lives in the CLI layer and is invoked through the
+/// `command_label` resolver hook, so core does not depend on the full CLI
+/// parser (`cli_surface::Cli`).
 fn dispatched_command_identity(command: &[String]) -> Option<RunnerWorkloadCommandIdentity> {
     let argv = cli_argv_from_dispatched_command(command)?;
-    let cli = Cli::try_parse_from(argv).ok()?;
-    let route_contract = cli.command.lab_route_contract().ok()??;
-    Some(RunnerWorkloadCommandIdentity::from_label(
-        route_contract.command.hot_label,
-    ))
+    let label = super::resolve_command_label(&argv)?;
+    Some(RunnerWorkloadCommandIdentity::from_label(&label))
 }
 
 fn cli_argv_from_dispatched_command(command: &[String]) -> Option<Vec<String>> {
@@ -407,10 +407,21 @@ fn validate_runner_workload_command_fallback(
         ));
     }
 
+    let dispatched_family = dispatched_command_family(command_args);
+
     if let Some(dispatched_label) =
         dispatched_command_label(command_args, &workload.kind.command_label)
     {
-        if dispatched_label != workload.kind.command_label {
+        // A differing surface label is only drift when the commands are not the
+        // same workload family. Same-family labels (e.g. `test` and `trace`,
+        // both Quality) canonicalize to one runner-workload identity, so a
+        // labelled dispatch that resolves to the workload's family is a match
+        // even when the surface label differs (#7972). When the dispatched
+        // family is Unknown we cannot canonicalize, so fall back to strict
+        // label matching.
+        let canonical_same_family = dispatched_family != RunnerWorkloadCommandFamily::Unknown
+            && dispatched_family == workload.kind.command_family;
+        if dispatched_label != workload.kind.command_label && !canonical_same_family {
             return Err(workload_error(
                 "runner_workload.kind.command_label",
                 format!(
@@ -421,7 +432,6 @@ fn validate_runner_workload_command_fallback(
         }
     }
 
-    let dispatched_family = dispatched_command_family(command_args);
     if dispatched_family != RunnerWorkloadCommandFamily::Unknown
         && dispatched_family != workload.kind.command_family
     {
@@ -661,6 +671,18 @@ mod tests {
     use crate::core::api_jobs::JobArtifactMetadata;
     use crate::core::plan::{HomeboyPlan, PlanKind};
 
+    /// Register the command-label resolver the way production startup does, so
+    /// tests that build workloads from dispatched argv resolve a hot-command
+    /// label (the parse now goes through the resolver hook rather than core
+    /// calling the CLI parser directly).
+    fn register_test_command_label_resolver() {
+        crate::core::runner::set_command_label_resolver(|argv| {
+            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
+            let route_contract = cli.command.lab_route_contract().ok()??;
+            Some(route_contract.command.hot_label.to_string())
+        });
+    }
+
     fn plan() -> HomeboyPlan {
         HomeboyPlan::builder_for_description(PlanKind::LabOffload, "test").build()
     }
@@ -782,6 +804,7 @@ mod tests {
                 .map(|arg| (*arg).to_string())
                 .collect::<Vec<_>>();
 
+            register_test_command_label_resolver();
             let workload = build_runner_workload_for_dispatched_command(
                 RunnerWorkloadBuildInput {
                     plan: &plan,
@@ -1048,11 +1071,16 @@ mod tests {
             proof_id: None,
         });
 
+        // A dispatch whose label belongs to no known workload family (here
+        // `status`) cannot be canonicalized to this `trace` (Quality) workload,
+        // so the strict label check still rejects genuine command drift. (A
+        // same-family alias like `test` is intentionally accepted — see
+        // `runner_workload_validation_rejects_dispatch_drift`.)
         let err = validate_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "test".to_string()],
+            &["homeboy".to_string(), "status".to_string()],
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
@@ -1077,6 +1105,7 @@ mod tests {
             "homeboy-lab",
         ]
         .map(str::to_string);
+        register_test_command_label_resolver();
         let workload = build_runner_workload_for_dispatched_command(
             RunnerWorkloadBuildInput {
                 plan: &plan,

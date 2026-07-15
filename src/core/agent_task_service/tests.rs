@@ -25,8 +25,9 @@ use std::sync::{Arc, Mutex};
 fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut plan = test_plan();
+    plan.options.retry.max_attempts = 1;
     plan.options.execution_budget =
-        crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1);
+        crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1);
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
         entries: vec![AgentTaskProviderRotationEntry {
             backend: Some("fallback".to_string()),
@@ -41,7 +42,7 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
 
     let usage = execution_budget_usage(&aggregate);
     let remaining = budget_remaining(
-        &crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1),
+        &crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1),
         usage,
     )
     .expect("remaining total budget");
@@ -87,6 +88,45 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
         assert_eq!(record.tasks[0].state, AgentTaskState::Succeeded);
         assert!(record.aggregate_path.is_some());
+    });
+}
+
+#[test]
+fn runner_handoff_materializes_the_run_before_preparation_failure() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0]
+            .executor
+            .secret_env
+            .push("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__".to_string());
+        std::env::remove_var("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__");
+
+        let error = run_loaded_plan(
+            plan,
+            Some("controller-proxy-interrupted-runner-handoff"),
+            SucceedingExecutor,
+        )
+        .expect_err("runner preparation fails after receiving the durable plan");
+        let record = lifecycle_status("controller-proxy-interrupted-runner-handoff")
+            .expect("runner-scoped status resolves from its materialized record");
+        let log = agent_task_lifecycle::logs("controller-proxy-interrupted-runner-handoff")
+            .expect("runner-scoped logs resolve from its materialized record");
+        let recovery = run_submitted(
+            "controller-proxy-interrupted-runner-handoff".to_string(),
+            SucceedingExecutor,
+        )
+        .expect("runner-scoped run resolves the materialized terminal record");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+        assert!(!log.events.is_empty());
+        assert_eq!(recovery.exit_code, 1);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "prepare_plan_for_execution"
+        );
+        assert!(agent_task_lifecycle::load_plan(&record.run_id).is_ok());
     });
 }
 
@@ -278,6 +318,7 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             observed_root.contains("homeboy-agent-task-attempts"),
             "attempt worktree should live under the agent-task attempts scratch root, got {observed_root}"
         );
+        assert!(observed.workspace.attempt.is_some());
         assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
         assert!(observed.workspace.kind.is_none());
         assert!(observed.workspace.component_id.is_none());

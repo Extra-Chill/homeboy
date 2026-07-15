@@ -1,3 +1,4 @@
+use clap::Parser;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
@@ -15,6 +16,7 @@ use homeboy::core::runners::{self, RunnerExecOptions};
 use homeboy::core::Error;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::core::io::output_file::write_output_file;
 
@@ -86,6 +88,15 @@ pub fn route_after_parse(
     } else {
         None
     };
+
+    if let Some(exit_code) = run_split_placement_cook(
+        cli,
+        normalized_args,
+        output_file,
+        inferred_runner_id.as_deref(),
+    )? {
+        return Ok(Some(exit_code));
+    }
 
     let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_retry_handoff(cli, normalized_args)?
@@ -199,6 +210,190 @@ pub fn route_after_parse(
             }
             print!("{}", output.stdout);
             Ok(Some(output.exit_code))
+        }
+    }
+}
+
+/// Cook owns controller-local target resolution, promotion, gates, retries, and
+/// finalization. Its provider attempt is the only portable unit: a materialized
+/// typed run-plan that mirrors its aggregate and artifacts back into the same
+/// durable attempt record before this controller resumes.
+fn run_split_placement_cook(
+    cli: &Cli,
+    _normalized_args: &[String],
+    output_file: Option<&str>,
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<i32>> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+
+    let plan = materialize_agent_task_cook_plan(cli)?.expect("cook plan");
+    let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize Lab cook attempt plan".to_string()),
+        )
+    })?;
+    let cook_id = cook
+        .dispatch
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+    let attempt_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, 1);
+    let source_path = homeboy::core::agent_tasks::service::source_worktree_path(
+        cook.dispatch.cwd.clone(),
+        cook.dispatch.workspace.clone(),
+    );
+    let mut controller = cook.clone();
+    controller.dispatch.run_id = Some(cook_id);
+    controller.attempt_run_id = Some(attempt_run_id);
+    controller.attempt_plan = Some(serialized_plan);
+    let dispatcher = Arc::new(LabCookAttemptDispatcher {
+        runner_id: runner_id.to_string(),
+        allow_local_fallback: cli.placement.allows_local_fallback(),
+        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+        skip_deps_hydration: cli.skip_deps_hydration,
+        source_path,
+        job_overrides: lab_job_overrides(cli)?,
+    });
+    let (value, exit_code) =
+        crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher(
+            controller,
+            homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+            Some(dispatcher),
+        )?;
+    let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize controller-owned cook result".to_string()),
+        )
+    })?;
+    if let Some(path) = output_file {
+        write_output_file(path, &stdout)?;
+    }
+    print!("{stdout}");
+    Ok(Some(exit_code))
+}
+
+/// The controller supplies this transport to the cook service. Every attempt
+/// uses the same durable run id, while Lab only executes the provider plan.
+#[derive(Debug)]
+struct LabCookAttemptDispatcher {
+    runner_id: String,
+    allow_local_fallback: bool,
+    allow_dirty_lab_workspace: bool,
+    skip_deps_hydration: bool,
+    source_path: Option<PathBuf>,
+    job_overrides: runners::LabJobOverrides,
+}
+
+impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
+    fn dispatch_attempt(
+        &self,
+        plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+        run_id: &str,
+    ) -> homeboy::core::Result<()> {
+        let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize Lab cook attempt plan".to_string()),
+            )
+        })?;
+        let provider_args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            serialized_plan,
+            "--record-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        let provider_cli = Cli::try_parse_from(&provider_args).map_err(|error| {
+            Error::validation_invalid_argument(
+                "agent-task cook",
+                format!("build Lab provider attempt: {error}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        // Stage the controller-owned identity before Lab preflight. A rejected
+        // handoff can then terminalize this record with a retryable diagnosis.
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        let outcome = lab_routing::dispatch_lab_offload(
+            LabRoutingRequest {
+                command: lab_offload_command(&provider_cli.command)?,
+                normalized_args: &provider_args,
+                explicit_runner: Some(&self.runner_id),
+                placement: homeboy::cli_surface::Placement::Lab,
+                allow_local_fallback: self.allow_local_fallback,
+                allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
+                skip_deps_hydration: self.skip_deps_hydration,
+                capture_patch: false,
+                mutation_flag: None,
+                timeout: None,
+                active_run_id: Some(run_id),
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                require_controller_git_bundle: false,
+                local_output_file: None,
+                durable_agent_task_plan: Some(&plan),
+                source_path: self.source_path.as_deref(),
+                job_overrides: self.job_overrides.clone(),
+            },
+            Some(&self.runner_id),
+            Box::new(NoopLabDispatchObserver),
+        )
+        .map_err(|error| {
+            let recovery =
+                format!("Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`.");
+            match agent_task_lifecycle::record_pre_execution_failure(
+                run_id,
+                &plan,
+                "lab_handoff_preacceptance",
+                &error,
+            ) {
+                Ok(_) => error.with_hint(recovery),
+                Err(record_error) => error.with_hint(format!(
+                    "{recovery} Homeboy also could not persist the handoff failure: {}",
+                    record_error.message
+                )),
+            }
+        })?;
+        match outcome {
+            LabRouteOutcome::Offloaded(remote) if remote.exit_code == 0 => Ok(()),
+            LabRouteOutcome::Offloaded(remote) => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab provider attempt {run_id} failed with exit code {}", remote.exit_code),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Inspect the controller-owned attempt with `homeboy agent-task status {run_id}`."
+                )]),
+            )),
+            LabRouteOutcome::RunLocal => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab did not accept controller-owned provider attempt {run_id}"),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Resolve the Lab handoff, then retry the controller-owned attempt with `homeboy agent-task retry {run_id} --run --runner {}`.",
+                    self.runner_id
+                )]),
+            )),
+            LabRouteOutcome::InFlight(_) => Err(Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab handoff for provider attempt {run_id} is still in flight"),
+                Some(run_id.to_string()),
+                Some(vec![format!(
+                    "Inspect the controller-owned attempt with `homeboy agent-task status {run_id}`."
+                )]),
+            )),
         }
     }
 }
@@ -754,6 +949,7 @@ fn run_rig_source_management_on_runner(
     let runner = runners::load(runner_id)?;
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let mut command = runner_rig_source_management_command(homeboy_path, normalized_args);
+    let rig_install_source_root = rig_install_source_sync_root(&command);
     let mut translated_remote_root = runner.workspace_root.clone().unwrap_or_default();
     let local_cwd = std::env::current_dir().ok();
     if let Some(local_cwd) = local_cwd.as_deref() {
@@ -783,7 +979,6 @@ fn run_rig_source_management_on_runner(
     // containing checkout (not just the package directory) keeps rigs that
     // declare `package_dependencies` — which resolve against the repo root — and
     // package-level `extends` templates working on the runner.
-    let rig_install_source_root = rig_install_source_sync_root(&command);
     if let Some(source_root) = rig_install_source_root.as_deref() {
         let (synced, sync_exit_code) = runners::sync_workspace(
             runner_id,
@@ -799,24 +994,7 @@ fn run_rig_source_management_on_runner(
         }
     }
 
-    // Remote-execution preflight before dispatching caller-derived argv to the
-    // runner (#5093):
-    // 1. Path-translation: reject any forwarded argument that still embeds the
-    //    controller-local working directory or rig-install source path instead of
-    //    the runner-resident workspace, so a controller-only path never reaches
-    //    the remote runtime.
-    // 2. Capability parity: validate the runner can run the forwarded `homeboy`
-    //    binary before execution starts (enforced by `runners::exec` against the
-    //    supplied `RunnerCapabilityPreflight`).
-    if let Some(local_cwd) = local_cwd.as_deref() {
-        runners::preflight_remote_argv_path_translation(
-            "Rig source management",
-            runner_id,
-            &command,
-            local_cwd,
-            &translated_remote_root,
-        )?;
-    }
+    command = strip_rig_source_management_local_wrapper_flags(&command);
     if let Some(source_root) = rig_install_source_root.as_deref() {
         runners::preflight_remote_argv_path_translation(
             "Rig source management",
@@ -825,19 +1003,15 @@ fn run_rig_source_management_on_runner(
             source_root,
             &translated_remote_root,
         )?;
+    } else if let Some(local_cwd) = local_cwd.as_deref() {
+        runners::preflight_remote_argv_path_translation(
+            "Rig source management",
+            runner_id,
+            &command,
+            local_cwd,
+            &translated_remote_root,
+        )?;
     }
-    let required_commands: Vec<String> = command
-        .first()
-        .filter(|program| !program.trim().is_empty())
-        .cloned()
-        .into_iter()
-        .collect();
-    let capability_preflight =
-        (!required_commands.is_empty()).then(|| runners::RunnerCapabilityPreflight {
-            command: "rig.source-management".to_string(),
-            required_commands,
-            ..Default::default()
-        });
 
     let (output, exit_code) = runners::exec(
         runner_id,
@@ -855,7 +1029,11 @@ fn run_rig_source_management_on_runner(
             raw_exec: false,
             source_snapshot: None,
             path_materialization_plan: None,
-            capability_preflight,
+            capability_preflight: Some(runners::RunnerCapabilityPreflight {
+                command: "rig_source_management".to_string(),
+                required_commands: vec![homeboy_path.to_string()],
+                ..Default::default()
+            }),
             required_extensions: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
@@ -952,29 +1130,36 @@ fn runner_rig_source_management_command(
     normalized_args: &[String],
 ) -> Vec<String> {
     let mut command = vec![homeboy_path.to_string()];
-    let mut iter = normalized_args.iter().skip(1).peekable();
-    while let Some(arg) = iter.next() {
-        if arg == "--runner"
-            || arg == "--output"
-            || arg == "--artifact-root"
-            || arg == "--placement"
-        {
-            iter.next();
-            continue;
-        }
-        if arg == "--allow-dirty-lab-workspace" || arg == "--detach-after-handoff" {
-            continue;
-        }
-        if arg.starts_with("--runner=")
-            || arg.starts_with("--output=")
-            || arg.starts_with("--artifact-root=")
-            || arg.starts_with("--placement=")
-        {
-            continue;
-        }
-        command.push(arg.clone());
-    }
+    command.extend(normalized_args.iter().skip(1).cloned());
     command
+}
+
+fn strip_rig_source_management_local_wrapper_flags(command: &[String]) -> Vec<String> {
+    const FLAGS: [(&str, bool); 7] = [
+        ("--runner", true),
+        ("--output", true),
+        ("--artifact-root", true),
+        ("--placement", true),
+        ("--allow-local-fallback", false),
+        ("--allow-dirty-lab-workspace", false),
+        ("--detach-after-handoff", false),
+    ];
+
+    let mut stripped = Vec::with_capacity(command.len());
+    let mut args = command.iter().peekable();
+    while let Some(arg) = args.next() {
+        if let Some((_, takes_value)) = FLAGS
+            .iter()
+            .find(|(flag, _)| arg == flag || arg.starts_with(&format!("{flag}=")))
+        {
+            if *takes_value && !arg.contains('=') {
+                args.next();
+            }
+            continue;
+        }
+        stripped.push(arg.clone());
+    }
+    stripped
 }
 
 fn is_runs_list_runner_option(args: &[String]) -> bool {
@@ -1362,6 +1547,9 @@ mod tests {
 
     #[test]
     fn non_lab_command_continues_local_dispatch() {
+        // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
+        // so hold the env lock to serialize against tests that assert on it.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let cli = Cli::parse_from(["homeboy", "status"]);
 
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
@@ -1488,6 +1676,9 @@ mod tests {
 
     #[test]
     fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
+        // Serialize against LAB_OFFLOAD_METADATA_ENV-asserting tests: this
+        // routes through route_after_parse, which mutates that global.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
             "homeboy",
             "--placement",
@@ -2125,7 +2316,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_rig_source_management_command_strips_controller_globals() {
+    fn runner_rig_source_management_remote_preflight_strips_controller_globals() {
         let normalized = vec![
             "homeboy".to_string(),
             "rig".to_string(),
@@ -2140,8 +2331,11 @@ mod tests {
             "--detach-after-handoff".to_string(),
         ];
 
+        let command = runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized);
+        let preflight = strip_rig_source_management_local_wrapper_flags(&command);
+
         assert_eq!(
-            runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized),
+            preflight,
             vec![
                 "/usr/local/bin/homeboy".to_string(),
                 "rig".to_string(),
@@ -2704,7 +2898,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_cook_supports_automatic_explicit_and_lab_placement_routing() {
+    fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
         let automatic = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -2717,8 +2911,8 @@ mod tests {
             "cargo test --locked",
         ]);
         let automatic_command = lab_offload_command(&automatic.command).unwrap().unwrap();
-        assert!(automatic_command.is_portable());
-        assert!(automatic_command.routing_policy.default_lab_offload);
+        assert!(!automatic_command.is_portable());
+        assert!(!automatic_command.routing_policy.default_lab_offload);
 
         let explicit = Cli::parse_from([
             "homeboy",
@@ -2735,7 +2929,7 @@ mod tests {
         ]);
         let explicit_command = lab_offload_command(&explicit.command).unwrap().unwrap();
         assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
-        assert!(explicit_command.is_portable());
+        assert!(!explicit_command.is_portable());
 
         let lab = Cli::parse_from([
             "homeboy",
@@ -2750,7 +2944,7 @@ mod tests {
             "--verify",
             "cargo test --locked",
         ]);
-        assert!(lab_offload_command(&lab.command)
+        assert!(!lab_offload_command(&lab.command)
             .unwrap()
             .unwrap()
             .is_portable());
@@ -2889,14 +3083,16 @@ mod tests {
             .expect_err("fanout submit-batch must not run locally under Lab placement");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("Lab placement refused local execution"));
-        assert!(err.message.contains("automatic Lab offload disabled"));
+        // submit-batch needs an explicit runner under Lab placement: it does
+        // not auto-offload, so `--placement lab` without an eligible runner is
+        // refused rather than silently running locally.
+        assert!(err.message.contains("--placement lab"));
+        assert!(err.message.contains("requires an eligible Lab runner"));
+        assert!(err.message.contains("agent-task fanout submit-batch"));
     }
 
     #[test]
-    fn agent_task_fanout_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_run_plan_coordination_is_controller_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -2911,17 +3107,25 @@ mod tests {
         ];
         let cli = Cli::parse_from(&normalized);
 
+        // Fanout coordination is controller-owned so durable batch state,
+        // worktree ownership, and recovery stay local; the coordinator itself
+        // is not Lab-portable, though the independent cooks it generates may use
+        // their own Lab placement (#8045).
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(cli
+            .command
+            .lab_runner_unsupported_reason()
+            .is_some_and(|reason| reason.contains("controller-owned")));
     }
 
     #[test]
-    fn agent_task_fanout_cook_batch_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -2944,9 +3148,8 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout cook-batch");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use super::fixtures::*;
 use serde_json::json;
 use std::fs;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
@@ -197,7 +198,18 @@ fn empty_required_non_patch_typed_artifact_fails_with_operator_pointer() {
         artifact_kind: "json",
     });
 
-    let aggregate = scheduler.run(plan_with_required_artifacts(&["agent_result"]));
+    let plan = plan_with_required_artifacts(&["agent_result"]);
+    assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
+    assert_eq!(
+        plan.clone()
+            .canonicalize()
+            .options
+            .execution_budget
+            .max_provider_executions,
+        1,
+        "the scheduler's canonical plan must retain the explicit test execution budget"
+    );
+    let aggregate = scheduler.run(plan);
 
     assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
     assert_eq!(aggregate.totals.failed, 1);

@@ -14,6 +14,13 @@ const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
+/// Whether this build can isolate a spawned command into a terminable process
+/// tree. Callers that require fail-closed child identity persistence must check
+/// this before spawning.
+pub const fn supports_process_tree_isolation() -> bool {
+    cfg!(unix)
+}
+
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new(program).args(args).output().map_err(|e| {
         Error::internal_io(
@@ -237,6 +244,30 @@ fn terminate_process_tree(root_pid: u32) -> io::Result<()> {
             "process tree cancellation is not implemented on this platform",
         ))
     }
+}
+
+/// Terminate an isolated child process tree and reap its direct child process.
+/// On platforms without process groups, `Child::kill` still provides portable
+/// termination and reaping of the spawned process.
+pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
+    #[cfg(unix)]
+    if let Err(error) = terminate_process_tree(child.id()) {
+        // Reap the direct child even if its process-group cleanup failed.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = child.kill() {
+            if error.kind() != io::ErrorKind::InvalidInput {
+                return Err(error);
+            }
+        }
+    }
+
+    child.wait()
 }
 
 #[derive(Debug)]

@@ -430,12 +430,9 @@ pub(super) fn write_trace_rig_with_variant(
 "#,
     )
     .expect("write variant overlay");
-    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
-    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
-    fs::write(
-        rig_dir.join(format!("{}.json", rig_id)),
-        format!(
-            r#"{{
+
+    let rig_spec = format!(
+        r#"{{
                     "components": {{
                         "{component_id}": {{ "path": "{}" }}
                     }},
@@ -449,8 +446,18 @@ pub(super) fn write_trace_rig_with_variant(
                         }}
                     }}
                 }}"#,
-            path.display()
-        ),
-    )
-    .expect("write rig");
+        path.display()
+    );
+
+    // The rig-source metadata above declares `package_path` as the rig source,
+    // so `rig check`'s package-lint validates the package contents. It must
+    // therefore contain a `rig.json` (the contract entrypoint) or the
+    // "specs satisfy the Homeboy rig contract" step fails with "No rig specs
+    // found". Write the spec into the package as well as the installed
+    // registry.
+    fs::write(package_path.join("rig.json"), &rig_spec).expect("write package rig.json");
+
+    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+    fs::write(rig_dir.join(format!("{}.json", rig_id)), &rig_spec).expect("write rig");
 }

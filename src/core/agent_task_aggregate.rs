@@ -267,6 +267,7 @@ impl AgentTaskOutcomeStatus {
             Self::UnableToRemediate => "unable_to_remediate",
             Self::ProviderError => "provider_error",
             Self::Timeout => "timeout",
+            Self::CandidateRecoverable => "candidate_recoverable",
             Self::Failed => "failed",
             Self::FollowUpIssue => "follow_up_issue",
             Self::Cancelled => "cancelled",
@@ -293,6 +294,7 @@ fn count_status(summary: &mut AgentTaskAggregateSummary, status: AgentTaskOutcom
         AgentTaskOutcomeStatus::UnableToRemediate => summary.unable_to_remediate += 1,
         AgentTaskOutcomeStatus::ProviderError => summary.provider_error += 1,
         AgentTaskOutcomeStatus::Timeout => summary.timed_out += 1,
+        AgentTaskOutcomeStatus::CandidateRecoverable => summary.succeeded += 1,
         AgentTaskOutcomeStatus::Failed => summary.failed += 1,
         AgentTaskOutcomeStatus::FollowUpIssue => summary.follow_up_issue += 1,
         AgentTaskOutcomeStatus::Cancelled => summary.cancelled += 1,
@@ -364,7 +366,10 @@ fn reconcile_outcome(
         .filter(|artifact| is_apply_artifact(artifact))
         .map(|artifact| artifact.id.clone())
         .collect::<Vec<_>>();
-    if matches!(outcome.status, AgentTaskOutcomeStatus::Succeeded) && !apply_artifact_ids.is_empty()
+    if matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::CandidateRecoverable
+    ) && !apply_artifact_ids.is_empty()
     {
         return (
             AgentTaskReconciliationDecision::ApplyCandidate,
@@ -384,6 +389,9 @@ fn reconcile_outcome(
             AgentTaskOutcomeStatus::Failed => "failed task needs review".to_string(),
             AgentTaskOutcomeStatus::Succeeded => empty_or_unknown_patch_reason(outcome)
                 .unwrap_or_else(|| "succeeded without apply-back artifact".to_string()),
+            AgentTaskOutcomeStatus::CandidateRecoverable => {
+                "recoverable candidate without an apply-back artifact".to_string()
+            }
             AgentTaskOutcomeStatus::ProviderError
             | AgentTaskOutcomeStatus::Timeout
             | AgentTaskOutcomeStatus::FollowUpIssue => unreachable!("handled above"),

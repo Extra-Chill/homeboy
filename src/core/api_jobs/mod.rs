@@ -12,7 +12,8 @@ pub(crate) use store::LocalChildStartDiscriminator;
 pub use store::{JobHandle, JobRunner, JobStore};
 pub use summary::active_runner_job_run_summary;
 pub use types::{
-    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonLeaseJobDiagnostics, Job,
+    ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonActiveJobRecoveryDisposition,
+    DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics, DaemonLinkedDurableRunState, Job,
     JobClaimMetadata, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
     LeaselessOrphanJobDiagnostics, RunnerJobLifecycleOwner, RunnerJobSource,
 };
@@ -25,7 +26,7 @@ mod tests {
     use serde_json::json;
 
     use super::persistence::recovered_terminal_from_result;
-    use super::store::RecoveredTerminalJob;
+    use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
     use super::*;
     use crate::core::secret_env_plan::SecretEnvPlan;
     use crate::core::source_snapshot::SourceSnapshot;
@@ -704,6 +705,197 @@ mod tests {
     }
 
     #[test]
+    fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting() {
+        for linked in [
+            LinkedDurableRunResolution::Active("run-active".to_string()),
+            LinkedDurableRunResolution::Unresolved("run-unresolved".to_string()),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let path = temp.path().join("jobs.json");
+            let store = JobStore::open_without_reconciliation(&path)
+                .expect("store")
+                .with_daemon_lease("lease-dead".to_string());
+            let selected = store.create("runner.exec");
+            store.start(selected.id).expect("start selected");
+            let linked_job = store.create("runner.exec");
+            store
+                .start_with_child_identity(linked_job.id, 4242, "dead-child".to_string())
+                .expect("record child");
+            let before = std::fs::read(&path).expect("store bytes");
+
+            let result = store
+                .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
+                    "lease-dead",
+                    &[selected.id],
+                    |_| false,
+                    |stored| {
+                        (stored.job.id == linked_job.id)
+                            .then(|| linked.clone())
+                            .unwrap_or(LinkedDurableRunResolution::None)
+                    },
+                );
+
+            match linked {
+                LinkedDurableRunResolution::Active(_) => assert_eq!(
+                    result
+                        .expect("active returns diagnostics")
+                        .protected_job_ids,
+                    vec![linked_job.id]
+                ),
+                LinkedDurableRunResolution::Unresolved(_) => assert!(result
+                    .expect_err("unresolved errors")
+                    .message
+                    .contains("cannot be safely resolved")),
+                _ => unreachable!(),
+            }
+            assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+        }
+    }
+
+    #[test]
+    fn confirmed_pidless_job_with_unselected_live_child_returns_diagnostics_without_persisting() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("lease-dead".to_string());
+        let confirmed = store.create("runner.exec");
+        store.start(confirmed.id).expect("start confirmed job");
+        let live_child = store.create("runner.exec");
+        store.start(live_child.id).expect("start live child");
+        store
+            .append_event(
+                live_child.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
+            .expect("record live child");
+        let before = std::fs::read(&path).expect("store bytes");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
+                "lease-dead",
+                &[confirmed.id],
+                |pid| pid == 4242,
+                |_| LinkedDurableRunResolution::None,
+            )
+            .expect("live child returns protected diagnostics");
+
+        assert_eq!(diagnostics.protected_job_ids, vec![live_child.id]);
+        assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+    }
+
+    #[test]
+    fn status_evidence_reports_linked_active_and_unresolved_as_blocking() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let active = store.create("runner.exec");
+        store.start(active.id).expect("start active");
+        let unresolved = store.create("runner.exec");
+        store.start(unresolved.id).expect("start unresolved");
+
+        let evidence = store.active_daemon_job_recovery_evidence_with_linked_durable_run_resolver(
+            Some("lease-dead"),
+            |_| false,
+            |stored| match stored.job.id {
+                id if id == active.id => {
+                    LinkedDurableRunResolution::Active("run-active".to_string())
+                }
+                id if id == unresolved.id => {
+                    LinkedDurableRunResolution::Unresolved("run-unresolved".to_string())
+                }
+                _ => LinkedDurableRunResolution::None,
+            },
+        );
+
+        assert!(evidence
+            .iter()
+            .all(|job| job.disposition == DaemonActiveJobRecoveryDisposition::BlockingAmbiguous));
+        let active_evidence = evidence
+            .iter()
+            .find(|job| job.job_id == active.id)
+            .expect("active evidence");
+        assert_eq!(
+            active_evidence.linked_durable_run_id.as_deref(),
+            Some("run-active")
+        );
+        assert_eq!(
+            active_evidence.linked_durable_run_state,
+            Some(DaemonLinkedDurableRunState::Active)
+        );
+        let unresolved_evidence = evidence
+            .iter()
+            .find(|job| job.job_id == unresolved.id)
+            .expect("unresolved evidence");
+        assert_eq!(
+            unresolved_evidence.linked_durable_run_id.as_deref(),
+            Some("run-unresolved")
+        );
+        assert_eq!(
+            unresolved_evidence.linked_durable_run_state,
+            Some(DaemonLinkedDurableRunState::Unresolved)
+        );
+    }
+
+    #[test]
+    fn confirmed_recovery_fails_closed_for_unresolved_linked_durable_run() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let mut request = remote_runner_request("homeboy-lab", None);
+        request.lifecycle = Some(RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some("missing-linked-run".to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        });
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("queue linked job");
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs("lease-dead", &[job.id])
+            .expect_err("unresolved linked run blocks confirmation");
+
+        assert!(error.message.contains("cannot be safely resolved"));
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+    }
+
+    #[test]
+    fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("lease-dead".to_string());
+        let selected = store.create("runner.exec");
+        store.start(selected.id).expect("start selected");
+        let before = std::fs::read(&path).expect("store bytes");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
+                "lease-dead",
+                &[],
+                |_| false,
+                |_| {
+                    LinkedDurableRunResolution::Terminal(RecoveredTerminalJob::test_result(
+                        JobStatus::Succeeded,
+                        "run-terminal",
+                        json!({ "status": "succeeded" }),
+                        Vec::new(),
+                    ))
+                },
+            )
+            .expect("linked terminal evidence is reconciled authoritatively");
+
+        assert_eq!(diagnostics.terminalized_count(), 1);
+        assert_eq!(
+            store.get(selected.id).expect("job").status,
+            JobStatus::Succeeded
+        );
+        assert_ne!(std::fs::read(&path).expect("store bytes"), before);
+    }
+
+    #[test]
     fn reused_pid_with_a_different_start_identity_is_terminalized() {
         let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
         let job = store.create("runner.exec");
@@ -809,6 +1001,58 @@ mod tests {
             .contains("authoritative terminal result or recorded child PID"));
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
         assert_eq!(store.events(job.id).expect("events").len(), event_count);
+    }
+
+    #[test]
+    fn dead_lease_reconciliation_requires_exact_confirmation_for_untracked_children() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let confirmed = store.create("runner.exec");
+        store.start(confirmed.id).expect("start confirmed job");
+        let unconfirmed = store.create("runner.exec");
+        store.start(unconfirmed.id).expect("start unconfirmed job");
+        let unrelated = Uuid::new_v4();
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id],
+            )
+            .expect_err("every unresolved no-PID job needs exact confirmation");
+        assert!(error.message.contains(&unconfirmed.id.to_string()));
+        assert_eq!(
+            store.get(confirmed.id).expect("confirmed job").status,
+            JobStatus::Running
+        );
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id, unrelated],
+            )
+            .expect_err("unknown confirmation must fail closed");
+        assert!(error.message.contains(&unrelated.to_string()));
+        assert_eq!(
+            store.get(confirmed.id).expect("confirmed job").status,
+            JobStatus::Running
+        );
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id, unconfirmed.id],
+            )
+            .expect("exact confirmations terminalize only the confirmed no-PID jobs");
+        assert_eq!(diagnostics.terminalized_count(), 2);
+        for job_id in [confirmed.id, unconfirmed.id] {
+            assert_eq!(store.get(job_id).expect("job").status, JobStatus::Failed);
+            assert!(store.events(job_id).expect("events").iter().any(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data["reason"]
+                        == json!("operator_confirmed_untracked_child_dead_after_dead_daemon_lease")
+                        && data["operator_confirmation"] == json!(true)
+                })
+            }));
+        }
     }
 
     #[test]

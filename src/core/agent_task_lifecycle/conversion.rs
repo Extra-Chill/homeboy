@@ -194,6 +194,7 @@ pub(crate) fn task_state_for_outcome_status(status: AgentTaskOutcomeStatus) -> A
         AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
             AgentTaskState::Succeeded
         }
+        AgentTaskOutcomeStatus::CandidateRecoverable => AgentTaskState::CandidateRecoverable,
         AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
         AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
         _ => AgentTaskState::Failed,
@@ -233,6 +234,7 @@ pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregate
             AgentTaskState::Blocked => totals.blocked += 1,
             AgentTaskState::Skipped => totals.skipped += 1,
             AgentTaskState::Succeeded => totals.succeeded += 1,
+            AgentTaskState::CandidateRecoverable => totals.candidate_recoverable += 1,
             AgentTaskState::Failed => totals.failed += 1,
             AgentTaskState::Cancelled => totals.cancelled += 1,
             AgentTaskState::TimedOut => totals.timed_out += 1,
@@ -481,6 +483,9 @@ pub(crate) fn run_provider_handle(
         state: Some(match outcome.status {
             crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded
             | crate::core::agent_task::AgentTaskOutcomeStatus::NoOp => AgentTaskState::Succeeded,
+            crate::core::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable => {
+                AgentTaskState::CandidateRecoverable
+            }
             crate::core::agent_task::AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
             crate::core::agent_task::AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
             _ => AgentTaskState::Failed,
@@ -493,6 +498,9 @@ pub(crate) fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTa
     match aggregate.status {
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded => {
             AgentTaskRunState::Succeeded
+        }
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable => {
+            AgentTaskRunState::CandidateRecoverable
         }
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure => {
             AgentTaskRunState::PartialFailure

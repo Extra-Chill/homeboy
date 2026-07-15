@@ -73,19 +73,27 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 
 ### Provider Execution Budgets
 
-Each dispatched plan carries one versioned `execution_budget`: total provider
-executions, same-provider retries, and provider rotations. The total cap applies
-before either category cap, so retry and rotation cannot multiply executions.
+Every agent-task plan serializes one `execution_budget` per task: total provider
+executions, same-provider retries, and cross-provider rotations. The total cap is
+always authoritative across both retry paths.
 
 ```bash
+# Exactly one provider process: no retry and no rotation.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 1
+
+# One retry on the same provider, with at most two executions total.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
+
+# Rotate once after a provider failure, with no same-provider retry.
 homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
 ```
 
-`--attempts` remains a deprecated alias for the total. It cannot be combined
-with explicit budget fields and resolves both category limits to `N - 1`.
-Status previews the resolved budget without changing durable run data.
+`--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.
+Retry and rotation ceilings remain explicit, so the alias never grants either
+category an independent budget. It cannot be combined with the canonical total
+execution flag. Plan and
+`agent-task status` output show the resolved defaults before provider execution;
+an exhausted run records which budget stopped further execution.
 
 | Subcommand | Purpose |
 |---|---|

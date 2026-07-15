@@ -58,6 +58,23 @@ impl AgentTaskExecutor {
         }
     }
 
+    /// Set the scheduler-owned temporary directory through the declared runtime
+    /// environment contract without inferring environment names from config.
+    pub fn set_runtime_tmpdir(&mut self, path: &str) {
+        if !self.config.is_object() {
+            self.config = Value::Object(Default::default());
+        }
+        let config = self.config.as_object_mut().expect("executor config object");
+        if !config.get("runtime_env").is_some_and(Value::is_object) {
+            config.insert("runtime_env".to_string(), Value::Object(Default::default()));
+        }
+        config
+            .get_mut("runtime_env")
+            .and_then(Value::as_object_mut)
+            .expect("runtime environment object")
+            .insert("TMPDIR".to_string(), Value::String(path.to_string()));
+    }
+
     pub fn runtime_selection(&self) -> AgentTaskRuntimeSelection {
         let explicit = self.runtime_selection.clone().unwrap_or_default();
         AgentTaskRuntimeSelection {
@@ -131,6 +148,28 @@ mod tests {
         assert_eq!(executor.config["workspace_root"], "/candidate");
         assert_eq!(executor.config["unrelated_root"], "/original");
     }
+
+    #[test]
+    fn sets_only_tmpdir_in_declared_runtime_environment() {
+        let mut executor = AgentTaskExecutor {
+            backend: "test".to_string(),
+            selector: None,
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: json!({
+                "runtime_env": { "KEEP": "value", "TMPDIR": "/old" },
+                "unrelated_tmpdir": "/unchanged"
+            }),
+        };
+
+        executor.set_runtime_tmpdir("/allocated");
+
+        assert_eq!(executor.config["runtime_env"]["TMPDIR"], "/allocated");
+        assert_eq!(executor.config["runtime_env"]["KEEP"], "value");
+        assert_eq!(executor.config["unrelated_tmpdir"], "/unchanged");
+    }
 }
 
 fn config_str<'a>(config: &'a Value, key: &str) -> Option<&'a str> {
@@ -169,6 +208,10 @@ pub struct AgentTaskWorkspace {
     pub task_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<String>,
+    /// Ownership and provenance for one concrete provider execution. This is
+    /// intentionally path-free so the same contract survives Lab remapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AgentTaskAttemptWorkspace>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub materialization: Value,
 }
@@ -185,9 +228,32 @@ impl Default for AgentTaskWorkspace {
             base_ref: None,
             task_url: None,
             cleanup: None,
+            attempt: None,
             materialization: Value::Null,
         }
     }
+}
+
+/// Immutable ownership information for one provider attempt workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskAttemptWorkspace {
+    pub identity: String,
+    pub base_ref: String,
+    pub base_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<AgentTaskCandidateAdoption>,
+}
+
+/// An explicit decision to continue a previously harvested candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCandidateAdoption {
+    pub source_attempt: String,
+    pub patch_path: String,
+    pub patch_fingerprint: String,
+    pub provider_backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_model: Option<String>,
+    pub decision: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
