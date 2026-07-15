@@ -813,6 +813,12 @@ fn replay_leaseless_recovery(
         receipt.phase = StateLossRecoveryPhase::Reconciled;
         write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
     }
+    if receipt.phase == StateLossRecoveryPhase::Reconciled {
+        receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
+        receipt.replacement_startup_token = Some(uuid::Uuid::new_v4().to_string());
+        write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+        return replay_leaseless_recovery(status, addr);
+    }
     if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
         if let Some(state) = status.state.as_ref().filter(|_| status.running) {
             if receipt.replacement_startup_token.as_deref() != Some(&state.startup_token) {
