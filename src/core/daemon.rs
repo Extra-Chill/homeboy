@@ -12,7 +12,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::command_contract::RunnerWorkload;
-use crate::core::api_jobs::{JobStatus, JobStore, RunnerJobLifecycleMetadata};
+use crate::core::api_jobs::{
+    DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, RunnerJobLifecycleMetadata,
+};
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
@@ -88,6 +90,9 @@ pub struct DaemonStatus {
     /// operator can distinguish another runner from an attributable owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_candidates: Vec<DaemonProcessCandidate>,
+    /// Durable evidence only; status never reconciles or mutates active jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_job_recovery_evidence: Vec<DaemonActiveJobRecoveryEvidence>,
     /// Launcher-owned evidence is best effort. A missing record explicitly does
     /// not imply an OS-level cause for a dead daemon.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -523,9 +528,20 @@ pub fn read_status() -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
     let state_identity = daemon_state_identity(&path, &paths::daemon_jobs_file()?)?;
     let validation = validate_lease_file(&path)?;
-    let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
-
     let jobs_path = paths::daemon_jobs_file()?;
+    let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
+    let active_job_recovery_evidence = job_store.active_daemon_job_recovery_evidence(
+        (validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead))
+            .then(|| {
+                validation
+                    .state
+                    .as_ref()
+                    .map(|state| state.lease_id.as_str())
+            })
+            .flatten(),
+        pid_is_running,
+    );
+    let active_jobs = active_job_recovery_evidence.len();
     Ok(DaemonStatus {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
@@ -536,6 +552,7 @@ pub fn read_status() -> Result<DaemonStatus> {
         state_path,
         state_identity,
         process_candidates: control::daemon_process_candidates(&jobs_path)?,
+        active_job_recovery_evidence,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
             .transpose()?

@@ -236,6 +236,43 @@ pub struct DaemonLeaseJobDiagnostics {
     pub protected_job_ids: Vec<Uuid>,
 }
 
+/// Read-only recovery evidence for one active daemon job.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonActiveJobRecoveryEvidence {
+    pub job_id: Uuid,
+    pub operation: String,
+    pub status: JobStatus,
+    pub daemon_lease_id: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub terminal_evidence: Option<JobStatus>,
+    pub child_pid: Option<u32>,
+    pub child_started_at: Option<String>,
+    pub linked_durable_run_id: Option<String>,
+    pub linked_durable_run_state: Option<DaemonLinkedDurableRunState>,
+    pub linked_durable_run_terminal_status: Option<JobStatus>,
+    pub disposition: DaemonActiveJobRecoveryDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonLinkedDurableRunState {
+    Terminal,
+    Active,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonActiveJobRecoveryDisposition {
+    TerminalEvidence,
+    DeadChild,
+    MissingChildIdentityRecoverable,
+    ProtectedLive,
+    BlockingAmbiguous,
+}
+
 /// An active durable job terminalized after the daemon lease disappeared.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeaselessOrphanAffectedJob {

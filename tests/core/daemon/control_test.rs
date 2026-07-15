@@ -346,6 +346,7 @@ fn leaseless_status(active_jobs: usize) -> DaemonStatus {
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "lease-missing-test-state".to_string(),
         process_candidates: Vec::new(),
+        active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
     }
 }
@@ -1172,6 +1173,7 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
+        active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
     }
 }
@@ -1203,6 +1205,7 @@ fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
         state_path: "/fake/daemon-state.json".to_string(),
         state_identity: "sha256:fake".to_string(),
         process_candidates: Vec::new(),
+        active_job_recovery_evidence: Vec::new(),
         termination_evidence: None,
     }
 }

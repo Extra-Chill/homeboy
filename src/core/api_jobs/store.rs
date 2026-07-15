@@ -19,8 +19,9 @@ use super::persistence::{read_durable_store, reconcile_stale_jobs};
 use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
 use super::types::{
-    DaemonLeaseJobDiagnostics, Job, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
-    LeaselessOrphanJobDiagnostics,
+    DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics,
+    DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus,
+    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics,
 };
 use crate::core::agent_task_scheduler::AgentTaskAggregateStatus;
 use crate::core::agent_task_service;
@@ -320,6 +321,113 @@ impl JobStore {
         diagnostics
     }
 
+    /// Read active-job recovery evidence without reconciling or persisting jobs.
+    pub fn active_daemon_job_recovery_evidence(
+        &self,
+        current_lease_id: Option<&str>,
+        pid_is_alive: impl Fn(u32) -> bool,
+    ) -> Vec<DaemonActiveJobRecoveryEvidence> {
+        self.active_daemon_job_recovery_evidence_with_linked_durable_run_resolver(
+            current_lease_id,
+            pid_is_alive,
+            resolve_linked_durable_run,
+        )
+    }
+
+    pub(super) fn active_daemon_job_recovery_evidence_with_linked_durable_run_resolver(
+        &self,
+        current_lease_id: Option<&str>,
+        pid_is_alive: impl Fn(u32) -> bool,
+        resolve_linked: impl Fn(&StoredJob) -> LinkedDurableRunResolution,
+    ) -> Vec<DaemonActiveJobRecoveryEvidence> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut evidence = inner
+            .jobs
+            .values()
+            .filter_map(|stored| {
+                let job = &stored.job;
+                if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {
+                    return None;
+                }
+                let terminal_evidence =
+                    recovered_terminal_from_result(&stored.events).map(|(status, _)| status);
+                let linked = resolve_linked(stored);
+                let (
+                    linked_durable_run_id,
+                    linked_durable_run_state,
+                    linked_durable_run_terminal_status,
+                ) = match &linked {
+                    LinkedDurableRunResolution::None => (None, None, None),
+                    LinkedDurableRunResolution::Terminal(result) => (
+                        Some(result.run_id.clone()),
+                        Some(DaemonLinkedDurableRunState::Terminal),
+                        Some(result.status),
+                    ),
+                    LinkedDurableRunResolution::Active(run_id) => (
+                        Some(run_id.clone()),
+                        Some(DaemonLinkedDurableRunState::Active),
+                        None,
+                    ),
+                    LinkedDurableRunResolution::Unresolved(run_id) => (
+                        Some(run_id.clone()),
+                        Some(DaemonLinkedDurableRunState::Unresolved),
+                        None,
+                    ),
+                };
+                let child_pid = last_progress_child_pid(&stored.events);
+                let child_started_at = last_progress_child_started_at(&stored.events);
+                let child_is_live = child_pid.is_some_and(|pid| {
+                    pid_is_alive(pid) && child_started_at.as_deref().is_none_or(|expected| {
+                        crate::core::engine::invocation::InvocationChildRecord::process_started_at(
+                            pid,
+                        )
+                        .as_deref()
+                            == Some(expected)
+                    })
+                });
+                let disposition = if matches!(
+                    linked,
+                    LinkedDurableRunResolution::Active(_)
+                        | LinkedDurableRunResolution::Unresolved(_)
+                ) {
+                    DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+                } else if terminal_evidence.is_some()
+                    || linked_durable_run_terminal_status.is_some()
+                {
+                    DaemonActiveJobRecoveryDisposition::TerminalEvidence
+                } else if child_is_live {
+                    DaemonActiveJobRecoveryDisposition::ProtectedLive
+                } else if child_pid.is_some() || child_started_at.is_some() {
+                    DaemonActiveJobRecoveryDisposition::DeadChild
+                } else if current_lease_id
+                    .is_some_and(|lease| job.daemon_lease_id.as_deref() == Some(lease))
+                {
+                    DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+                } else {
+                    DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+                };
+                Some(DaemonActiveJobRecoveryEvidence {
+                    job_id: job.id,
+                    operation: job.operation.clone(),
+                    status: job.status,
+                    daemon_lease_id: job.daemon_lease_id.clone(),
+                    created_at_ms: job.created_at_ms,
+                    updated_at_ms: job.updated_at_ms,
+                    started_at_ms: job.started_at_ms,
+                    terminal_evidence,
+                    child_pid,
+                    child_started_at,
+                    linked_durable_run_id,
+                    linked_durable_run_state,
+                    linked_durable_run_terminal_status,
+                    disposition,
+                })
+            })
+            .collect::<Vec<_>>();
+        evidence.sort_by_key(|job| (job.created_at_ms, job.job_id));
+        evidence
+    }
+
     pub fn reconcile_dead_daemon_lease_jobs(
         &self,
         expected_lease_id: &str,
@@ -337,7 +445,8 @@ impl JobStore {
         self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_running,
-            recovered_terminal_agent_task_result,
+            |_| None,
+            resolve_linked_durable_run,
             confirmed_no_pid_job_ids,
             false,
         )
@@ -352,9 +461,28 @@ impl JobStore {
         self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_running,
-            recovered_terminal_agent_task_result,
+            |_| None,
+            resolve_linked_durable_run,
             &[],
             true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
+        &self,
+        expected_lease_id: &str,
+        confirmed_no_pid_job_ids: &[Uuid],
+        pid_is_alive: impl Fn(u32) -> bool,
+        resolve_linked: impl Fn(&StoredJob) -> LinkedDurableRunResolution,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
+            expected_lease_id,
+            pid_is_alive,
+            |_| None,
+            resolve_linked,
+            confirmed_no_pid_job_ids,
+            false,
         )
     }
 
@@ -366,7 +494,8 @@ impl JobStore {
         self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_alive,
-            recovered_terminal_agent_task_result,
+            |_| None,
+            resolve_linked_durable_run,
             &[],
             false,
         )
@@ -382,6 +511,7 @@ impl JobStore {
             expected_lease_id,
             pid_is_alive,
             terminal_child_result,
+            resolve_linked_durable_run,
             &[],
             false,
         )
@@ -392,6 +522,7 @@ impl JobStore {
         expected_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+        resolve_linked: impl Fn(&StoredJob) -> LinkedDurableRunResolution,
         confirmed_no_pid_job_ids: &[Uuid],
         allow_missing_child_identity: bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
@@ -428,36 +559,58 @@ impl JobStore {
         let mut ambiguous_job_ids = Vec::new();
         for job_id in &diagnostics.matching_job_ids {
             let stored = inner.jobs.get(job_id).expect("diagnosed job exists");
-            let disposition =
-                if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
-                    DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code)
-                } else if let Some(pid) = last_progress_child_pid(&stored.events) {
-                    if pid_is_alive(pid)
-                    && last_progress_child_started_at(&stored.events).is_none_or(|expected| {
-                        crate::core::engine::invocation::InvocationChildRecord::process_started_at(
-                            pid,
-                        )
-                        .as_deref()
-                            == Some(expected.as_str())
-                    })
-                {
+            let disposition = match resolve_linked(stored) {
+                LinkedDurableRunResolution::Terminal(recovered) => {
+                    DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
+                }
+                LinkedDurableRunResolution::Active(_) => {
                     diagnostics.protected_job_ids.push(*job_id);
                     DeadLeaseJobDisposition::ProtectedLive
-                } else if let Some(recovered) = terminal_child_result(stored) {
-                    DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
-                } else {
-                    DeadLeaseJobDisposition::TerminalizeDead
                 }
-                } else if allow_missing_child_identity {
-                    DeadLeaseJobDisposition::TerminalizeDead
-                } else {
-                    ambiguous_job_ids.push(*job_id);
-                    if confirmed_no_pid_job_ids.contains(job_id) {
-                        DeadLeaseJobDisposition::TerminalizeOperatorConfirmedNoPid
+                LinkedDurableRunResolution::Unresolved(run_id) => {
+                    return Err(Error::validation_invalid_argument(
+                        "expected-lease-id",
+                        format!("refusing dead-daemon recovery because linked durable run `{run_id}` for job `{job_id}` cannot be safely resolved"),
+                        Some(expected_lease_id.to_string()),
+                        None,
+                    ));
+                }
+                LinkedDurableRunResolution::None => {
+                    if let Some((status, exit_code)) =
+                        recovered_terminal_from_result(&stored.events)
+                    {
+                        DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code)
+                    } else if let Some(recovered) = terminal_child_result(stored) {
+                        DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
+                    } else if let Some(pid) = last_progress_child_pid(&stored.events) {
+                        let child_is_live = pid_is_alive(pid)
+                            && last_progress_child_started_at(&stored.events).is_none_or(
+                                |expected| {
+                                    crate::core::engine::invocation::InvocationChildRecord::process_started_at(pid)
+                                        .as_deref()
+                                        == Some(expected.as_str())
+                                },
+                            );
+                        if child_is_live {
+                            diagnostics.protected_job_ids.push(*job_id);
+                            DeadLeaseJobDisposition::ProtectedLive
+                        } else {
+                            DeadLeaseJobDisposition::TerminalizeDead
+                        }
                     } else {
-                        continue;
+                        if allow_missing_child_identity {
+                            DeadLeaseJobDisposition::TerminalizeDead
+                        } else {
+                            ambiguous_job_ids.push(*job_id);
+                            if confirmed_no_pid_job_ids.contains(job_id) {
+                                DeadLeaseJobDisposition::TerminalizeOperatorConfirmedNoPid
+                            } else {
+                                continue;
+                            }
+                        }
                     }
-                };
+                }
+            };
             dispositions.push((*job_id, disposition));
         }
         let ambiguous_job_ids = ambiguous_job_ids
@@ -492,6 +645,10 @@ impl JobStore {
                 Some(expected_lease_id.to_string()),
                 None,
             ));
+        }
+        if !diagnostics.protected_job_ids.is_empty() {
+            diagnostics.protected_job_ids.sort();
+            return Ok(diagnostics);
         }
 
         let now = timestamp_ms();
@@ -1091,6 +1248,7 @@ enum DeadLeaseJobDisposition {
     TerminalizeOperatorConfirmedNoPid,
 }
 
+#[derive(Clone)]
 pub(super) struct RecoveredTerminalJob {
     status: JobStatus,
     terminal_result: Value,
@@ -1115,25 +1273,23 @@ impl RecoveredTerminalJob {
     }
 }
 
-/// A remote runner workload records its agent-task run ID in a typed execution
-/// envelope. That durable run is authoritative after the runner child exits.
-fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredTerminalJob> {
-    let run_id = stored
-        .remote_runner
-        .as_ref()?
-        .request
-        .runner_workload
-        .as_ref()?
-        .agent_task
-        .as_ref()?
-        .run_id
-        .trim()
-        .to_string();
-    if run_id.is_empty() {
-        return None;
-    }
+#[derive(Clone)]
+pub(super) enum LinkedDurableRunResolution {
+    None,
+    Terminal(RecoveredTerminalJob),
+    Active(String),
+    Unresolved(String),
+}
 
-    let result = agent_task_service::terminal_run_result(&run_id).ok()??;
+fn resolve_linked_durable_run(stored: &StoredJob) -> LinkedDurableRunResolution {
+    let Some(run_id) = linked_agent_task_run_id(stored) else {
+        return LinkedDurableRunResolution::None;
+    };
+    let result = match agent_task_service::terminal_run_result(&run_id) {
+        Ok(Some(result)) => result,
+        Ok(None) => return LinkedDurableRunResolution::Active(run_id),
+        Err(_) => return LinkedDurableRunResolution::Unresolved(run_id),
+    };
     let status = match result.value.status {
         AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
         AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
@@ -1161,7 +1317,7 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
             })),
         })
         .collect();
-    Some(RecoveredTerminalJob {
+    LinkedDurableRunResolution::Terminal(RecoveredTerminalJob {
         status,
         terminal_result: serde_json::json!({
             "kind": "agent_task_aggregate",
@@ -1172,6 +1328,19 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
         run_id,
         artifacts,
     })
+}
+
+fn linked_agent_task_run_id(stored: &StoredJob) -> Option<String> {
+    let run_id = stored
+        .remote_runner
+        .as_ref()?
+        .request
+        .run_ref_metadata()?
+        .get("agent_task_run_id")?
+        .as_str()?
+        .trim()
+        .to_string();
+    (!run_id.is_empty()).then_some(run_id)
 }
 
 /// The reverse runner records the executing child in periodic progress
