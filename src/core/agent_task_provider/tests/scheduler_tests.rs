@@ -469,7 +469,9 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
             &fs::read_to_string(
                 crate::core::paths::homeboy_data()
                     .expect("homeboy data")
-                    .join("controller-scratch/resources.json"),
+                    .join("controller-scratch/test-indexes")
+                    .join("run-scratch-retry")
+                    .join("resources.json"),
             )
             .expect("scratch index"),
         )

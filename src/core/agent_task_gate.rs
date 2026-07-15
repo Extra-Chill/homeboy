@@ -194,9 +194,33 @@ pub(crate) fn run_gate_command_with_policy(
     visibility: AgentTaskGateVisibility,
     reveal_policy: AgentTaskGateRevealPolicy,
 ) -> Result<AgentTaskGateReport> {
+    run_gate_command_with_policy_and_runtime_tmpdir(
+        cwd,
+        index,
+        command,
+        visibility,
+        reveal_policy,
+        None,
+    )
+}
+
+pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir(
+    cwd: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    runtime_tmpdir: Option<&Path>,
+) -> Result<AgentTaskGateReport> {
     let command_vec = vec!["sh".to_string(), "-lc".to_string(), command.to_string()];
     let mut process = Command::new(&command_vec[0]);
     process.args(&command_vec[1..]).current_dir(cwd);
+    if let Some(runtime_tmpdir) = runtime_tmpdir {
+        process
+            .env("TMPDIR", runtime_tmpdir)
+            .env("TEMP", runtime_tmpdir)
+            .env("TMP", runtime_tmpdir);
+    }
     let environment = selected_gate_environment(command);
     for variable in &environment.sanitized {
         process.env_remove(&variable.name);
@@ -438,6 +462,25 @@ mod tests {
         assert_eq!(report.exit_code, 0);
         assert_eq!(report.stdout, "ok");
         assert!(report.failure_evidence.is_none());
+    }
+
+    #[test]
+    fn gate_command_uses_the_declared_runtime_scratch_root() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let scratch = tempfile::tempdir().expect("scratch");
+
+        let report = run_gate_command_with_policy_and_runtime_tmpdir(
+            worktree.path(),
+            8,
+            "printf '%s:%s:%s' \"$TMPDIR\" \"$TEMP\" \"$TMP\"",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(scratch.path()),
+        )
+        .expect("gate report");
+
+        let expected = scratch.path().display().to_string();
+        assert_eq!(report.stdout, format!("{expected}:{expected}:{expected}"));
     }
 
     #[test]

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::core::agent_task_gate::{
-    run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateVisibility,
+    run_gate_command, run_gate_command_with_policy,
+    run_gate_command_with_policy_and_runtime_tmpdir, AgentTaskGateReport,
+    AgentTaskGateRevealPolicy, AgentTaskGateVisibility,
 };
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::stream_capture::StreamCaptureMetadata;
@@ -227,6 +228,18 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
         visibility: AgentTaskGateVisibility,
         reveal_policy: AgentTaskGateRevealPolicy,
     ) -> Result<AgentTaskGateReport>;
+
+    fn verify_with_runtime_tmpdir(
+        &mut self,
+        cwd: &Path,
+        index: usize,
+        command: &str,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+        _runtime_tmpdir: &Path,
+    ) -> Result<AgentTaskGateReport> {
+        self.verify(cwd, index, command, visibility, reveal_policy)
+    }
 }
 
 pub(crate) struct ExternalPromotionWorkspaceProvider {
@@ -401,6 +414,25 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         }
 
         run_gate_command_with_policy(cwd, index, command, visibility, reveal_policy)
+    }
+
+    fn verify_with_runtime_tmpdir(
+        &mut self,
+        cwd: &Path,
+        index: usize,
+        command: &str,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+        runtime_tmpdir: &Path,
+    ) -> Result<AgentTaskGateReport> {
+        run_gate_command_with_policy_and_runtime_tmpdir(
+            cwd,
+            index,
+            command,
+            visibility,
+            reveal_policy,
+            Some(runtime_tmpdir),
+        )
     }
 }
 

@@ -374,7 +374,9 @@ fn cleanup_unlocked(
 ) -> Result<ControllerScratchCleanupOutput> {
     let mut index = read_index_unlocked()?;
     let mut candidates = Vec::new();
-    let mut skipped = legacy_unknown_paths(&std::env::temp_dir())?;
+    // Only durably registered resources are cleanup candidates. In particular,
+    // do not infer ownership by scanning a shared system temporary directory.
+    let mut skipped = Vec::new();
     let mut applied_count = 0;
     let mut reclaimed_bytes = 0;
     let now = chrono::Utc::now();
@@ -611,38 +613,6 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     )
     .map(|count| count.trim() != "0")
     .unwrap_or(true)
-}
-
-fn legacy_unknown_paths(root: &Path) -> Result<Vec<ControllerScratchSkipped>> {
-    let index = read_index_unlocked()?;
-    let known: std::collections::HashSet<_> = index
-        .resources
-        .iter()
-        .map(|resource| resource.path.as_str())
-        .collect();
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut unknown = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if path.is_dir()
-            && (name.starts_with("homeboy-") || name.starts_with("opencode-"))
-            && !known.contains(path.to_string_lossy().as_ref())
-        {
-            unknown.push(ControllerScratchSkipped {
-                path: path.display().to_string(),
-                run_id: None,
-                owner_pid: None,
-                lifecycle_state: None,
-                reason: "legacy scratch path has no Homeboy ownership metadata; report-only"
-                    .to_string(),
-            });
-        }
-    }
-    Ok(unknown)
 }
 
 fn path_size(path: &Path) -> Result<u64> {
@@ -1183,22 +1153,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_legacy_path_is_report_only() {
+    fn cleanup_ignores_unregistered_system_temp_paths() {
         crate::test_support::with_isolated_home(|_| {
-            let root = tempfile::tempdir().expect("root");
-            let path = root.path().join("homeboy-legacy");
-            fs::create_dir(&path).expect("legacy");
+            let path =
+                std::env::temp_dir().join(format!("homeboy-unregistered-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&path).expect("unregistered scratch");
 
-            let skipped = legacy_unknown_paths(root.path()).expect("inventory");
-            assert_eq!(skipped.len(), 1);
-            assert_eq!(skipped[0].path, path.display().to_string());
-            assert_eq!(skipped[0].run_id, None);
-            assert_eq!(skipped[0].owner_pid, None);
-            assert_eq!(
-                skipped[0].reason,
-                "legacy scratch path has no Homeboy ownership metadata; report-only"
-            );
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+            })
+            .expect("cleanup inventory");
+
+            assert!(output.candidates.is_empty());
+            assert!(output.skipped.is_empty());
             assert!(path.exists());
+            fs::remove_dir(&path).expect("remove unregistered scratch");
         });
     }
 
