@@ -657,8 +657,6 @@ impl AgentTaskScheduleSupport {
                 executor.cancel(&task.task_id);
                 task.timeout_cancel_requested = true;
             }
-            // Keep the task and its Arc-owned checkout until TaskResult arrives.
-            // This is the join acknowledgement boundary for race-safe harvesting.
             index += 1;
         }
     }
