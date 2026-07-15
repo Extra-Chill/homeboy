@@ -15,10 +15,10 @@ use crate::core::output::MergeOutput;
 
 use super::connection::active_jobs_before_daemon_replacement;
 use super::{
-    connect_with_orphan_adoption, disconnect, exec, load, materialize_runner_extension_with_env,
-    merge, normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
-    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    connect_with_orphan_adoption, disconnect_with_force, exec, load,
+    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
+    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
@@ -401,7 +401,7 @@ pub fn refresh_homeboy_binary(
             active_jobs.iter().map(|job| job.job_id.as_str()),
             options.force,
         )?;
-        let _ = disconnect(&plan.runner_id);
+        disconnect_with_force(&plan.runner_id, options.force)?;
         let (_report, connect_exit_code) = connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),

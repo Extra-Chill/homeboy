@@ -89,7 +89,11 @@ enum DaemonCommand {
         startup_token: String,
     },
     /// Stop the background daemon recorded in the state file
-    Stop,
+    Stop {
+        /// Explicitly interrupt active durable daemon jobs
+        #[arg(long)]
+        force: bool,
+    },
     /// Show daemon state and selected local address
     Status,
     /// Render deployable reverse-runner broker service configuration
@@ -213,7 +217,7 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
                 0,
             ))
         }
-        DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
+        DaemonCommand::Stop { force } => Ok((DaemonOutput::Stop(daemon::stop_with_force(force)?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
         DaemonCommand::BrokerConfig {
             listen_addr,
