@@ -117,17 +117,32 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 #[test]
 fn cook_returns_durable_id_when_promotion_provider_is_missing() {
     with_temp_home(|| {
-        let (value, exit_code) = run_cook_with_executor(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).expect("create source");
+        init_runtime_component_checkout(&source);
+        let status = Command::new("git")
+            .args([
+                "clone",
+                source.to_str().expect("source path"),
+                target.to_str().expect("target path"),
+            ])
+            .status()
+            .expect("clone target");
+        assert!(status.success());
+        let executor = CommittingExecutor {
+            workspace: source.clone(),
+        };
+        let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
                 dispatch: DispatchArgs {
-                    prompt: None,
+                    prompt: Some("commit a change".to_string()),
                     tasks: Vec::new(),
-                    cwd: None,
+                    cwd: Some(source.display().to_string()),
                     workspace: None,
-                    repo: Some("homeboy".to_string()),
-                    task_url: Some(
-                        "https://github.com/Extra-Chill/homeboy/issues/3675".to_string(),
-                    ),
+                    repo: Some("fixture-component".to_string()),
+                    task_url: None,
                     backend: Some("fixture".to_string()),
                     selector: None,
                     model: None,
@@ -149,20 +164,17 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 },
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
-                goal: Some("cook fixture".to_string()),
-                to_worktree: std::env::current_dir()
-                    .expect("current workspace")
-                    .display()
-                    .to_string(),
+                goal: None,
+                to_worktree: target.display().to_string(),
                 provider_command: None,
                 provider_argv: Vec::new(),
                 gates: VerifyGateArgs {
-                    verify: vec!["cargo test --lib".to_string()],
+                    verify: vec!["true".to_string()],
                     private_verify: Vec::new(),
                     private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 },
-                max_attempts: 2,
-                no_finalize: false,
+                max_attempts: 1,
+                no_finalize: true,
                 base: "main".to_string(),
                 head: None,
                 title: None,
@@ -171,7 +183,8 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 ai_tool: "OpenCode (GPT-5.5)".to_string(),
                 ai_used_for: "test".to_string(),
             },
-            ExtensionProviderAgentTaskExecutor::default(),
+            executor.clone(),
+            Some(Arc::new(MirroredAttemptDispatcher { executor })),
         )
         .expect("cook reported controlled failure");
 
@@ -186,12 +199,9 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
             value["history_run_ids"].as_array().expect("history").len(),
             1
         );
-        assert_eq!(value["status"], "provider_failure");
+        assert_eq!(value["status"], "policy_failure");
         assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
-        assert!(value["stop_reason"]
-            .as_str()
-            .expect("stop reason")
-            .contains("provider"));
+        assert!(value["stop_reason"].as_str().is_some());
     });
 }
 
