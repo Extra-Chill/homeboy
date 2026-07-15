@@ -255,6 +255,8 @@ pub trait AgentTaskPrFinalizationBackend {
     }
     fn current_branch(&mut self, path: &str) -> Result<String>;
     fn changed_files(&mut self, path: &str) -> Result<Vec<String>>;
+    fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>>;
+    fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool>;
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;
     fn find_open_pr(
@@ -437,6 +439,12 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     };
     changed_files.sort();
     changed_files.dedup();
+    let has_uncommitted_changes = !changed_files.is_empty();
+    if changed_files.is_empty() && options.manual_finalization {
+        changed_files = backend.changed_files_since(&options.path, &options.base)?;
+        changed_files.sort();
+        changed_files.dedup();
+    }
     let intent = build_pr_publication_intent(&options, &head, &changed_files, proof.clone());
     validate_publication_intent(&intent)?;
 
@@ -457,8 +465,12 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     if !options.manual_finalization {
         backend.validate_candidate(&options)?;
     }
-    backend.commit_all(&options.path, &options.commit_message)?;
-    backend.push_branch(&options.path, &head)?;
+    if has_uncommitted_changes {
+        backend.commit_all(&options.path, &options.commit_message)?;
+        backend.push_branch(&options.path, &head)?;
+    } else if !backend.branch_is_published(&options.path, &head)? {
+        backend.push_branch(&options.path, &head)?;
+    }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
     let (action, pr) = match existing {
@@ -853,6 +865,8 @@ mod tests {
     struct MockBackend {
         branch: String,
         changed_files: Vec<String>,
+        changed_files_since: Vec<String>,
+        branch_published: bool,
         existing_pr: Option<AgentTaskPrRef>,
         create_error: bool,
         hydrate_error: bool,
@@ -864,6 +878,11 @@ mod tests {
         pushed: bool,
         created: bool,
         create_calls: u8,
+        changed_files_calls: u8,
+        changed_files_since_calls: u8,
+        branch_is_published_calls: u8,
+        commit_calls: u8,
+        push_calls: u8,
         updated: bool,
         last_body: String,
     }
@@ -931,16 +950,29 @@ mod tests {
         }
 
         fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
+            self.changed_files_calls += 1;
             Ok(self.changed_files.clone())
+        }
+
+        fn changed_files_since(&mut self, _path: &str, _base: &str) -> Result<Vec<String>> {
+            self.changed_files_since_calls += 1;
+            Ok(self.changed_files_since.clone())
+        }
+
+        fn branch_is_published(&mut self, _path: &str, _head: &str) -> Result<bool> {
+            self.branch_is_published_calls += 1;
+            Ok(self.branch_published)
         }
 
         fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
             self.committed = true;
+            self.commit_calls += 1;
             Ok(())
         }
 
         fn push_branch(&mut self, _path: &str, _head: &str) -> Result<()> {
             self.pushed = true;
+            self.push_calls += 1;
             Ok(())
         }
 
@@ -1004,6 +1036,11 @@ mod tests {
         assert!(backend.committed);
         assert!(backend.pushed);
         assert!(backend.created);
+        assert_eq!(backend.changed_files_calls, 1);
+        assert_eq!(backend.changed_files_since_calls, 0);
+        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.commit_calls, 1);
+        assert_eq!(backend.push_calls, 1);
         assert!(backend.last_body.contains("## AI assistance"));
         assert!(backend.last_body.contains("## Summary"));
         assert!(backend.last_body.contains("## How to test"));
@@ -1203,6 +1240,32 @@ mod tests {
         assert!(!backend.committed);
         assert!(!backend.pushed);
         assert!(!backend.created);
+        assert_eq!(backend.changed_files_calls, 1);
+        assert_eq!(backend.changed_files_since_calls, 1);
+        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.commit_calls, 0);
+        assert_eq!(backend.push_calls, 0);
+    }
+
+    #[test]
+    fn manual_finalization_uses_committed_diff_without_recommitting_or_republishing() {
+        let mut backend = MockBackend {
+            changed_files_since: vec!["src/lib.rs".to_string()],
+            branch_published: true,
+            ..Default::default()
+        };
+
+        let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+        assert_eq!(report.status, "review_ready");
+        assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+        assert!(backend.created);
+        assert_eq!(backend.changed_files_calls, 1);
+        assert_eq!(backend.changed_files_since_calls, 1);
+        assert_eq!(backend.branch_is_published_calls, 1);
+        assert_eq!(backend.commit_calls, 0);
+        assert_eq!(backend.push_calls, 0);
+        assert_eq!(backend.create_calls, 1);
     }
 
     #[test]
