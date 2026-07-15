@@ -6,11 +6,12 @@ use crate::core::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPr
 use crate::core::error::{Error, Result};
 use crate::core::git::{
     commit_at, get_head_commit, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at,
-    remote_branch_commit, CommitOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState,
-    PushOptions,
+    remote_branch_commit, resolve_default_remote, run_git, CommitOptions, PrCreateOptions,
+    PrEditOptions, PrFindOptions, PrState, PushOptions,
 };
 use crate::core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
+use std::path::Path;
 
 pub struct RealAgentTaskPrFinalizationBackend;
 
@@ -67,21 +68,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 
     fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>> {
-        let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", &format!("{}...HEAD", base)])
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
-        if !output.status.success() {
-            return Err(Error::git_command_failed(format!(
-                "git diff from base failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect())
+        changed_files_since_remote_branch(path, base)
     }
 
     fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool> {
@@ -189,6 +176,30 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 }
 
+fn changed_files_since_remote_branch(path: &str, base: &str) -> Result<Vec<String>> {
+    let root = Path::new(path);
+    run_git(
+        root,
+        &["check-ref-format", "--branch", base],
+        "validate PR base branch",
+    )?;
+    let remote = resolve_default_remote(root);
+    let base_ref = format!("refs/heads/{base}");
+    run_git(
+        root,
+        &["fetch", "--no-tags", &remote, &base_ref],
+        "fetch PR base branch",
+    )?;
+    Ok(run_git(
+        root,
+        &["diff", "--name-only", "FETCH_HEAD...HEAD"],
+        "discover changes from PR base branch",
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect())
+}
+
 pub(super) fn validate_real_candidate_fingerprint(
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
@@ -263,4 +274,105 @@ fn deserialize_persisted_value<T: DeserializeOwned>(
         .ok_or_else(|| Error::validation_invalid_argument("run_id", missing_message, None, None))?;
     serde_json::from_value(value)
         .map_err(|_| Error::validation_invalid_argument("run_id", invalid_message, None, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("runs git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("runs git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git output is UTF-8")
+    }
+
+    #[test]
+    fn changed_files_since_remote_branch_ignores_a_stale_local_base() {
+        let root = tempdir().expect("temporary directory");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let checkout = root.path().join("checkout");
+        git(
+            root.path(),
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        std::fs::create_dir(&source).expect("source directory");
+        git(&source, &["init", "--initial-branch=main"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test User"]);
+        std::fs::write(source.join("base.txt"), "base\n").expect("base file");
+        git(&source, &["add", "base.txt"]);
+        git(&source, &["commit", "-m", "base"]);
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        git(&source, &["push", "-u", "origin", "main"]);
+        git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        git(
+            root.path(),
+            &[
+                "clone",
+                remote.to_str().expect("remote path"),
+                checkout.to_str().expect("checkout path"),
+            ],
+        );
+        git(&checkout, &["remote", "rename", "origin", "upstream"]);
+        git(&checkout, &["config", "user.email", "test@example.com"]);
+        git(&checkout, &["config", "user.name", "Test User"]);
+
+        std::fs::write(source.join("upstream.txt"), "upstream\n").expect("upstream file");
+        git(&source, &["add", "upstream.txt"]);
+        git(&source, &["commit", "-m", "upstream change"]);
+        git(&source, &["push", "origin", "main"]);
+
+        git(&checkout, &["fetch", "upstream", "main"]);
+        git(&checkout, &["switch", "-c", "fix/manual", "FETCH_HEAD"]);
+        std::fs::write(checkout.join("candidate.txt"), "candidate\n").expect("candidate file");
+        git(&checkout, &["add", "candidate.txt"]);
+        git(&checkout, &["commit", "-m", "candidate change"]);
+
+        assert_eq!(
+            git_output(&checkout, &["diff", "--name-only", "main...HEAD"])
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["candidate.txt", "upstream.txt"]
+        );
+        assert_eq!(
+            changed_files_since_remote_branch(checkout.to_str().expect("checkout path"), "main")
+                .expect("discovers remote-base changes"),
+            vec!["candidate.txt"]
+        );
+    }
 }
