@@ -1858,15 +1858,21 @@ mod tests {
     }
 
     #[test]
-    fn active_runner_jobs_include_daemon_local_jobs_counted_by_freshness() {
+    fn active_runner_jobs_include_marked_daemon_execution_but_not_unrelated_jobs() {
         let store = JobStore::default();
-        let job = store.create("runner.exec");
+        let runner_job = store.create_with_source_snapshot_and_metadata(
+            "runner.exec",
+            None,
+            Some(json!({ "runner_daemon_execution": true })),
+        );
+        let unrelated_job = store.create("runner.exec");
 
         let active = store.active_runner_jobs();
 
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].job_id, job.id.to_string());
+        assert_eq!(active[0].job_id, runner_job.id.to_string());
         assert_eq!(active[0].source, "daemon");
+        assert_ne!(active[0].job_id, unrelated_job.id.to_string());
     }
 
     #[test]

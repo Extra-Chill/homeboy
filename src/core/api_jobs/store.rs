@@ -981,18 +981,32 @@ impl JobStore {
             .jobs
             .values()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
-            .map(|stored| {
-                stored
-                    .remote_runner
-                    .as_ref()
-                    .map(|remote| {
-                        super::summary::active_runner_job_summary(&stored.job, &remote.request, now)
-                    })
-                    .unwrap_or_else(|| super::summary::active_daemon_job_summary(&stored.job, now))
+            .filter_map(|stored| {
+                if let Some(remote) = stored.remote_runner.as_ref() {
+                    return Some(super::summary::active_runner_job_summary(
+                        &stored.job,
+                        &remote.request,
+                        now,
+                    ));
+                }
+                Self::is_runner_daemon_execution(stored)
+                    .then(|| super::summary::active_daemon_job_summary(&stored.job, now))
             })
             .collect();
         jobs.sort_by_key(|job| (job.started_at_ms, job.job_id.clone()));
         jobs
+    }
+
+    fn is_runner_daemon_execution(stored: &StoredJob) -> bool {
+        stored.job.operation == "runner.exec"
+            && stored.events.iter().any(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("runner_daemon_execution"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
     }
 
     pub(crate) fn stale_runner_jobs(&self) -> Vec<super::types::ActiveRunnerJobSummary> {

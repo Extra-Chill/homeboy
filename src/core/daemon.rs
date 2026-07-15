@@ -1761,11 +1761,8 @@ fn exec_request_run_ref_metadata(
         })
         .or_else(|| durable_run_id.clone());
 
-    if durable_run_id.is_none() && agent_task_run_id.is_none() {
-        return None;
-    }
-
     Some(json!({
+        "runner_daemon_execution": true,
         "durable_run_id": durable_run_id,
         "agent_task_run_id": agent_task_run_id,
     }))
@@ -1829,6 +1826,7 @@ mod tests {
 
         assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+        assert_eq!(metadata["runner_daemon_execution"], true);
     }
 
     #[test]
