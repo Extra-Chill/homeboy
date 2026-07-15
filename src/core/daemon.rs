@@ -37,8 +37,8 @@ pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
-    reconcile_leaseless_orphans, recover_missing_lease_state, start_background, supervise,
-    ArtifactFetchOutcome,
+    reconcile_leaseless_orphans, recover_missing_child_identity, recover_missing_lease_state,
+    start_background, supervise, ArtifactFetchOutcome,
 };
 use patch_capture::{capture_baseline, capture_patch_report};
 
@@ -1449,12 +1449,17 @@ fn enqueue_exec_job(
         request.metadata.as_ref(),
     );
     let runner = job_store
-        .run_background_deferred_start_with_source_snapshot_metadata_and_path_materialization_plan(
+        .run_local_child_background_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot.clone(),
             run_ref_metadata,
             path_materialization_plan.clone(),
             move |job| {
+                let mut plan = plan;
+                plan.env.insert(
+                    "HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(),
+                    job.local_child_reservation_id()?,
+                );
                 let baseline = if request.capture_patch {
                     Some(capture_baseline(&plan.cwd)?)
                 } else {
@@ -1466,16 +1471,14 @@ fn enqueue_exec_job(
                 });
                 let started_job = job.clone();
                 let child_started = Arc::new(move |pid| {
-                    let started_at =
-                        crate::core::engine::invocation::InvocationChildRecord::process_started_at(
-                            pid,
-                        )
-                        .ok_or_else(|| {
-                            Error::internal_unexpected(
-                                "capture runner child process start identity",
-                            )
-                        })?;
-                    started_job.start_with_child_identity(pid, started_at)?;
+                    let process_group_id = crate::core::process::isolated_process_group_id(pid)
+                        .map_err(Error::internal_unexpected)?;
+                    let discriminator = match crate::core::process::linux_process_starttime_ticks(pid) {
+                        Ok(Some(ticks)) => crate::core::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
+                        Ok(None) => return Err(Error::internal_unexpected("runner child exited before Linux start identity was captured")),
+                        Err(evidence) => crate::core::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
+                    };
+                    started_job.start_with_reserved_child_identity(pid, process_group_id, discriminator)?;
                     Ok(())
                 });
                 let process_output = execute_runner_process_until_cancelled_with_progress(

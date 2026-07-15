@@ -1,6 +1,7 @@
 use clap::{Args, CommandFactory, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 use homeboy::core::daemon::{
     self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
@@ -37,11 +38,23 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
-        /// Explicitly terminalize legacy active jobs missing a persisted child identity
-        #[arg(long)]
-        recover_missing_child_identity: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+    },
+    /// Recover one legacy job with exact PID and Linux start-tick evidence.
+    RecoverMissingChildIdentity {
+        #[arg(long)]
+        lease_id: String,
+        #[arg(long)]
+        recorded_daemon_pid: u32,
+        #[arg(long)]
+        recorded_daemon_endpoint: String,
+        #[arg(long)]
+        job_id: Uuid,
+        #[arg(long)]
+        child_pid: u32,
+        #[arg(long)]
+        child_starttime_ticks: u64,
     },
     /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
     ReconcileLeaselessOrphans {
@@ -130,6 +143,7 @@ pub enum DaemonOutput {
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
     AdoptOrphan(DaemonOrphanAdoptionResult),
+    RecoverMissingChildIdentity(homeboy::core::api_jobs::Job),
     ReconcileLeaselessOrphans(DaemonLeaselessRecoveryResult),
     RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
     Serve(DaemonStartResult),
@@ -161,8 +175,12 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
             0,
         )),
-        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, recover_missing_child_identity, addr } => Ok((
-            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, recover_missing_child_identity, &addr)?),
+        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
+            0,
+        )),
+        DaemonCommand::RecoverMissingChildIdentity { lease_id, recorded_daemon_pid, recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks } => Ok((
+            DaemonOutput::RecoverMissingChildIdentity(daemon::recover_missing_child_identity(&lease_id, recorded_daemon_pid, &recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks)?),
             0,
         )),
         DaemonCommand::ReconcileLeaselessOrphans { confirm_no_daemon_owner, addr } => Ok((
@@ -279,6 +297,21 @@ mod tests {
 
     use super::*;
     use crate::cli_surface::{Cli, Commands};
+
+    #[test]
+    fn legacy_child_recovery_parser_requires_exact_evidence() {
+        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover-missing-child-identity"])
+            .is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "nope",
+        ]).is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "not-a-uuid", "--child-pid", "43", "--child-starttime-ticks", "1",
+        ]).is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "00000000-0000-0000-0000-000000000001", "--child-pid", "43", "--child-starttime-ticks", "1",
+        ]).is_ok());
+    }
 
     #[test]
     fn leaseless_recovery_subcommand_reaches_address_validation() {

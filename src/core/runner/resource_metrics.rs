@@ -140,9 +140,14 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
             // The caller cannot safely recover a child it never durably recorded.
-            // Preserve the actionable persistence error after reaping this child.
-            let _ = child.kill();
-            let _ = child.wait();
+            // Preserve the actionable persistence error only after terminating
+            // the isolated process tree, including descendants it may have spawned.
+            cleanup_unpersisted_child(
+                pid,
+                &mut child,
+                crate::core::process::terminate_isolated_process_group,
+                crate::core::process::terminate_process_tree_best_effort,
+            );
             return Err(error);
         }
     }
@@ -177,6 +182,46 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         capture,
         metrics,
     })
+}
+
+fn cleanup_unpersisted_child(
+    pid: u32,
+    child: &mut std::process::Child,
+    terminate_group: impl FnOnce(u32) -> Result<()>,
+    terminate_tree: impl FnOnce(u32) -> Result<()>,
+) {
+    cleanup_after_identity_failure(
+        pid,
+        terminate_group,
+        terminate_tree,
+        child,
+        |child| {
+            child
+                .kill()
+                .map_err(|error| Error::internal_io(error.to_string(), None))
+        },
+        |child| {
+            child
+                .wait()
+                .map(|_| ())
+                .map_err(|error| Error::internal_io(error.to_string(), None))
+        },
+    );
+}
+
+fn cleanup_after_identity_failure<Child>(
+    pid: u32,
+    terminate_group: impl FnOnce(u32) -> Result<()>,
+    terminate_tree: impl FnOnce(u32) -> Result<()>,
+    child: &mut Child,
+    kill_root: impl FnOnce(&mut Child) -> Result<()>,
+    wait_root: impl FnOnce(&mut Child) -> Result<()>,
+) {
+    let group_terminated = terminate_group(pid).is_ok();
+    if terminate_tree(pid).is_err() || !group_terminated {
+        let _ = kill_root(child);
+    }
+    let _ = wait_root(child);
 }
 
 struct ResourceMetricsCollector {
@@ -675,7 +720,7 @@ fn clock_ticks_per_second() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     #[test]
     fn heartbeat_payload_includes_elapsed_pid_and_optional_resources() {
@@ -698,11 +743,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn child_started_failure_kills_and_reaps_the_spawned_child() {
+    fn child_identity_persistence_failure_kills_and_reaps_the_isolated_process_tree() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let marker = temp.path().join("descendant.pid");
         let mut command = Command::new("sh");
-        command.args(["-c", "sleep 30"]);
+        command.args([
+            "-c",
+            &format!(
+                "sleep 30 & echo $! > {} ; wait",
+                crate::core::engine::shell::quote_arg(marker.to_str().expect("marker path"))
+            ),
+        ]);
         let pid = Arc::new(AtomicU32::new(0));
         let callback_pid = Arc::clone(&pid);
+        let marker_for_callback = marker.clone();
         let error = measured_command_output_until_cancelled_with_progress(
             &mut command,
             || false,
@@ -710,6 +764,14 @@ mod tests {
             None,
             Some(Arc::new(move |child_pid| {
                 callback_pid.store(child_pid, Ordering::SeqCst);
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !marker_for_callback.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert!(
+                    marker_for_callback.exists(),
+                    "shell created descendant marker"
+                );
                 Err(Error::internal_unexpected("persist child identity"))
             })),
             None,
@@ -720,6 +782,38 @@ mod tests {
         assert!(!crate::core::process::pid_is_running(
             pid.load(Ordering::SeqCst)
         ));
+        let descendant: u32 = std::fs::read_to_string(marker)
+            .expect("descendant marker")
+            .trim()
+            .parse()
+            .expect("descendant pid");
+        assert!(!crate::core::process::pid_is_running(descendant));
+    }
+
+    #[test]
+    fn child_identity_cleanup_falls_back_to_root_kill_when_group_cleanup_fails() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let waited = Arc::new(AtomicBool::new(false));
+        let kill_observed = Arc::clone(&killed);
+        let wait_observed = Arc::clone(&waited);
+
+        cleanup_after_identity_failure(
+            4242,
+            |_| Err(Error::internal_unexpected("group cleanup unsupported")),
+            |_| Err(Error::internal_unexpected("tree cleanup unsupported")),
+            &mut (),
+            move |_| {
+                kill_observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_| {
+                wait_observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(killed.load(Ordering::SeqCst));
+        assert!(waited.load(Ordering::SeqCst));
     }
 
     #[test]
