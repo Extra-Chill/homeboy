@@ -13,7 +13,7 @@ use crate::core::agent_task_gate::{
 };
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::stream_capture::StreamCaptureMetadata;
-use crate::core::{Error, Result};
+use crate::core::{worktree_providers, Error, Result};
 
 use super::types::{
     AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
@@ -231,29 +231,84 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
 
 pub(crate) struct ExternalPromotionWorkspaceProvider {
     invocation: Option<CommandInvocation>,
+    provenance: Option<serde_json::Value>,
 }
 
 impl ExternalPromotionWorkspaceProvider {
-    pub(crate) fn from_options(options: &AgentTaskPromotionOptions) -> Self {
-        Self {
-            invocation: options
-                .provider_invocation
-                .clone()
-                .or_else(|| options
-                    .provider_command
-                    .clone()
-                .or_else(|| std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok())
-                .map(|command| {
-                    eprintln!(
-                        "Warning: agent-task promotion provider string command is deprecated; use argv-capable provider invocation instead"
-                    );
-                    CommandInvocation {
-                        argv: command.split_whitespace().map(str::to_string).collect(),
-                        display: Some(command),
-                        ..Default::default()
-                    }
-                })),
+    pub(crate) fn from_options(options: &AgentTaskPromotionOptions) -> Result<Self> {
+        let config = crate::core::defaults::load_config();
+        Self::from_options_with_config_and_environment(
+            options,
+            &config,
+            None,
+            std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok(),
+        )
+    }
+
+    pub(super) fn from_options_with_config_and_environment(
+        options: &AgentTaskPromotionOptions,
+        config: &crate::core::defaults::HomeboyConfig,
+        executable: Option<PathBuf>,
+        promotion_command: Option<String>,
+    ) -> Result<Self> {
+        if let Some(invocation) = options.provider_invocation.clone() {
+            return Ok(Self {
+                invocation: Some(invocation),
+                provenance: None,
+            });
         }
+        if let Some(command) = options.provider_command.clone().or(promotion_command) {
+            eprintln!(
+                "Warning: agent-task promotion provider string command is deprecated; use argv-capable provider invocation instead"
+            );
+            return Ok(Self {
+                invocation: Some(CommandInvocation {
+                    argv: command.split_whitespace().map(str::to_string).collect(),
+                    display: Some(command),
+                    ..Default::default()
+                }),
+                provenance: None,
+            });
+        }
+
+        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &options.to_worktree,
+            config,
+        )?;
+        let executable = executable.map(Ok).unwrap_or_else(|| {
+            std::env::current_exe().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("resolve current Homeboy executable for promotion provider".to_string()),
+                )
+            })
+        })?;
+        let workspace = resolution.worktree.path;
+        Ok(Self {
+            invocation: Some(CommandInvocation {
+                argv: vec![
+                    executable.display().to_string(),
+                    "agent-task".to_string(),
+                    "promotion-provider".to_string(),
+                    "--workspace".to_string(),
+                    workspace.clone(),
+                ],
+                ..Default::default()
+            }),
+            provenance: Some(serde_json::json!({
+                "id": resolution.provider_id,
+                "handle": resolution.worktree.handle,
+                "path": workspace,
+            })),
+        })
+    }
+
+    pub(crate) fn provenance(&self) -> Option<&serde_json::Value> {
+        self.provenance.as_ref()
+    }
+
+    pub(super) fn invocation(&self) -> Option<&CommandInvocation> {
+        self.invocation.as_ref()
     }
 }
 

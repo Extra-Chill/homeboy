@@ -185,7 +185,7 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("workspace provider command"));
+            .contains("configured worktree provider"));
     });
 }
 

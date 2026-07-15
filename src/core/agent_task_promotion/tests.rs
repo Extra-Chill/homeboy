@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 
 use super::apply::{
     run_provider_command, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
-    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
+    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::promote::{
     normalize_promotion_patch, promote, promote_with_provider, select_patch_artifact,
@@ -29,6 +29,10 @@ use crate::core::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::core::command_invocation::CommandInvocation;
+use crate::core::defaults::{
+    HomeboyConfig, WorktreeProviderCommands, WorktreeProviderConfig, WorktreeProviderKind,
+    WorktreeProviderListResultMapping,
+};
 use crate::core::{Error, Result};
 
 const VALID_PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -171,6 +175,228 @@ fn git(cwd: &Path, args: &[&str]) {
         "git {} failed: {}",
         args.join(" "),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn promotion_options(to_worktree: &str) -> AgentTaskPromotionOptions {
+    AgentTaskPromotionOptions {
+        source: "{}".to_string(),
+        source_run_id: None,
+        source_path: None,
+        source_worktree_path: None,
+        base_ref: None,
+        task_base_sha: None,
+        to_worktree: to_worktree.to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions::default(),
+        provider_command: None,
+        provider_invocation: None,
+    }
+}
+
+#[test]
+fn configured_command_provider_constructs_native_promotion_adapter_with_provenance() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    git(workspace.path(), &["init", "-b", "cook-target"]);
+    let provider = tempfile::NamedTempFile::new().expect("provider command");
+    std::fs::write(
+        provider.path(),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            serde_json::json!({
+                "worktrees": [{
+                    "handle": "fixture@cook-target",
+                    "path": workspace.path(),
+                    "branch": "cook-target",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }]
+            })
+        ),
+    )
+    .expect("write provider command");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+    }
+    let mut config = HomeboyConfig::default();
+    config.worktree_providers.insert(
+        "fixture".to_string(),
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![
+                    provider.path().display().to_string(),
+                    "{handle}".to_string(),
+                ]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(WorktreeProviderListResultMapping {
+                items: "$.worktrees".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.safety.dirty".to_string(),
+                unpushed: "$.safety.unpushed".to_string(),
+                primary: "$.safety.primary".to_string(),
+            }),
+        },
+    );
+
+    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &promotion_options("fixture@cook-target"),
+        &config,
+        Some(PathBuf::from("/fixture/homeboy")),
+        None,
+    )
+    .expect("configured provider resolves");
+
+    assert_eq!(
+        provider.invocation().expect("invocation").argv,
+        vec![
+            "/fixture/homeboy".to_string(),
+            "agent-task".to_string(),
+            "promotion-provider".to_string(),
+            "--workspace".to_string(),
+            workspace.path().display().to_string(),
+        ]
+    );
+    assert_eq!(provider.provenance().expect("provenance")["id"], "fixture");
+    assert_eq!(
+        provider.provenance().expect("provenance")["handle"],
+        "fixture@cook-target"
+    );
+}
+
+#[test]
+fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    git(workspace.path(), &["init", "-b", "cook-target"]);
+    let provider = tempfile::NamedTempFile::new().expect("provider command");
+    std::fs::write(
+        provider.path(),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            serde_json::json!({
+                "worktrees": [{
+                    "handle": "fixture@cook-target",
+                    "path": workspace.path(),
+                    "branch": "cook-target",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }]
+            })
+        ),
+    )
+    .expect("write provider command");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(provider.path())
+            .expect("provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
+    }
+    let mut config = HomeboyConfig::default();
+    config.worktree_providers.insert(
+        "fixture".to_string(),
+        WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![
+                    provider.path().display().to_string(),
+                    "{handle}".to_string(),
+                ]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(WorktreeProviderListResultMapping {
+                items: "$.worktrees".to_string(),
+                handle: "$.handle".to_string(),
+                path: "$.path".to_string(),
+                branch: "$.branch".to_string(),
+                dirty: "$.safety.dirty".to_string(),
+                unpushed: "$.safety.unpushed".to_string(),
+                primary: "$.safety.primary".to_string(),
+            }),
+        },
+    );
+
+    crate::core::worktree_providers::resolve_worktree_provider_from_config(
+        "fixture@cook-target",
+        &config,
+    )
+    .expect("lookup-only provider resolves for non-mutating callers");
+
+    let error = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &promotion_options("fixture@cook-target"),
+        &config,
+        Some(PathBuf::from("/fixture/homeboy")),
+        None,
+    )
+    .err()
+    .expect("lookup-only provider must not authorize promotion");
+
+    assert!(error
+        .message
+        .contains("not apply-enabled provider(s): fixture"));
+}
+
+#[test]
+fn explicit_promotion_provider_sources_precede_configured_resolution() {
+    let mut options = promotion_options("fixture@missing");
+    options.provider_command = Some("command-provider".to_string());
+    options.provider_invocation = Some(CommandInvocation {
+        argv: vec!["argv-provider".to_string()],
+        ..Default::default()
+    });
+
+    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &options,
+        &HomeboyConfig::default(),
+        Some(PathBuf::from("/fixture/homeboy")),
+        Some("environment-provider".to_string()),
+    )
+    .expect("explicit argv does not resolve configured providers");
+
+    assert_eq!(
+        provider.invocation().expect("invocation").argv,
+        vec!["argv-provider".to_string()]
+    );
+
+    options.provider_invocation = None;
+    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &options,
+        &HomeboyConfig::default(),
+        Some(PathBuf::from("/fixture/homeboy")),
+        Some("environment-provider".to_string()),
+    )
+    .expect("explicit command does not resolve configured providers");
+    assert_eq!(
+        provider.invocation().expect("invocation").argv,
+        vec!["command-provider".to_string()]
+    );
+
+    options.provider_command = None;
+    let provider = ExternalPromotionWorkspaceProvider::from_options_with_config_and_environment(
+        &options,
+        &HomeboyConfig::default(),
+        Some(PathBuf::from("/fixture/homeboy")),
+        Some("environment-provider".to_string()),
+    )
+    .expect("environment command does not resolve configured providers");
+    assert_eq!(
+        provider.invocation().expect("invocation").argv,
+        vec!["environment-provider".to_string()]
     );
 }
 
@@ -1011,32 +1237,34 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
 }
 
 #[test]
-fn promote_requires_provider_for_apply() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (source_path, source) = write_patch_source(&temp);
+fn promote_rejects_unresolved_configured_provider_for_apply() {
+    crate::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source_path, source) = write_patch_source(&temp);
 
-    let err = promote(AgentTaskPromotionOptions {
-        source,
-        source_run_id: None,
-        source_path: Some(source_path),
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: None,
-        to_worktree: "repo@controlled-worktree".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: VerifyGateOptions {
-            verify: Vec::new(),
-            private_verify: Vec::new(),
-            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
-        },
-        provider_command: None,
-        provider_invocation: None,
-    })
-    .expect_err("missing provider rejected");
+        let err = promote(AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@controlled-worktree".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
+            provider_command: None,
+            provider_invocation: None,
+        })
+        .expect_err("unresolved configured provider rejected");
 
-    assert!(err.message.contains("workspace provider command"));
+        assert!(err.message.contains("configured worktree provider"));
+    });
 }
 
 #[test]

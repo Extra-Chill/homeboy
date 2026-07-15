@@ -84,6 +84,13 @@ pub struct WorktreeProviderHandle {
     pub safety: WorktreeProviderHandleSafety,
 }
 
+/// A provider-managed workspace together with the provider that resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderResolution {
+    pub provider_id: String,
+    pub worktree: WorktreeProviderHandle,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandleSafety {
     pub dirty: bool,
@@ -94,13 +101,41 @@ pub struct WorktreeProviderHandleSafety {
 /// Resolve an externally managed worktree handle without creating or adopting
 /// a Homeboy record. This is intentionally a lookup-only boundary.
 pub fn resolve_worktree_provider_handle(handle: &str) -> Result<WorktreeProviderHandle> {
-    resolve_worktree_provider_handle_from_config(handle, &defaults::load_config())
+    resolve_worktree_provider(handle).map(|resolution| resolution.worktree)
 }
 
 pub fn resolve_worktree_provider_handle_from_config(
     handle: &str,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderHandle> {
+    resolve_worktree_provider_from_config(handle, config).map(|resolution| resolution.worktree)
+}
+
+/// Resolve a provider-managed workspace and retain the selected provider id.
+pub fn resolve_worktree_provider(handle: &str) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_from_config(handle, &defaults::load_config())
+}
+
+pub fn resolve_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, false)
+}
+
+/// Resolve a workspace only from providers explicitly authorized for apply operations.
+pub fn resolve_apply_enabled_worktree_provider_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderResolution> {
+    resolve_worktree_provider_with_policy_from_config(handle, config, true)
+}
+
+fn resolve_worktree_provider_with_policy_from_config(
+    handle: &str,
+    config: &HomeboyConfig,
+    require_apply_enabled: bool,
+) -> Result<WorktreeProviderResolution> {
     let mut provider_ids = config
         .worktree_providers
         .keys()
@@ -108,10 +143,15 @@ pub fn resolve_worktree_provider_handle_from_config(
         .collect::<Vec<_>>();
     provider_ids.sort();
     let mut attempted = Vec::new();
+    let mut not_apply_enabled = Vec::new();
 
-    for provider_id in provider_ids {
+    for provider_id in provider_ids.iter().cloned() {
         let provider = &config.worktree_providers[&provider_id];
         if !provider.enabled {
+            continue;
+        }
+        if require_apply_enabled && !provider.apply_enabled {
+            not_apply_enabled.push(provider_id);
             continue;
         }
         if let Some(command) = provider.commands.resolve.as_ref() {
@@ -119,7 +159,10 @@ pub fn resolve_worktree_provider_handle_from_config(
             let worktrees = run_provider_resolve_command(&provider_id, provider, command, handle)?;
             if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
                 validate_provider_handle(&provider_id, &worktree)?;
-                return Ok(worktree);
+                return Ok(WorktreeProviderResolution {
+                    provider_id,
+                    worktree,
+                });
             }
             continue;
         }
@@ -130,14 +173,33 @@ pub fn resolve_worktree_provider_handle_from_config(
         let worktrees = run_provider_list_command(&provider_id, provider, command)?;
         if let Some(worktree) = worktrees.into_iter().find(|item| item.handle == handle) {
             validate_provider_handle(&provider_id, &worktree)?;
-            return Ok(worktree);
+            return Ok(WorktreeProviderResolution {
+                provider_id,
+                worktree,
+            });
         }
     }
 
-    let configured = if attempted.is_empty() {
-        "no enabled worktree provider has commands.list configured".to_string()
+    let configured = if provider_ids.is_empty() {
+        "no worktree providers are configured".to_string()
     } else {
-        format!("checked provider(s): {}", attempted.join(", "))
+        format!(
+            "configured provider(s): {}; checked provider(s): {}{}",
+            provider_ids.join(", "),
+            if attempted.is_empty() {
+                "none with an enabled resolve or list command".to_string()
+            } else {
+                attempted.join(", ")
+            },
+            if not_apply_enabled.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; not apply-enabled provider(s): {}",
+                    not_apply_enabled.join(", ")
+                )
+            },
+        )
     };
     Err(Error::validation_invalid_argument(
         "to_worktree",
@@ -147,7 +209,11 @@ pub fn resolve_worktree_provider_handle_from_config(
         Some(handle.to_string()),
         Some(vec![
             "Create the destination through its workspace provider, or use an existing Homeboy task worktree handle.".to_string(),
-            "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string(),
+            if require_apply_enabled {
+                "Configure an enabled, apply-enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string()
+            } else {
+                "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string()
+            },
         ]),
     ))
 }
@@ -1049,6 +1115,60 @@ mod tests {
 
         assert_eq!(handle.path, workspace.path().display().to_string());
         assert_eq!(handle.branch, "cook-target");
+    }
+
+    #[test]
+    fn resolution_retains_the_selected_provider_identity() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+
+        let resolution = resolve_worktree_provider_from_config(
+            "fixture@cook-target",
+            &config_with_provider(list_provider(script, worktrees_mapping())),
+        )
+        .expect("provider handle resolves");
+
+        assert_eq!(resolution.provider_id, "fixture");
+        assert_eq!(
+            resolution.worktree.path,
+            workspace.path().display().to_string()
+        );
+    }
+
+    #[test]
+    fn unresolved_handle_reports_sorted_configured_provider_ids() {
+        let mut config = HomeboyConfig::default();
+        for provider_id in ["zeta", "alpha"] {
+            config.worktree_providers.insert(
+                provider_id.to_string(),
+                WorktreeProviderConfig {
+                    enabled: false,
+                    kind: WorktreeProviderKind::Command,
+                    apply_enabled: false,
+                    commands: WorktreeProviderCommands::default(),
+                    list_result_mapping: None,
+                },
+            );
+        }
+
+        let error = resolve_worktree_provider_from_config("fixture@missing", &config)
+            .expect_err("missing handle fails");
+
+        assert!(
+            error
+                .message
+                .contains("configured provider(s): alpha, zeta"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
