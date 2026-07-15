@@ -196,7 +196,10 @@ fn run_list_preserves_registered_component_path() {
             BenchOutput::List(result) => {
                 assert_eq!(result.component, "studio");
                 assert_eq!(result.component_id, "studio");
-                assert_eq!(result.count, 2);
+                // The plain (non-rig) fixture lists its in-tree scenarios
+                // `in-tree slow visual` (the `visual` scenario was added with
+                // its artifact fixture in #7992).
+                assert_eq!(result.count, 3);
                 assert_eq!(result.scenarios[0].id, "in-tree");
             }
             _ => panic!("expected list output"),
