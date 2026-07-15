@@ -81,6 +81,9 @@ pub struct DeployArgs {
     /// Deploy from current branch HEAD instead of the latest tag
     #[arg(long)]
     pub head: bool,
+    /// Validate this versioned release-set manifest before any deploy action
+    #[arg(long, value_name = "PATH")]
+    pub release_set: Option<String>,
     /// Deploy an exact Git ref resolved from the declared component repository
     #[arg(
         long = "ref",
@@ -109,6 +112,8 @@ pub struct DeployOutput {
     pub force: bool,
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_set_identity: Option<String>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
@@ -126,6 +131,8 @@ pub struct MultiProjectDeployOutput {
     pub dry_run: bool,
     pub check: bool,
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_set_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy_run_id: Option<String>,
     #[serde(
@@ -146,13 +153,17 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
+    let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
+    if let Some(release_set) = release_set.as_ref() {
+        apply_release_set(release_set, &mut args)?;
+    }
     validate_apply_boundary(&args)?;
 
     // Fleet deploy
     if let Some(ref fleet_id) = args.fleet {
         let fl = homeboy::core::fleet::load(fleet_id)?;
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(&fl.project_ids, &component_ids, &config, &args);
+        return run_multi_output(&fl.project_ids, &component_ids, &config, &args, release_set.as_ref());
     }
 
     // Shared component deploy (find all projects using the component)
@@ -162,13 +173,13 @@ pub fn run(
         args.component_ids = component_ids;
         args.target_id = None;
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(&project_ids, &component_ids, &config, &args);
+        return run_multi_output(&project_ids, &component_ids, &config, &args, release_set.as_ref());
     }
 
     // Multi-project deploy
     if let Some(ref project_ids) = args.projects {
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(project_ids, &component_ids, &config, &args);
+        return run_multi_output(project_ids, &component_ids, &config, &args, release_set.as_ref());
     }
 
     // Single-project deploy: resolve project and component IDs
@@ -214,6 +225,7 @@ pub fn run(
             force: args.force,
             results: result.results,
             summary: result.summary,
+            release_set_identity: release_set.map(|value| value.identity.clone()),
             actionable: Some(deploy_actionable(&project_id)),
         }),
         exit_code,
@@ -251,6 +263,103 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     ))
 }
 
+fn load_release_set(path: &str) -> homeboy::core::Result<homeboy::core::release_set::NormalizedReleaseSet> {
+    let input = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "release_set",
+            format!("Cannot read release-set manifest '{path}': {error}"),
+            None,
+            None,
+        )
+    })?;
+    homeboy::core::release_set::ReleaseSetManifest::parse_json(&input).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument("release_set", error, None, None)
+    })
+}
+
+/// Prove every declared component resolves to its caller-supplied exact ref
+/// before handing control to deploy orchestration. This is intentionally before
+/// lifecycle creation, builds, transfers, or remote actions.
+fn apply_release_set(
+    release_set: &homeboy::core::release_set::NormalizedReleaseSet,
+    args: &mut DeployArgs,
+) -> homeboy::core::Result<()> {
+    let mut active = Vec::new();
+    for entry in &release_set.components {
+        match homeboy::core::component::load(&entry.id) {
+            Ok(component) => active.push((entry, component)),
+            Err(_) if !entry.required => continue,
+            Err(error) => {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "release_set",
+                    format!("Required component '{}' is unavailable: {}", entry.id, error.message),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+    if active.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release_set",
+            "Release set has no available components to deploy",
+            None,
+            None,
+        ));
+    }
+    let refs = active
+        .iter()
+        .map(|(entry, _)| entry.requested_ref.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if refs.len() != 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "release_set",
+            "This deploy vertical requires one exact ref shared by every release-set component",
+            None,
+            None,
+        ));
+    }
+    let requested_ref = refs.into_iter().next().expect("non-empty release set");
+    if let Some(ref supplied) = args.requested_ref {
+        if supplied != requested_ref {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "ref",
+                "--ref must match the release-set component ref",
+                None,
+                None,
+            ));
+        }
+    }
+    for (entry, component) in &active {
+        let root = homeboy::core::git::get_git_root(&component.local_path).map_err(|_| {
+            homeboy::core::Error::validation_invalid_argument(
+                "release_set",
+                format!("Component '{}' source is not a Git checkout", entry.id),
+                None,
+                None,
+            )
+        })?;
+        let status = homeboy::core::git::run_git(
+            std::path::Path::new(&root),
+            &["status", "--porcelain"],
+            "validate release-set source cleanliness",
+        )?;
+        if !status.trim().is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "release_set",
+                format!("Component '{}' source checkout is dirty", entry.id),
+                None,
+                None,
+            ));
+        }
+        homeboy::core::deploy::preflight_exact_ref(component, &entry.requested_ref)?;
+    }
+    args.component = Some(active.iter().map(|(entry, _)| entry.id.clone()).collect());
+    args.component_ids.clear();
+    args.requested_ref = Some(requested_ref.to_string());
+    Ok(())
+}
+
 fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref comps) = args.component {
         Ok(comps.clone())
@@ -281,7 +390,8 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::core::Result<(Str
                 || args.outdated
                 || args.behind_upstream
                 || args.check
-                || args.json.is_some();
+                || args.json.is_some()
+                || args.release_set.is_some();
             if comps.is_empty() && !has_selector_flag {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "input",
@@ -385,6 +495,7 @@ fn run_multi_output(
     component_ids: &[String],
     config: &DeployConfig,
     args: &DeployArgs,
+    release_set: Option<&homeboy::core::release_set::NormalizedReleaseSet>,
 ) -> CmdResult<DeployCommandOutput> {
     let result = deploy::run_multi(project_ids, component_ids, config)?;
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
@@ -400,6 +511,7 @@ fn run_multi_output(
             dry_run: args.dry_run,
             check: args.check,
             force: args.force,
+            release_set_identity: release_set.map(|value| value.identity.clone()),
             deploy_run_id: result.deploy_run_id,
             actionable: Some(actionable),
         }),

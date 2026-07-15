@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--check] [--dry-run] [--apply] [--json '<spec>']
+homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--release-set <path>] [--check] [--dry-run] [--apply] [--json '<spec>']
 # If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
 
 # Multi-project deployment
@@ -335,3 +335,6 @@ Extension hooks run first, then component hooks. All `post:deploy` hooks are non
 - [component](component.md)
 - [fleet](fleet.md)
 - [hooks](../architecture/hooks.md)
+## Release Sets
+
+`homeboy deploy --project <project> --release-set <path> --dry-run` validates a caller-supplied `homeboy/release-set/v1` manifest before deployment planning. The proof checks registered component membership, clean Git sources, and the same exact-ref resolver used by deploy. Red preflight performs no release or deploy action. See `docs/reference/release-set-manifest.md` for the generic contract and sample.

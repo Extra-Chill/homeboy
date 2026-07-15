@@ -1,0 +1,14 @@
+{
+  "schema": "homeboy/release-set/v1",
+  "components": [
+    {
+      "id": "component-a",
+      "ref": "0123456789012345678901234567890123456789"
+    },
+    {
+      "id": "component-b",
+      "ref": "0123456789012345678901234567890123456789",
+      "required": false
+    }
+  ]
+}
