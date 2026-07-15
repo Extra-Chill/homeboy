@@ -208,6 +208,92 @@ wait_for_registry_visibility() {
   return 1
 }
 
+is_crates_io_rate_limited() {
+  local output
+  for output in "$@"; do
+    if grep -qi 'crates\.io' "${output}" && grep -Eqi '(^|[^0-9])429([^0-9]|$)|rate limit' "${output}"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+crates_io_retry_delay() {
+  local output retry_after retry_after_epoch now delay
+  local fallback_delay="${HOMEBOY_CRATES_IO_PUBLISH_RETRY_DELAY_SECONDS:-60}"
+  local safety_margin="${HOMEBOY_CRATES_IO_PUBLISH_RETRY_SAFETY_MARGIN_SECONDS:-5}"
+  local max_delay="${HOMEBOY_CRATES_IO_PUBLISH_RETRY_MAX_DELAY_SECONDS:-300}"
+
+  if ! [[ "${fallback_delay}" =~ ^[0-9]+$ && "${safety_margin}" =~ ^[0-9]+$ && "${max_delay}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid crates.io publish retry delay configuration." >&2
+    return 1
+  fi
+
+  retry_after=""
+  while IFS= read -r output; do
+    if [[ "${output}" =~ Please[[:space:]]try[[:space:]]again[[:space:]]after[[:space:]]+([A-Z][a-z][a-z],[[:space:]][0-9]{1,2}[[:space:]][A-Z][a-z][a-z][[:space:]][0-9]{4}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]]GMT) ]]; then
+      retry_after="${BASH_REMATCH[1]}"
+      break
+    fi
+  done < <(cat "$@")
+
+  delay="${fallback_delay}"
+  if [[ -n "${retry_after}" ]] && { retry_after_epoch="$(date -u -j -f '%a, %d %b %Y %H:%M:%S %Z' "${retry_after}" +%s 2>/dev/null)" || retry_after_epoch="$(date -u -d "${retry_after}" +%s 2>/dev/null)"; }; then
+    now="$(date +%s)"
+    if (( retry_after_epoch > now )); then
+      delay=$((retry_after_epoch - now + safety_margin))
+    fi
+  fi
+
+  if (( delay > max_delay )); then
+    delay="${max_delay}"
+  fi
+
+  printf '%s\n' "${delay}"
+}
+
+publish_package() {
+  local package_name="$1"
+  local attempts="${HOMEBOY_CRATES_IO_PUBLISH_ATTEMPTS:-3}"
+  local attempt status delay stdout stderr
+
+  if ! [[ "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid HOMEBOY_CRATES_IO_PUBLISH_ATTEMPTS value: ${attempts}" >&2
+    return 1
+  fi
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    stdout="$(mktemp)"
+    stderr="$(mktemp)"
+
+    if cargo publish --package "${package_name}" --locked --allow-dirty >"${stdout}" 2>"${stderr}"; then
+      cat "${stdout}"
+      cat "${stderr}" >&2
+      rm -f "${stdout}" "${stderr}"
+      return 0
+    else
+      status=$?
+    fi
+
+    cat "${stdout}"
+    cat "${stderr}" >&2
+
+    if ! is_crates_io_rate_limited "${stdout}" "${stderr}" || [[ "${attempt}" -eq "${attempts}" ]]; then
+      rm -f "${stdout}" "${stderr}"
+      return "${status}"
+    fi
+
+    delay="$(crates_io_retry_delay "${stdout}" "${stderr}")" || {
+      rm -f "${stdout}" "${stderr}"
+      return 1
+    }
+    rm -f "${stdout}" "${stderr}"
+    echo "crates.io rate limited ${package_name}; retrying in ${delay}s (${attempt}/${attempts})..." >&2
+    sleep "${delay}"
+  done
+}
+
 if ! command -v jq &>/dev/null; then
   echo "Error: jq is required for Rust workspace publishing." >&2
   exit 1
@@ -222,7 +308,7 @@ while IFS=$'\t' read -r package_name package_version; do
   fi
 
   echo "Publishing ${package_name} v${package_version} to crates.io..."
-  cargo publish --package "${package_name}" --locked --allow-dirty
+  publish_package "${package_name}"
   wait_for_registry_visibility "${package_name}" "${package_version}"
 done < <(workspace_packages)
 
