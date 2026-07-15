@@ -850,7 +850,6 @@ PHPUNIT_ARGS_JSON=$(printf '%s\0' "${PASSTHROUGH_ARGS[@]}" | php -r '
     $parts = array_values(array_filter(explode("\0", $raw), static function ($value) { return $value !== ""; }));
     echo json_encode($parts, JSON_UNESCAPED_SLASHES);
 ' 2>/dev/null || printf '[]')
-PHPUNIT_ARGS_JSON=$(printf '%s' "$PHPUNIT_ARGS_JSON" | jq -c '. + ["--cache-result-file=/tmp/wp-codebox-phpunit.result.cache"]' 2>/dev/null || printf '["--cache-result-file=/tmp/wp-codebox-phpunit.result.cache"]')
 
 SELECTED_TEST_FILE_REL=""
 if [ -n "$SELECTED_TEST_FILE" ]; then
@@ -1019,6 +1018,7 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
 fi
 
 RESULT_FILE=""
+WP_CODEBOX_RUN_ARTIFACTS_DIR=""
 WP_CODEBOX_TMPFILE=""
 PHPUNIT_STDOUT_TMPFILE=""
 RECIPE_FILE=""
@@ -1117,6 +1117,7 @@ if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-artifacts.XXXXXX")
 fi
 RESULT_FILE="${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"
+WP_CODEBOX_RUN_ARTIFACTS_DIR=$(mktemp -d "${ARTIFACTS_DIR}/wp-codebox-phpunit.XXXXXX")
 
 run_phpunit_prepare_steps
 
@@ -1287,7 +1288,7 @@ fi
 set +e
 NODE_OPTIONS="$WP_CODEBOX_NODE_OPTIONS" "${wp_codebox_command[@]}" recipe-run \
     --recipe "$RECIPE_FILE" \
-    --artifacts "$ARTIFACTS_DIR" \
+    --artifacts "$WP_CODEBOX_RUN_ARTIFACTS_DIR" \
     --json \
     > "$WP_CODEBOX_TMPFILE" 2>&1
 wp_codebox_exit=$?
@@ -1297,6 +1298,32 @@ rm -f "$RECIPE_FILE" "$RECIPE_OPTIONS_FILE" "$PHPUNIT_RECIPE_BUILDER_STDERR"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 PHPUNIT_OUTPUT=""
+RESULT_FILE=""
+CURRENT_RUN_ARTIFACTS_DIR=""
+runtime_pointer_file="${WP_CODEBOX_RUN_ARTIFACTS_DIR}/latest-runtime.json"
+if [ -f "$runtime_pointer_file" ]; then
+    runtime_artifact_directory=$(jq -r '.paths.runtimeDirectory // empty' "$runtime_pointer_file" 2>/dev/null || true)
+    if [[ ! "$runtime_artifact_directory" =~ ^runtime-[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+        FAILED_STEP="WP Codebox runtime artifact pointer"
+        FAILURE_OUTPUT="Invalid runtime directory in ${runtime_pointer_file}: ${runtime_artifact_directory:-<empty>}"
+        echo "ERROR: ${FAILURE_OUTPUT}. Expected a runtime-<alphanumeric-or-hyphen> basename." >&2
+        exit 1
+    fi
+
+    run_artifacts_root_real=$(php -r 'echo realpath($argv[1]) ?: "";' "$WP_CODEBOX_RUN_ARTIFACTS_DIR" 2>/dev/null || true)
+    candidate_runtime_dir="${WP_CODEBOX_RUN_ARTIFACTS_DIR}/${runtime_artifact_directory}"
+    candidate_runtime_dir_real=$(php -r 'echo realpath($argv[1]) ?: "";' "$candidate_runtime_dir" 2>/dev/null || true)
+    if [ -z "$run_artifacts_root_real" ] || [ -z "$candidate_runtime_dir_real" ] || [ "$candidate_runtime_dir_real" != "${run_artifacts_root_real}/${runtime_artifact_directory}" ]; then
+        FAILED_STEP="WP Codebox runtime artifact pointer"
+        FAILURE_OUTPUT="Runtime artifact directory escapes or is missing from ${WP_CODEBOX_RUN_ARTIFACTS_DIR}: ${runtime_artifact_directory}"
+        echo "ERROR: ${FAILURE_OUTPUT}" >&2
+        exit 1
+    fi
+
+    CURRENT_RUN_ARTIFACTS_DIR="$candidate_runtime_dir_real"
+    candidate_result_file="${CURRENT_RUN_ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"
+    [ -f "$candidate_result_file" ] && RESULT_FILE="$candidate_result_file"
+fi
 if [ -f "$RESULT_FILE" ]; then
     PHPUNIT_OUTPUT=$(cat "$RESULT_FILE")
 fi
@@ -1314,8 +1341,8 @@ fi
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
 PARSE_FAILURES="${EXTENSION_PATH}/scripts/test/parse-test-failures.sh"
 if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
-	if [ -f "${ARTIFACTS_DIR}/files/test-results.json" ]; then
-		bash "$PARSE_RESULTS" "$ARTIFACTS_DIR" || true
+	if [ -n "$CURRENT_RUN_ARTIFACTS_DIR" ] && [ -f "${CURRENT_RUN_ARTIFACTS_DIR}/files/test-results.json" ]; then
+		bash "$PARSE_RESULTS" "$CURRENT_RUN_ARTIFACTS_DIR" || true
 	elif [ -n "$PHPUNIT_STDOUT" ]; then
 		bash "$PARSE_RESULTS" "$PHPUNIT_STDOUT_TMPFILE" || true
 	elif [ -n "$PHPUNIT_OUTPUT" ]; then
@@ -1323,8 +1350,8 @@ if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
 	fi
 fi
 if [ -n "${HOMEBOY_TEST_FAILURES_FILE:-}" ] && [ -f "$PARSE_FAILURES" ]; then
-	if [ -f "${ARTIFACTS_DIR}/files/test-results.json" ]; then
-		bash "$PARSE_FAILURES" "$ARTIFACTS_DIR" "${PLUGIN_PATH:-}" || true
+	if [ -n "$CURRENT_RUN_ARTIFACTS_DIR" ] && [ -f "${CURRENT_RUN_ARTIFACTS_DIR}/files/test-results.json" ]; then
+		bash "$PARSE_FAILURES" "$CURRENT_RUN_ARTIFACTS_DIR" "${PLUGIN_PATH:-}" || true
 	elif [ -n "$PHPUNIT_STDOUT" ]; then
 		bash "$PARSE_FAILURES" "$PHPUNIT_STDOUT_TMPFILE" "${PLUGIN_PATH:-}" || true
 	fi

@@ -39,6 +39,8 @@ RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${CORE_RUNTIME_DIR}/r
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${CORE_RUNTIME_DIR}/runner-steps.sh}"
 HOST_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/test-db-activation-host"
 DEP_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-db-activation-dep"
+ARTIFACTS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-db-activation.XXXXXX")"
+trap 'rm -rf "$ARTIFACTS_DIR"' EXIT
 
 for core_helper in "$RUNNER_PRELUDE_HELPER" "$RESOLVE_CONTEXT_HELPER" "$RUNNER_STEPS_HELPER"; do
     if [ ! -f "$core_helper" ]; then
@@ -78,14 +80,37 @@ echo "Host fixture: $HOST_FIXTURE_DIR"
 echo "Dep fixture:  $DEP_FIXTURE_DIR"
 echo ""
 
-HOMEBOY_COMPONENT_ID=test-db-activation-host \
-HOMEBOY_COMPONENT_PATH="$HOST_FIXTURE_DIR" \
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
-HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
-HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
-HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_HELPER" \
-HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
-    bash "${SCRIPT_DIR}/test-runner.sh"
+source_hash_before=$(tar -C "$(dirname "$HOST_FIXTURE_DIR")" -cf - "$(basename "$HOST_FIXTURE_DIR")" | shasum -a 256)
+runner_output=$(HOMEBOY_COMPONENT_ID=test-db-activation-host \
+    HOMEBOY_COMPONENT_PATH="$HOST_FIXTURE_DIR" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_HELPER" \
+    HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
+    HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$ARTIFACTS_DIR" \
+    bash "${SCRIPT_DIR}/test-runner.sh" 2>&1)
+printf '%s\n' "$runner_output"
+
+if [[ "$runner_output" != *"WP Codebox test run complete."* ]]; then
+    echo "ERROR: expected WP Codebox PHPUnit runner success classification" >&2
+    exit 1
+fi
+run_artifacts_dir=""
+for candidate in "${ARTIFACTS_DIR}"/wp-codebox-phpunit.*; do
+    [ -d "$candidate" ] && run_artifacts_dir="$candidate"
+done
+runtime_artifact_directory=$(jq -r '.paths.runtimeDirectory // empty' "${run_artifacts_dir}/latest-runtime.json")
+result_artifact="${run_artifacts_dir}/${runtime_artifact_directory}/files/phpunit/.pg-test-result.txt"
+if [ ! -f "$result_artifact" ] || ! grep -q '^STAGE_BEGIN:run_tests' "$result_artifact"; then
+    echo "ERROR: expected WP Codebox structured PHPUnit diagnostic artifact" >&2
+    exit 1
+fi
+source_hash_after=$(tar -C "$(dirname "$HOST_FIXTURE_DIR")" -cf - "$(basename "$HOST_FIXTURE_DIR")" | shasum -a 256)
+if [ "$source_hash_before" != "$source_hash_after" ]; then
+    echo "ERROR: readonly WP Codebox PHPUnit source fixture changed" >&2
+    exit 1
+fi
 
 echo ""
 echo "============================================"

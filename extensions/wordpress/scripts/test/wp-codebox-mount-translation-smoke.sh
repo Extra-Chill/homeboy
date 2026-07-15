@@ -17,6 +17,9 @@ WRITABLE_DIR="${TMPDIR}/writable"
 STUBS_DIR="${TMPDIR}/stubs"
 COMPOSER_LOG="${TMPDIR}/composer.log"
 RESOLVE_CONTEXT_HELPER="${TMPDIR}/resolve-context-helper.sh"
+WRITE_RESULTS_HELPER="${TMPDIR}/write-test-results-helper.sh"
+RESULTS_FILE="${TMPDIR}/parsed-results.json"
+FAILURES_FILE="${TMPDIR}/parsed-failures.json"
 mkdir -p "${PLUGIN_PATH}/tests" "${PLUGIN_PATH}/config" "${DEP_PATH}/fixtures" "${REMOTE_DEP_PATH}/fixtures" "$ARTIFACTS_DIR" "$WRITABLE_DIR" "$STUBS_DIR"
 
 cat > "${PLUGIN_PATH}/tests/OnlyTest.php" <<'PHP'
@@ -52,6 +55,15 @@ homeboy_resolve_context() {
 }
 SH
 chmod +x "$RESOLVE_CONTEXT_HELPER"
+
+cat > "$WRITE_RESULTS_HELPER" <<'SH'
+#!/usr/bin/env bash
+homeboy_write_test_results() {
+    jq -n --arg source current-runtime --argjson total "$1" --argjson passed "$2" --argjson failed "$3" --argjson skipped "$4" --arg partial "$5" \
+        '{source: $source, total: $total, passed: $passed, failed: $failed, skipped: $skipped, partial: $partial}' > "$HOMEBOY_TEST_RESULTS_FILE"
+}
+SH
+chmod +x "$WRITE_RESULTS_HELPER"
 
 cat > "$FAKE_WP_CODEBOX" <<'NODE'
 #!/usr/bin/env node
@@ -128,7 +140,7 @@ for (const expected of [
   'plugin-slug=example',
   'test-file=OnlyTest.php',
   'changed-tests-json=["tests/OnlyTest.php"]',
-  'phpunit-args-json=["--filter","OnlyTest","--cache-result-file=/tmp/wp-codebox-phpunit.result.cache"]',
+  'phpunit-args-json=["--filter","OnlyTest"]',
   'env-json={}',
   'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',
   'autoload-file=/wp-codebox-vendor/autoload.php',
@@ -161,18 +173,30 @@ if (!fs.existsSync(path.join(componentPath, 'vendor/autoload.php'))) {
 }
 
 const artifactRoot = argValue('--artifacts') || path.join(path.dirname(process.env.FAKE_WP_CODEBOX_ARGS_FILE), 'artifacts')
-const phpunitArtifacts = path.join(artifactRoot, 'files', 'phpunit')
+const runtimeDirectory = 'runtime-fixture'
+const phpunitArtifacts = path.join(artifactRoot, runtimeDirectory, 'files', 'phpunit')
 fs.mkdirSync(phpunitArtifacts, { recursive: true })
-const resultModePath = path.join(artifactRoot, 'runtime-smoke-result-mode')
-const phpunitResult = fs.existsSync(resultModePath)
+const resultModePath = path.join(path.dirname(artifactRoot), 'runtime-smoke-result-mode')
+const resultMode = fs.existsSync(resultModePath) ? fs.readFileSync(resultModePath, 'utf8').trim() : 'passed'
+if (resultMode === 'fail-before-diagnostic') {
+  process.stderr.write('fixture runtime failed before persisting diagnostics\n')
+  process.exit(1)
+}
+const phpunitResult = resultMode === 'bootstrap-failure'
   ? ['STAGE_FAIL:bootstrap:fixture bootstrap failure', ''].join('\n')
   : ['STAGE_BEGIN:run_tests', 'ALL TESTS PASSED', 'TESTS: 1 FAILURES: 0 ERRORS: 0', 'STAGE_OK:run_tests', ''].join('\n')
 // WP Codebox persists the sandbox VFS result to this structured artifact path.
 fs.writeFileSync(path.join(phpunitArtifacts, '.pg-test-result.txt'), phpunitResult)
-fs.writeFileSync(resultModePath, 'bootstrap-failure\n')
-const filesRoot = path.join(artifactRoot, 'runtime-smoke', 'files')
+fs.writeFileSync(resultModePath, resultMode === 'passed' ? 'bootstrap-failure\n' : 'passed\n')
+const pointerRuntimeDirectory = resultMode === 'invalid-pointer' ? 'runtime-/../../other-run' : runtimeDirectory
+fs.writeFileSync(path.join(artifactRoot, 'latest-runtime.json'), JSON.stringify({ paths: { runtimeDirectory: pointerRuntimeDirectory } }))
+const filesRoot = path.join(artifactRoot, runtimeDirectory, 'files')
 fs.mkdirSync(filesRoot, { recursive: true })
-fs.writeFileSync(path.join(filesRoot, 'test-results.json'), JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: 'passed' }, null, 2))
+fs.writeFileSync(path.join(filesRoot, 'test-results.json'), JSON.stringify({
+  schema: 'wp-codebox/test-results/v1',
+  status: 'passed',
+  summary: { total: 1, passed: 1, failed: 0, skipped: 0 },
+}, null, 2))
 
 process.stdout.write(JSON.stringify({
   success: true,
@@ -239,6 +263,9 @@ run_runner() {
         HOMEBOY_COMPONENT_ID="example" \
         HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
         HOMEBOY_RUNTIME_RUNNER_STEPS="${TMPDIR}/missing-runner-steps.sh" \
+        HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="$WRITE_RESULTS_HELPER" \
+        HOMEBOY_TEST_RESULTS_FILE="$RESULTS_FILE" \
+        HOMEBOY_TEST_FAILURES_FILE="$FAILURES_FILE" \
         HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="$DEP_PATH" \
         HOMEBOY_LAB_OFFLOAD_JSON="$LAB_OFFLOAD_JSON" \
         HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
@@ -259,6 +286,14 @@ if [ ! -s "$ARGS_FILE" ]; then
     echo "Expected fake wp-codebox to capture arguments" >&2
     exit 1
 fi
+if ! grep -q '"source": "current-runtime"' "$RESULTS_FILE"; then
+    echo "Expected current runtime test-results sidecar to be parsed" >&2
+    exit 1
+fi
+if [ ! -f "$FAILURES_FILE" ] || grep -q 'stale-caller-sidecar' "$FAILURES_FILE"; then
+    echo "Expected current runtime failure sidecar to be parsed" >&2
+    exit 1
+fi
 
 if ! grep -q -- 'install --no-dev --no-interaction --no-progress --prefer-dist' "$COMPOSER_LOG"; then
     echo "Expected WP Codebox runner to prepare missing component Composer autoload" >&2
@@ -270,7 +305,11 @@ if [ -e "${PLUGIN_PATH}/.pg-test-result.txt" ]; then
     echo "WP Codebox diagnostics must not write to the readonly component source" >&2
     exit 1
 fi
-if ! grep -q '^STAGE_OK:run_tests' "${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"; then
+run_artifacts_dir=""
+for candidate in "${ARTIFACTS_DIR}"/wp-codebox-phpunit.*; do
+    [ -d "$candidate" ] && run_artifacts_dir="$candidate"
+done
+if ! grep -q '^STAGE_OK:run_tests' "${run_artifacts_dir}/runtime-fixture/files/phpunit/.pg-test-result.txt"; then
     echo "Expected PHPUnit VFS diagnostic to persist under WP Codebox artifacts" >&2
     exit 1
 fi
@@ -290,6 +329,57 @@ if [[ "$failure_output" != *"BOOTSTRAP FAILURE: bootstrap:fixture bootstrap fail
 fi
 if [ -e "${PLUGIN_PATH}/.pg-test-result.txt" ]; then
     echo "Structured diagnostic failure must not write to the readonly component source" >&2
+    exit 1
+fi
+
+mkdir -p "${ARTIFACTS_DIR}/files/phpunit"
+printf 'NO_TEST_FILES\n' > "${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"
+printf '{"schema":"stale-caller-sidecar"}\n' > "${ARTIFACTS_DIR}/files/test-results.json"
+printf '{"source":"stale-caller-sidecar"}\n' > "$RESULTS_FILE"
+printf '{"source":"stale-caller-sidecar"}\n' > "$FAILURES_FILE"
+printf 'fail-before-diagnostic\n' > "${ARTIFACTS_DIR}/runtime-smoke-result-mode"
+set +e
+stale_output=$(run_runner 2>&1)
+stale_status=$?
+set -e
+if [ "$stale_status" -eq 0 ]; then
+    echo "Expected a runtime failure without a current diagnostic to fail the runner" >&2
+    exit 1
+fi
+if [[ "$stale_output" == *"Skipping PHPUnit tests"* ]]; then
+    echo "Runner consumed a stale no-test diagnostic from a previous invocation" >&2
+    echo "$stale_output" >&2
+    exit 1
+fi
+if ! grep -q '^NO_TEST_FILES' "${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"; then
+    echo "Runner must preserve unrelated caller artifacts" >&2
+    exit 1
+fi
+if ! grep -q 'stale-caller-sidecar' "${ARTIFACTS_DIR}/files/test-results.json"; then
+    echo "Runner must not consume or replace stale caller test-result sidecars" >&2
+    exit 1
+fi
+if ! grep -q 'stale-caller-sidecar' "$RESULTS_FILE"; then
+    echo "Runner must not overwrite exported results from stale caller sidecars" >&2
+    exit 1
+fi
+if ! grep -q 'stale-caller-sidecar' "$FAILURES_FILE"; then
+    echo "Runner must not overwrite exported failures from stale caller sidecars" >&2
+    exit 1
+fi
+
+printf 'invalid-pointer\n' > "${ARTIFACTS_DIR}/runtime-smoke-result-mode"
+set +e
+pointer_output=$(run_runner 2>&1)
+pointer_status=$?
+set -e
+if [ "$pointer_status" -eq 0 ]; then
+    echo "Expected malformed runtime artifact pointer to fail the runner" >&2
+    exit 1
+fi
+if [[ "$pointer_output" != *"Invalid runtime directory"* ]]; then
+    echo "Expected actionable malformed runtime pointer diagnostic" >&2
+    echo "$pointer_output" >&2
     exit 1
 fi
 
