@@ -180,7 +180,6 @@ where
         plan.options.timeout_ms = Some(timeout_ms);
     }
     prepare_plan_for_execution(&mut plan, Some(&run_id))?;
-    agent_task_lifecycle::mark_running(&run_id)?;
     let harvest_context =
         match crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
             Ok(context) => context,
@@ -194,6 +193,7 @@ where
                 return Err(error);
             }
         };
+    agent_task_lifecycle::mark_running(&run_id)?;
     run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
