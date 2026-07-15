@@ -13,6 +13,35 @@ pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
 pub const ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
 pub const RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA: &str = "homeboy/runtime-agent-artifact-paths/v1";
 
+// Drift guard: the lab-contract type layer (`command_contract::lab::handoff`)
+// carries its own copies of these identifiers so it stays free of any upward
+// dependency on core. If either literal changes here, these assertions force the
+// matching update there (and vice versa).
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = {
+    assert!(str_eq(
+        crate::command_contract::RUNNER_ARTIFACT_MANIFEST_FILE,
+        ARTIFACT_MANIFEST_FILE
+    ));
+    assert!(str_eq(
+        crate::command_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+        ARTIFACT_MANIFEST_SCHEMA
+    ));
+};
+
 /// Stable runtime-agent artifact path for an agent execution transcript.
 pub const RUNTIME_AGENT_TRANSCRIPT_ARTIFACT_PATH: &str = "artifacts/agent-loop/transcript.json";
 

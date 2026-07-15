@@ -12,8 +12,14 @@ pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
 pub const RUNNER_ARTIFACT_MANIFEST_REF_NAME: &str = "runner-artifact-manifest-ref";
 pub const RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA: &str = "homeboy/runner-artifact-manifest-ref/v1";
-pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = crate::core::artifacts::ARTIFACT_MANIFEST_SCHEMA;
-pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = crate::core::artifacts::ARTIFACT_MANIFEST_FILE;
+// Canonical artifact-manifest identifiers. These MUST stay in sync with
+// `core::artifact_manifest::{ARTIFACT_MANIFEST_SCHEMA, ARTIFACT_MANIFEST_FILE}`;
+// a compile-time assertion in that module guards against drift. Defined locally
+// here so this lab-contract type layer carries no upward dependency on core.
+pub const ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
+pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
+pub const RUNNER_ARTIFACT_MANIFEST_SCHEMA: &str = ARTIFACT_MANIFEST_SCHEMA;
+pub const RUNNER_ARTIFACT_MANIFEST_FILE: &str = ARTIFACT_MANIFEST_FILE;
 pub const RUNNER_ARTIFACT_ROOT_DIR_SUFFIX: &str = "-homeboy-artifacts";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
