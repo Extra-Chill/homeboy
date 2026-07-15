@@ -527,6 +527,7 @@ where
                         &mut outcome,
                         running_task.adoption.as_ref(),
                     );
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
@@ -800,6 +801,24 @@ where
             artifact_bindings,
         }
     }
+}
+
+fn persist_resolved_provider_model(outcome: &mut AgentTaskOutcome, request: &AgentTaskRequest) {
+    let Some(model) = request
+        .executor
+        .model()
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return;
+    };
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome
+        .metadata
+        .as_object_mut()
+        .expect("outcome metadata object")
+        .insert("model".to_string(), serde_json::json!(model));
 }
 
 #[derive(Debug, Clone)]
