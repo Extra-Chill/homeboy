@@ -2,8 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::secret_env_plan::SecretEnvPlan;
-
 pub const ENV_MATERIALIZATION_PLAN_SCHEMA: &str = "homeboy/env-materialization-plan/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,37 +57,6 @@ impl Default for EnvMaterializationPlan {
 }
 
 impl EnvMaterializationPlan {
-    pub fn from_secret_env_plan(plan: &SecretEnvPlan) -> Self {
-        let mut env_plan = Self {
-            public_env: plan.public_env.clone(),
-            secret_refs: normalize_names(plan.secret_env_names())
-                .into_iter()
-                .map(|name| EnvSecretRef { name, owner: None })
-                .collect(),
-            source_env_bindings: plan
-                .secret_env_requirements()
-                .into_iter()
-                .filter_map(|requirement| {
-                    let source_env_refs = normalize_names(requirement.source_env_candidates());
-                    if source_env_refs.is_empty() {
-                        None
-                    } else {
-                        Some(EnvSourceEnvBinding {
-                            name: requirement.name,
-                            source_env_refs,
-                        })
-                    }
-                })
-                .collect(),
-            inherited_allowed_env_names: normalize_names(
-                plan.inheritance.allowed_env_names.clone(),
-            ),
-            ..Self::default()
-        };
-        env_plan.normalize();
-        env_plan
-    }
-
     pub fn is_empty(&self) -> bool {
         self.public_env.is_empty()
             && self.secret_refs.is_empty()
@@ -173,31 +140,6 @@ fn normalize_source_env_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvRequirement};
-
-    #[test]
-    fn env_materialization_plan_carries_source_env_refs_without_values() {
-        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
-            name: "SERVICE_TOKEN".to_string(),
-            required: true,
-            source_env_names: vec!["SOURCE_SERVICE_TOKEN".to_string()],
-            refresh: None,
-        }]);
-
-        let env_plan = EnvMaterializationPlan::from_secret_env_plan(&plan);
-        let json = serde_json::to_string(&env_plan).expect("serializes env materialization plan");
-
-        assert!(json.contains("SERVICE_TOKEN"));
-        assert!(json.contains("SOURCE_SERVICE_TOKEN"));
-        assert!(!json.contains("secret-value"));
-        assert_eq!(
-            env_plan.source_env_bindings,
-            vec![EnvSourceEnvBinding {
-                name: "SERVICE_TOKEN".to_string(),
-                source_env_refs: vec!["SOURCE_SERVICE_TOKEN".to_string()],
-            }]
-        );
-    }
 
     #[test]
     fn env_materialization_plan_keeps_secret_values_out_of_handoff_metadata() {

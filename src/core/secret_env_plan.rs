@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::env_materialization_plan::EnvMaterializationPlan;
+use crate::core::env_materialization_plan::{
+    EnvMaterializationPlan, EnvSecretRef, EnvSourceEnvBinding,
+};
 use crate::core::redaction::RedactionPolicy;
 
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
@@ -355,6 +357,42 @@ impl Default for SecretEnvPlan {
 }
 
 impl SecretEnvPlan {
+    /// Project this secret-env plan into a public `EnvMaterializationPlan`.
+    ///
+    /// Lives here (rather than as `EnvMaterializationPlan::from_secret_env_plan`)
+    /// so `env_materialization_plan` carries no dependency on `secret_env_plan` —
+    /// the dependency flows one way, `secret_env_plan -> env_materialization_plan`.
+    pub fn to_env_materialization_plan(&self) -> EnvMaterializationPlan {
+        let mut env_plan = EnvMaterializationPlan {
+            public_env: self.public_env.clone(),
+            secret_refs: normalize_names(self.secret_env_names())
+                .into_iter()
+                .map(|name| EnvSecretRef { name, owner: None })
+                .collect(),
+            source_env_bindings: self
+                .secret_env_requirements()
+                .into_iter()
+                .filter_map(|requirement| {
+                    let source_env_refs = normalize_names(requirement.source_env_candidates());
+                    if source_env_refs.is_empty() {
+                        None
+                    } else {
+                        Some(EnvSourceEnvBinding {
+                            name: requirement.name,
+                            source_env_refs,
+                        })
+                    }
+                })
+                .collect(),
+            inherited_allowed_env_names: normalize_names(
+                self.inheritance.allowed_env_names.clone(),
+            ),
+            ..EnvMaterializationPlan::default()
+        };
+        env_plan.normalize();
+        env_plan
+    }
+
     pub fn materialize_request(
         request: SecretEnvPlanMaterializeRequest,
     ) -> Result<SecretEnvPlanMaterialization, SecretEnvPlanDiagnosticError> {
@@ -1037,6 +1075,30 @@ fn default_require_declaration() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_env_materialization_plan_carries_source_env_refs_without_values() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "SERVICE_TOKEN".to_string(),
+            required: true,
+            source_env_names: vec!["SOURCE_SERVICE_TOKEN".to_string()],
+            refresh: None,
+        }]);
+
+        let env_plan = plan.to_env_materialization_plan();
+        let json = serde_json::to_string(&env_plan).expect("serializes env materialization plan");
+
+        assert!(json.contains("SERVICE_TOKEN"));
+        assert!(json.contains("SOURCE_SERVICE_TOKEN"));
+        assert!(!json.contains("secret-value"));
+        assert_eq!(
+            env_plan.source_env_bindings,
+            vec![EnvSourceEnvBinding {
+                name: "SERVICE_TOKEN".to_string(),
+                source_env_refs: vec!["SOURCE_SERVICE_TOKEN".to_string()],
+            }]
+        );
+    }
 
     #[test]
     fn secret_env_plan_materializes_public_and_secret_values() {
