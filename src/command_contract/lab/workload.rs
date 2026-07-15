@@ -48,7 +48,7 @@ pub struct RunnerWorkloadAgentTask {
     pub plan_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_provider_policy:
-        Option<crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy>,
+        Option<crate::core::agent_task_schedule::ResolvedAgentTaskProviderPolicy>,
     pub dispatch_kind: RunnerWorkloadAgentTaskDispatchKind,
     pub lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 }
