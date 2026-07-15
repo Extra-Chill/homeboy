@@ -24,7 +24,7 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 }
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
-    if request.placement == crate::cli_surface::Placement::Auto
+    if request.placement == homeboy_cli_contract::Placement::Auto
         && crate::core::resource_policy_context::is_managed_runner_placement_context()
     {
         return Ok(LabOffloadOutcome::RunLocal {
@@ -59,7 +59,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 lab_runner_support_summary().unsupported_message,
             ));
         }
-        if request.placement == crate::cli_surface::Placement::Lab {
+        if request.placement == homeboy_cli_contract::Placement::Lab {
             if is_build_command(request.normalized_args) {
                 return Err(unsupported_build_lab_error("placement_lab", None));
             }
@@ -83,7 +83,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
-        if request.placement == crate::cli_surface::Placement::Lab {
+        if request.placement == homeboy_cli_contract::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         plan = disabled_select_runner_plan(plan, reason);
@@ -95,7 +95,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     // preflight snapshot captured by CliRuntime: cold controllers stay local,
     // while warm/hot controllers may use an eligible default Lab runner.
     if !contract.routing_policy.default_lab_offload
-        && request.placement == crate::cli_surface::Placement::Auto
+        && request.placement == homeboy_cli_contract::Placement::Auto
         && contract.source_path_mode != crate::command_contract::LabSourcePathMode::RunnerResident
         && crate::core::resource_policy_context::captured_context()
             .is_some_and(|context| context.severity != "ok")
@@ -130,10 +130,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         resolve_lab_runner_selection(&contract, request.explicit_runner, request.placement)?;
     selection_timer.finish();
     let Some(selection) = selection else {
-        if request.placement == crate::cli_surface::Placement::Auto {
+        if request.placement == homeboy_cli_contract::Placement::Auto {
             fail_if_no_default_runner_accepts_jobs(&contract)?;
         }
-        let reason = if request.placement == crate::cli_surface::Placement::Local {
+        let reason = if request.placement == homeboy_cli_contract::Placement::Local {
             "placement_local_override"
         } else {
             "no_default_runner"
@@ -148,7 +148,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
-        if request.placement == crate::cli_surface::Placement::Lab {
+        if request.placement == homeboy_cli_contract::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         // No runner was selected: record the skip reason as the fallback so the
@@ -224,7 +224,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                         "release_gate",
                     ));
                 }
-                if request.placement == crate::cli_surface::Placement::Auto
+                if request.placement == homeboy_cli_contract::Placement::Auto
                     && matches!(selection.source, LabRunnerSelectionSource::Default)
                 {
                     let reason = format!("runner_unavailable: {}", error.message);
@@ -283,7 +283,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     "release_gate",
                 ));
             }
-            if request.placement == crate::cli_surface::Placement::Lab {
+            if request.placement == homeboy_cli_contract::Placement::Lab {
                 return Err(local_execution_denied_error(
                     &reason,
                     Some(&selection.runner_id),

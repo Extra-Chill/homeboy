@@ -491,7 +491,7 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
 pub(super) fn resolve_lab_runner_selection(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    placement: crate::cli_surface::Placement,
+    placement: homeboy_cli_contract::Placement,
 ) -> Result<Option<LabRunnerSelection>> {
     let config = crate::core::defaults::load_config();
     let deny_local_bench = config.bench.local_execution.is_denied();
@@ -520,7 +520,7 @@ pub(super) fn resolve_lab_runner_selection(
 pub(super) fn resolve_lab_runner_selection_from_placement(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    placement: crate::cli_surface::Placement,
+    placement: homeboy_cli_contract::Placement,
     deny_local_bench: bool,
     release_gate_local_hot_allowed: bool,
     default_runner: Option<String>,
@@ -543,7 +543,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         }));
     }
 
-    if placement == crate::cli_surface::Placement::Lab && !command.is_portable() {
+    if placement == homeboy_cli_contract::Placement::Lab && !command.is_portable() {
         return Err(Error::validation_invalid_argument(
             "placement",
             "--placement lab is unavailable for this local-only command",
@@ -563,7 +563,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
     // closed with a clear diagnostic unless the operator explicitly opts back
     // into local execution via config/env, in which case the override is recorded
     // by the offload metadata.
-    if command.routing_policy.release_gate && placement == crate::cli_surface::Placement::Local {
+    if command.routing_policy.release_gate && placement == homeboy_cli_contract::Placement::Local {
         if let Some(runner_id) = default_runner.as_ref() {
             if !release_gate_local_hot_allowed {
                 return Err(release_gate_local_hot_denied_error(
@@ -577,12 +577,12 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         }
     }
 
-    if placement == crate::cli_surface::Placement::Local || !command.is_portable() {
+    if placement == homeboy_cli_contract::Placement::Local || !command.is_portable() {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }
 
-    if placement == crate::cli_surface::Placement::Lab && default_runner.is_none() {
+    if placement == homeboy_cli_contract::Placement::Lab && default_runner.is_none() {
         return Err(Error::validation_invalid_argument(
             "placement",
             format!(

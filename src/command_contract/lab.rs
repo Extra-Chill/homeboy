@@ -55,19 +55,9 @@ const LAB_CLI_ARGUMENT_IDS: &[&str] = &[
     "runner_workspace_root",
 ];
 
-impl crate::cli_surface::Placement {
-    /// Explicitly permit controller execution when an intended Lab offload
-    /// cannot proceed. `Auto` retains the existing default routing behavior.
-    pub const fn allows_local_fallback(self) -> bool {
-        matches!(self, Self::LabOrLocal)
-    }
-
-    /// Whether the operator requested a Lab attempt instead of leaving the
-    /// command to its automatic routing policy.
-    pub const fn requests_lab(self) -> bool {
-        matches!(self, Self::Lab | Self::LabOrLocal)
-    }
-}
+// Inherent methods for `Placement` (`allows_local_fallback`, `requests_lab`)
+// now live in the `homeboy-cli-contract` crate alongside the enum definition,
+// since inherent impls must be defined in the type's home crate.
 
 /// Projects the generated Clap tree onto the commands whose portability
 /// contract can route work through Lab. Parsing remains global so placement
