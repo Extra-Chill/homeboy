@@ -43,6 +43,7 @@ use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_st
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
+pub(crate) use stop_transport_recovery::disconnect_with_force;
 
 use super::daemon_http_get::daemon_get;
 
