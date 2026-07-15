@@ -92,6 +92,45 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
 }
 
 #[test]
+fn runner_handoff_materializes_the_run_before_preparation_failure() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0]
+            .executor
+            .secret_env
+            .push("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__".to_string());
+        std::env::remove_var("__HOMEBOY_TEST_MISSING_RUNNER_HANDOFF_SECRET__");
+
+        let error = run_loaded_plan(
+            plan,
+            Some("controller-proxy-interrupted-runner-handoff"),
+            SucceedingExecutor,
+        )
+        .expect_err("runner preparation fails after receiving the durable plan");
+        let record = lifecycle_status("controller-proxy-interrupted-runner-handoff")
+            .expect("runner-scoped status resolves from its materialized record");
+        let log = agent_task_lifecycle::logs("controller-proxy-interrupted-runner-handoff")
+            .expect("runner-scoped logs resolve from its materialized record");
+        let recovery = run_submitted(
+            "controller-proxy-interrupted-runner-handoff".to_string(),
+            SucceedingExecutor,
+        )
+        .expect("runner-scoped run resolves the materialized terminal record");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+        assert!(!log.events.is_empty());
+        assert_eq!(recovery.exit_code, 1);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "prepare_plan_for_execution"
+        );
+        assert!(agent_task_lifecycle::load_plan(&record.run_id).is_ok());
+    });
+}
+
+#[test]
 fn submitted_terminal_runs_reuse_durable_evidence_without_reexecution() {
     with_isolated_home(|_| {
         for (run_id, expected_exit_code) in [("terminal-succeeded", 0), ("terminal-failed", 1)] {

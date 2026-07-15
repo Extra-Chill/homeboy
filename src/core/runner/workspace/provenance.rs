@@ -158,10 +158,6 @@ pub(crate) fn verify_lab_workspace(
     snapshot: SourceSnapshot,
     lab: serde_json::Value,
 ) -> std::result::Result<VerifiedLabWorkspaceProvenance, String> {
-    snapshot
-        .local_path
-        .as_deref()
-        .ok_or("is missing controller source path")?;
     let recorded_remote_path = snapshot
         .remote_path
         .as_deref()
