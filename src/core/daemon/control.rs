@@ -744,6 +744,18 @@ where
             Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
         ));
     }
+    if !reconciled.preserved_remote_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "job_store",
+            format!(
+                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
+                reconciled.preserved_remote_job_ids.len(),
+                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
+        ));
+    }
     let affected_job_count = reconciled.reconciled_count();
     let replacement = start()?;
     Ok(DaemonLeaselessOrphanReconciliationResult {
@@ -1020,6 +1032,18 @@ pub fn reconcile_leaseless_orphans(
             ),
             None,
             Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
+        ));
+    }
+    if !reconciled.preserved_remote_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            format!(
+                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
+                reconciled.preserved_remote_job_ids.len(),
+                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
         ));
     }
     let affected_job_count = reconciled.reconciled_count();

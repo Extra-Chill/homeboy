@@ -201,6 +201,57 @@ fn version_mismatched_split_view_reconciles_only_after_no_owner_proof() {
                 .status,
             JobStatus::Failed
         );
+        let replay = JobStore::open_without_reconciliation(&path)
+            .expect("reopen terminal store")
+            .reconcile_leaseless_orphan_jobs()
+            .expect("identical version-mismatch reconciliation is idempotent");
+        assert_eq!(replay.reconciled_count(), 0);
+    });
+}
+
+#[test]
+fn version_mismatched_split_view_refuses_preserved_remote_claim_before_replacement() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("stale-lease".to_string());
+        let remote_job = store
+            .submit_remote_runner_job(
+                serde_json::from_value(serde_json::json!({
+                    "runner_id": "remote-runner",
+                    "command": ["true"],
+                }))
+                .expect("remote request"),
+            )
+            .expect("queue remote job");
+        let mut status = leaseless_status(1);
+        status.freshness.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+
+        let error = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(status),
+            || {
+                Ok(vec![
+                    "owner lock acquired".to_string(),
+                    "no daemon process".to_string(),
+                ])
+            },
+            || {
+                let snapshot = path.with_extension("remote-claim.snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || unreachable!("preserved remote claim must block replacement"),
+        )
+        .expect_err("active broker-owned claim blocks version-mismatch recovery");
+
+        assert!(error.message.contains("broker-owned remote job"));
+        assert!(error.message.contains(&remote_job.id.to_string()));
+        assert_eq!(
+            store.get(remote_job.id).expect("remote job").status,
+            JobStatus::Queued
+        );
     });
 }
 
