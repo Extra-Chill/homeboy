@@ -645,6 +645,11 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
 ) -> Option<(Vec<String>, String)> {
     let (args, run_id) = ensure_agent_task_dispatch_run_id_with(args, preferred)?;
     let invocation = CommandInvocation::for_subcommand(&args, "agent-task")?;
+    // A run-plan already carries the controller-owned durable identity in
+    // --record-run-id. Unlike cook, it has no attempt id to derive or inject.
+    if invocation.child_index_matching(&["run-plan"]).is_some() {
+        return Some((args, run_id));
+    }
     let action_index = invocation.child_index_matching(&["cook"])?;
     let existing_attempt_run_id = invocation
         .option_value_after(action_index, "--attempt-run-id")
@@ -664,6 +669,30 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
         )
         .into_args();
     Some((args, attempt_run_id))
+}
+
+#[cfg(test)]
+mod lifecycle_identity_tests {
+    use super::*;
+
+    #[test]
+    fn run_plan_record_identity_is_preserved_for_lab_lifecycle() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@plan.json".to_string(),
+            "--record-run-id".to_string(),
+            "retry-8341".to_string(),
+        ];
+
+        let (rewritten, run_id) = ensure_agent_task_lifecycle_identity_with(&args, None, None)
+            .expect("run-plan has a durable lifecycle identity");
+
+        assert_eq!(rewritten, args);
+        assert_eq!(run_id, "retry-8341");
+    }
 }
 
 /// Resolves the stable per-run isolation token for an agent-task cook offload:

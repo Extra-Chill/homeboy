@@ -33,6 +33,8 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     } else {
         LiveCancellationOutcome::NotRunning
     };
+    let runner_id = record.runner_id().map(str::to_string);
+    let runner_job_id = record.runner_job_id().map(str::to_string);
 
     let cancelled_at = now_timestamp();
     let was_stale_running = record.state == AgentTaskRunState::Running;
@@ -68,6 +70,18 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
                 }),
             );
         }
+        LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
+            metadata.insert(
+                "live_cancellation".to_string(),
+                json!({
+                    "runner_id": runner_id,
+                    "runner_job_id": runner_job_id,
+                    "runner_job_status": job.status,
+                    "runner_job_events": events,
+                    "cancellation": "runner_job_cancel",
+                }),
+            );
+        }
         LiveCancellationOutcome::Unsupported(unsupported) => {
             metadata.insert(
                 "live_cancellation_unsupported".to_string(),
@@ -98,6 +112,10 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
 /// not actually running.
 enum LiveCancellationOutcome {
     Terminated(crate::core::process::ProcessTreeTermination),
+    RunnerJobCancelled {
+        job: crate::core::api_jobs::Job,
+        events: Vec<crate::core::api_jobs::JobEvent>,
+    },
     Unsupported(UnsupportedLiveCancellation),
     NotRunning,
 }
@@ -132,6 +150,13 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
+        if let (Some(runner_id), Some(runner_job_id)) =
+            (runner_id.as_deref(), runner_job_id.as_deref())
+        {
+            if let Ok((job, events)) = cancel_runner_job(runner_id, runner_job_id) {
+                return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+            }
+        }
         let mut recovery_commands = Vec::new();
         if let Some(runner) = runner_id.as_deref() {
             if let Some(job) = runner_job_id.as_deref() {
@@ -178,6 +203,70 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     }
 
     Ok(LiveCancellationOutcome::NotRunning)
+}
+
+fn cancel_runner_job(
+    runner_id: &str,
+    runner_job_id: &str,
+) -> Result<(
+    crate::core::api_jobs::Job,
+    Vec<crate::core::api_jobs::JobEvent>,
+)> {
+    #[cfg(test)]
+    if let Some(result) = test_cancel_hook::take(runner_id, runner_job_id) {
+        return result;
+    }
+
+    crate::core::runners::runner_job_cancel(runner_id, runner_job_id)
+}
+
+#[cfg(test)]
+pub(super) mod test_cancel_hook {
+    use super::*;
+    use std::cell::RefCell;
+
+    type CancelHook = Box<
+        dyn FnMut(
+            &str,
+            &str,
+        ) -> Result<(
+            crate::core::api_jobs::Job,
+            Vec<crate::core::api_jobs::JobEvent>,
+        )>,
+    >;
+
+    thread_local! {
+        static HOOK: RefCell<Option<CancelHook>> = const { RefCell::new(None) };
+    }
+
+    pub(in super::super) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    pub(in super::super) fn install(hook: CancelHook) -> Guard {
+        HOOK.with(|cell| *cell.borrow_mut() = Some(hook));
+        Guard
+    }
+
+    pub(super) fn take(
+        runner_id: &str,
+        runner_job_id: &str,
+    ) -> Option<
+        Result<(
+            crate::core::api_jobs::Job,
+            Vec<crate::core::api_jobs::JobEvent>,
+        )>,
+    > {
+        HOOK.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|hook| hook(runner_id, runner_job_id))
+        })
+    }
 }
 
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
