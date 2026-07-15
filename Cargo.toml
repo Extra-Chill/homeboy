@@ -1,9 +1,8 @@
 [workspace]
 # Internal crates split out of the homeboy monolith to gain per-crate
 # incremental compilation and lower peak build memory. They are path-only
-# dependencies of the `homeboy` crate and are NOT published to crates.io
-# (each sets `publish = false`); the shipped CLI artifact remains the single
-# `homeboy` binary.
+# dependencies of the `homeboy` crate. The entire workspace is private; the
+# shipped CLI artifact remains the single `homeboy` binary.
 members = ["crates/*"]
 
 [package]
@@ -17,6 +16,7 @@ description = "Headless automation for agentic software engineering workflows"
 repository = "https://github.com/Extra-Chill/homeboy"
 homepage = "https://github.com/Extra-Chill/homeboy"
 exclude = ["/artifacts/"]
+publish = false
 
 [lib]
 name = "homeboy"
@@ -35,20 +35,19 @@ name = "bench-audit-self"
 path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
-# Internal workspace crates. Cargo uses the path locally and the version when
-# packaging the publishable homeboy crate for crates.io.
-homeboy-cli-contract = { version = "0.1.0", path = "crates/homeboy-cli-contract" }
-homeboy-error = { version = "0.1.0", path = "crates/homeboy-error" }
-homeboy-finding = { version = "0.1.0", path = "crates/homeboy-finding" }
-homeboy-output = { version = "0.1.0", path = "crates/homeboy-output" }
-homeboy-paths = { version = "0.1.0", path = "crates/homeboy-paths" }
-homeboy-process = { version = "0.1.0", path = "crates/homeboy-process" }
-homeboy-product-identity = { version = "0.1.0", path = "crates/homeboy-product-identity" }
-homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-primitives" }
-homeboy-cli = { version = "0.1.0", path = "crates/homeboy-cli" }
-homeboy-core = { version = "0.1.0", path = "crates/homeboy-core" }
-homeboy-lab-contract = { version = "0.1.0", path = "crates/homeboy-lab-contract" }
-homeboy-redaction = { version = "0.1.0", path = "crates/homeboy-redaction" }
+# Private workspace crates shipped only in the Homeboy binary.
+homeboy-cli-contract = { path = "crates/homeboy-cli-contract" }
+homeboy-error = { path = "crates/homeboy-error" }
+homeboy-finding = { path = "crates/homeboy-finding" }
+homeboy-output = { path = "crates/homeboy-output" }
+homeboy-paths = { path = "crates/homeboy-paths" }
+homeboy-process = { path = "crates/homeboy-process" }
+homeboy-product-identity = { path = "crates/homeboy-product-identity" }
+homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
+homeboy-cli = { path = "crates/homeboy-cli" }
+homeboy-core = { path = "crates/homeboy-core" }
+homeboy-lab-contract = { path = "crates/homeboy-lab-contract" }
+homeboy-redaction = { path = "crates/homeboy-redaction" }
 
 # Core library dependencies
 base64 = "0.22"
