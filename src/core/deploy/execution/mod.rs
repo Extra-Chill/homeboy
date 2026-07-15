@@ -177,10 +177,16 @@ mod tests {
         )
         .expect("prepared artifact should pass local preflight");
 
-        assert_eq!(prepared.artifact_path, Some(durable_artifact));
+        assert_eq!(prepared.artifact_path, Some(durable_artifact.clone()));
         assert!(
             !build_counter.exists(),
             "prepared deployment must not build"
+        );
+        assert!(!prepared.cleanup_local_artifact);
+        drop(prepared);
+        assert!(
+            durable_artifact.exists(),
+            "caller-owned prepared artifacts remain outside downloaded-artifact cleanup"
         );
     }
 

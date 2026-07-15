@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::core::component::{Component, GithubConfig};
 use crate::core::error::{Error, Result};
@@ -53,11 +55,52 @@ pub struct ReleaseArtifact {
     pub sha256: String,
 }
 
+/// Shared payload and runtime-temp pin retained by every lease clone.
+///
+/// Runtime download directories follow the existing retained-artifact policy and
+/// are cleaned by the runtime-temp cleanup command, not when this lease drops.
+#[derive(Debug)]
+struct ReleaseArtifactLeaseInner {
+    artifact: ReleaseArtifact,
+    _runtime_temp_pin: crate::core::engine::temp::RuntimeTempPin,
+}
+
+/// Cloneable ownership of a downloaded release artifact within a deploy scope.
+/// Consumers retain the verified bytes independently without invalidating another
+/// consumer, and the final drop removes only the runtime cleanup pin.
+#[derive(Debug, Clone)]
+pub struct ReleaseArtifactLease(Arc<ReleaseArtifactLeaseInner>);
+
+impl ReleaseArtifactLease {
+    fn new(artifact: ReleaseArtifact) -> Result<Self> {
+        let directory = artifact.path.parent().ok_or_else(|| {
+            Error::internal_io(
+                "Downloaded release artifact has no parent directory".to_string(),
+                Some(artifact.path.display().to_string()),
+            )
+        })?;
+        let runtime_temp_pin = crate::core::engine::temp::pin_runtime_temp_dir(directory)?;
+        Ok(Self(Arc::new(ReleaseArtifactLeaseInner {
+            artifact,
+            _runtime_temp_pin: runtime_temp_pin,
+        })))
+    }
+}
+
+impl Deref for ReleaseArtifactLease {
+    type Target = ReleaseArtifact;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.artifact
+    }
+}
+
 /// Command-scoped immutable artifact cache. A multi-target deploy resolves and
-/// verifies a release asset once, then fans out the same local bytes.
+/// verifies a release asset once, then fans out independent leases for the same
+/// local bytes.
 #[derive(Default)]
 pub struct ReleaseArtifactStore {
-    artifacts: HashMap<String, ReleaseArtifact>,
+    artifacts: HashMap<String, ReleaseArtifactLease>,
 }
 
 impl ReleaseArtifactStore {
@@ -67,7 +110,7 @@ impl ReleaseArtifactStore {
         github_config: &GithubConfig,
         tag: &str,
         artifact_name: &str,
-    ) -> Result<ReleaseArtifact> {
+    ) -> Result<ReleaseArtifactLease> {
         self.get_or_insert_with(github, tag, artifact_name, || {
             resolve_and_download_release_artifact(github, github_config, tag, artifact_name)
         })
@@ -78,7 +121,7 @@ impl ReleaseArtifactStore {
         github: &GitHubRepo,
         tag: &str,
         artifact_name: &str,
-    ) -> Option<ReleaseArtifact> {
+    ) -> Option<ReleaseArtifactLease> {
         self.artifacts
             .get(&format!(
                 "{}/{}/{}:{tag}:{artifact_name}",
@@ -93,7 +136,7 @@ impl ReleaseArtifactStore {
         tag: &str,
         artifact_name: &str,
         resolve: impl FnOnce() -> Result<ReleaseArtifact>,
-    ) -> Result<ReleaseArtifact> {
+    ) -> Result<ReleaseArtifactLease> {
         let key = format!(
             "{}/{}/{}:{tag}:{artifact_name}",
             github.host, github.owner, github.repo
@@ -101,7 +144,7 @@ impl ReleaseArtifactStore {
         if let Some(artifact) = self.artifacts.get(&key) {
             return Ok(artifact.clone());
         }
-        let artifact = resolve()?;
+        let artifact = ReleaseArtifactLease::new(resolve()?)?;
         self.artifacts.insert(key, artifact.clone());
         Ok(artifact)
     }
@@ -1171,36 +1214,117 @@ mod tests {
     }
 
     #[test]
-    fn release_artifact_store_resolves_once_for_multiple_targets() {
+    fn release_artifact_store_leases_deduplicate_and_retain_downloads() {
         let github = GitHubRepo {
             host: "github.example.test".to_string(),
             owner: "example".to_string(),
             repo: "plugin".to_string(),
         };
         let mut store = ReleaseArtifactStore::default();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("plugin.zip");
         let calls = std::cell::Cell::new(0);
-        let artifact = || ReleaseArtifact {
-            path: PathBuf::from("/tmp/plugin.zip"),
-            tag: "v1.2.3".to_string(),
-            commit: Some("abc123".to_string()),
-            url: "https://github.example.test/api/v3/assets/1".to_string(),
-            name: "plugin.zip".to_string(),
-            size: 7,
-            sha256: "abc".to_string(),
-        };
-        store
+        let first = store
             .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
                 calls.set(calls.get() + 1);
-                Ok(artifact())
+                std::fs::write(&path, b"payload").expect("write downloaded artifact");
+                Ok(ReleaseArtifact {
+                    path: path.clone(),
+                    tag: "v1.2.3".to_string(),
+                    commit: Some("abc123".to_string()),
+                    url: "https://github.example.test/api/v3/assets/1".to_string(),
+                    name: "plugin.zip".to_string(),
+                    size: 7,
+                    sha256: "abc".to_string(),
+                })
             })
             .expect("first target resolves asset");
-        store
+        let second = store
             .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
                 calls.set(calls.get() + 1);
-                Ok(artifact())
+                panic!("second identical acquisition must reuse the verified download")
             })
             .expect("second target reuses asset");
+
         assert_eq!(calls.get(), 1, "one metadata lookup/download per run");
+        assert_eq!(
+            std::fs::read(&first.path).expect("first lease reads"),
+            b"payload"
+        );
+
+        drop(first);
+        assert_eq!(
+            std::fs::read(&second.path).expect("second lease remains valid"),
+            b"payload"
+        );
+
+        drop(second);
+        assert!(
+            path.exists(),
+            "runtime download retention policy keeps the final artifact for cleanup"
+        );
+        drop(store);
+        assert!(
+            path.exists(),
+            "dropping the final lease does not invent eager deletion"
+        );
+    }
+
+    #[test]
+    fn release_artifact_leases_pin_runtime_downloads_until_the_final_drop() {
+        crate::test_support::with_isolated_home(|_| {
+            let directory = crate::core::engine::temp::runtime_temp_dir("deploy-download")
+                .expect("runtime download directory");
+            let path = directory.join("plugin.zip");
+            std::fs::write(&path, b"payload").expect("write downloaded artifact");
+            let lease = ReleaseArtifactLease::new(ReleaseArtifact {
+                path,
+                tag: "v1.2.3".to_string(),
+                commit: Some("abc123".to_string()),
+                url: "https://github.example.test/api/v3/assets/1".to_string(),
+                name: "plugin.zip".to_string(),
+                size: 7,
+                sha256: "abc".to_string(),
+            })
+            .expect("pin runtime download");
+            let second = lease.clone();
+
+            let pinned = crate::core::engine::temp::cleanup_runtime_tmp(
+                true,
+                0,
+                Some("deploy-download"),
+                10,
+            )
+            .expect("cleanup while pinned");
+            assert_eq!(pinned.removed_count, 0);
+            assert!(directory.exists());
+
+            drop(lease);
+            let still_pinned = crate::core::engine::temp::cleanup_runtime_tmp(
+                true,
+                0,
+                Some("deploy-download"),
+                10,
+            )
+            .expect("cleanup with second lease");
+            assert_eq!(still_pinned.removed_count, 0);
+            assert!(directory.exists());
+
+            drop(second);
+            assert!(
+                !directory.join(".homeboy-runtime-temp-pin-v1").exists(),
+                "the final lease removes its cleanup pin"
+            );
+            let reclaimed = crate::core::engine::temp::cleanup_runtime_tmp(
+                true,
+                0,
+                Some("deploy-download"),
+                10,
+            )
+            .expect("cleanup after final lease");
+            assert_eq!(reclaimed.removed_count, 1);
+            assert!(!directory.exists());
+        });
     }
 
     #[test]
@@ -1238,6 +1362,42 @@ mod tests {
         assert!(
             store.get(&github, "v1.2.3", "plugin.zip").is_none(),
             "a failed verification must not make bytes available to deploy targets"
+        );
+    }
+
+    #[test]
+    fn failed_acquisition_creates_no_live_entry_or_lease() {
+        let github = GitHubRepo {
+            host: "github.example.test".to_string(),
+            owner: "example".to_string(),
+            repo: "plugin".to_string(),
+        };
+        let mut store = ReleaseArtifactStore::default();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let download_dir = temp.path().join("deploy-download");
+        std::fs::create_dir(&download_dir).expect("download directory");
+        let calls = std::cell::Cell::new(0);
+
+        let error = store
+            .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
+                calls.set(calls.get() + 1);
+                std::fs::write(download_dir.join("plugin.zip"), b"invalid bytes")
+                    .expect("failed download bytes");
+                Err(Error::validation_invalid_argument(
+                    "releaseArtifact",
+                    "Downloaded release artifact 'plugin.zip' SHA-256 digest does not match GitHub Release metadata".to_string(),
+                    None,
+                    None,
+                ))
+            })
+            .expect_err("failed verification must not yield a lease");
+
+        assert_eq!(calls.get(), 1);
+        assert!(error.to_string().contains("SHA-256 digest does not match"));
+        assert!(store.get(&github, "v1.2.3", "plugin.zip").is_none());
+        assert!(
+            !download_dir.join(".homeboy-runtime-temp-pin-v1").exists(),
+            "failed acquisition must not leave a cleanup pin"
         );
     }
 
