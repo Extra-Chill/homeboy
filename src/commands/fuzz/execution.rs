@@ -11,9 +11,10 @@ use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{
-    fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
-    FuzzCoverageReconciliation, FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile,
-    FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
+    fuzz_gate_profile_contract, fuzz_result_envelope_evidence_ref, parse_fuzz_results_file,
+    persist_fuzz_run_result_envelope, FuzzArtifact, FuzzCampaign, FuzzCoverageReconciliation,
+    FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile, FuzzSamplingRequest,
+    FuzzSequencePlan, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
     FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
 };
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
@@ -24,8 +25,7 @@ use uuid::Uuid;
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
-    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
-    persist_fuzz_run_result_envelope,
+    fuzz_result_envelope_from_campaign, gate_status,
 };
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzPlanArgs,
