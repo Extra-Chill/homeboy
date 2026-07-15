@@ -20,6 +20,7 @@
 mod constants;
 mod descriptors;
 mod lab;
+mod lab_routing;
 mod output;
 mod public_variants;
 mod registry;
