@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::spec::{
+use crate::command_contract::CommandDescriptor;
+use crate::command_contract::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
     AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
     AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
@@ -11,13 +12,12 @@ use crate::command_contract::spec::{
     AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
     RUNTIME_REFRESH_LAB_LABEL,
 };
-use crate::command_contract::CommandDescriptor;
 use crate::commands::{adapter, agent_task};
 use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 
-use super::{
+use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LabCommandPortability, LabWorkspaceModePolicy,
     LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES,
 };
@@ -222,7 +222,7 @@ impl Commands {
 
     pub fn lab_route_contract(
         &self,
-    ) -> crate::core::Result<Option<super::LabCommandRouteContract>> {
+    ) -> crate::core::Result<Option<crate::command_contract::LabCommandRouteContract>> {
         let Some(contract) = self.lab_contract() else {
             return Ok(None);
         };

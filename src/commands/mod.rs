@@ -216,6 +216,9 @@ pub mod cleanup;
 pub mod component;
 pub mod config;
 pub mod contract;
+pub mod contract_lab_routing;
+#[cfg(test)]
+mod contract_lab_routing_tests;
 pub mod contract_output_routing;
 pub mod docs;
 pub mod extension;
