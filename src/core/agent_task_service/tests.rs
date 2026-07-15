@@ -203,9 +203,23 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             worktree::CleanupPolicy::PreserveOnFailure
         );
         assert_eq!(observed.workspace.mode, AgentTaskWorkspaceMode::Existing);
-        assert_eq!(
-            observed.workspace.root.as_deref(),
-            Some(record.worktree_path.as_str())
+        // Provider dispatch runs in an isolated per-attempt detached worktree
+        // derived from the managed component worktree, so a timed-out provider
+        // cannot contaminate a later rotation (#8092). The managed worktree
+        // stays the preflight source of truth (its metadata is preserved
+        // below), but the provider must NOT be pointed straight at it.
+        let observed_root = observed
+            .workspace
+            .root
+            .as_deref()
+            .expect("provider received a workspace root");
+        assert_ne!(
+            observed_root, record.worktree_path,
+            "provider must run in an isolated attempt worktree, not the managed worktree"
+        );
+        assert!(
+            observed_root.contains("homeboy-agent-task-attempts"),
+            "attempt worktree should live under the agent-task attempts scratch root, got {observed_root}"
         );
         assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
         assert!(observed.workspace.kind.is_none());
