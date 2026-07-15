@@ -2,8 +2,8 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::command_contract::lab_runner_unsupported_hint;
 use crate::core::lab_contract::LabCommandPortability;
+use crate::core::runner::resolve_lab_runner_hint;
 use crate::core::{Error, ErrorCode, Result};
 
 use super::daemon_freshness::repair_or_fail;
@@ -533,7 +533,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
                 "runner",
                 message,
                 Some(runner_id.to_string()),
-                Some(vec![lab_runner_unsupported_hint()]),
+                Some(vec![resolve_lab_runner_hint().hint]),
             ));
         }
 
@@ -549,7 +549,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
             "placement",
             "--placement lab is unavailable for this local-only command",
             None,
-            Some(vec![lab_runner_unsupported_hint()]),
+            Some(vec![resolve_lab_runner_hint().hint]),
         ));
     }
 

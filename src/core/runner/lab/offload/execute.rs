@@ -44,7 +44,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             Some(unsupported_runner_hints(
                 runner_id,
                 request.normalized_args,
-                lab_runner_support_summary().hint,
+                resolve_lab_runner_hint().hint,
             )),
         )
     };
@@ -56,7 +56,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             }
             return Err(unsupported_runner_error(
                 runner_id,
-                lab_runner_support_summary().unsupported_message,
+                resolve_lab_runner_hint().unsupported_message,
             ));
         }
         if request.placement == homeboy_cli_contract::Placement::Lab {

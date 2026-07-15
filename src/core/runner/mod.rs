@@ -22,8 +22,9 @@ pub use broker_auth::{
 mod capabilities;
 mod cli_resolver;
 pub use cli_resolver::{
-    resolve_agent_task_dispatch, resolve_command_label, set_agent_task_dispatch_resolver,
-    set_command_label_resolver,
+    resolve_agent_task_dispatch, resolve_command_label, resolve_lab_runner_hint,
+    set_agent_task_dispatch_resolver, set_command_label_resolver, set_lab_runner_hint_provider,
+    LabRunnerHint,
 };
 mod command_path;
 mod connection;
