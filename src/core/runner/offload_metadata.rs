@@ -1,6 +1,6 @@
-use crate::command_contract::RunnerWorkload;
 use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::gate::{collect_plan_gate_results, HomeboyGateResult};
+use crate::core::lab_contract::RunnerWorkload;
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
 use crate::core::proof::{HomeboyProof, HomeboyProofProvenance, HomeboyProofRunner};
 
@@ -186,13 +186,13 @@ mod tests {
         lab_offload_metadata_with_workspace_mapping_and_runner_workload,
         LAB_OFFLOAD_METADATA_SCHEMA,
     };
-    use crate::command_contract::{
+    use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
+    use crate::core::lab_contract::{
         RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCommandFamily,
         RunnerWorkloadExtensionRevision, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
         RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
         RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
     };
-    use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
     use crate::core::proof::{HomeboyProof, HomeboyProofProvenance};
 

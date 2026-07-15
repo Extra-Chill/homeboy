@@ -1699,7 +1699,7 @@ mod tests {
         )
         .build();
         let command_contract = crate::core::runner::LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract::portable(
+            command: crate::core::lab_contract::LabCommandContract::portable(
                 "tunnel preview-client start",
                 None,
                 false,

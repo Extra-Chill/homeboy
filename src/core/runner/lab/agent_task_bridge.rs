@@ -10,10 +10,6 @@
 
 use std::fs;
 
-use crate::command_contract::{
-    AgentTaskDispatchIdentity, RunnerWorkloadAgentTask,
-    RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-};
 use crate::core::agent_task::AgentTaskEvidenceRef;
 use crate::core::agent_task_lifecycle::{
     cook_attempt_run_id, record_runner_job_identity, AgentTaskArtifactRef, AgentTaskRunRecord,
@@ -31,6 +27,10 @@ use crate::core::api_jobs::JobEvent;
 use crate::core::api_jobs::JobEventKind;
 use crate::core::artifact_manifest::ArtifactManifest;
 use crate::core::engine::local_files::write_file_owner_only;
+use crate::core::lab_contract::{
+    AgentTaskDispatchIdentity, RunnerWorkloadAgentTask,
+    RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+};
 use crate::core::notification_route::NotificationRoute;
 use crate::core::runner::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
@@ -1037,7 +1037,7 @@ mod tests {
             run_id: "run-typed-no-event".to_string(),
             plan_ref: Some("@/tmp/plan.json".to_string()),
             resolved_provider_policy: None,
-            dispatch_kind: crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+            dispatch_kind: crate::core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
             lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
         };
 
@@ -1060,7 +1060,7 @@ mod tests {
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: None,
                 dispatch_kind:
-                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    crate::core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };
@@ -1117,7 +1117,7 @@ mod tests {
                 plan_ref: Some(format!("@{}", plan_path.display())),
                 resolved_provider_policy: None,
                 dispatch_kind:
-                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    crate::core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };
@@ -1249,7 +1249,7 @@ mod tests {
                     },
                 ),
                 dispatch_kind:
-                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                    crate::core::lab_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
                 lifecycle_mirror_policy:
                     RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
             };

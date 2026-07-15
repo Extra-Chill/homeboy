@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::command_contract::{LabRoutingPolicy, RunnerWorkloadCapability};
+use crate::core::lab_contract::{LabRoutingPolicy, RunnerWorkloadCapability};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CommandExecutionPlan {

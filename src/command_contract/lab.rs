@@ -110,12 +110,14 @@ fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {
     )
 }
 
-mod handoff;
 mod support;
-mod types;
-mod workload;
 
-pub use handoff::*;
+// The lab contract types (workload / handoff / typed identifiers) and the
+// lab-runnable command labels now live in the homeboy-lab-contract crate.
+// Re-exported here so existing `command_contract::lab::*` (and the top-level
+// `command_contract::*`) call sites are unchanged.
+pub use homeboy_lab_contract::lab::handoff::*;
+pub use homeboy_lab_contract::lab::labels::*;
+pub use homeboy_lab_contract::lab::types::*;
+pub use homeboy_lab_contract::lab::workload::*;
 pub use support::*;
-pub use types::*;
-pub use workload::*;

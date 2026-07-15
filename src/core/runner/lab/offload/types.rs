@@ -52,14 +52,14 @@ pub struct LabJobOverrides {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabOffloadCommand {
-    pub command: crate::command_contract::LabCommandContract,
+    pub command: crate::core::lab_contract::LabCommandContract,
     pub required_extensions: Vec<String>,
-    pub required_capabilities: Vec<crate::command_contract::RunnerWorkloadCapability>,
-    pub workload: Option<crate::command_contract::LabRigWorkloadArguments>,
+    pub required_capabilities: Vec<crate::core::lab_contract::RunnerWorkloadCapability>,
+    pub workload: Option<crate::core::lab_contract::LabRigWorkloadArguments>,
 }
 
 impl std::ops::Deref for LabOffloadCommand {
-    type Target = crate::command_contract::LabCommandContract;
+    type Target = crate::core::lab_contract::LabCommandContract;
 
     fn deref(&self) -> &Self::Target {
         &self.command
@@ -72,8 +72,8 @@ impl std::ops::DerefMut for LabOffloadCommand {
     }
 }
 
-pub type LabOffloadSourcePathMode = crate::command_contract::LabSourcePathMode;
-pub type LabOffloadWorkspaceModePolicy = crate::command_contract::LabWorkspaceModePolicy;
+pub type LabOffloadSourcePathMode = crate::core::lab_contract::LabSourcePathMode;
+pub type LabOffloadWorkspaceModePolicy = crate::core::lab_contract::LabWorkspaceModePolicy;
 
 pub enum LabOffloadOutcome {
     RunLocal {

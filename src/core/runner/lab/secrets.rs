@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::command_contract::LabSecretEnvSource;
 use crate::core::agent_tasks::provider::{
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
@@ -19,6 +18,7 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::core::lab_contract::LabSecretEnvSource;
 use crate::core::secret_env_plan::{
     SecretEnvHandoffEntry, SecretEnvPlan, SecretEnvPlanMaterializeRequest,
 };

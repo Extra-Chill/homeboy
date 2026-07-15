@@ -1,4 +1,6 @@
-use crate::command_contract::{
+use crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+use crate::core::error::{Error, Result};
+use crate::core::lab_contract::{
     RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
     RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
     RunnerWorkloadCapability, RunnerWorkloadCommandFamily, RunnerWorkloadExtensionRevision,
@@ -6,8 +8,6 @@ use crate::command_contract::{
     RunnerWorkloadSecrets, RunnerWorkloadState, RunnerWorkloadWorkspaceMappings,
     RUNNER_WORKLOAD_SCHEMA,
 };
-use crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
-use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use clap::Parser;
@@ -608,7 +608,7 @@ pub(crate) fn runner_workload_with_result_refs(
     workload.result_refs.artifacts = artifacts
         .iter()
         .map(
-            |artifact| crate::command_contract::RunnerWorkloadArtifactRef {
+            |artifact| crate::core::lab_contract::RunnerWorkloadArtifactRef {
                 id: artifact.id.clone(),
                 name: artifact.name.clone(),
                 path: artifact.path.clone(),
@@ -689,7 +689,7 @@ mod tests {
 
     fn command() -> LabOffloadCommand {
         LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract::portable(
+            command: crate::core::lab_contract::LabCommandContract::portable(
                 "trace",
                 None,
                 true,

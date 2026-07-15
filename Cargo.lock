@@ -699,6 +699,7 @@ dependencies = [
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
+ "homeboy-lab-contract",
  "homeboy-output",
  "homeboy-paths",
  "homeboy-process",
@@ -756,6 +757,16 @@ dependencies = [
 name = "homeboy-finding"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "homeboy-lab-contract"
+version = "0.1.0"
+dependencies = [
+ "homeboy-error",
+ "homeboy-redaction",
  "serde",
  "serde_json",
 ]

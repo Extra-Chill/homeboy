@@ -11,13 +11,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{
     DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, RunnerJobLifecycleMetadata,
 };
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::core::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
+use crate::core::lab_contract::RunnerWorkload;
 use crate::core::paths;
 use crate::core::process::pid_is_running;
 use crate::core::runner::{

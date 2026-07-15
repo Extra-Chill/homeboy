@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
-use crate::command_contract::{run_location_index_path, RunnerWorkload};
 use crate::core::api_jobs::{Job, JobEvent, JobStatus, RunnerJobLifecycleMetadata};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, ErrorCode, Result};
+use crate::core::lab_contract::{run_location_index_path, RunnerWorkload};
 use crate::core::redaction::redact_argv;
 use crate::core::runner::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_workload_result;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -392,7 +392,7 @@ pub(super) fn detached_handoff_output(
         mirror_run_id.as_deref(),
         DaemonJobHandoffState::InFlight,
     );
-    let envelope = crate::command_contract::RunnerHandoffEnvelope::detached_lab_offload(
+    let envelope = crate::core::lab_contract::RunnerHandoffEnvelope::detached_lab_offload(
         &runner.id,
         &job_id,
         cwd.clone(),

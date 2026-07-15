@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::command_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::agent_task::{AgentTaskArtifactDeclaration, AgentTaskRequest};
 use crate::core::env_materialization_plan::EnvMaterializationPlan;
+use crate::core::lab_contract::{RunnerWorkload, RunnerWorkloadArtifactRef};
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -662,14 +662,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::command_contract::{
-        RunnerWorkloadAssignment, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
-        RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-        RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
-    };
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskPolicy, AgentTaskWorkspace, AgentTaskWorkspaceMode,
         AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use crate::core::lab_contract::{
+        RunnerWorkloadAssignment, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
+        RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
+        RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
     };
 
     #[test]

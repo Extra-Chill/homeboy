@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::command_contract::{
-    LabCommandContract, LabCommandPortability, LabCommandRouteContract, LabSourcePathMode,
-    LabWorkspaceModePolicy,
-};
 use crate::core::command_execution_plan::{
     CommandSourceMaterialization, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
+};
+use crate::core::lab_contract::{
+    LabCommandContract, LabCommandPortability, LabCommandRouteContract, LabSourcePathMode,
+    LabWorkspaceModePolicy,
 };
 use crate::core::observation::records::RunEvidenceCommands;
 use crate::core::observation::RunStatus;
@@ -351,7 +351,7 @@ fn attach_handoff_metadata(metadata: &mut serde_json::Value, stdout: &str) {
         return;
     };
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some(crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA)
+        != Some(crate::core::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA)
     {
         return;
     }
@@ -588,13 +588,13 @@ fn execute_lab_offload_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::{
-        LabCommandContract, LabCommandPortability, LabRoutingPolicy, LabSourcePathMode,
-        LAB_CAPABILITY_PLAYWRIGHT, LAB_TRACE_EXTRA_CAPABILITIES,
-    };
     use crate::core::command_execution_plan::{
         CommandPortability, CommandSourceMaterialization, CommandSourcePolicy,
         CommandWorkspacePolicy,
+    };
+    use crate::core::lab_contract::{
+        LabCommandContract, LabCommandPortability, LabRoutingPolicy, LabSourcePathMode,
+        LAB_CAPABILITY_PLAYWRIGHT, LAB_TRACE_EXTRA_CAPABILITIES,
     };
     use crate::core::plan::{HomeboyPlan, PlanKind};
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -639,7 +639,7 @@ mod tests {
             capture_mutation_patch: true,
             mutation_flag: Some("--keep-overlay"),
             extra_required_capabilities: LAB_TRACE_EXTRA_CAPABILITIES,
-            secret_env_sources: crate::command_contract::LAB_TRACE_SECRET_ENV_SOURCES,
+            secret_env_sources: crate::core::lab_contract::LAB_TRACE_SECRET_ENV_SOURCES,
             routing_policy: LabRoutingPolicy {
                 default_lab_offload: true,
                 infer_source_path_tools: false,

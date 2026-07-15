@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::error::{Error, Result};
+use homeboy_error::{Error, Result};
 
 pub const NOTIFICATION_ROUTE_METADATA_KEY: &str = "notification_route";
 pub const NOTIFICATION_TRANSPORT_ENV: &str = "HOMEBOY_NOTIFICATION_TRANSPORT";

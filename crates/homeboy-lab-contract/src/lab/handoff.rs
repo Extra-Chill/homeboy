@@ -1,8 +1,8 @@
 //! Durable handoff and run-location evidence for detached Lab jobs.
 
-use crate::core::path_materialization::PathMaterializationPlan;
+use crate::path_materialization::PathMaterializationPlan;
 
-use super::RunnerWorkloadArtifactRef;
+use super::workload::RunnerWorkloadArtifactRef;
 
 pub const RUNNER_HANDOFF_ENVELOPE_SCHEMA: &str = "homeboy/runner-exec-handoff/v1";
 pub const RUN_LOCATION_INDEX_SCHEMA: &str = "homeboy/run-location-index/v1";
@@ -257,7 +257,7 @@ impl RunnerHandoffEnvelope {
 }
 
 impl RunnerHandoffArtifactManifestRef {
-    pub(crate) fn for_remote_cwd(remote_cwd: &str) -> Self {
+    pub fn for_remote_cwd(remote_cwd: &str) -> Self {
         Self {
             schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
             manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),

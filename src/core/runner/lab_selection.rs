@@ -2,7 +2,8 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::command_contract::{lab_runner_unsupported_hint, LabCommandPortability};
+use crate::command_contract::lab_runner_unsupported_hint;
+use crate::core::lab_contract::LabCommandPortability;
 use crate::core::{Error, ErrorCode, Result};
 
 use super::daemon_freshness::repair_or_fail;

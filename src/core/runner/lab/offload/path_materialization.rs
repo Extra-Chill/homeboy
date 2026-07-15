@@ -63,13 +63,13 @@ impl PathMaterializationPlanner {
 
 pub(crate) fn rig_declared_path_input_extra_workspaces(
     args: &[String],
-    workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
+    workload: Option<&crate::core::lab_contract::LabRigWorkloadArguments>,
     primary_source_path: &Path,
 ) -> Result<Vec<ExtraLabWorkspace>> {
     if !workload.is_some_and(|workload| {
         matches!(
             workload.kind,
-            crate::command_contract::LabRigWorkloadKind::Bench
+            crate::core::lab_contract::LabRigWorkloadKind::Bench
         )
     }) {
         return Ok(Vec::new());
@@ -142,7 +142,7 @@ mod tests {
             fixture.display().to_string(),
         ];
         let mut contract = LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract::portable(
+            command: crate::core::lab_contract::LabCommandContract::portable(
                 "bench",
                 None,
                 false,
@@ -152,8 +152,8 @@ mod tests {
             required_capabilities: Vec::new(),
             workload: None,
         };
-        contract.workload = Some(crate::command_contract::LabRigWorkloadArguments {
-            kind: crate::command_contract::LabRigWorkloadKind::Bench,
+        contract.workload = Some(crate::core::lab_contract::LabRigWorkloadArguments {
+            kind: crate::core::lab_contract::LabRigWorkloadKind::Bench,
             rig_ids: vec!["fixture-matrix".to_string()],
             component: None,
             extension_overrides: Vec::new(),
