@@ -23,9 +23,9 @@ use super::committed_changes::{committed_changes_patch, CommittedChangesPatch};
 use super::patch::write_normalized_patch;
 pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_content};
 use super::types::{
-    AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport, AgentTaskPromotionSource, AgentTaskPromotionStatus,
-    AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+    AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
+    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionStatus, AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
 
 mod gate_run;
@@ -48,6 +48,181 @@ pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionR
                 "target_workspace": report.target.path,
             });
         }
+    }
+    Ok(report)
+}
+
+/// Rebuild a full proof for a clean candidate that was already applied before
+/// its deterministic gates failed. The reverse apply check proves the original
+/// artifact remains in the candidate before any gate result is trusted.
+pub fn resume_promoted_patch(
+    options: AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+) -> Result<AgentTaskPromotionReport> {
+    validate_resume_provenance(&options, target_path, previous)?;
+    let source_value: Value = serde_json::from_str(&options.source).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("agent-task promotion source".to_string()),
+            Some(options.source.clone()),
+        )
+    })?;
+    let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
+    let artifact = select_patch_artifact(&outcome, options.artifact_id.as_deref())?;
+    let patch_path = resolve_artifact_path(&artifact, options.source_path.as_deref())?;
+    let patch = std::fs::read_to_string(&patch_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read patch artifact {}", patch_path.display())),
+        )
+    })?;
+    validate_artifact_content(&artifact, &patch)?;
+    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let command_evidence = vec![verify_patch_is_present(
+        target_path,
+        &normalized_patch.content,
+    )?];
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
+    let gates = run_promotion_gates(&options, &mut provider, target_path)?;
+    let target =
+        AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
+    let candidate = if gates.status == AgentTaskPromotionStatus::Applied {
+        Some(crate::core::agent_task_promotion::candidate_fingerprint(
+            &target_path.display().to_string(),
+        )?)
+    } else {
+        None
+    };
+    let mut report = AgentTaskPromotionReport {
+        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
+        status: gates.status,
+        source: promotion_source(&source_kind, &outcome, &options),
+        to_worktree: options.to_worktree,
+        target: target.clone(),
+        patch_artifact: AgentTaskPromotionArtifactRef {
+            id: artifact.id,
+            kind: artifact.kind,
+            path: patch_path.display().to_string(),
+            sha256: artifact.sha256,
+        },
+        changed_files: normalized_patch.changed_files,
+        command_evidence,
+        deterministic_gates: gates.deterministic_gates,
+        gate_results: gates.gate_results,
+        provenance: json!({
+            "source_schema": outcome.schema,
+            "artifact_metadata": artifact.metadata,
+            "worktree_path": target_path,
+            "dependencies_materialized": gates.dependencies_materialized,
+            "candidate": candidate,
+            "resumed_from_gate_failed_promotion": true,
+        }),
+        operator_notification: promotion_notification(gates.status, &target),
+    };
+    if let Some(provenance) = provider.provenance() {
+        report.provenance["worktree_provider"] = provenance.clone();
+    }
+    Ok(report)
+}
+
+fn validate_resume_provenance(
+    options: &AgentTaskPromotionOptions,
+    target_path: &Path,
+    previous: &Value,
+) -> Result<()> {
+    if previous.get("status").and_then(Value::as_str) != Some("gate_failed") {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume requires a durable gate-failed promotion",
+            None,
+            None,
+        ));
+    }
+    let previous_run = previous
+        .get("source_run_id")
+        .and_then(Value::as_str)
+        .or_else(|| previous.pointer("/source/run_id").and_then(Value::as_str));
+    if previous_run != options.source_run_id.as_deref() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume source run does not match the durable gate-failed promotion",
+            None,
+            None,
+        ));
+    }
+    if previous.get("to_worktree").and_then(Value::as_str) != Some(options.to_worktree.as_str())
+        || previous.pointer("/target/worktree").and_then(Value::as_str)
+            != Some(options.to_worktree.as_str())
+        || previous.pointer("/target/path").and_then(Value::as_str)
+            != Some(target_path.to_string_lossy().as_ref())
+    {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume target does not match the durable gate-failed promotion",
+            None,
+            None,
+        ));
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(target_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "promotion resume requires a clean Git worktree",
+            Some(target_path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn verify_patch_is_present(
+    target_path: &Path,
+    patch: &str,
+) -> Result<AgentTaskPromotionCommandReport> {
+    use std::io::Write;
+
+    let mut child = std::process::Command::new("git")
+        .args(["apply", "--reverse", "--check", "-"])
+        .current_dir(target_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(patch.as_bytes())
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let report = AgentTaskPromotionCommandReport {
+        command: vec![
+            "git".to_string(),
+            "apply".to_string(),
+            "--reverse".to_string(),
+            "--check".to_string(),
+            "-".to_string(),
+        ],
+        exit_code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        capture: Default::default(),
+    };
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion resume could not prove the recorded patch is present in the clean target",
+            None,
+            None,
+        ));
     }
     Ok(report)
 }

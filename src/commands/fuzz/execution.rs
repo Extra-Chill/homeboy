@@ -3,29 +3,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use homeboy::core::artifact_ref::EvidenceRef;
-use homeboy::core::artifacts::{
-    record_artifact_postprocess_outputs, run_artifact_postprocess_steps, ArtifactPostprocessContext,
-};
+use homeboy::core::artifacts::{run_artifact_postprocess_steps, ArtifactPostprocessContext};
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{
     fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
-    FuzzCoverageReconciliation, FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile,
-    FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
-    FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA,
+    FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile, FuzzSamplingRequest,
+    FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
 };
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
-use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
+use homeboy::core::observation::{RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
 use uuid::Uuid;
 
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
-    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_from_campaign, gate_status,
-    persist_fuzz_run_result_envelope,
+    fuzz_result_envelope_from_campaign, gate_status,
 };
 use super::types::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzExecutionOutput, FuzzPlanArgs,
@@ -36,8 +32,6 @@ use super::workloads::{
     resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id, select_workload,
     FuzzRigContext,
 };
-
-const FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND: &str = "fuzz_coverage_reconciliation";
 
 pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     if args
@@ -108,9 +102,12 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         workload_id.clone(),
         &target_inventory,
     )?;
-    let sequence_plan_path =
-        persist_fuzz_sequence_plan(&run_dir, execution_request.sequence_plan.as_ref())?;
-    let execution_request_path = persist_fuzz_execution_request(&run_dir, &execution_request)?;
+    let sequence_plan_path = homeboy::core::fuzz::persist_fuzz_sequence_plan(
+        &run_dir,
+        execution_request.sequence_plan.as_ref(),
+    )?;
+    let execution_request_path =
+        homeboy::core::fuzz::persist_fuzz_execution_request(&run_dir, &execution_request)?;
     let runner_output = run_fuzz_extension_script(
         &ctx,
         &args,
@@ -774,7 +771,6 @@ pub(super) fn persist_fuzz_run_evidence(
         .filter(|run_id| !run_id.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("fuzz-{}", Uuid::new_v4()));
-    let store = ObservationStore::open_initialized()?;
     let now = chrono::Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
         "source": "homeboy fuzz run",
@@ -830,67 +826,18 @@ pub(super) fn persist_fuzz_run_evidence(
         rig_id: input.rig_id.map(str::to_string),
         metadata_json: metadata,
     };
-    store.upsert_imported_run(&run)?;
-    let mut evidence_refs = Vec::new();
-    if input.results_path.is_file() {
-        store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
-    }
-    if let Some(execution_request_path) = input.execution_request_path {
-        if execution_request_path.is_file() {
-            store.record_artifact_with_metadata(
-                &run_id,
-                "fuzz_execution_request",
-                execution_request_path,
-                serde_json::json!({
-                    "schema": FUZZ_EXECUTION_REQUEST_SCHEMA,
-                    "source": "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
-                }),
-            )?;
-        }
-    }
-    if let Some(sequence_plan_path) = input.sequence_plan_path {
-        if sequence_plan_path.is_file() {
-            store.record_artifact_with_metadata(
-                &run_id,
-                "fuzz_sequence_plan",
-                sequence_plan_path,
-                serde_json::json!({
-                    "schema": FUZZ_SEQUENCE_PLAN_SCHEMA,
-                    "source": "--sequence-plan",
-                }),
-            )?;
-        }
-    }
-    if let Some(campaign) = input.results {
-        if let Some(execution_request_path) = input.execution_request_path {
-            persist_fuzz_coverage_reconciliation(
-                &store,
-                &run_id,
-                execution_request_path,
+    let envelope = input
+        .results
+        .map(|campaign| {
+            let mut envelope =
+                fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
+            envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
                 campaign,
-            )?;
-        }
-        let mut envelope =
-            fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
-        envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
-            campaign,
-            input.args.effective_gate_profile().as_core(),
-        ));
-        if let Some(artifact) = persist_fuzz_run_result_envelope(Some(&run_id), &envelope)? {
-            evidence_refs.push(fuzz_result_envelope_evidence_ref(&artifact));
-        }
-    }
-    if input.artifacts_dir.is_dir() {
-        store.record_directory_artifact_with_metadata(
-            &run_id,
-            "fuzz_artifacts",
-            input.artifacts_dir,
-            serde_json::json!({
-                "source": "HOMEBOY_FUZZ_ARTIFACTS_DIR",
-                "missing_artifact_refs": input.missing_artifact_refs,
-            }),
-        )?;
-    }
+                input.args.effective_gate_profile().as_core(),
+            ));
+            homeboy::core::Result::Ok(envelope)
+        })
+        .transpose()?;
     let generic_postprocess_outputs = input
         .postprocess
         .iter()
@@ -911,76 +858,21 @@ pub(super) fn persist_fuzz_run_evidence(
             },
         )
         .collect::<Vec<_>>();
-    record_artifact_postprocess_outputs(&store, &run_id, &generic_postprocess_outputs)?;
+    let (_run_id, evidence_refs) =
+        homeboy::core::fuzz::persist_fuzz_run_evidence(homeboy::core::fuzz::FuzzRunEvidence {
+            run: run.clone(),
+            results_path: input.results_path,
+            execution_request_path: input.execution_request_path,
+            sequence_plan_path: input.sequence_plan_path,
+            artifacts_dir: input.artifacts_dir,
+            campaign: input.results,
+            envelope,
+            missing_artifact_refs: input.missing_artifact_refs,
+            postprocess: generic_postprocess_outputs,
+        })?;
     Ok(FuzzRunPersistedEvidence {
         run: Some(run),
         evidence_refs,
-    })
-}
-
-fn persist_fuzz_coverage_reconciliation(
-    store: &ObservationStore,
-    run_id: &str,
-    execution_request_path: &Path,
-    campaign: &FuzzCampaign,
-) -> homeboy::core::Result<Option<homeboy::core::observation::ArtifactRecord>> {
-    if !execution_request_path.is_file() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(execution_request_path).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some(execution_request_path.display().to_string()),
-        )
-    })?;
-    let request: FuzzExecutionRequest = serde_json::from_str(&raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "fuzz_execution_request",
-            format!("failed to parse fuzz execution request for coverage reconciliation: {error}"),
-            Some(execution_request_path.display().to_string()),
-            None,
-        )
-    })?;
-    let reconciliation = homeboy::core::fuzz::reconcile_fuzz_coverage(&request, campaign);
-    let artifact_path = fuzz_coverage_reconciliation_path(execution_request_path);
-    write_fuzz_coverage_reconciliation(&artifact_path, &reconciliation)?;
-    store
-        .record_artifact_with_metadata(
-            run_id,
-            FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND,
-            &artifact_path,
-            serde_json::json!({
-                "schema": FUZZ_COVERAGE_RECONCILIATION_SCHEMA,
-                "source": "homeboy fuzz run",
-                "request_id": reconciliation.request_id,
-                "campaign_id": reconciliation.campaign_id,
-            }),
-        )
-        .map(Some)
-}
-
-fn fuzz_coverage_reconciliation_path(execution_request_path: &Path) -> PathBuf {
-    execution_request_path
-        .parent()
-        .map(|parent| {
-            parent.join(homeboy::core::engine::run_dir::files::FUZZ_COVERAGE_RECONCILIATION)
-        })
-        .unwrap_or_else(|| {
-            PathBuf::from(homeboy::core::engine::run_dir::files::FUZZ_COVERAGE_RECONCILIATION)
-        })
-}
-
-fn write_fuzz_coverage_reconciliation(
-    path: &Path,
-    reconciliation: &FuzzCoverageReconciliation,
-) -> homeboy::core::Result<()> {
-    let raw = serde_json::to_vec_pretty(reconciliation).map_err(|error| {
-        homeboy::core::Error::internal_unexpected(format!(
-            "failed to encode fuzz coverage reconciliation: {error}"
-        ))
-    })?;
-    std::fs::write(path, raw).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
     })
 }
 
@@ -1443,43 +1335,6 @@ pub(super) fn fuzz_runner_env(
         args.effective_isolation().as_str().to_string(),
     ));
     Ok(env)
-}
-
-pub(super) fn persist_fuzz_execution_request(
-    run_dir: &RunDir,
-    request: &FuzzExecutionRequest,
-) -> homeboy::core::Result<PathBuf> {
-    let path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_EXECUTION_REQUEST);
-    let raw = serde_json::to_vec_pretty(request).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("serialize fuzz execution request".to_string()),
-        )
-    })?;
-    std::fs::write(&path, raw).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })?;
-    Ok(path)
-}
-
-pub(super) fn persist_fuzz_sequence_plan(
-    run_dir: &RunDir,
-    plan: Option<&FuzzSequencePlan>,
-) -> homeboy::core::Result<Option<PathBuf>> {
-    let Some(plan) = plan else {
-        return Ok(None);
-    };
-    let path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_SEQUENCE_PLAN);
-    let raw = serde_json::to_vec_pretty(plan).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("serialize fuzz sequence plan".to_string()),
-        )
-    })?;
-    std::fs::write(&path, raw).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })?;
-    Ok(Some(path))
 }
 
 pub(super) fn build_fuzz_execution_request(

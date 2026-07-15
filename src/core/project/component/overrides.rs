@@ -15,37 +15,53 @@ pub fn apply_component_overrides(
     component: &crate::core::component::Component,
     project: &Project,
 ) -> crate::core::component::Component {
+    resolve_deploy_override_inputs(component, project).1
+}
+
+/// Resolve project override layers without allowing target binding fields to
+/// contaminate source/build preparation identity.
+pub(crate) fn resolve_deploy_override_inputs(
+    component: &crate::core::component::Component,
+    project: &Project,
+) -> (
+    crate::core::component::Component,
+    crate::core::component::Component,
+) {
+    let mut preparation = component.clone();
+    let mut binding = component.clone();
     let fleet_overrides = resolve_fleet_overrides(project, &component.id);
     let project_overrides = project.component_overrides.get(&component.id);
-    let project_cli_fallback = crate::core::project::project_cli_path(project);
 
-    if fleet_overrides.is_none() && project_overrides.is_none() && project_cli_fallback.is_none() {
-        return component.clone();
+    for overrides in [fleet_overrides.as_ref(), project_overrides] {
+        let Some(overrides) = overrides else {
+            continue;
+        };
+        apply_preparation_overrides(overrides, &mut preparation);
+        overrides.apply_to_component(&mut binding);
     }
 
-    let mut merged = component.clone();
-
-    // Apply fleet-level overrides first (lowest precedence in the cascade)
-    if let Some(overrides) = &fleet_overrides {
-        overrides.apply_to_component(&mut merged);
-    }
-
-    // Apply project-level component overrides on top (highest precedence
-    // among explicit overrides)
-    if let Some(overrides) = project_overrides {
-        overrides.apply_to_component(&mut merged);
-    }
-
-    // cli_path-only fallback: project-scoped CLI path fills in the gap when no
-    // explicit override at any layer set it. This is intentionally last so any
-    // explicit override above wins.
-    if merged.cli_path.is_none() {
-        if let Some(cli_path) = project_cli_fallback {
-            merged.cli_path = Some(cli_path);
+    if binding.cli_path.is_none() {
+        if let Some(cli_path) = crate::core::project::project_cli_path(project) {
+            binding.cli_path = Some(cli_path);
         }
     }
 
-    merged
+    (preparation, binding)
+}
+
+fn apply_preparation_overrides(
+    overrides: &ProjectComponentOverrides,
+    component: &mut crate::core::component::Component,
+) {
+    if let Some(build_artifact) = &overrides.build_artifact {
+        component.build_artifact = Some(build_artifact.clone());
+    }
+    if let Some(scopes) = &overrides.scopes {
+        component.scopes = Some(scopes.clone());
+    }
+    if !overrides.artifact_inputs.is_empty() {
+        component.artifact_inputs = overrides.artifact_inputs.clone();
+    }
 }
 
 /// Look up fleet-level component overrides for a project's component.
@@ -348,6 +364,36 @@ mod tests {
 
         let result = apply_component_overrides(&component, &project);
         assert_eq!(result.cli_path, Some("docker wp".to_string()));
+    }
+
+    #[test]
+    fn deploy_override_inputs_keep_build_and_binding_fields_separate() {
+        let component = base_component("my-plugin");
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "my-plugin".to_string(),
+            ProjectComponentOverrides {
+                build_artifact: Some("build/project.zip".to_string()),
+                remote_path: Some("wp-content/plugins/project".to_string()),
+                extract_command: Some("unzip {{artifact}}".to_string()),
+                ..Default::default()
+            },
+        );
+        let project = project_with_overrides("site", overrides);
+
+        let (preparation, binding) = resolve_deploy_override_inputs(&component, &project);
+
+        assert_eq!(
+            preparation.build_artifact.as_deref(),
+            Some("build/project.zip")
+        );
+        assert_eq!(preparation.remote_path, "original/path");
+        assert_eq!(binding.build_artifact.as_deref(), Some("build/project.zip"));
+        assert_eq!(binding.remote_path, "wp-content/plugins/project");
+        assert_eq!(
+            binding.extract_command.as_deref(),
+            Some("unzip {{artifact}}")
+        );
     }
 
     /// When neither explicit overrides nor project-scoped `cli_path` are set,

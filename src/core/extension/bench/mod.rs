@@ -21,6 +21,7 @@
 
 pub mod aggregation;
 pub mod artifact;
+pub mod artifact_persistence;
 pub(crate) mod artifact_validation;
 pub mod baseline;
 pub(crate) mod budget_findings;
@@ -46,6 +47,10 @@ use crate::core::extension::{ExtensionCapability, ExtensionExecutionContext};
 
 pub use aggregation::aggregate_runs;
 pub use artifact::BenchArtifact;
+pub use artifact_persistence::{
+    apply_recorded_bench_artifact_links, record_bench_observation_artifacts, record_if_exists,
+    record_memory_timeline_artifacts,
+};
 pub use baseline::{
     compare as compare_baseline, load_baseline, save_baseline, BenchBaseline,
     BenchBaselineComparison, BenchBaselineMetadata, BenchScenarioSnapshot, ScenarioDelta,

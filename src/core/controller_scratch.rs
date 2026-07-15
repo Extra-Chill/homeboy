@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,7 @@ pub struct ControllerScratchResource {
 pub struct ControllerScratchAllocation {
     pub path: PathBuf,
     pub lease_id: String,
+    pub(crate) index_path: PathBuf,
 }
 
 /// Allocate and durably register one scheduler-owned temporary root for a
@@ -54,6 +55,30 @@ pub fn allocate_attempt(
     plan_id: &str,
     task_id: &str,
     attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    allocate_attempt_at_index(run_id, plan_id, task_id, attempt, index_path()?)
+}
+
+#[cfg(test)]
+pub fn allocate_test_attempt(
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let index_path = paths::homeboy_data()?.join(format!(
+        "controller-scratch/test-indexes/{}/resources.json",
+        paths::sanitize_path_segment(run_id)
+    ));
+    allocate_attempt_at_index(run_id, plan_id, task_id, attempt, index_path)
+}
+
+fn allocate_attempt_at_index(
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+    index_path: PathBuf,
 ) -> Result<ControllerScratchAllocation> {
     let root = paths::homeboy_data()?.join("controller-scratch/attempts");
     fs::create_dir_all(&root).map_err(|error| {
@@ -96,29 +121,35 @@ pub fn allocate_attempt(
         ));
     }
 
-    let mut index = read_index()?;
-    index.resources.push(ControllerScratchResource {
-        path: path.display().to_string(),
-        run_id: run_id.to_string(),
-        plan_id: plan_id.to_string(),
-        task_id: task_id.to_string(),
-        attempt,
-        root_bound: root.display().to_string(),
-        owner_pid: std::process::id(),
-        lifecycle_state: "active".to_string(),
-        lease_id: lease_id.clone(),
-        reconstructable: true,
-        retention: "P7D".to_string(),
-        source_ref: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        finalized_at: None,
-        terminal_reason: None,
-        terminal_evidence: None,
-        interrupted_at: None,
-    });
-    write_index(&index)?;
+    with_index_lock(&index_path, || {
+        let mut index = read_or_recover_index_at_unlocked(&index_path)?;
+        index.resources.push(ControllerScratchResource {
+            path: path.display().to_string(),
+            run_id: run_id.to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            attempt,
+            root_bound: root.display().to_string(),
+            owner_pid: std::process::id(),
+            lifecycle_state: "active".to_string(),
+            lease_id: lease_id.clone(),
+            reconstructable: true,
+            retention: "P7D".to_string(),
+            source_ref: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            finalized_at: None,
+            terminal_reason: None,
+            terminal_evidence: None,
+            interrupted_at: None,
+        });
+        write_index_at_unlocked(&index_path, &index)
+    })?;
 
-    Ok(ControllerScratchAllocation { path, lease_id })
+    Ok(ControllerScratchAllocation {
+        path,
+        lease_id,
+        index_path,
+    })
 }
 
 /// Releases one scheduler-owned attempt after its candidate evidence has been
@@ -129,26 +160,28 @@ pub fn release_attempt(
     reason: &str,
     evidence: serde_json::Value,
 ) -> Result<()> {
-    let mut index = read_index()?;
-    let Some(resource) = index.resources.iter_mut().find(|resource| {
-        resource.lease_id == allocation.lease_id
-            && Path::new(&resource.path) == allocation.path.as_path()
-    }) else {
-        return Err(Error::validation_invalid_argument(
-            "controller_scratch.lease_id",
-            "allocated scratch lease is not registered",
-            Some(allocation.lease_id.clone()),
-            None,
-        ));
-    };
-    if resource.finalized_at.is_none() {
-        resource.lifecycle_state = "released".to_string();
-        resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
-        resource.terminal_reason = Some(reason.to_string());
-        resource.terminal_evidence = Some(evidence);
-        write_index(&index)?;
-    }
-    Ok(())
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        let Some(resource) = index.resources.iter_mut().find(|resource| {
+            resource.lease_id == allocation.lease_id
+                && Path::new(&resource.path) == allocation.path.as_path()
+        }) else {
+            return Err(Error::validation_invalid_argument(
+                "controller_scratch.lease_id",
+                "allocated scratch lease is not registered",
+                Some(allocation.lease_id.clone()),
+                None,
+            ));
+        };
+        if resource.finalized_at.is_none() {
+            resource.lifecycle_state = "released".to_string();
+            resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
+            resource.terminal_reason = Some(reason.to_string());
+            resource.terminal_evidence = Some(evidence);
+            write_index_at_unlocked(&allocation.index_path, &index)?;
+        }
+        Ok(())
+    })
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -210,7 +243,14 @@ pub struct ControllerScratchCleanupOptions {
 /// `metadata.controller_scratch` object or array. Providers own materializing
 /// the path; Homeboy owns its durable lifecycle and cleanup policy.
 pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -> Result<()> {
-    let mut index = read_index()?;
+    let index_path = index_path()?;
+    with_index_lock(&index_path, || {
+        register_outcome_resources_unlocked(run_id, outcomes)
+    })
+}
+
+fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcome]) -> Result<()> {
+    let mut index = read_index_unlocked()?;
     let mut changed = false;
     for outcome in outcomes {
         let values = outcome
@@ -294,7 +334,7 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
         }
     }
     if changed {
-        write_index(&index)?;
+        write_index_unlocked(&index)?;
     }
     Ok(())
 }
@@ -302,7 +342,12 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
 /// Marks all resources owned by a terminal run as finalized, including failed
 /// and cancelled exits, so retention starts regardless of task outcome.
 pub fn finalize_run(run_id: &str) -> Result<()> {
-    let mut index = read_index()?;
+    let index_path = index_path()?;
+    with_index_lock(&index_path, || finalize_run_unlocked(run_id))
+}
+
+fn finalize_run_unlocked(run_id: &str) -> Result<()> {
+    let mut index = read_index_unlocked()?;
     let now = chrono::Utc::now().to_rfc3339();
     let mut changed = false;
     for resource in &mut index.resources {
@@ -314,13 +359,20 @@ pub fn finalize_run(run_id: &str) -> Result<()> {
         }
     }
     if changed {
-        write_index(&index)?;
+        write_index_unlocked(&index)?;
     }
     Ok(())
 }
 
 pub fn cleanup(options: ControllerScratchCleanupOptions) -> Result<ControllerScratchCleanupOutput> {
-    let mut index = read_index()?;
+    let index_path = index_path()?;
+    with_index_lock(&index_path, || cleanup_unlocked(options))
+}
+
+fn cleanup_unlocked(
+    options: ControllerScratchCleanupOptions,
+) -> Result<ControllerScratchCleanupOutput> {
+    let mut index = read_index_unlocked()?;
     let mut candidates = Vec::new();
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
@@ -364,7 +416,7 @@ pub fn cleanup(options: ControllerScratchCleanupOptions) -> Result<ControllerScr
         });
     }
     if reconciled {
-        write_index(&index)?;
+        write_index_unlocked(&index)?;
     }
 
     let candidate_count = eligible.len();
@@ -510,7 +562,7 @@ fn remove_candidate(
     candidate: &ControllerScratchCandidate,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<u64>> {
-    let mut index = read_index()?;
+    let mut index = read_index_unlocked()?;
     let Some(resource) = index.resources.iter_mut().find(|resource| {
         resource.lease_id == candidate.lease_id
             && !resource.lease_id.is_empty()
@@ -521,7 +573,7 @@ fn remove_candidate(
     };
     let path = PathBuf::from(&resource.path);
     if !path.exists() || cleanup_block_reason(resource, &path, now)?.is_some() {
-        write_index(&index)?;
+        write_index_unlocked(&index)?;
         return Ok(None);
     }
     let bytes = path_size(&path)?;
@@ -531,7 +583,7 @@ fn remove_candidate(
             Some(format!("remove {}", path.display())),
         )
     })?;
-    write_index(&index)?;
+    write_index_unlocked(&index)?;
     Ok(Some(bytes))
 }
 
@@ -587,8 +639,75 @@ fn path_size(path: &Path) -> Result<u64> {
 fn index_path() -> Result<PathBuf> {
     Ok(paths::homeboy_data()?.join("controller-scratch/resources.json"))
 }
+
+fn with_index_lock<T>(index_path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock_path = index_path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(lock_path.display().to_string()))
+        })?;
+    let _guard = ControllerScratchIndexLock::lock(file)?;
+    operation()
+}
+
+struct ControllerScratchIndexLock {
+    file: File,
+}
+
+impl ControllerScratchIndexLock {
+    #[cfg(unix)]
+    fn lock(file: File) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock controller scratch index".to_string()),
+            ));
+        }
+        Ok(Self { file })
+    }
+
+    #[cfg(not(unix))]
+    fn lock(file: File) -> Result<Self> {
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ControllerScratchIndexLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+#[cfg(test)]
 fn read_index() -> Result<ControllerScratchIndex> {
-    let path = index_path()?;
+    let index_path = index_path()?;
+    with_index_lock(&index_path, read_index_unlocked)
+}
+
+fn read_index_unlocked() -> Result<ControllerScratchIndex> {
+    read_index_at_unlocked(&index_path()?)
+}
+
+fn read_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
     match fs::read_to_string(&path) {
         Ok(raw) => serde_json::from_str(&raw).map_err(|error| {
             Error::internal_json(error.to_string(), Some(path.display().to_string()))
@@ -603,8 +722,152 @@ fn read_index() -> Result<ControllerScratchIndex> {
         )),
     }
 }
+
+/// A controller using an older non-atomic writer can expose transient partial
+/// bytes even while this process holds the index lock. Retry once before
+/// classifying the durable index as malformed.
+fn read_or_recover_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
+    let raw = read_index_bytes(path)?;
+    let first_error = match serde_json::from_str(&raw) {
+        Ok(index) => return Ok(index),
+        Err(error) => error,
+    };
+    let retried_raw = read_index_bytes(path)?;
+    match serde_json::from_str(&retried_raw) {
+        Ok(index) => Ok(index),
+        Err(retried_error) => {
+            if let Ok(document) = serde_json::from_str::<serde_json::Value>(&retried_raw) {
+                return salvage_compatible_resources(path, document, &retried_error.to_string());
+            }
+            let quarantine_path = preserve_index_bytes(path, "corrupt")?;
+            eprintln!(
+                "Homeboy quarantined syntactically invalid controller scratch index {} to {} after two reads; first parse error: {}; retry parse error: {}; allocating a fresh scratch root",
+                path.display(),
+                quarantine_path.display(),
+                first_error,
+                retried_error
+            );
+            Ok(ControllerScratchIndex {
+                schema: schema(),
+                resources: Vec::new(),
+            })
+        }
+    }
+}
+
+fn read_index_bytes(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(path.display().to_string()),
+        )),
+    }
+}
+
+fn salvage_compatible_resources(
+    path: &Path,
+    document: serde_json::Value,
+    parse_context: &str,
+) -> Result<ControllerScratchIndex> {
+    let Some(document) = document.as_object() else {
+        return quarantine_incompatible_index(
+            path,
+            parse_context,
+            "top-level JSON value is not an object",
+        );
+    };
+    let Some(resources) = document
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return quarantine_incompatible_index(
+            path,
+            parse_context,
+            "top-level resources field is not an array",
+        );
+    };
+    let mut compatible_resources = Vec::with_capacity(resources.len());
+    let mut incompatible_count = 0;
+    for resource in resources {
+        match serde_json::from_value(resource.clone()) {
+            Ok(resource) => compatible_resources.push(resource),
+            Err(_) => incompatible_count += 1,
+        }
+    }
+    let preserved_path = preserve_index_bytes(path, "incompatible")?;
+    eprintln!(
+        "Homeboy salvaged {} compatible controller scratch resources from {} after typed parse failure ({} incompatible resource(s); context: {}); preserved original bytes at {}",
+        compatible_resources.len(),
+        path.display(),
+        incompatible_count,
+        parse_context,
+        preserved_path.display()
+    );
+    Ok(ControllerScratchIndex {
+        schema: document
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(schema),
+        resources: compatible_resources,
+    })
+}
+
+fn quarantine_incompatible_index(
+    path: &Path,
+    parse_context: &str,
+    shape_context: &str,
+) -> Result<ControllerScratchIndex> {
+    let quarantine_path = preserve_index_bytes(path, "incompatible")?;
+    eprintln!(
+        "Homeboy quarantined controller scratch index {} to {} because it is syntactically valid but structurally incompatible ({}; parse context: {}); allocating a fresh scratch root",
+        path.display(),
+        quarantine_path.display(),
+        shape_context,
+        parse_context
+    );
+    Ok(ControllerScratchIndex {
+        schema: schema(),
+        resources: Vec::new(),
+    })
+}
+
+fn preserve_index_bytes(path: &Path, classification: &str) -> Result<PathBuf> {
+    let preserved_path = path.with_file_name(format!(
+        "{}.{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("resources.json"),
+        classification,
+        uuid::Uuid::new_v4()
+    ));
+    fs::rename(path, &preserved_path).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "could not preserve controller scratch index {} at {}: {}",
+                path.display(),
+                preserved_path.display(),
+                error
+            ),
+            Some(path.display().to_string()),
+        )
+    })?;
+    Ok(preserved_path)
+}
+
+#[cfg(test)]
 fn write_index(index: &ControllerScratchIndex) -> Result<()> {
-    let path = index_path()?;
+    let index_path = index_path()?;
+    with_index_lock(&index_path, || write_index_unlocked(index))
+}
+
+fn write_index_unlocked(index: &ControllerScratchIndex) -> Result<()> {
+    write_index_at_unlocked(&index_path()?, index)
+}
+
+fn write_index_at_unlocked(path: &Path, index: &ControllerScratchIndex) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(error.to_string(), Some(parent.display().to_string()))
@@ -612,7 +875,9 @@ fn write_index(index: &ControllerScratchIndex) -> Result<()> {
     }
     let raw = serde_json::to_vec_pretty(index)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    fs::write(path, raw).map_err(|error| Error::internal_io(error.to_string(), None))
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, raw).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    fs::rename(&temporary, path).map_err(|error| Error::internal_io(error.to_string(), None))
 }
 fn schema() -> String {
     CONTROLLER_SCRATCH_SCHEMA.to_string()
@@ -744,6 +1009,110 @@ mod tests {
             assert_eq!(resource.owner_pid, std::process::id());
             assert!(resource.reconstructable);
             assert!(!resource.created_at.is_empty());
+        });
+    }
+
+    #[test]
+    fn allocation_quarantines_a_malformed_index_and_registers_a_fresh_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let index_path = index_path().expect("index path");
+            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+            fs::write(&index_path, "{ stale").expect("malformed index");
+
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
+                .expect("allocation recovers malformed index");
+            let index = read_index().expect("replacement index");
+
+            assert_eq!(index.resources.len(), 1);
+            assert_eq!(index.resources[0].lease_id, allocation.lease_id);
+            let quarantined = fs::read_dir(index_path.parent().expect("index parent"))
+                .expect("index directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("resources.json.corrupt-"))
+                .collect::<Vec<_>>();
+            assert_eq!(quarantined.len(), 1);
+        });
+    }
+
+    #[test]
+    fn allocation_salvages_valid_leases_from_a_typed_incompatible_resource() {
+        crate::test_support::with_isolated_home(|_| {
+            let index_path = index_path().expect("index path");
+            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+            let valid = resource(Path::new("/scratch/valid"), Path::new("/scratch"));
+            fs::write(
+                &index_path,
+                serde_json::json!({
+                    "schema": CONTROLLER_SCRATCH_SCHEMA,
+                    "resources": [
+                        valid,
+                        { "path": 42 }
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("typed incompatible index");
+
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
+                .expect("allocation salvages compatible leases");
+            let index = read_index().expect("replacement index");
+
+            assert_eq!(index.resources.len(), 2);
+            assert!(index
+                .resources
+                .iter()
+                .any(|resource| resource.lease_id == "test-lease"));
+            assert!(index
+                .resources
+                .iter()
+                .any(|resource| resource.lease_id == allocation.lease_id));
+            let preserved = fs::read_dir(index_path.parent().expect("index parent"))
+                .expect("index directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("resources.json.incompatible-"))
+                .collect::<Vec<_>>();
+            assert_eq!(preserved.len(), 1);
+        });
+    }
+
+    #[test]
+    fn concurrent_allocation_and_release_preserves_every_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            const WORKERS: usize = 8;
+            const ALLOCATIONS_PER_WORKER: usize = 12;
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|worker| {
+                    std::thread::spawn(move || {
+                        for attempt in 1..=ALLOCATIONS_PER_WORKER {
+                            let allocation = allocate_attempt(
+                                &format!("run-{worker}"),
+                                "parallel-plan",
+                                &format!("task-{worker}"),
+                                attempt as u32,
+                            )
+                            .expect("allocate");
+                            release_attempt(&allocation, "completed", serde_json::json!({}))
+                                .expect("release");
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("worker");
+            }
+
+            let index = read_index().expect("parse index after concurrent updates");
+            assert_eq!(index.resources.len(), WORKERS * ALLOCATIONS_PER_WORKER);
+            assert!(index
+                .resources
+                .iter()
+                .all(|resource| resource.lifecycle_state == "released"));
+            assert!(index
+                .resources
+                .iter()
+                .all(|resource| resource.finalized_at.is_some()));
         });
     }
 

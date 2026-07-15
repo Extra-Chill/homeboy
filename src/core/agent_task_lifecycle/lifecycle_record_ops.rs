@@ -107,57 +107,6 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
     };
 }
 
-/// Backfill only generic executor evidence that older terminal records could
-/// derive from their durable plan and aggregate. Existing lifecycle entries
-/// are authoritative and must not be reprojected during a status read.
-pub(crate) fn backfill_terminal_generic_runtime_evidence(
-    record: &mut AgentTaskRunRecord,
-    plan: &AgentTaskPlan,
-    aggregate: &AgentTaskAggregate,
-) -> bool {
-    let mut missing = tasks_for_aggregate(plan, aggregate)
-        .into_iter()
-        .filter(|task| {
-            !record
-                .provider_handles
-                .iter()
-                .any(|handle| handle.task_id == task.task_id)
-                && !record
-                    .lifecycle
-                    .provider_runtime
-                    .iter()
-                    .any(|runtime| runtime.task_id == task.task_id)
-                && !matches!(
-                    task.state,
-                    AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped
-                )
-        })
-        .map(|task| ProviderRuntimeLifecycle {
-            task_id: task.task_id,
-            backend: task.backend.clone(),
-            state: provider_runtime_state_for_task_state(Some(task.state)),
-            stream_uri: None,
-            external_runtime_ids: Vec::new(),
-            metadata: json!({
-                "evidence_source": "canonical_executor_outcome",
-                "executor": {
-                    "backend": task.backend,
-                    "selector": task.selector,
-                    "model": task.model,
-                },
-                "model": task.model,
-            }),
-        })
-        .collect::<Vec<_>>();
-
-    if missing.is_empty() {
-        return false;
-    }
-
-    record.lifecycle.provider_runtime.append(&mut missing);
-    true
-}
-
 pub(crate) fn cleanup_lifecycle_for_plan(
     plan: &AgentTaskPlan,
     updated_at: Option<String>,

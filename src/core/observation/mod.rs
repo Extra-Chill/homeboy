@@ -4,7 +4,9 @@
 //! stack specs, baselines). SQLite stores observed state from command runs and
 //! generated artifacts. This module only provides the storage substrate.
 
+pub mod artifact_preview;
 mod budget_findings;
+pub mod bundle;
 pub mod context;
 pub mod disk_budget;
 pub mod evidence_report;
@@ -13,6 +15,7 @@ pub mod loop_inventory_run;
 pub mod observed_workflow;
 pub mod records;
 mod run_failure_causes;
+pub mod runner_artifact_attach;
 pub mod runs_service;
 pub mod store;
 mod test_findings;
@@ -23,6 +26,11 @@ pub use lifecycle::{
     running_status_note, ActiveObservation, ACTIVE_RUN_ID_ENV,
 };
 
+pub use bundle::{
+    build_bundle, bundle_artifact_uri, extract_directory_artifact_archive, portable_artifact_label,
+    read_bundle_dir, write_bundle_dir, ObservationBundle, ObservationBundleArtifactBytes,
+    ObservationBundleManifest, BUNDLE_FORMAT, BUNDLE_VERSION,
+};
 pub use loop_inventory_run::persist_loop_inventory_run;
 
 pub use crate::core::notification_route::NotificationRoute;

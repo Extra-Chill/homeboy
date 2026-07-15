@@ -47,7 +47,7 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
 
     let output = execute_git(
         path,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
     )
     .map_err(|e| Error::git_command_failed(e.to_string()))?;
 
@@ -59,32 +59,7 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut staged = Vec::new();
-    let mut unstaged = Vec::new();
-    let mut untracked = Vec::new();
-
-    for line in stdout.lines() {
-        if line.len() < 3 {
-            continue;
-        }
-        let index_status = line.chars().next().unwrap_or(' ');
-        let worktree_status = line.chars().nth(1).unwrap_or(' ');
-        let file_path = line[3..].to_string();
-
-        match (index_status, worktree_status) {
-            ('?', '?') => untracked.push(file_path),
-            (idx, wt) => {
-                if idx != ' ' && idx != '?' {
-                    staged.push(file_path.clone());
-                }
-                if wt != ' ' && wt != '?' {
-                    unstaged.push(file_path);
-                }
-            }
-        }
-    }
-
+    let (staged, unstaged, untracked) = parse_porcelain(&output.stdout);
     let has_changes = !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty();
     let hint = build_untracked_hint(path, untracked.len());
 
@@ -95,6 +70,47 @@ pub fn get_uncommitted_changes(path: &str) -> Result<UncommittedChanges> {
         untracked,
         hint,
     })
+}
+
+fn parse_porcelain(output: &[u8]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+    let mut untracked = Vec::new();
+    let mut entries = output.split(|byte| *byte == b'\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 3 {
+            continue;
+        }
+        let index_status = entry[0] as char;
+        let worktree_status = entry[1] as char;
+        let file_path = String::from_utf8_lossy(&entry[3..]).to_string();
+        let renamed_or_copied =
+            matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C');
+        let original_path = renamed_or_copied
+            .then(|| entries.next())
+            .flatten()
+            .map(|path| String::from_utf8_lossy(path).to_string());
+
+        match (index_status, worktree_status) {
+            ('?', '?') => untracked.push(file_path),
+            (idx, wt) => {
+                if idx != ' ' && idx != '?' {
+                    staged.push(file_path.clone());
+                    if let Some(original) = original_path.as_ref() {
+                        staged.push(original.clone());
+                    }
+                }
+                if wt != ' ' && wt != '?' {
+                    unstaged.push(file_path);
+                    if let Some(original) = original_path {
+                        unstaged.push(original);
+                    }
+                }
+            }
+        }
+    }
+
+    (staged, unstaged, untracked)
 }
 
 fn build_untracked_hint(path: &str, untracked_count: usize) -> Option<String> {
@@ -532,6 +548,82 @@ mod tests {
             "stat-only touch must not surface as a real change after index refresh, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn get_uncommitted_changes_reports_both_rename_paths_without_porcelain_quoting() {
+        use std::fs;
+        use std::process::Command;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "test"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(dir.path().join("old name.txt"), "one\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "delete\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+
+        Command::new("git")
+            .args(["mv", "old name.txt", "new name.txt"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        let staged = get_uncommitted_changes(path).unwrap();
+        assert!(staged.staged.contains(&"old name.txt".to_string()));
+        assert!(staged.staged.contains(&"new name.txt".to_string()));
+        fs::rename(
+            dir.path().join("new name.txt"),
+            dir.path().join("worktree name.txt"),
+        )
+        .unwrap();
+        fs::remove_file(dir.path().join("delete.txt")).unwrap();
+        fs::write(dir.path().join("untracked name.txt"), "new\n").unwrap();
+
+        let changes = get_uncommitted_changes(path).unwrap();
+        assert!(changes.staged.contains(&"old name.txt".to_string()));
+        assert!(changes.staged.contains(&"new name.txt".to_string()));
+        assert!(changes.unstaged.contains(&"delete.txt".to_string()));
+        assert!(changes
+            .untracked
+            .contains(&"untracked name.txt".to_string()));
+        assert!(changes.untracked.contains(&"worktree name.txt".to_string()));
+        assert!(changes.staged.iter().all(|path| !path.contains(" -> ")));
+    }
+
+    #[test]
+    fn porcelain_rename_and_copy_entries_preserve_old_and_new_paths() {
+        for status in [b"R ".as_slice(), b" C".as_slice()] {
+            let mut entry = status.to_vec();
+            entry.extend_from_slice(b" new name.txt\0old name.txt\0");
+            let (staged, unstaged, untracked) = parse_porcelain(&entry);
+            let changed = if status[0] == b'R' { staged } else { unstaged };
+            assert_eq!(changed, vec!["new name.txt", "old name.txt"]);
+            assert!(untracked.is_empty());
+        }
     }
 
     #[test]
