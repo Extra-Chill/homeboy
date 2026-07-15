@@ -137,10 +137,17 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
         let job = output.job.expect("job");
         handle.join().expect("mock broker joins");
         let events = store.events(job.id).expect("persisted events");
-        let progress_index = events
+        let (progress_index, progress) = events
             .iter()
-            .position(|event| event.kind == JobEventKind::Progress && event.data.is_some())
-            .expect("child progress event persisted before finish");
+            .enumerate()
+            .find_map(|(index, event)| {
+                (event.kind == JobEventKind::Progress)
+                    .then(|| event.data.as_ref())
+                    .flatten()
+                    .filter(|data| data["phase"] == "import")
+                    .map(|data| (index, data))
+            })
+            .expect("structured child progress event persisted before finish");
         let result_index = events
             .iter()
             .position(|event| event.kind == JobEventKind::Result)
@@ -149,7 +156,6 @@ fn reverse_worker_streams_redacted_child_progress_without_trusting_stdout_lifecy
             progress_index < result_index,
             "progress must stream before terminal result"
         );
-        let progress = events[progress_index].data.as_ref().expect("progress data");
         assert_eq!(progress["phase"], "import");
         assert_eq!(progress["current_item"], "[REDACTED]");
         assert_eq!(progress["metadata"]["api_key"], "[REDACTED]");

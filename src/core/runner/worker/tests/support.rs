@@ -21,13 +21,15 @@ pub(super) fn spawn_mock_broker_until_finish(
 
 pub(super) fn spawn_mock_broker_until_finish_with_paths(
     store: JobStore,
-    max_requests: usize,
+    _max_requests: usize,
     seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> (String, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
     let handle = std::thread::spawn(move || {
-        for _ in 0..max_requests {
+        // Cancellation is observed after the second snapshot; keep serving the
+        // worker's acknowledgement poll instead of dropping the broker early.
+        loop {
             let (mut stream, _) = listener.accept().expect("accept request");
             let request = read_request(&mut stream);
             if let Some(seen_paths) = &seen_paths {

@@ -150,7 +150,10 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
-                to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
+                to_worktree: std::env::current_dir()
+                    .expect("current workspace")
+                    .display()
+                    .to_string(),
                 provider_command: None,
                 provider_argv: Vec::new(),
                 gates: VerifyGateArgs {
@@ -183,12 +186,12 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
             value["history_run_ids"].as_array().expect("history").len(),
             1
         );
-        assert_eq!(value["status"], "policy_failure");
+        assert_eq!(value["status"], "provider_failure");
         assert_eq!(value["attempts"][0]["run_id"], value["latest_run_id"]);
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("no worktree providers are configured"));
+            .contains("promotion provider"));
     });
 }
 
