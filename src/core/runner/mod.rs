@@ -20,6 +20,11 @@ pub use broker_auth::{
     BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 mod capabilities;
+mod cli_resolver;
+pub use cli_resolver::{
+    resolve_agent_task_dispatch, resolve_command_label, set_agent_task_dispatch_resolver,
+    set_command_label_resolver,
+};
 mod command_path;
 mod connection;
 mod daemon_freshness;

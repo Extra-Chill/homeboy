@@ -8,6 +8,32 @@ use crate::core::defaults;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Register the agent-task dispatch resolver the way production startup does, so
+/// tests exercising `inject_agent_task_resolved_provider_policy_in_args` (which
+/// now goes through the resolver hook) get the same behavior as the running CLI.
+fn register_test_agent_task_dispatch_resolver() {
+    crate::core::runner::set_agent_task_dispatch_resolver(|argv| {
+        let cli =
+            <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(|error| {
+                crate::core::error::Error::validation_invalid_argument(
+                    "agent-task",
+                    "failed to parse agent-task arguments while compiling Lab provider policy",
+                    Some(error.to_string()),
+                    None,
+                )
+            })?;
+        Ok(match cli.command {
+            crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
+                crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                    Some(cook.dispatch.into())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+    });
+}
+
 mod lab_source_path_tests {
     use super::*;
 
@@ -1164,6 +1190,7 @@ mod provider_config_default_injection_tests {
     #[test]
     fn controller_provider_policy_survives_runner_default_drift_and_serializes_rotation() {
         crate::test_support::with_isolated_home(|_| {
+            register_test_agent_task_dispatch_resolver();
             defaults::save_config(&defaults::HomeboyConfig {
                 agent_task: defaults::AgentTaskConfig {
                     default_backend: Some("controller-backend".to_string()),
@@ -1232,6 +1259,7 @@ mod provider_config_default_injection_tests {
     #[test]
     fn explicit_backend_is_compiled_into_controller_provider_policy() {
         crate::test_support::with_isolated_home(|_| {
+            register_test_agent_task_dispatch_resolver();
             defaults::save_config(&defaults::HomeboyConfig {
                 agent_task: defaults::AgentTaskConfig {
                     default_backend: Some("controller-default".to_string()),
