@@ -1858,6 +1858,18 @@ mod tests {
     }
 
     #[test]
+    fn active_runner_jobs_include_daemon_local_jobs_counted_by_freshness() {
+        let store = JobStore::default();
+        let job = store.create("runner.exec");
+
+        let active = store.active_runner_jobs();
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].job_id, job.id.to_string());
+        assert_eq!(active[0].source, "daemon");
+    }
+
+    #[test]
     fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("jobs.json");

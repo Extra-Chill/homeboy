@@ -63,6 +63,43 @@ pub(super) fn active_runner_job_summary(
     }
 }
 
+pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJobSummary {
+    let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
+    ActiveRunnerJobSummary {
+        runner_id: job
+            .target_runner_id
+            .clone()
+            .unwrap_or_else(|| "daemon".to_string()),
+        job_id: job.id.to_string(),
+        operation: job.operation.clone(),
+        source: "daemon".to_string(),
+        kind: job.operation.clone(),
+        status: job.status,
+        command: job.operation.clone(),
+        cwd: None,
+        started_at_ms,
+        updated_at_ms: job.updated_at_ms,
+        elapsed_ms: now_ms.saturating_sub(started_at_ms),
+        heartbeat_age_ms: now_ms.saturating_sub(job.updated_at_ms),
+        claim: super::types::JobClaimMetadata {
+            claim_id: job.claim_id.clone(),
+            claimed_by_runner_id: job.claimed_by_runner_id.clone(),
+            claimed_at_ms: job.claimed_at_ms,
+            claim_expires_at_ms: job.claim_expires_at_ms,
+        },
+        claim_expires_in_ms: job
+            .claim_expires_at_ms
+            .map(|expires_at| expires_at.saturating_sub(now_ms)),
+        lifecycle: None,
+        durable_run_id: None,
+        stale_reason: job.stale_reason.clone(),
+        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
+        retryable: Some(runner_job_retryable(job)),
+        active_child_count: None,
+        active_cell_count: None,
+    }
+}
+
 fn request_metadata_u64(request: &RemoteRunnerJobRequest, key: &str) -> Option<u64> {
     request
         .metadata

@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::api_jobs::JobEventKind;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -582,7 +583,7 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+                "printf 'HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"provider_dispatch\",\"current_item\":\"task-8341\",\"metadata\":{\"event\":\"provider_selected\",\"provider\":\"fixture\"}}\\n'; printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
                 "sh".to_string(),
                 started.display().to_string(),
                 release.display().to_string(),
@@ -615,6 +616,19 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             matches!(job.status, JobStatus::Queued | JobStatus::Running),
             "detached handoff returned only after workload completion"
         );
+        let events = fetch_daemon_events(&client, &daemon_url, &job_id)
+            .expect("live daemon events while workload is blocked");
+        let progress = events
+            .iter()
+            .filter_map(|event| {
+                (event.kind == JobEventKind::Progress)
+                    .then(|| event.data.as_ref())
+                    .flatten()
+            })
+            .find(|data| data["phase"] == "provider_dispatch")
+            .expect("provider progress is forwarded before process completion");
+        assert_eq!(progress["phase"], "provider_dispatch");
+        assert_eq!(progress["metadata"]["event"], "provider_selected");
 
         std::fs::write(&release, "release").expect("release workload");
         wait_for_terminal_daemon_job(&client, &daemon_url, &job_id);

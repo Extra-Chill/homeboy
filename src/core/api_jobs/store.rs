@@ -981,13 +981,14 @@ impl JobStore {
             .jobs
             .values()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
-            .filter_map(|stored| {
-                let request = stored.remote_runner.as_ref()?.request.clone();
-                Some(super::summary::active_runner_job_summary(
-                    &stored.job,
-                    &request,
-                    now,
-                ))
+            .map(|stored| {
+                stored
+                    .remote_runner
+                    .as_ref()
+                    .map(|remote| {
+                        super::summary::active_runner_job_summary(&stored.job, &remote.request, now)
+                    })
+                    .unwrap_or_else(|| super::summary::active_daemon_job_summary(&stored.job, now))
             })
             .collect();
         jobs.sort_by_key(|job| (job.started_at_ms, job.job_id.clone()));

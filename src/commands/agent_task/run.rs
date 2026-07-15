@@ -239,11 +239,34 @@ pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
     if let Some(timeout_ms) = args.timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
+    emit_runner_lifecycle_progress(&plan, args.record_run_id.as_deref());
     run_loaded_plan(
         plan,
         args.record_run_id.as_deref(),
         ExtensionProviderAgentTaskExecutor::discover(),
     )
+}
+
+fn emit_runner_lifecycle_progress(plan: &AgentTaskPlan, run_id: Option<&str>) {
+    if std::env::var_os("HOMEBOY_LAB_RUNNER_ID").is_none() {
+        return;
+    }
+    for task in &plan.tasks {
+        println!(
+            "HOMEBOY_RUNNER_PROGRESS {}",
+            serde_json::json!({
+                "schema": "homeboy/runner-progress/v1",
+                "phase": "provider_dispatch",
+                "current_item": task.task_id,
+                "metadata": {
+                    "agent_task_run_id": run_id,
+                    "task_id": task.task_id,
+                    "provider": task.executor.backend,
+                    "event": "provider_selected",
+                },
+            })
+        );
+    }
 }
 
 pub(super) fn run_loaded_plan<E>(

@@ -222,6 +222,73 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 }
 
 #[test]
+fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancellation() {
+    with_isolated_home(|_| {
+        let run_id = "agent-task-detached-run-plan";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--record-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-8341",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("detached run-plan is bound to the controller run");
+
+        let status = status(run_id).expect("controller identity resolves status");
+        let logs = logs(run_id).expect("controller identity resolves logs");
+        let artifacts = artifacts(run_id).expect("controller identity resolves artifacts");
+        assert_eq!(status.run_id, run_id);
+        assert_eq!(status.metadata["runner_job_id"], "job-8341");
+        assert!(!logs.events.is_empty());
+        assert!(artifacts.artifacts.is_empty());
+
+        let _cancel =
+            super::cancellation::test_cancel_hook::install(Box::new(|runner_id, job_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(job_id, "job-8341");
+                Ok((
+                    crate::core::api_jobs::Job {
+                        id: uuid::Uuid::new_v4(),
+                        operation: "runner.exec".to_string(),
+                        status: crate::core::api_jobs::JobStatus::Cancelled,
+                        created_at_ms: 1,
+                        updated_at_ms: 2,
+                        started_at_ms: Some(1),
+                        finished_at_ms: Some(2),
+                        event_count: 0,
+                        source_snapshot: None,
+                        path_materialization_plan: None,
+                        stale_reason: None,
+                        daemon_lease_id: None,
+                        target_runner_id: None,
+                        target_project_id: None,
+                        claim_id: None,
+                        claimed_by_runner_id: None,
+                        claimed_at_ms: None,
+                        claim_expires_at_ms: None,
+                        artifacts: Vec::new(),
+                    },
+                    Vec::new(),
+                ))
+            }));
+        let cancelled = cancel_run(run_id, Some("operator requested cancellation"))
+            .expect("canonical cancellation reaches the runner job");
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
+        );
+    });
+}
+
+#[test]
 fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     with_isolated_home(|_| {
         let command = vec![
