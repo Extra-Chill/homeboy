@@ -643,6 +643,12 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
     preferred: Option<&str>,
     preferred_attempt_run_id: Option<&str>,
 ) -> Option<(Vec<String>, String)> {
+    // `run-plan --record-run-id` is already the portable attempt identity. It
+    // has no `cook` subcommand to decorate, but still needs to cross the daemon
+    // boundary so the accepted job can be joined to the controller lifecycle.
+    if let Some((_, run_id)) = agent_task_run_plan_recording_args(args) {
+        return Some((args.to_vec(), run_id));
+    }
     let (args, run_id) = ensure_agent_task_dispatch_run_id_with(args, preferred)?;
     let invocation = CommandInvocation::for_subcommand(&args, "agent-task")?;
     // A run-plan already carries the controller-owned durable identity in
@@ -1665,6 +1671,25 @@ mod tests {
 
         assert_eq!(run_id, "retry-run");
         assert_eq!(out, args);
+    }
+
+    #[test]
+    fn lifecycle_identity_preserves_materialized_run_plan_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            "@/runner/retry-plan.json".to_string(),
+            "--record-run-id".to_string(),
+            "cook-8332-attempt-1".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_lifecycle_identity_with(&args, None, None)
+            .expect("materialized run-plan has a lifecycle identity");
+
+        assert_eq!(out, args);
+        assert_eq!(run_id, "cook-8332-attempt-1");
     }
 
     #[test]
