@@ -1369,6 +1369,59 @@ fn record_promotion_persists_latest_event_on_run_metadata() {
 }
 
 #[test]
+fn corrected_promotion_replaces_gate_failed_latest_proof() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let run_id = "run-corrected-promotion";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+
+        let gate_failed = json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
+            "to_worktree": "homeboy@fix-8307",
+            "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
+            "patch_artifact": { "id": "first.patch", "kind": "patch", "path": "first.patch" },
+            "changed_files": ["src/lib.rs"],
+            "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "failed" }],
+            "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "first" } } },
+            "operator_notification": { "status": "blocked", "message": "gates failed" }
+        });
+        let corrected = json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
+            "to_worktree": "homeboy@fix-8307",
+            "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
+            "patch_artifact": { "id": "corrected.patch", "kind": "patch", "path": "corrected.patch" },
+            "changed_files": ["src/lib.rs"],
+            "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "passed" }],
+            "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "corrected" } } },
+            "operator_notification": { "status": "completed", "message": "gates passed" }
+        });
+
+        record_promotion(run_id, gate_failed).expect("gate failure recorded");
+        let updated = record_promotion(run_id, corrected.clone()).expect("correction recorded");
+
+        let latest: crate::core::agent_task_promotion::AgentTaskPromotionReport =
+            serde_json::from_value(updated.metadata["latest_promotion"].clone())
+                .expect("latest promotion is finalization proof");
+        assert_eq!(
+            latest.status,
+            crate::core::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(latest.patch_artifact.id, "corrected.patch");
+        assert_eq!(
+            updated.metadata["promotions"]
+                .as_array()
+                .expect("history")
+                .len(),
+            2
+        );
+    });
+}
+
+#[test]
 fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
     with_isolated_home(|_| {
         let record = record_pre_dispatch_failure(AgentTaskPreDispatchFailure {

@@ -8,7 +8,8 @@ use homeboy::core::agent_tasks::finalization::{
 };
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    promote, resume_promoted_patch, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use homeboy::core::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
@@ -204,7 +205,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         .ok()
         .map(|record| record.run_id);
     let (raw, source_path) = read_promotion_source(&args.source)?;
-    let report = promote(AgentTaskPromotionOptions {
+    let promotion_options = AgentTaskPromotionOptions {
         source: raw,
         source_run_id: source_run_id.clone(),
         source_path,
@@ -221,7 +222,34 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             argv: args.provider_argv,
             ..Default::default()
         }),
-    })?;
+    };
+    let previous_promotion = source_run_id.as_ref().and_then(|run_id| {
+        agent_task_lifecycle::status(run_id)
+            .ok()
+            .and_then(|record| record.metadata.get("latest_promotion").cloned())
+    });
+    let report = if let Some(previous) = previous_promotion
+        .filter(|previous| previous.get("status").and_then(Value::as_str) == Some("gate_failed"))
+    {
+        let target_path = previous
+            .pointer("/target/path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "promotion",
+                    "gate-failed promotion has no materialized target path to resume",
+                    None,
+                    None,
+                )
+            })?;
+        resume_promoted_patch(
+            promotion_options,
+            std::path::Path::new(target_path),
+            &previous,
+        )?
+    } else {
+        promote(promotion_options)?
+    };
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1
     } else {
@@ -230,8 +258,17 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
     value["handoff"] = promotion_handoff(&report, &to_worktree);
     if let Some(run_id) = source_run_id.filter(|_| !args.dry_run) {
-        let record =
-            agent_task_lifecycle::record_promotion(&run_id, promotion_status_event(&report))?;
+        // Finalization consumes the complete report as its durable gate proof.
+        // A status-only projection cannot prove the candidate or its gates.
+        let record = agent_task_lifecycle::record_promotion(
+            &run_id,
+            serde_json::to_value(&report).map_err(|error| {
+                homeboy::core::Error::internal_json(
+                    error.to_string(),
+                    Some("serialize agent-task promotion report".to_string()),
+                )
+            })?,
+        )?;
         value["recorded_on_run"] = serde_json::json!({
             "run_id": record.run_id,
             "metadata_key": "latest_promotion",
@@ -733,21 +770,6 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
             "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --title <title> --commit-message <message>"
         ),
         "next_actions": next_actions
-    })
-}
-
-fn promotion_status_event(report: &AgentTaskPromotionReport) -> Value {
-    serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-status/v1",
-        "status": report.status,
-        "source_run_id": report.source.run_id,
-        "source_task_id": report.source.task_id,
-        "patch_artifact_id": report.patch_artifact.id,
-        "patch_artifact_path": report.patch_artifact.path,
-        "to_worktree": report.to_worktree,
-        "target": report.target,
-        "changed_files": report.changed_files,
-        "operator_notification": report.operator_notification,
     })
 }
 

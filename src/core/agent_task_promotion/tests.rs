@@ -12,8 +12,8 @@ use super::apply::{
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 use super::promote::{
-    normalize_promotion_patch, promote, promote_with_provider, select_patch_artifact,
-    validate_artifact_content,
+    normalize_promotion_patch, promote, promote_with_provider, resume_promoted_patch,
+    select_patch_artifact, validate_artifact_content,
 };
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
@@ -1217,6 +1217,68 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
     assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
     assert_eq!(report.operator_notification.status, "blocked");
+}
+
+#[test]
+fn resume_promoted_patch_rebuilds_green_proof_for_clean_committed_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    git(&target, &["init"]);
+    git(&target, &["config", "user.email", "test@example.com"]);
+    git(&target, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(target.join("src")).expect("src");
+    std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
+    git(&target, &["add", "."]);
+    git(&target, &["commit", "-m", "base"]);
+    std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
+    git(&target, &["add", "."]);
+    git(&target, &["commit", "-m", "candidate plus gate correction"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some("run-8307".to_string()),
+        source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: None,
+        task_base_sha: None,
+        to_worktree: "repo@fix-8307".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions {
+            verify: vec!["true".to_string()],
+            private_verify: Vec::new(),
+            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+        },
+        provider_command: None,
+        provider_invocation: None,
+    };
+    let previous = serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-status/v1",
+        "status": "gate_failed",
+        "source_run_id": "run-8307",
+        "to_worktree": "repo@fix-8307",
+        "target": { "worktree": "repo@fix-8307", "path": target },
+    });
+
+    let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(
+        report.command_evidence[0].command,
+        vec!["git", "apply", "--reverse", "--check", "-"]
+    );
+    assert_eq!(report.gate_results.len(), 1);
+    assert_eq!(
+        report.gate_results[0].status,
+        crate::core::gate::HomeboyGateStatus::Passed
+    );
+    assert_eq!(
+        report.provenance["resumed_from_gate_failed_promotion"],
+        true
+    );
+    assert!(report.provenance["candidate"].is_object());
 }
 
 #[test]
