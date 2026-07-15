@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::engine::command::{
-    isolate_process_tree, wait_with_bounded_output,
+    isolate_process_tree, terminate_process_tree_and_reap, wait_with_bounded_output,
     wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
     StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
@@ -82,7 +82,8 @@ pub(crate) struct MeasuredOutput {
     pub metrics: RunnerResourceMetrics,
 }
 
-pub(crate) type RunnerCommandProgressSink = Arc<dyn Fn(Value) + Send + Sync + 'static>;
+pub(crate) type RunnerCommandProgressSink =
+    Arc<dyn Fn(Value) -> Result<()> + Send + Sync + 'static>;
 
 #[derive(Debug, Default)]
 struct MetricsState {
@@ -139,21 +140,37 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     let pid = child.id();
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
-            // The caller cannot safely recover a child it never durably recorded.
-            // Preserve the actionable persistence error after reaping this child.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            let cleanup = terminate_process_tree_and_reap(&mut child);
+            let cleanup_context = cleanup
+                .err()
+                .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
+                .unwrap_or_default();
+            return Err(Error::internal_io(
+                format!("failed to persist spawned runner child identity: {error}{cleanup_context}"),
+                Some("persist runner child identity".to_string()),
+            ));
         }
     }
-    // Persist the spawned child identity before waiting or sampling so a daemon
-    // loss cannot leave an executing runner command without PID evidence.
+    // The first PID event is an acknowledgement boundary: without durable
+    // identity evidence, terminate and reap rather than leaving work running.
     if let Some(progress) = progress_sink.as_ref() {
-        progress(runner_command_heartbeat_data(
+        if let Err(error) = progress(runner_command_heartbeat_data(
             started.elapsed(),
             pid,
             process_tree_resource_summary(pid),
-        ));
+        )) {
+            let cleanup = terminate_process_tree_and_reap(&mut child);
+            let cleanup_context = cleanup
+                .err()
+                .map(|error| format!("; child cleanup also failed: {error}"))
+                .unwrap_or_default();
+            return Err(Error::internal_io(
+                format!(
+                    "failed to persist spawned runner child identity: {error}{cleanup_context}"
+                ),
+                Some("persist runner child identity".to_string()),
+            ));
+        }
     }
     let guard_violation = Arc::new(Mutex::new(None));
     let collector = ResourceMetricsCollector::start(
@@ -243,7 +260,7 @@ impl ResourceMetricsCollector {
             );
             if let Some(progress) = progress_sink.as_ref() {
                 if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                    progress(runner_command_heartbeat_data(
+                    let _ = progress(runner_command_heartbeat_data(
                         started.elapsed(),
                         root_pid,
                         process_tree_resource_summary(root_pid),
@@ -746,7 +763,10 @@ mod tests {
         let progress = Arc::new(Mutex::new(Vec::new()));
         let progress_sink = {
             let progress = Arc::clone(&progress);
-            Arc::new(move |data| progress.lock().expect("progress lock").push(data))
+            Arc::new(move |data: Value| {
+                progress.lock().expect("progress lock").push(data);
+                Ok(())
+            })
         };
         let mut command = Command::new("sh");
         command.args(["-c", "exit 0"]);
@@ -767,6 +787,47 @@ mod tests {
                     .as_u64()
                     .is_some_and(|pid| pid > 0)
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_initial_child_identity_persistence_terminates_and_reaps_the_process_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("should-not-exist");
+        let spawned_pid = Arc::new(Mutex::new(None));
+        let progress_sink = {
+            let spawned_pid = Arc::clone(&spawned_pid);
+            Arc::new(move |data: Value| {
+                *spawned_pid.lock().expect("pid lock") = data["process"]["root_pid"].as_u64();
+                Err(Error::internal_io(
+                    "durable progress unavailable",
+                    Some("test progress persistence".to_string()),
+                ))
+            })
+        };
+        let mut command = Command::new("sh");
+        command.args(["-c", &format!("sleep 1; touch {}", marker.display())]);
+
+        let error = measured_command_output_until_cancelled_with_progress(
+            &mut command,
+            || false,
+            Some(progress_sink),
+            None,
+            None,
+        )
+        .expect_err("initial identity persistence failure must fail execution");
+
+        assert!(!error.message.is_empty(), "persistence failure is surfaced");
+        let pid = spawned_pid
+            .lock()
+            .expect("pid lock")
+            .expect("initial callback received PID") as u32;
+        assert!(!crate::core::process::pid_is_running(pid));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "child process tree must not continue running"
+        );
     }
 
     #[test]

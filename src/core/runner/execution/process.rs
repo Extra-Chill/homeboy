@@ -541,7 +541,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
                 &env,
                 &secret_env_names,
             ) {
-                sink(progress);
+                let _ = sink(progress);
             }
         }) as StdoutLineObserver
     });

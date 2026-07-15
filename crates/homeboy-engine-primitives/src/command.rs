@@ -239,6 +239,30 @@ fn terminate_process_tree(root_pid: u32) -> io::Result<()> {
     }
 }
 
+/// Terminate an isolated child process tree and reap its direct child process.
+/// On platforms without process groups, `Child::kill` still provides portable
+/// termination and reaping of the spawned process.
+pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
+    #[cfg(unix)]
+    if let Err(error) = terminate_process_tree(child.id()) {
+        // Reap the direct child even if its process-group cleanup failed.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = child.kill() {
+            if error.kind() != io::ErrorKind::InvalidInput {
+                return Err(error);
+            }
+        }
+    }
+
+    child.wait()
+}
+
 #[derive(Debug)]
 struct BoundedStreamCapture {
     bytes: Vec<u8>,
