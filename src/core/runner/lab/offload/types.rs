@@ -35,6 +35,9 @@ pub struct LabOffloadRequest<'a> {
     /// This keeps process cwd in the runner job while retaining an exact local
     /// source for Git materialization and path remapping.
     pub source_path: Option<&'a std::path::Path>,
+    /// Controller-derived evidence attached to staged source metadata. This is
+    /// descriptive only; it cannot relax remote snapshot validation.
+    pub verified_cook_baseline: Option<&'a serde_json::Value>,
     /// Select controller-bundle materialization before runner-side Git transport.
     pub require_controller_git_bundle: bool,
     pub job_overrides: LabJobOverrides,

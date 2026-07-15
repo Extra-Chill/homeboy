@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::core::agent_task_service::DerivedCookBaselineCapability;
 use crate::core::io::output_file::write_output_file;
 
 pub fn route_after_parse(
@@ -174,6 +175,7 @@ pub fn route_after_parse(
             source_path: retry_handoff
                 .as_ref()
                 .map(|handoff| handoff.primary_workspace.as_path()),
+            verified_cook_baseline: None,
             require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
         },
@@ -294,12 +296,26 @@ struct LabCookAttemptDispatcher {
     job_overrides: runners::LabJobOverrides,
 }
 
+fn cook_attempt_source_path<'a>(
+    derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
+    controller_source_path: Option<&'a Path>,
+) -> Option<&'a Path> {
+    derived_cook_baseline
+        .map(|capability| capability.canonical_path())
+        .or(controller_source_path)
+}
+
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
     fn dispatch_attempt(
         &self,
         plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
         run_id: &str,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
+        // The capability has already bound the promoted artifact and exact
+        // baseline to this retry; only its evidence crosses the Lab boundary.
+        let verified_cook_baseline =
+            derived_cook_baseline.map(DerivedCookBaselineCapability::verified_baseline_provenance);
         let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -345,7 +361,14 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 require_controller_git_bundle: false,
                 local_output_file: None,
                 durable_agent_task_plan: Some(&plan),
-                source_path: self.source_path.as_deref(),
+                // A retry's baseline is controller-owned capability, not plan
+                // data. Stage that exact clean checkout; never substitute the
+                // controller's original workspace during nested Lab dispatch.
+                source_path: cook_attempt_source_path(
+                    derived_cook_baseline,
+                    self.source_path.as_deref(),
+                ),
+                verified_cook_baseline: verified_cook_baseline.as_ref(),
                 job_overrides: self.job_overrides.clone(),
             },
             Some(&self.runner_id),
@@ -2057,6 +2080,35 @@ mod tests {
         for cli in [&cook, &batch, &retry] {
             assert_eq!(lab_route_dispatch_timeout(&cli.command), None);
         }
+    }
+
+    #[test]
+    fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() {
+        let baseline = tempfile::tempdir().expect("baseline");
+        let controller = tempfile::tempdir().expect("controller");
+        let capability = crate::core::agent_task_service::test_derived_cook_baseline_capability(
+            baseline.path().to_path_buf(),
+            "baseline-commit".to_string(),
+            "baseline-tree".to_string(),
+            "task",
+            Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
+        );
+
+        assert_eq!(
+            super::cook_attempt_source_path(Some(&capability), Some(controller.path())),
+            Some(capability.canonical_path())
+        );
+        assert_eq!(
+            capability.verified_baseline_provenance(),
+            serde_json::json!({
+                "source_run_id": "test-source-run",
+                "source_task_id": "task",
+                "promoted_patch_artifact_sha256": "test-artifact-sha256",
+                "baseline_commit": "baseline-commit",
+                "baseline_tree": "baseline-tree",
+                "parent_snapshot_identity": "snapshot:parent",
+            })
+        );
     }
 
     #[test]

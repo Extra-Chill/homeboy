@@ -652,6 +652,16 @@ mod committed_harvest_tests {
                 .expect("content hash");
         let lab = serde_json::json!({
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
+            "source_provenance": {
+                "verified_cook_baseline": {
+                    "source_run_id": "promoted-run",
+                    "source_task_id": "snapshot-task",
+                    "promoted_patch_artifact_sha256": "c".repeat(64),
+                    "baseline_commit": "d".repeat(40),
+                    "baseline_tree": "e".repeat(40),
+                    "parent_snapshot_identity": "snapshot:parent"
+                }
+            },
             "source_snapshot": snapshot,
             "workspace_verification": {
                 "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
@@ -697,7 +707,7 @@ mod committed_harvest_tests {
             artifact_declarations: Vec::new(),
             metadata: serde_json::Value::Null,
         };
-        let preflight = prepare_committed_harvest(&request).expect("snapshot preflight");
+        let preflight = prepare_committed_harvest(&request, None).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
         let source_provenance = preflight.source_provenance.expect("source provenance");
         assert!(workspace.path().join(".git").is_dir());
@@ -782,6 +792,12 @@ mod committed_harvest_tests {
         .expect("external patch provenance");
         for artifact in &outcome.artifacts {
             assert_eq!(artifact.metadata["source_provenance"], source_provenance);
+            assert_eq!(
+                artifact.metadata["source_provenance"]["verified_cook_baseline"]
+                    ["promoted_patch_artifact_sha256"],
+                "c".repeat(64),
+                "Lab retry artifact retains controller-verified baseline evidence"
+            );
         }
         assert_eq!(outcome.artifacts[0].metadata["kept"], true);
         drop(attempt);
@@ -863,7 +879,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request)
+        let preflight = prepare_committed_harvest(&request, None)
             .expect("runner-resident snapshot harvest preflight");
 
         assert!(preflight.base_sha.is_some());
@@ -913,7 +929,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request).expect("local non-Git no-op");
+        let preflight = prepare_committed_harvest(&request, None).expect("local non-Git no-op");
 
         assert!(preflight.base_sha.is_none());
         assert!(preflight.source_provenance.is_none());

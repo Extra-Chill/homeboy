@@ -3,7 +3,9 @@
 //! resolution. Pure move out of the former `agent_task_service.rs` god-file.
 
 use serde_json::Value;
+use sha2::Digest;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use crate::core::agent_task::AgentTaskExecutor;
@@ -18,7 +20,8 @@ use crate::core::agent_task_finalization::{
 use crate::core::agent_task_gate::VerifyGateOptions;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    normalize_promotion_patch, promote, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::core::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -30,13 +33,20 @@ use crate::core::agent_task_scheduler::{
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
-use super::execution::run_loaded_plan;
+use super::execution::{run_loaded_plan, run_loaded_plan_with_derived_cook_baseline};
 use super::AgentTaskRunResult;
 
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
-    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> Result<()>;
+    /// `derived_cook_baseline` is process-local authority for a gate-fix retry.
+    /// Implementations must not serialize it into the provider request.
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -132,7 +142,7 @@ where
             .unwrap_or(true);
         if needs_execution {
             let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
-                dispatcher.dispatch_attempt(plan.clone(), &run_id)
+                dispatcher.dispatch_attempt(plan.clone(), &run_id, None)
             } else {
                 run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
             };
@@ -312,7 +322,7 @@ where
                 ));
             }
             AgentTaskCookLoopStatus::RetryRequested => {
-                let Some(follow_up_request) = follow_up_request else {
+                let Some(mut follow_up_request) = follow_up_request else {
                     return Ok(cook_report(
                         cook_id,
                         "policy_failure",
@@ -367,6 +377,23 @@ where
                         ));
                     }
                 };
+                let baseline = match materialize_follow_up_baseline(&promotion, &run_id) {
+                    Ok(baseline) => baseline,
+                    Err(error) => {
+                        return Ok(cook_report(
+                            cook_id,
+                            "policy_failure",
+                            attempts,
+                            None,
+                            Some(error.to_string()),
+                            1,
+                        ));
+                    }
+                };
+                follow_up_request.workspace.root = Some(baseline.path.display().to_string());
+                // Requests retain artifact facts for review, never authorization.
+                follow_up_request.inputs["cook_loop"]["artifact_provenance"] =
+                    baseline.artifact_provenance();
                 let mut follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
@@ -374,9 +401,22 @@ where
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
+                if let Some(dispatcher) = &options.attempt_dispatcher {
+                    dispatcher.dispatch_attempt(
+                        follow_up_plan,
+                        &next_run_id,
+                        Some(baseline.capability()),
+                    )?;
+                } else {
+                    run_loaded_plan_with_derived_cook_baseline(
+                        follow_up_plan,
+                        Some(&next_run_id),
+                        executor.clone(),
+                        Some(baseline.capability()),
+                    )?;
+                }
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
-                next_plan = Some(follow_up_plan);
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 return Ok(cook_report(
@@ -402,6 +442,324 @@ where
         Some("cook attempt budget exhausted".to_string()),
         1,
     ))
+}
+
+/// A cook-owned detached checkout turns the already-promoted dirty candidate
+/// into a clean commit before the scheduler creates its normal attempt checkout.
+struct CookFollowUpBaseline {
+    source_root: PathBuf,
+    path: PathBuf,
+    capability: DerivedCookBaselineCapability,
+}
+
+/// Process-local authority for one materialized cook retry baseline. It is not
+/// serializable and never enters a request, environment, or durable record.
+pub struct DerivedCookBaselineCapability {
+    canonical_path: PathBuf,
+    commit: String,
+    tree: String,
+    artifact_sha256: String,
+    source_run_id: String,
+    source_task_id: String,
+    parent_snapshot: Option<Value>,
+}
+
+impl DerivedCookBaselineCapability {
+    pub(crate) fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+
+    pub(crate) fn commit(&self) -> &str {
+        &self.commit
+    }
+
+    pub(crate) fn tree(&self) -> &str {
+        &self.tree
+    }
+
+    pub(crate) fn source_task_id(&self) -> &str {
+        &self.source_task_id
+    }
+
+    pub(crate) fn parent_snapshot(&self) -> Option<&Value> {
+        self.parent_snapshot.as_ref()
+    }
+
+    pub(crate) fn artifact_provenance(&self) -> Value {
+        serde_json::json!({
+            "source_run_id": self.source_run_id,
+            "source_task_id": self.source_task_id,
+            "source_patch_artifact_sha256": self.artifact_sha256,
+        })
+    }
+
+    /// Evidence derived from the controller-validated capability. It is not
+    /// authorization for remote workspace or snapshot verification.
+    pub(crate) fn verified_baseline_provenance(&self) -> Value {
+        serde_json::json!({
+            "source_run_id": self.source_run_id,
+            "source_task_id": self.source_task_id,
+            "promoted_patch_artifact_sha256": self.artifact_sha256,
+            "baseline_commit": self.commit,
+            "baseline_tree": self.tree,
+            "parent_snapshot_identity": self.parent_snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .get("workspace_snapshot_identity")
+                    .cloned()
+                    .or_else(|| snapshot.get("identity").cloned())
+            }),
+        })
+    }
+}
+
+impl CookFollowUpBaseline {
+    fn capability(&self) -> &DerivedCookBaselineCapability {
+        &self.capability
+    }
+
+    fn artifact_provenance(&self) -> Value {
+        self.capability.artifact_provenance()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_derived_cook_baseline_capability(
+    path: PathBuf,
+    commit: String,
+    tree: String,
+    task_id: &str,
+    parent_snapshot: Option<Value>,
+) -> DerivedCookBaselineCapability {
+    DerivedCookBaselineCapability {
+        canonical_path: path
+            .canonicalize()
+            .expect("test baseline path canonicalizes"),
+        commit,
+        tree,
+        artifact_sha256: "test-artifact-sha256".to_string(),
+        source_run_id: "test-source-run".to_string(),
+        source_task_id: task_id.to_string(),
+        parent_snapshot,
+    }
+}
+
+impl Drop for CookFollowUpBaseline {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .current_dir(&self.source_root)
+            .status();
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.source_root)
+            .status();
+    }
+}
+
+fn materialize_follow_up_baseline(
+    promotion: &AgentTaskPromotionReport,
+    source_run_id: &str,
+) -> Result<CookFollowUpBaseline> {
+    let source_root = promotion
+        .provenance
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.worktree_path",
+                "gate-failed promotion did not report its managed target workspace",
+                None,
+                None,
+            )
+        })?;
+    let expected_head = promotion.target.head.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion.target.head",
+            "gate-failed promotion did not record the immutable target HEAD",
+            None,
+            None,
+        )
+    })?;
+    if git_output(&source_root, &["rev-parse", "HEAD"])? != expected_head {
+        return Err(Error::validation_invalid_argument(
+            "promotion.target.head",
+            "promotion target HEAD changed after the gate-failed promotion; refusing cook retry baseline",
+            None,
+            None,
+        ));
+    }
+    let parent_snapshot = std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+        .ok()
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument("source_snapshot", error.to_string(), None, None)
+        })?;
+    let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read promoted patch artifact".to_string()),
+        )
+    })?;
+    let artifact_sha256 = format!("{:x}", sha2::Sha256::digest(&artifact_bytes));
+    if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
+        if expected != artifact_sha256 {
+            return Err(Error::validation_invalid_argument(
+                "promotion.patch_artifact.sha256",
+                "promoted artifact bytes no longer match durable sha256",
+                None,
+                None,
+            ));
+        }
+    }
+    let artifact = std::str::from_utf8(&artifact_bytes).map_err(|error| {
+        Error::validation_invalid_argument(
+            "promotion.patch_artifact",
+            format!("patch bytes are not UTF-8: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let normalized = normalize_promotion_patch(artifact, &promotion.to_worktree)?;
+    let index = tempfile::NamedTempFile::new().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create cook baseline Git index".to_string()),
+        )
+    })?;
+    let index_path = index.path().display().to_string();
+    git_output_with_env(
+        &source_root,
+        &["read-tree", expected_head],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    git_output_with_env(
+        &source_root,
+        &["add", "--all"],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    let target_tree = git_output_with_env(
+        &source_root,
+        &["write-tree"],
+        &[("GIT_INDEX_FILE", &index_path)],
+    )?;
+    let parent = std::env::temp_dir().join("homeboy-cook-follow-up-baselines");
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create cook baseline directory".to_string()),
+        )
+    })?;
+    let path = parent.join(format!("baseline-{}", uuid::Uuid::new_v4()));
+    let path_string = path.display().to_string();
+    git_output(
+        &source_root,
+        &["worktree", "add", "--detach", &path_string, expected_head],
+    )?;
+    let baseline = CookFollowUpBaseline {
+        source_root,
+        path: path.clone(),
+        // The capability is completed only after the committed baseline's
+        // identity has been verified below.
+        capability: DerivedCookBaselineCapability {
+            canonical_path: path,
+            commit: String::new(),
+            tree: String::new(),
+            artifact_sha256,
+            source_run_id: source_run_id.to_string(),
+            source_task_id: promotion.source.task_id.clone(),
+            parent_snapshot,
+        },
+    };
+    let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
+    std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("write cook baseline patch".to_string()),
+        )
+    })?;
+    git_output(
+        &baseline.path,
+        &[
+            "apply",
+            "--whitespace=nowarn",
+            &patch_path.display().to_string(),
+        ],
+    )?;
+    std::fs::remove_file(&patch_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("remove cook baseline patch".to_string()),
+        )
+    })?;
+    git_output(&baseline.path, &["add", "--all"])?;
+    git_output(
+        &baseline.path,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@localhost",
+            "commit",
+            "--no-verify",
+            "-m",
+            "homeboy: cook promoted baseline",
+        ],
+    )?;
+    let commit = git_output(&baseline.path, &["rev-parse", "HEAD"])?;
+    let tree = git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?;
+    if tree != target_tree {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion target contains extra, missing, or unrelated changes; refusing cook retry baseline",
+            None,
+            None,
+        ));
+    }
+    let mut baseline = baseline;
+    baseline.capability.canonical_path = baseline.path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("canonicalize cook retry baseline".to_string()),
+        )
+    })?;
+    baseline.capability.commit = commit;
+    baseline.capability.tree = tree;
+    Ok(baseline)
+}
+
+fn git_output(cwd: &std::path::Path, args: &[&str]) -> Result<String> {
+    git_output_with_env(cwd, args, &[])
+}
+
+fn git_output_with_env(
+    cwd: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("git {}", args.join(" "))))
+        })?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            None,
+            None,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -964,5 +1322,178 @@ mod tests {
             }
             assert!(backend.committed && backend.pushed && backend.created);
         });
+    }
+
+    #[test]
+    fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = &temp.path().join("repo");
+        std::fs::create_dir(root).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        let target_head = git_output(root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("candidate.bin"), [0_u8, 1, 2, 255]).unwrap();
+        std::fs::write(root.join("candidate.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(root.join("candidate.sh"))
+            .unwrap()
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(root.join("candidate.sh"), permissions).unwrap();
+        assert!(Command::new("git")
+            .args(["add", "--all"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        let patch = Command::new("git")
+            .args([
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--find-renames",
+                "HEAD",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(patch.status.success());
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, patch.stdout).unwrap();
+        assert!(Command::new("git")
+            .args(["reset"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+            "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
+            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path}, "changed_files":["candidate.bin", "candidate.sh"],
+            "command_evidence":[], "deterministic_gates":[], "gate_results":[],
+            "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+        })).unwrap();
+        let baseline = materialize_follow_up_baseline(&report, "first-run").expect("baseline");
+        assert!(git_output(&baseline.path, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read(baseline.path.join("candidate.bin")).unwrap(),
+            [0_u8, 1, 2, 255]
+        );
+        assert!(
+            baseline
+                .path
+                .join("candidate.sh")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        );
+        assert!(!baseline.capability.commit().is_empty());
+        assert!(!baseline.capability.tree().is_empty());
+        assert_eq!(
+            baseline.artifact_provenance()["source_patch_artifact_sha256"],
+            sha2::Sha256::digest(std::fs::read(&patch_path).unwrap())
+                .to_vec()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
+
+    #[test]
+    fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "A"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let head_a = git_output(&root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("advanced.txt"), "B\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "B"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, "").unwrap();
+        let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+            "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":head_a},
+            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
+            "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+        }))
+        .unwrap();
+
+        let error = match materialize_follow_up_baseline(&report, "first-run") {
+            Ok(_) => panic!("target advancement rejects the stale promotion baseline"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.message.contains("target HEAD changed"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 }

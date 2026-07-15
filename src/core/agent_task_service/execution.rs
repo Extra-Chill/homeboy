@@ -19,6 +19,7 @@ use crate::core::agent_task_secrets::validate_secret_env_with_fallbacks;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::{config, worktree, Error, Result};
 
+use super::cook::DerivedCookBaselineCapability;
 use super::discovery::source_uri;
 
 #[derive(Debug, Clone)]
@@ -61,9 +62,21 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
 }
 
 pub fn run_loaded_plan<E>(
+    plan: AgentTaskPlan,
+    record_run_id: Option<&str>,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    run_loaded_plan_with_derived_cook_baseline(plan, record_run_id, executor, None)
+}
+
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline<E>(
     mut plan: AgentTaskPlan,
     record_run_id: Option<&str>,
     executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
 where
     E: AgentTaskExecutorAdapter,
@@ -86,7 +99,8 @@ where
         prepare_plan_for_execution(&mut plan, None)?;
     }
 
-    let aggregate = run_plan_with_scheduler(plan.clone(), record_run_id, executor);
+    let aggregate =
+        run_plan_with_scheduler(plan.clone(), record_run_id, executor, derived_cook_baseline);
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     }
@@ -282,7 +296,7 @@ fn run_prepared_claimed<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor);
+    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None);
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -333,14 +347,17 @@ fn run_plan_with_scheduler<E>(
     plan: AgentTaskPlan,
     run_id: Option<&str>,
     executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> AgentTaskAggregate
 where
     E: AgentTaskExecutorAdapter,
 {
     let scheduler = AgentTaskScheduler::new(executor);
     match run_id {
-        Some(run_id) => scheduler.with_run_id(run_id.to_string()).run(plan),
-        None => scheduler.run(plan),
+        Some(run_id) => scheduler
+            .with_run_id(run_id.to_string())
+            .run_with_derived_cook_baseline(plan, derived_cook_baseline),
+        None => scheduler.run_with_derived_cook_baseline(plan, derived_cook_baseline),
     }
 }
 
