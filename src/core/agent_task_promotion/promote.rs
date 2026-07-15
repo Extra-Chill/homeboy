@@ -334,7 +334,9 @@ fn run_promotion_gates(
     crate::core::hygiene::materialize_worktree_dependencies(worktree_path)?;
     let mut deterministic_gates = Vec::new();
     for (index, command) in options.gates.verify.iter().enumerate() {
-        deterministic_gates.push(provider.verify(
+        deterministic_gates.push(run_promotion_gate(
+            options,
+            provider,
             worktree_path,
             index + 1,
             command,
@@ -344,7 +346,9 @@ fn run_promotion_gates(
     }
     let private_offset = deterministic_gates.len();
     for (index, command) in options.gates.private_verify.iter().enumerate() {
-        deterministic_gates.push(provider.verify(
+        deterministic_gates.push(run_promotion_gate(
+            options,
+            provider,
             worktree_path,
             private_offset + index + 1,
             command,
@@ -367,6 +371,50 @@ fn run_promotion_gates(
         gate_results,
         dependencies_materialized: true,
     })
+}
+
+fn run_promotion_gate(
+    options: &AgentTaskPromotionOptions,
+    provider: &mut impl AgentTaskPromotionWorkspaceProvider,
+    worktree_path: &Path,
+    index: usize,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+) -> Result<crate::core::agent_task_gate::AgentTaskGateReport> {
+    let run_id = options
+        .source_run_id
+        .as_deref()
+        .unwrap_or("unrecorded-promotion");
+    let allocation = crate::core::controller_scratch::allocate_attempt(
+        run_id,
+        "promotion-verification",
+        &format!("gate-{index}"),
+        1,
+    )?;
+    let result = provider.verify_with_runtime_tmpdir(
+        worktree_path,
+        index,
+        command,
+        visibility,
+        reveal_policy,
+        &allocation.path,
+    );
+    let evidence = match &result {
+        Ok(report) => serde_json::json!({
+            "gate_id": report.id,
+            "status": report.status,
+            "exit_code": report.exit_code,
+        }),
+        Err(error) => serde_json::json!({ "error": error.message }),
+    };
+    let reason = match &result {
+        Ok(report) if report.status == AgentTaskGateStatus::Succeeded => "verification_succeeded",
+        Ok(_) => "verification_failed",
+        Err(_) => "verification_execution_failed",
+    };
+    crate::core::controller_scratch::release_attempt(&allocation, reason, evidence)?;
+    result
 }
 
 fn promotion_source(
