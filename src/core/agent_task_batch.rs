@@ -394,16 +394,14 @@ mod tests {
     use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use crate::core::agent_task_service;
     use std::collections::HashMap;
-    use tempfile::TempDir;
-
-    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn batch_submit_persists_parent_and_child_durable_runs() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/audit", vec![request("a"), request("b")]);
 
         let batch = submit_plan_batch(&plan, Some("batch/audit")).expect("batch submitted");
@@ -422,10 +420,11 @@ mod tests {
 
     #[test]
     fn batch_children_inherit_the_scoped_notification_route() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/routes", vec![request("a"), request("b")]);
         let route = crate::core::notification_route::NotificationRoute::new(
             "extension",
@@ -448,10 +447,11 @@ mod tests {
 
     #[test]
     fn batch_status_returns_partial_envelope_when_child_record_is_unavailable() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/restart", vec![request("a")]);
         submit_plan_batch(&plan, Some("batch/restart")).expect("batch submitted");
         let mut batch = read_batch("batch/restart").expect("batch record");
@@ -487,10 +487,11 @@ mod tests {
 
     #[test]
     fn batch_artifacts_report_exposes_stable_manifest_and_counts() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/artifacts", vec![request("a"), request("b")]);
         submit_plan_batch(&plan, Some("batch/artifacts")).expect("batch submitted");
         agent_task_service::run_submitted("batch_artifacts-a".to_string(), ArtifactExecutor)
@@ -518,10 +519,11 @@ mod tests {
 
     #[test]
     fn batch_artifacts_preserves_available_refs_when_child_record_is_unavailable() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let plan = AgentTaskPlan::new("fanout/artifacts-partial", vec![request("a")]);
         submit_plan_batch(&plan, Some("batch/artifacts-partial")).expect("batch submitted");
         agent_task_service::run_submitted(
@@ -562,10 +564,11 @@ mod tests {
 
     #[test]
     fn batch_submit_rejects_dependent_workflow_plans() {
-        let _lock = TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = isolated_homeboy_data();
+        // Hold the process-wide home guard (isolated HOME/XDG_DATA_HOME under
+        // the shared lock) so these tests serialize against every other module
+        // that mutates the same env — a module-local lock only ordered this
+        // module's own tests and raced `with_isolated_home` users elsewhere.
+        let _home = crate::test_support::HomeGuard::new();
         let mut plan = AgentTaskPlan::new("workflow", vec![request("a"), request("b")]);
         plan.output_dependencies.insert(
             "b".to_string(),
@@ -649,30 +652,6 @@ mod tests {
                 follow_up: None,
                 metadata: Value::Null,
             }
-        }
-    }
-
-    struct IsolatedHomeboyData {
-        _temp: TempDir,
-        previous: Option<String>,
-    }
-
-    impl Drop for IsolatedHomeboyData {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-    }
-
-    fn isolated_homeboy_data() -> IsolatedHomeboyData {
-        let temp = tempfile::tempdir().expect("temp data home");
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        std::env::set_var("XDG_DATA_HOME", temp.path());
-        IsolatedHomeboyData {
-            _temp: temp,
-            previous,
         }
     }
 }
