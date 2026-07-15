@@ -291,7 +291,12 @@ fn rig_spec_parse_error(
     let context = format!("parse rig spec {}", path.display());
     if matches!(err.classify(), serde_json::error::Category::Data) {
         let component = value.and_then(component_with_unrecognized_schema);
-        return Error::rig_schema_unsupported(err.to_string(), context, component);
+        return Error::rig_schema_unsupported(
+            err.to_string(),
+            context,
+            component,
+            env!("CARGO_PKG_VERSION"),
+        );
     }
     Error::validation_invalid_json(err, Some(context), received)
 }

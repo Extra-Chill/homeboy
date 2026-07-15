@@ -3077,14 +3077,16 @@ mod tests {
             .expect_err("fanout submit-batch must not run locally under Lab placement");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("Lab placement refused local execution"));
-        assert!(err.message.contains("automatic Lab offload disabled"));
+        // submit-batch needs an explicit runner under Lab placement: it does
+        // not auto-offload, so `--placement lab` without an eligible runner is
+        // refused rather than silently running locally.
+        assert!(err.message.contains("--placement lab"));
+        assert!(err.message.contains("requires an eligible Lab runner"));
+        assert!(err.message.contains("agent-task fanout submit-batch"));
     }
 
     #[test]
-    fn agent_task_fanout_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_run_plan_coordination_is_controller_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -3099,13 +3101,21 @@ mod tests {
         ];
         let cli = Cli::parse_from(&normalized);
 
+        // Fanout coordination is controller-owned so durable batch state,
+        // worktree ownership, and recovery stay local; the coordinator itself
+        // is not Lab-portable, though the independent cooks it generates may use
+        // their own Lab placement (#8045).
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(cli
+            .command
+            .lab_runner_unsupported_reason()
+            .is_some_and(|reason| reason.contains("controller-owned")));
     }
 
     #[test]
