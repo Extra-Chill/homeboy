@@ -6,7 +6,8 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeSourceConsistencyDiagnostic, AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::api_jobs::{JobEvent, JobStatus};
-use homeboy::core::runner::{RunnerActiveJobSource, RunnerActiveJobState};
+use homeboy::core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use homeboy::core::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 use homeboy::core::runners::{self as runner, RunnerSession, RunnerStatusReport, RunnerTunnelMode};
 
 use super::super::jobs::format_job_event;
@@ -153,6 +154,83 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     assert!(serialized.contains("homeboy agent-task status run-123 --full"));
     assert!(serialized.contains("homeboy agent-task retry run-123"));
     assert!(!serialized.contains("runner job logs"));
+}
+
+#[test]
+fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
+    let mut report = RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: false,
+        state: runner::RunnerSessionState::Disconnected,
+        session: Some(RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: runner::RunnerSessionRole::Controller,
+            server_id: Some("lab-server".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:7331".to_string()),
+            local_port: Some(7331),
+            local_url: Some("http://127.0.0.1:7331".to_string()),
+            tunnel_pid: Some(12345),
+            remote_daemon_pid: Some(23456),
+            remote_daemon_lease_id: Some("lease-23456".to_string()),
+            homeboy_version: "homeboy old".to_string(),
+            homeboy_build_identity: Some("homeboy old+daemon".to_string()),
+            connected_at: "2026-06-26T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }),
+        stale_daemon: None,
+        daemon_freshness: Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("lease-23456".to_string()),
+            pid: Some(23456),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string()),
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 1,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        }),
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 1,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+        active_job_error: Some(RunnerActiveJobError {
+            code: "active_job_view_inconsistent".to_string(),
+            message: "freshness has one job while /jobs has none".to_string(),
+        }),
+        session_path: "/tmp/session.json".to_string(),
+    };
+
+    let commands = runner_status_operator_commands(&report);
+
+    assert!(commands.iter().any(|command| {
+        command.scope == "daemon_reconcile_split_view"
+            && command.command.contains("--reconcile-leaseless-orphans")
+            && command.description.contains("process")
+    }));
+
+    report
+        .daemon_freshness
+        .as_mut()
+        .expect("freshness")
+        .active_jobs = 0;
+    assert!(runner_status_operator_commands(&report)
+        .iter()
+        .all(|command| command.scope != "daemon_reconcile_split_view"));
 }
 
 #[test]

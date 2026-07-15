@@ -165,6 +165,46 @@ fn corrupt_lease_reconciliation_terminalizes_queued_durable_agent_task_after_pro
 }
 
 #[test]
+fn version_mismatched_split_view_reconciles_only_after_no_owner_proof() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("runner.exec");
+        record_test_absent_local_child(&store, job.id);
+        let mut status = leaseless_status(1);
+        status.freshness.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+
+        let result = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(status),
+            || {
+                Ok(vec![
+                    "owner lock acquired".to_string(),
+                    "no daemon process".to_string(),
+                ])
+            },
+            || {
+                let snapshot = path.with_extension("split-view.snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || Ok(fake_daemon(4343, "replacement-lease")),
+        )
+        .expect("version-mismatched split view is recoverable after proof");
+
+        assert_eq!(result.affected_job_ids, vec![job.id.to_string()]);
+        assert_eq!(
+            JobStore::open_without_reconciliation(&path)
+                .expect("reopen store")
+                .get(job.id)
+                .expect("job")
+                .status,
+            JobStatus::Failed
+        );
+    });
+}
+
+#[test]
 fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
     for probe in [
         || {

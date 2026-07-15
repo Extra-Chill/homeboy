@@ -713,10 +713,15 @@ where
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
     let status = status()?;
-    if !matches!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
-    ) || status.freshness.active_jobs == 0
+    if status.freshness.active_jobs == 0
+        || !matches!(
+            status.freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::LeaseMissing
+                    | DaemonStaleReasonCode::LeaseCorrupt
+                    | DaemonStaleReasonCode::VersionMismatch
+            )
+        )
     {
         return Err(Error::validation_invalid_argument(
             "job_store",
@@ -954,9 +959,11 @@ where
     })
 }
 
-/// Explicitly recover legacy unowned durable jobs when the daemon lease is
-/// missing or unreadable. Process and configured-listener probes are fail-closed
-/// because no trustworthy lease identity exists to adopt.
+/// Explicitly recover durable jobs when no daemon owner can be proven. This
+/// covers missing lease metadata and stale version-mismatched daemons whose
+/// typed `/jobs` view no longer accounts for their durable active jobs.
+/// Process and configured-listener probes are fail-closed because replacement
+/// is safe only after ownership has been ruled out.
 pub fn reconcile_leaseless_orphans(
     confirm_no_daemon_owner: bool,
     addr: &str,
@@ -972,13 +979,19 @@ pub fn reconcile_leaseless_orphans(
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
-    if !matches!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
-    ) {
+    if status.freshness.active_jobs == 0
+        || !matches!(
+            status.freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::LeaseMissing
+                    | DaemonStaleReasonCode::LeaseCorrupt
+                    | DaemonStaleReasonCode::VersionMismatch
+            )
+        )
+    {
         return Err(Error::validation_invalid_argument(
             "reconcile_leaseless_orphans",
-            "lease-less recovery requires missing or corrupt daemon lease metadata; use exact lease recovery for recorded leases",
+            "recovery requires active jobs with missing, corrupt, or version-mismatched daemon freshness; use exact lease recovery for recorded dead leases",
             None,
             None,
         ));
