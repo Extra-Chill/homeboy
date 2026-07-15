@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -20,6 +21,8 @@ use super::args::{
     AgentTaskCookArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs,
     SubmitArgs,
 };
+
+const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
@@ -37,20 +40,39 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
     value
 }
 
-pub(super) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
 pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
-    let mut request = String::new();
+    let mut request = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut request)
+        .take(MAX_PROMOTION_PROVIDER_REQUEST_BYTES + 1)
+        .read_to_end(&mut request)
         .map_err(|error| {
             homeboy::core::Error::internal_io(
                 error.to_string(),
                 Some("read agent-task promotion provider request".to_string()),
             )
         })?;
+    if request.len() as u64 > MAX_PROMOTION_PROVIDER_REQUEST_BYTES {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "promotion-provider request",
+            format!(
+                "promotion provider request exceeds {MAX_PROMOTION_PROVIDER_REQUEST_BYTES} bytes"
+            ),
+            None,
+            None,
+        ));
+    }
+    let request = String::from_utf8(request).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "promotion-provider request",
+            format!("promotion provider request is not UTF-8: {error}"),
+            None,
+            None,
+        )
+    })?;
     homeboy::core::agent_task_promotion::apply_materialized_workspace_patch(
         Path::new(&args.workspace),
         &request,
@@ -67,6 +89,19 @@ pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value
 }
 
 pub(super) fn run_cook_with_executor<E>(args: AgentTaskCookArgs, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    run_cook_with_executor_and_dispatcher(args, executor, None)
+}
+
+pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
+    args: AgentTaskCookArgs,
+    executor: E,
+    attempt_dispatcher: Option<
+        Arc<dyn crate::core::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
@@ -101,29 +136,20 @@ where
         );
     }
     dispatch_args.core.queue_only = false;
-    let run_id = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+    let (run_id, initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
                 "agent-task cook attempt plan requires an attempt run id".to_string(),
             )
         })?;
-        let plan = agent_task_service::read_plan(attempt_plan)?;
-        // Submit the controller-compiled plan before provider execution. The
-        // durable record and its plan are therefore visible together to the
-        // runner-side cook loop and handoff observers.
-        agent_task_service::run_loaded_plan(plan, Some(&run_id), executor.clone())?;
-        run_id
+        (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let (dispatch_value, _dispatch_exit) =
-            dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
-        dispatch_value["run_id"]
-            .as_str()
-            .ok_or_else(|| {
-                homeboy::core::Error::internal_unexpected(
-                    "agent-task cook dispatch step did not return a run_id".to_string(),
-                )
-            })?
-            .to_string()
+        let run_id = dispatch_args
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+        let request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
+        (run_id, dispatch_service::build_dispatch_plan(&request)?)
     };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Keep this cook on one runtime generation through provider work and PR finalization.
@@ -140,6 +166,7 @@ where
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
             initial_run_id: run_id,
+            initial_plan,
             to_worktree: args.to_worktree,
             source_worktree_path,
             provider_command: args.provider_command,
@@ -163,6 +190,7 @@ where
                 .model
                 .or_else(|| agent_task_service::ai_model_from_tool(&args.ai_tool)),
             ai_used_for: args.ai_used_for,
+            attempt_dispatcher,
         },
         executor,
     )?;

@@ -398,7 +398,8 @@ mod config {
         pub timeout_ms: Option<u64>,
         #[serde(default)]
         pub retry: AgentTaskRetryPolicy,
-        /// One versioned provider-execution budget shared by retry and rotation.
+        /// Truthful operator budget for all provider executions of one task.
+        /// This is independent from deterministic cook gate attempts.
         #[serde(default = "legacy_execution_budget")]
         pub execution_budget: AgentTaskExecutionBudget,
         /// Per-plan provider rotation policy. Takes precedence over the global
@@ -523,6 +524,24 @@ mod config {
         pub max_provider_rotations: u32,
     }
 
+    impl Default for AgentTaskExecutionBudget {
+        fn default() -> Self {
+            Self {
+                version: Self::VERSION,
+                max_provider_executions: u32::MAX,
+                max_same_provider_retries: u32::MAX,
+                max_provider_rotations: u32::MAX,
+            }
+        }
+    }
+
+    fn legacy_execution_budget() -> AgentTaskExecutionBudget {
+        AgentTaskExecutionBudget {
+            version: 0,
+            ..AgentTaskExecutionBudget::default()
+        }
+    }
+
     impl AgentTaskExecutionBudget {
         pub const VERSION: u32 = 1;
 
@@ -551,19 +570,6 @@ mod config {
                     Self::VERSION
                 )),
             }
-        }
-    }
-
-    impl Default for AgentTaskExecutionBudget {
-        fn default() -> Self {
-            Self::new(u32::MAX, u32::MAX, u32::MAX)
-        }
-    }
-
-    fn legacy_execution_budget() -> AgentTaskExecutionBudget {
-        AgentTaskExecutionBudget {
-            version: 0,
-            ..AgentTaskExecutionBudget::default()
         }
     }
 
@@ -722,6 +728,7 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
+        CandidateRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
@@ -738,6 +745,8 @@ mod aggregate {
         pub skipped: usize,
         #[serde(default)]
         pub succeeded: usize,
+        #[serde(default)]
+        pub candidate_recoverable: usize,
         #[serde(default)]
         pub failed: usize,
         #[serde(default)]
@@ -764,6 +773,7 @@ mod aggregate {
         Skipped,
         Running,
         Succeeded,
+        CandidateRecoverable,
         Failed,
         Cancelled,
         TimedOut,

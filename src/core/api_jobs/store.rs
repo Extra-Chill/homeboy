@@ -659,25 +659,19 @@ impl JobStore {
                 stored.job.updated_at_ms = now;
                 stored.job.finished_at_ms = Some(now);
                 stored.job.stale_reason = None;
-                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                stored.events.push(JobEvent {
-                    sequence,
+                self.record_dead_lease_terminal_recovery(
+                    stored,
                     job_id,
-                    kind: JobEventKind::Status,
-                    timestamp_ms: now,
-                    message: Some(
-                        "job terminal status recovered from recorded result after dead daemon lease"
-                            .to_string(),
-                    ),
-                    data: Some(serde_json::json!({
+                    now,
+                    "job terminal status recovered from recorded result after dead daemon lease"
+                        .to_string(),
+                    serde_json::json!({
                         "status": status,
                         "reason": "recovered_after_dead_daemon_lease",
                         "exit_code": exit_code,
                         "daemon_lease_id": expected_lease_id,
-                    })),
-                });
-                apply_event_retention(&mut stored.events, self.event_retention_limit());
-                stored.job.event_count = stored.events.len();
+                    }),
+                );
                 continue;
             }
             if let DeadLeaseJobDisposition::RecoveredLinkedRun(recovered) = disposition {
@@ -695,25 +689,21 @@ impl JobStore {
                         stored.job.artifacts.push(artifact);
                     }
                 }
-                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                stored.events.push(JobEvent {
-                    sequence,
+                self.record_dead_lease_terminal_recovery(
+                    stored,
                     job_id,
-                    kind: JobEventKind::Status,
-                    timestamp_ms: now,
-                    message: Some(format!(
+                    now,
+                    format!(
                         "job terminal status recovered from linked durable run `{}` after dead daemon lease",
                         recovered.run_id
-                    )),
-                    data: Some(serde_json::json!({
+                    ),
+                    serde_json::json!({
                         "status": recovered.status,
                         "reason": "recovered_after_dead_daemon_lease",
                         "daemon_lease_id": expected_lease_id,
                         "child_terminal_result": recovered.terminal_result,
-                    })),
-                });
-                apply_event_retention(&mut stored.events, self.event_retention_limit());
-                stored.job.event_count = stored.events.len();
+                    }),
+                );
                 continue;
             }
             if matches!(disposition, DeadLeaseJobDisposition::ProtectedLive) {
@@ -773,6 +763,27 @@ impl JobStore {
         drop(inner);
         self.persist()?;
         Ok(diagnostics)
+    }
+
+    fn record_dead_lease_terminal_recovery(
+        &self,
+        stored: &mut StoredJob,
+        job_id: uuid::Uuid,
+        now: u64,
+        message: String,
+        data: serde_json::Value,
+    ) {
+        let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        stored.events.push(JobEvent {
+            sequence,
+            job_id,
+            kind: JobEventKind::Status,
+            timestamp_ms: now,
+            message: Some(message),
+            data: Some(data),
+        });
+        apply_event_retention(&mut stored.events, self.event_retention_limit());
+        stored.job.event_count = stored.events.len();
     }
 
     /// Terminalize all active jobs after an operator has proved that no daemon
@@ -1291,7 +1302,9 @@ fn resolve_linked_durable_run(stored: &StoredJob) -> LinkedDurableRunResolution 
         Err(_) => return LinkedDurableRunResolution::Unresolved(run_id),
     };
     let status = match result.value.status {
-        AgentTaskAggregateStatus::Succeeded => JobStatus::Succeeded,
+        AgentTaskAggregateStatus::Succeeded | AgentTaskAggregateStatus::CandidateRecoverable => {
+            JobStatus::Succeeded
+        }
         AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
         AgentTaskAggregateStatus::PartialFailure | AgentTaskAggregateStatus::Failed => {
             JobStatus::Failed

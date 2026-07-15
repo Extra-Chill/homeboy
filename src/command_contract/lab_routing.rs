@@ -16,7 +16,7 @@ use clap::Command;
 use std::collections::BTreeSet;
 
 use super::lab::{
-    AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
+    AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON, AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
     AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
     AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON, LAB_AGENT_TASK_SECRET_ENV_SOURCES,
 };
@@ -71,9 +71,14 @@ impl Commands {
                 AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Cook(_),
+            }) => LabCommandContract::local_only(
+                AGENT_TASK_RUN_LAB_LABEL,
+                AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
-                    agent_task::AgentTaskCommand::Cook(_)
-                    | agent_task::AgentTaskCommand::RunPlan(_)
+                    agent_task::AgentTaskCommand::RunPlan(_)
                     | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs { run: true, .. }),
             }) => LabCommandContract::portable(
                 AGENT_TASK_RUN_LAB_LABEL,

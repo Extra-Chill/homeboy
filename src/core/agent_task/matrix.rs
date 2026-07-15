@@ -314,6 +314,9 @@ fn matrix_execution_state_for_outcome(
         AgentTaskOutcomeStatus::ProviderError
         | AgentTaskOutcomeStatus::Timeout
         | AgentTaskOutcomeStatus::Cancelled => AgentTaskMatrixExecutionState::ExecutionFailed,
+        AgentTaskOutcomeStatus::CandidateRecoverable => {
+            AgentTaskMatrixExecutionState::ExecutedWithFindings
+        }
         AgentTaskOutcomeStatus::Failed
             if matches!(
                 outcome.failure_classification,

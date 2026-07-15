@@ -25,8 +25,9 @@ use std::sync::{Arc, Mutex};
 fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut plan = test_plan();
+    plan.options.retry.max_attempts = 1;
     plan.options.execution_budget =
-        crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1);
+        crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1);
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
         entries: vec![AgentTaskProviderRotationEntry {
             backend: Some("fallback".to_string()),
@@ -41,7 +42,7 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
 
     let usage = execution_budget_usage(&aggregate);
     let remaining = budget_remaining(
-        &crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 2, 1),
+        &crate::core::agent_task_scheduler::AgentTaskExecutionBudget::new(3, 0, 1),
         usage,
     )
     .expect("remaining total budget");
@@ -278,6 +279,7 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             observed_root.contains("homeboy-agent-task-attempts"),
             "attempt worktree should live under the agent-task attempts scratch root, got {observed_root}"
         );
+        assert!(observed.workspace.attempt.is_some());
         assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
         assert!(observed.workspace.kind.is_none());
         assert!(observed.workspace.component_id.is_none());

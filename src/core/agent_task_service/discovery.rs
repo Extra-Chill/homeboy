@@ -426,6 +426,7 @@ fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTa
             }
             AgentTaskState::Running => counts.running += 1,
             AgentTaskState::Succeeded | AgentTaskState::Cancelled => counts.completed += 1,
+            AgentTaskState::CandidateRecoverable => counts.completed += 1,
             AgentTaskState::Failed | AgentTaskState::TimedOut => counts.failed += 1,
         }
     }

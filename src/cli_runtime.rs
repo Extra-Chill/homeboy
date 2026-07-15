@@ -662,8 +662,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         &std::env::args().collect::<Vec<_>>(),
                         selected_lab_runner,
                     ),
-                    selected_lab_runner,
-                    hot_command,
+                    default_lab_runner.as_deref(),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);

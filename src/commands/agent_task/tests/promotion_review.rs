@@ -138,10 +138,9 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
                         tasks_json: None,
                         provider_config: None,
                         client_context: None,
-                        attempts: Some(1),
-                        max_provider_executions: None,
-                        max_same_provider_retries: None,
-                        max_provider_rotations: None,
+                        attempts: 1,
+                        same_provider_retries: 0,
+                        provider_rotations: 0,
                         queue_only: false,
                         timeout_ms: None,
                         resolved_provider_policy: None,
@@ -188,11 +187,11 @@ fn cook_returns_durable_id_when_promotion_provider_is_missing() {
         assert!(value["stop_reason"]
             .as_str()
             .expect("stop reason")
-            .contains("configured worktree provider"));
+            .contains("workspace provider command"));
     });
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CommittingExecutor {
     workspace: std::path::PathBuf,
 }
@@ -278,8 +277,26 @@ impl AgentTaskExecutorAdapter for CommittingExecutor {
     }
 }
 
+/// Mimics the typed Lab lifecycle mirror: the provider executes elsewhere, but
+/// the completed aggregate is written under the controller-owned attempt id.
+#[derive(Debug, Clone)]
+struct MirroredAttemptDispatcher {
+    executor: CommittingExecutor,
+}
+
+impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for MirroredAttemptDispatcher {
+    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> homeboy::core::Result<()> {
+        homeboy::core::agent_tasks::service::run_loaded_plan(
+            plan,
+            Some(run_id),
+            self.executor.clone(),
+        )
+        .map(|_| ())
+    }
+}
+
 #[test]
-fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
+fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
     with_temp_home(|| {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -315,7 +332,10 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
         )
         .expect("write promotion provider");
 
-        let (value, exit_code) = run_cook_with_executor(
+        let executor = CommittingExecutor {
+            workspace: source.clone(),
+        };
+        let (value, exit_code) = run_cook_with_executor_and_dispatcher(
             AgentTaskCookArgs {
                 dispatch: DispatchArgs {
                     prompt: Some("commit a change".to_string()),
@@ -335,10 +355,9 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                         tasks_json: None,
                         provider_config: None,
                         client_context: None,
-                        attempts: Some(1),
-                        max_provider_executions: None,
-                        max_same_provider_retries: None,
-                        max_provider_rotations: None,
+                        attempts: 1,
+                        same_provider_retries: 0,
+                        provider_rotations: 0,
                         queue_only: false,
                         timeout_ms: None,
                         resolved_provider_policy: None,
@@ -365,9 +384,8 @@ fn cook_applies_executor_commit_from_source_repo_to_distinct_target_repo() {
                 ai_tool: "OpenCode (GPT-5.6 Sol)".to_string(),
                 ai_used_for: "test".to_string(),
             },
-            CommittingExecutor {
-                workspace: source.clone(),
-            },
+            executor.clone(),
+            Some(Arc::new(MirroredAttemptDispatcher { executor })),
         )
         .expect("cook completes");
 

@@ -123,6 +123,7 @@ pub(crate) fn provider_runtime_state_for_task_state(
         }
         Some(AgentTaskState::Running) => ProviderRuntimeState::Running,
         Some(AgentTaskState::Succeeded) => ProviderRuntimeState::Succeeded,
+        Some(AgentTaskState::CandidateRecoverable) => ProviderRuntimeState::TimedOut,
         Some(AgentTaskState::Failed) => ProviderRuntimeState::Failed,
         Some(AgentTaskState::Cancelled) => ProviderRuntimeState::Cancelled,
         Some(AgentTaskState::TimedOut) => ProviderRuntimeState::TimedOut,

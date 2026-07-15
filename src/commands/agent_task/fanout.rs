@@ -12,6 +12,7 @@ use homeboy::core::agent_tasks::dispatch_service::{
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider::{self, AgentTaskProviderCatalog};
+use homeboy::core::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy::core::agent_tasks::service::{
     self as agent_task_service, AgentTaskCookServiceOptions,
 };
@@ -28,9 +29,6 @@ use super::args::{
     AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
-
-const AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA_V2: &str =
-    "homeboy/agent-task-batch-cook-fanout-plan/v2";
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     match args.command {
@@ -121,18 +119,12 @@ fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
 
     for cook in &plan.cooks {
         let invocation = cook.to_cook_invocation(&plan)?;
-        let (dispatch_value, _dispatch_exit) =
-            dispatch_service::run_dispatch_command(invocation.dispatch, executor.clone())?;
-        let run_id = dispatch_value["run_id"]
-            .as_str()
-            .ok_or_else(|| {
-                Error::internal_unexpected(
-                    "agent-task dispatch did not return a run_id".to_string(),
-                )
-            })?
-            .to_string();
+        let run_id = invocation.options.initial_run_id.clone();
+        let request = dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
+        let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
         let mut options = invocation.options;
         options.initial_run_id = run_id;
+        options.initial_plan = initial_plan;
         let result = agent_task_service::run_cook(options, executor.clone())?;
         let value = serde_json::to_value(result.value).unwrap_or(Value::Null);
         let exit_code = result.exit_code;
@@ -332,11 +324,7 @@ fn load_batch_cook_fanout_plan(args: &AgentTaskFanoutInputArgs) -> Result<BatchC
     BatchCookFanoutPlan::from_value(value, args)
 }
 
-// v1 has no flattened or extension-bearing fields, so strict decoding preserves
-// its concrete contract while rejecting misspelled budget fields. v2 makes the
-// budget-capable schema explicit for new producers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 struct BatchCookFanoutPlan {
     #[serde(default = "batch_cook_fanout_plan_schema")]
     schema: String,
@@ -349,16 +337,6 @@ struct BatchCookFanoutPlan {
 impl BatchCookFanoutPlan {
     fn from_value(value: Value, args: &AgentTaskFanoutInputArgs) -> Result<Self> {
         reject_generic_fanout_inputs(&value)?;
-        let attempts_explicit = value
-            .get("cooks")
-            .and_then(Value::as_array)
-            .map(|cooks| {
-                cooks
-                    .iter()
-                    .map(|cook| cook.get("attempts").is_some())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let mut plan: BatchCookFanoutPlan = serde_json::from_value(value).map_err(|error| {
             Error::validation_invalid_argument(
                 "input",
@@ -369,17 +347,12 @@ impl BatchCookFanoutPlan {
                 ]),
             )
         })?;
-        for (cook, attempts_explicit) in plan.cooks.iter_mut().zip(attempts_explicit) {
-            cook.attempts_explicit = attempts_explicit;
-        }
         if let Some(fanout_id) = &args.fanout_id {
             plan.fanout_id = fanout_id.clone();
         }
-        if plan.schema != AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA
-            && plan.schema != AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA_V2
-        {
+        if plan.schema != AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA {
             return Err(invalid_fanout(
-                "agent-task fanout requires homeboy/agent-task-batch-cook-fanout-plan/v1 or /v2",
+                "agent-task fanout requires homeboy/agent-task-batch-cook-fanout-plan/v1",
             ));
         }
         if plan.fanout_id.trim().is_empty() {
@@ -400,7 +373,6 @@ impl BatchCookFanoutPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 struct BatchCookSpec {
     cook_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,14 +399,10 @@ struct BatchCookSpec {
     secret_env: Vec<String>,
     #[serde(default = "one")]
     attempts: u32,
-    #[serde(skip)]
-    attempts_explicit: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_provider_executions: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_same_provider_retries: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_provider_rotations: Option<u32>,
+    #[serde(default)]
+    same_provider_retries: u32,
+    #[serde(default)]
+    provider_rotations: u32,
     #[serde(default = "one_usize")]
     concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -547,10 +515,8 @@ impl BatchCookSpec {
                 provider_config: self.provider_config.clone(),
                 client_context: Some(merged_client_context(plan, self)),
                 attempts: self.attempts,
-                attempts_explicit: self.attempts_explicit,
-                max_provider_executions: self.max_provider_executions,
-                max_same_provider_retries: self.max_same_provider_retries,
-                max_provider_rotations: self.max_provider_rotations,
+                same_provider_retries: self.same_provider_retries,
+                provider_rotations: self.provider_rotations,
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
@@ -582,6 +548,7 @@ impl BatchCookSpec {
             options: AgentTaskCookServiceOptions {
                 cook_id: self.run_id(),
                 initial_run_id: self.run_id(),
+                initial_plan: AgentTaskPlan::new(self.run_id(), Vec::new()),
                 to_worktree: self.to_worktree.clone(),
                 source_worktree_path,
                 provider_command: self.provider_command.clone(),
@@ -606,6 +573,7 @@ impl BatchCookSpec {
                     .clone()
                     .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
+                attempt_dispatcher: None,
             },
         })
     }
@@ -698,10 +666,8 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             model: args.model.clone(),
             secret_env: args.secret_env.clone(),
             attempts: 1,
-            attempts_explicit: false,
-            max_provider_executions: None,
-            max_same_provider_retries: None,
-            max_provider_rotations: None,
+            same_provider_retries: 0,
+            provider_rotations: 0,
             concurrency: 1,
             provider_config: args.provider_config.clone(),
             client_context: Some(
@@ -1112,47 +1078,6 @@ mod tests {
                 .expect("client context")
                 .contains("/Users/user/Developer/homeboy@5929-docs"));
         });
-    }
-
-    #[test]
-    fn v2_budget_fields_round_trip_and_reject_typos() {
-        let plan = BatchCookFanoutPlan::from_value(
-            json!({
-                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA_V2,
-                "fanout_id": "fanout/budget",
-                "cooks": [{
-                    "cook_id": "budget",
-                    "prompt": "fix budget",
-                    "to_worktree": "homeboy@budget",
-                    "verify": ["true"],
-                    "max_provider_executions": 3
-                }]
-            }),
-            &args(),
-        )
-        .expect("v2 plan");
-        let invocation = plan.cooks[0]
-            .to_cook_invocation(&plan)
-            .expect("v2 invocation");
-        assert_eq!(invocation.dispatch.core.max_provider_executions, Some(3));
-        assert!(!invocation.dispatch.core.attempts_explicit);
-
-        let error = BatchCookFanoutPlan::from_value(
-            json!({
-                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA_V2,
-                "fanout_id": "fanout/budget",
-                "cooks": [{
-                    "cook_id": "budget",
-                    "prompt": "fix budget",
-                    "to_worktree": "homeboy@budget",
-                    "verify": ["true"],
-                    "max_provider_execution": 3
-                }]
-            }),
-            &args(),
-        )
-        .expect_err("v2 typo rejected");
-        assert!(error.message.contains("max_provider_execution"));
     }
 
     #[test]

@@ -18,6 +18,16 @@ const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 // keep existing `cli_surface::Placement` call sites working.
 pub use homeboy_cli_contract::Placement;
 
+impl Placement {
+    pub const fn allows_local_fallback(self) -> bool {
+        matches!(self, Self::LabOrLocal)
+    }
+
+    pub const fn requests_lab(self) -> bool {
+        matches!(self, Self::Lab | Self::LabOrLocal)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "homeboy")]
 #[command(version = VERSION)]

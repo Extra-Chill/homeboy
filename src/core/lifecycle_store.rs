@@ -313,6 +313,7 @@ fn run_status(state: AgentTaskRunState) -> &'static str {
     match state {
         AgentTaskRunState::Queued | AgentTaskRunState::Running => RunStatus::Running.as_str(),
         AgentTaskRunState::Succeeded => RunStatus::Pass.as_str(),
+        AgentTaskRunState::CandidateRecoverable => RunStatus::Fail.as_str(),
         AgentTaskRunState::PartialFailure | AgentTaskRunState::Failed => RunStatus::Fail.as_str(),
         AgentTaskRunState::Cancelled => RunStatus::Skipped.as_str(),
     }
@@ -321,6 +322,7 @@ fn run_status(state: AgentTaskRunState) -> &'static str {
 fn terminal_finished_at(record: &AgentTaskRunRecord) -> Option<String> {
     match record.state {
         AgentTaskRunState::Succeeded
+        | AgentTaskRunState::CandidateRecoverable
         | AgentTaskRunState::PartialFailure
         | AgentTaskRunState::Failed
         | AgentTaskRunState::Cancelled => record
