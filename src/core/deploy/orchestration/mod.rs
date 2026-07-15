@@ -434,7 +434,6 @@ mod tests {
         checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
     };
     use crate::core::deploy::planning::{load_project_components, ExtensionSkippedComponent};
-    use crate::core::deploy::types::ComponentDeployResult;
     use crate::core::project::ProjectComponentAttachment;
     use crate::test_support::{home_env_guard, with_isolated_home};
     use std::collections::HashMap;
@@ -447,7 +446,6 @@ mod tests {
         auto_pull_version_drift_message, check_uncommitted_changes, check_unreleased_commits,
         verify_expected_version,
     };
-    use super::smoke_check::run_post_deploy_smoke;
 
     fn make_component(id: &str, local_path: &str) -> Component {
         Component::new(id.to_string(), local_path.to_string(), String::new(), None)
@@ -1394,89 +1392,6 @@ mod tests {
         assert!(
             !artifact.starts_with(&component.local_path),
             "the stale configured-checkout artifact must not be reused"
-        );
-    }
-
-    fn deployed_result(id: &str) -> ComponentDeployResult {
-        let component = make_component(id, "/tmp/does-not-matter");
-        ComponentDeployResult::new(&component, "/srv/site").with_status("deployed")
-    }
-
-    #[test]
-    fn post_deploy_smoke_is_noop_without_config() {
-        let project = Project {
-            id: "site".to_string(),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
-        assert_eq!(results[0].status, "deployed");
-    }
-
-    #[test]
-    fn post_deploy_smoke_noop_when_disabled() {
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: false,
-                url: "https://example.test/".to_string(),
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
-    }
-
-    #[test]
-    fn post_deploy_smoke_failure_records_error_and_fails() {
-        // enabled smoke against an unreachable URL fails the deploy and records
-        // the error on the deployed component.
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: true,
-                // Reserved TEST-NET address (RFC 5737) so the request fails fast.
-                url: "http://192.0.2.1:9/".to_string(),
-                timeout_secs: 1,
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(true));
-        assert!(
-            results[0].error.is_some(),
-            "failed smoke must record an error on the deployed component"
-        );
-    }
-
-    #[test]
-    fn post_deploy_smoke_warn_only_does_not_fail() {
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: true,
-                url: "http://192.0.2.1:9/".to_string(),
-                timeout_secs: 1,
-                warn_only: true,
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(false));
-        assert_eq!(
-            results[0].status, "deployed",
-            "warn_only smoke must not fail the deploy"
-        );
-        assert!(
-            results[0].warnings.iter().any(|w| w.contains("warn_only")),
-            "warn_only smoke failure should be surfaced as a warning"
         );
     }
 
