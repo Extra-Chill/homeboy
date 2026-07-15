@@ -1067,12 +1067,12 @@ impl AgentTaskScheduleSupport {
         policy: &AgentTaskProviderRotationPolicy,
         rotation_index: usize,
         attempt: u32,
-        max_total_executions: u32,
+        max_provider_executions: u32,
         max_provider_rotations: u32,
     ) -> bool {
         rotation_index < policy.entries.len()
             && rotation_index < max_provider_rotations as usize
-            && attempt < max_total_executions
+            && attempt < max_provider_executions
             && attempt < policy.max_total_attempts()
             && !matches!(
                 outcome.status,
@@ -1218,7 +1218,7 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::Cancelled
         );
         let exhausted = terminal_is_failure.then(|| {
-            if executions_used >= budget.max_total_executions.max(1) {
+            if executions_used >= budget.max_provider_executions {
                 "total_executions"
             } else if rotations_used >= budget.max_provider_rotations as usize {
                 "provider_rotations"
@@ -1233,12 +1233,12 @@ impl AgentTaskScheduleSupport {
             .insert(
                 "execution_budget".to_string(),
                 serde_json::json!({
-                    "max_total_executions": budget.max_total_executions.max(1),
+                    "max_provider_executions": budget.max_provider_executions,
                     "max_same_provider_retries": budget.max_same_provider_retries,
                     "max_provider_rotations": budget.max_provider_rotations,
                     "executions_used": executions_used,
                     "provider_rotations_used": rotations_used,
-                    "remaining_total_executions": budget.max_total_executions.max(1).saturating_sub(executions_used),
+                    "remaining_provider_executions": budget.max_provider_executions.saturating_sub(executions_used),
                     "exhausted": exhausted,
                     "terminal_reason": format!("{:?}", outcome.status).to_lowercase(),
                 }),
@@ -1265,12 +1265,12 @@ impl AgentTaskScheduleSupport {
         outcome: &AgentTaskOutcome,
         attempt: u32,
         max_same_provider_retries: u32,
-        max_total_executions: u32,
+        max_provider_executions: u32,
         retry_budget_total: Option<u32>,
         retry_budget_used: u32,
         retryable_failure_classifications: &[AgentTaskFailureClassification],
     ) -> bool {
-        attempt < max_total_executions
+        attempt < max_provider_executions
             && attempt <= max_same_provider_retries
             && retry_budget_total
                 .map(|budget| retry_budget_used < budget)

@@ -257,7 +257,7 @@ fn run_split_placement_cook(
     controller.attempt_plan = Some(serialized_plan);
     let dispatcher = Arc::new(LabCookAttemptDispatcher {
         runner_id: runner_id.to_string(),
-        allow_local_fallback: cli.allow_local_fallback,
+        allow_local_fallback: cli.placement.allows_local_fallback(),
         allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
         skip_deps_hydration: cli.skip_deps_hydration,
         source_path,

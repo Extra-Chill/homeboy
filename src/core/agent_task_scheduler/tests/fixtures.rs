@@ -482,7 +482,9 @@ pub(super) fn plan_with_tasks(count: usize) -> AgentTaskPlan {
     for index in 1..=count {
         tasks.push(request(&format!("task-{index}")));
     }
-    AgentTaskPlan::new("plan-1", tasks)
+    let mut plan = AgentTaskPlan::new("plan-1", tasks);
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+    plan
 }
 
 pub(super) fn plan_with_required_artifacts(names: &[&str]) -> AgentTaskPlan {
@@ -499,7 +501,9 @@ pub(super) fn plan_with_required_artifacts(names: &[&str]) -> AgentTaskPlan {
             metadata: Value::Null,
         })
         .collect();
-    AgentTaskPlan::new("plan-1", vec![task])
+    let mut plan = AgentTaskPlan::new("plan-1", vec![task]);
+    plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+    plan
 }
 
 pub(super) fn request(task_id: &str) -> AgentTaskRequest {

@@ -51,18 +51,6 @@ where
         cancellation: AgentTaskCancellationToken,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
-        if plan.options.execution_budget.is_legacy_unset() {
-            plan.options.execution_budget = AgentTaskExecutionBudget::migrate_legacy(
-                &plan.options.retry,
-                plan.options.rotation.as_ref(),
-            );
-            if let Some(metadata) = plan.metadata.as_object_mut() {
-                metadata.insert(
-                    "execution_budget_migrated_from_legacy".to_string(),
-                    true.into(),
-                );
-            }
-        }
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
@@ -107,7 +95,7 @@ where
         let mut events = Vec::new();
         let mut cancellation_notified = false;
         let execution_budget = plan.options.execution_budget.clone();
-        let max_attempts = execution_budget.max_total_executions.max(1);
+        let max_attempts = execution_budget.max_provider_executions;
         let (tx, rx) = mpsc::channel();
         let cancellation_tx = tx.clone();
         cancellation.on_cancel(Arc::new(move || {

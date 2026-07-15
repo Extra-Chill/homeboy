@@ -648,8 +648,9 @@ mod committed_harvest_tests {
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
             "source_snapshot": snapshot,
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v1", "identity": "snapshot:provider-ready",
+                "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
                 "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
+                "permission_policy": "unix-executable", "content_hash_algorithm": "homeboy-workspace-content-v2+unix-executable",
                 "source_snapshot": snapshot,
                 "primary_workspace": { "identity": "snapshot:provider-ready", "remote_path": workspace.path().display().to_string() }
             }

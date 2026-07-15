@@ -261,7 +261,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
             ..AgentTaskRetryPolicy::default()
         });
     plan.options.execution_budget = AgentTaskExecutionBudget {
-        max_total_executions: request.core.attempts.max(1),
+        version: AgentTaskExecutionBudget::VERSION,
+        max_provider_executions: request.core.attempts.max(1),
         max_same_provider_retries: request.core.same_provider_retries,
         max_provider_rotations: request.core.provider_rotations,
     };
@@ -1429,7 +1430,7 @@ mod tests {
         assert_eq!(plan.tasks.len(), 3);
         assert_eq!(plan.options.max_concurrency, 8);
         assert_eq!(plan.options.retry.max_attempts, 3);
-        assert_eq!(plan.options.execution_budget.max_total_executions, 3);
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 3);
         assert_eq!(plan.options.execution_budget.max_same_provider_retries, 0);
         assert_eq!(plan.tasks[0].task_id, "cook-homeboy");
         assert_eq!(plan.tasks[1].task_id, "cook-homeboy-2");

@@ -400,7 +400,7 @@ mod config {
         pub retry: AgentTaskRetryPolicy,
         /// Truthful operator budget for all provider executions of one task.
         /// This is independent from deterministic cook gate attempts.
-        #[serde(default)]
+        #[serde(default = "legacy_execution_budget")]
         pub execution_budget: AgentTaskExecutionBudget,
         /// Per-plan provider rotation policy. Takes precedence over the global
         /// Homeboy config `agent_task.rotation`; a per-task
@@ -513,52 +513,62 @@ mod config {
         pub retryable_failure_classifications: Vec<AgentTaskFailureClassification>,
     }
 
-    /// Bounds provider executions across both same-provider retries and provider
-    /// rotation. A total budget of one guarantees exactly one provider process.
+    /// Limits for provider process executions per task. The total is authoritative
+    /// across same-provider retries and cross-provider rotations.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub struct AgentTaskExecutionBudget {
-        #[serde(default = "default_execution_budget_total")]
-        pub max_total_executions: u32,
         #[serde(default)]
+        pub version: u32,
+        pub max_provider_executions: u32,
         pub max_same_provider_retries: u32,
-        #[serde(default)]
         pub max_provider_rotations: u32,
     }
 
     impl Default for AgentTaskExecutionBudget {
         fn default() -> Self {
             Self {
-                // Zero is the durable sentinel for plans written before this
-                // contract existed. The scheduler migrates it from retry and
-                // rotation policy before execution.
-                max_total_executions: 0,
-                max_same_provider_retries: 0,
-                max_provider_rotations: 0,
+                version: Self::VERSION,
+                max_provider_executions: u32::MAX,
+                max_same_provider_retries: u32::MAX,
+                max_provider_rotations: u32::MAX,
             }
         }
     }
 
-    fn default_execution_budget_total() -> u32 {
-        0
+    fn legacy_execution_budget() -> AgentTaskExecutionBudget {
+        AgentTaskExecutionBudget {
+            version: 0,
+            ..AgentTaskExecutionBudget::default()
+        }
     }
 
     impl AgentTaskExecutionBudget {
-        pub fn is_legacy_unset(&self) -> bool {
-            self.max_total_executions == 0
+        pub const VERSION: u32 = 1;
+
+        pub fn new(
+            max_provider_executions: u32,
+            max_same_provider_retries: u32,
+            max_provider_rotations: u32,
+        ) -> Self {
+            Self {
+                version: Self::VERSION,
+                max_provider_executions,
+                max_same_provider_retries,
+                max_provider_rotations,
+            }
         }
 
-        pub fn migrate_legacy(
-            retry: &AgentTaskRetryPolicy,
-            rotation: Option<&AgentTaskProviderRotationPolicy>,
-        ) -> Self {
-            let same_provider_retries = retry.max_attempts.saturating_sub(1);
-            let provider_rotations = rotation
-                .map(|policy| policy.max_total_attempts().saturating_sub(1))
-                .unwrap_or(0);
-            Self {
-                max_total_executions: 1 + same_provider_retries + provider_rotations,
-                max_same_provider_retries: same_provider_retries,
-                max_provider_rotations: provider_rotations,
+        pub fn migrate_legacy(&mut self) -> std::result::Result<bool, String> {
+            match self.version {
+                Self::VERSION => Ok(false),
+                0 => {
+                    self.version = Self::VERSION;
+                    Ok(true)
+                }
+                version => Err(format!(
+                    "unsupported agent-task execution budget version {version}; this Homeboy build supports version {}",
+                    Self::VERSION
+                )),
             }
         }
     }
