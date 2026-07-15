@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.2] - 2026-07-15
+
+### Changed
+- Allocate run-scoped agent-task scratch
+- Make PID-less daemon orphan recovery exact and observable
+- Support committed harvest from Lab snapshots
+
+### Fixed
+- verify artifact identity on Windows
+
 ## [0.286.1] - 2026-07-15
 
 ### Changed
