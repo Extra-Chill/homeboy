@@ -7,7 +7,7 @@ members = ["crates/*"]
 
 [package]
 name = "homeboy"
-version = "0.286.4"
+version = "0.286.5"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
