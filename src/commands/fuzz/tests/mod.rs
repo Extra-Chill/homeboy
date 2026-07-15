@@ -6,9 +6,8 @@ use super::execution::{
     build_fuzz_execution_request, default_runner_contract, fuzz_artifact_ref_validation,
     fuzz_campaign_contract, fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration,
     fuzz_postprocess_error, fuzz_run_artifact_validation_error, fuzz_run_outcome,
-    fuzz_runner_contract, fuzz_runner_env, persist_fuzz_execution_request,
-    persist_fuzz_run_evidence, persist_fuzz_sequence_plan, run_fuzz_artifact_postprocess,
-    FuzzRunEvidenceInput,
+    fuzz_runner_contract, fuzz_runner_env, persist_fuzz_run_evidence,
+    run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::{
     build_campaign_plan, load_or_default_isolation_proof, plan_inventory_selection, run_campaign,
@@ -34,6 +33,7 @@ use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
 use homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND;
+use homeboy::core::fuzz::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
     FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,
