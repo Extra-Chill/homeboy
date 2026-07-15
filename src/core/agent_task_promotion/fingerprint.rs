@@ -12,6 +12,11 @@ pub struct AgentTaskCandidateFingerprint {
     pub base: String,
     pub changed_files: Vec<String>,
     pub sha256: String,
+    /// The tree produced by applying the candidate to its recorded HEAD without
+    /// changing the real index. It binds a later recovery commit to the exact
+    /// promoted content.
+    #[serde(default)]
+    pub tree: String,
 }
 
 /// A provider can promote to a non-Git workspace. That capability is valid for
@@ -78,6 +83,7 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
     let unstaged = git(&["diff", "--binary"])?;
     let untracked = paths(git(&["ls-files", "--others", "--exclude-standard", "-z"])?);
     let mut changed_files = changed_paths(&git, &untracked)?;
+    let tree = candidate_tree(path)?;
     let mut hasher = Sha256::new();
     hash_record(&mut hasher, b"staged", &staged);
     hash_record(&mut hasher, b"unstaged", &unstaged);
@@ -97,8 +103,42 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
             base,
             changed_files,
             sha256: format!("{:x}", hasher.finalize()),
+            tree,
         },
     })
+}
+
+fn candidate_tree(path: &str) -> Result<String> {
+    let index = text(run_git(path, &["rev-parse", "--git-path", "index"])?);
+    let index = Path::new(path).join(index.trim());
+    let temporary = tempfile::NamedTempFile::new()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
+    std::fs::copy(&index, temporary.path()).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(index.display().to_string()))
+    })?;
+    let output = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(path)
+        .env("GIT_INDEX_FILE", temporary.path())
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    let output = Command::new("git")
+        .args(["write-tree"])
+        .current_dir(path)
+        .env("GIT_INDEX_FILE", temporary.path())
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    Ok(text(output.stdout).trim().to_string())
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
