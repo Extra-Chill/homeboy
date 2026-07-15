@@ -3,9 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use homeboy::core::observation::{
-    disk_budget::disk_budget, persist_loop_inventory_run, ArtifactRecord, NewRunRecord,
-};
+use homeboy::core::observation::{disk_budget::disk_budget, loop_inventory_run, NewRunRecord};
 use homeboy::core::{Error, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -35,7 +33,19 @@ pub fn loop_sync(args: RunsLoopSyncArgs) -> CmdResult<RunsOutput> {
     let (run_id, artifacts) = if args.dry_run {
         (None, Vec::new())
     } else {
-        persist_loop_inventory(&inventory, &triage, &args)?
+        let indexed_artifacts = files_for_artifact_index(&inventory)
+            .into_iter()
+            .map(|file| {
+                let kind = classify_file(&file).to_string();
+                (file, kind)
+            })
+            .collect::<Vec<_>>();
+        let (id, artifacts) = loop_inventory_run::persist_loop_inventory_run(
+            loop_run_record(&inventory, &triage, &args),
+            &inventory.archives,
+            &indexed_artifacts,
+        )?;
+        (Some(id), artifacts)
     };
 
     Ok((
@@ -151,27 +161,6 @@ fn inventory_loop_archives(args: &RunsLoopSyncArgs) -> Result<LoopInventory> {
         retention_candidates,
         total_size_bytes,
     })
-}
-
-fn persist_loop_inventory(
-    inventory: &LoopInventory,
-    triage: &LoopTriageSummary,
-    args: &RunsLoopSyncArgs,
-) -> Result<(Option<String>, Vec<ArtifactRecord>)> {
-    let indexed_artifacts = files_for_artifact_index(inventory)
-        .into_iter()
-        .map(|file| {
-            let kind = classify_file(&file).to_string();
-            (file, kind)
-        })
-        .collect::<Vec<_>>();
-
-    let (run_id, artifacts) = persist_loop_inventory_run(
-        loop_run_record(inventory, triage, args),
-        &inventory.archives,
-        &indexed_artifacts,
-    )?;
-    Ok((Some(run_id), artifacts))
 }
 
 fn loop_run_record(
