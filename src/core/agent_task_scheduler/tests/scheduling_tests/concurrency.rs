@@ -116,7 +116,7 @@ pub(super) mod concurrency_tests {
     fn applies_per_model_concurrency_below_global_limit() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(3);
         for task in &mut plan.tasks {
             task.executor.model = Some("model-a".to_string());
@@ -233,7 +233,7 @@ pub(super) mod concurrency_tests {
     fn unrelated_declared_resources_remain_concurrent() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         plan.tasks[0].limits.exclusive_resource_keys = vec!["cache:one".to_string()];
