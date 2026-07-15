@@ -127,6 +127,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     mut is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
     stdout_line_observer: Option<StdoutLineObserver>,
+    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -136,6 +137,15 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         Error::internal_io(err.to_string(), Some("execute runner command".to_string()))
     })?;
     let pid = child.id();
+    if let Some(child_started) = child_started {
+        if let Err(error) = child_started(pid) {
+            // The caller cannot safely recover a child it never durably recorded.
+            // Preserve the actionable persistence error after reaping this child.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
     let guard_violation = Arc::new(Mutex::new(None));
     let collector = ResourceMetricsCollector::start(
         pid,
@@ -665,6 +675,7 @@ fn clock_ticks_per_second() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn heartbeat_payload_includes_elapsed_pid_and_optional_resources() {
@@ -683,6 +694,32 @@ mod tests {
         assert_eq!(payload["process"]["root_pid"], 1234);
         assert_eq!(payload["process"]["resources"]["process_count"], 3);
         assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_started_failure_kills_and_reaps_the_spawned_child() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let pid = Arc::new(AtomicU32::new(0));
+        let callback_pid = Arc::clone(&pid);
+        let error = measured_command_output_until_cancelled_with_progress(
+            &mut command,
+            || false,
+            None,
+            None,
+            Some(Arc::new(move |child_pid| {
+                callback_pid.store(child_pid, Ordering::SeqCst);
+                Err(Error::internal_unexpected("persist child identity"))
+            })),
+            None,
+        )
+        .expect_err("callback failure returns");
+
+        assert!(error.message.contains("persist child identity"));
+        assert!(!crate::core::process::pid_is_running(
+            pid.load(Ordering::SeqCst)
+        ));
     }
 
     #[test]

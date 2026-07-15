@@ -37,6 +37,9 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+        /// Explicitly terminalize legacy active jobs missing a persisted child identity
+        #[arg(long)]
+        recover_missing_child_identity: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -158,8 +161,8 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
             0,
         )),
-        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
-            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
+        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, recover_missing_child_identity, addr } => Ok((
+            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, recover_missing_child_identity, &addr)?),
             0,
         )),
         DaemonCommand::ReconcileLeaselessOrphans { confirm_no_daemon_owner, addr } => Ok((

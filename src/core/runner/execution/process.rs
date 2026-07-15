@@ -422,6 +422,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     plan: &PreparedRunnerProcess,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
@@ -431,6 +432,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         &mut command,
         is_cancelled,
         progress_sink,
+        child_started,
         &plan.env,
         &plan.secret_env_names,
         plan.runner.settings.concurrency_limit,
@@ -524,6 +526,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     env: &HashMap<String, String>,
     secret_env_names: &[String],
     concurrency_limit: Option<usize>,
@@ -547,6 +550,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
         is_cancelled,
         progress_sink,
         stdout_line_observer,
+        child_started,
         concurrency_limit,
     )?;
     let output = measured.output;

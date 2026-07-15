@@ -405,7 +405,7 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
             .expect("owner lock")
             .expect("owner acquired");
 
-        let error = super::adopt_orphaned_lease("lease-dead", true, "127.0.0.1:0")
+        let error = super::adopt_orphaned_lease("lease-dead", true, false, "127.0.0.1:0")
             .expect_err("owner lock blocks adoption");
         assert!(error.message.contains("owner lock is held"));
         assert_eq!(std::fs::read(&jobs_path).expect("store bytes"), before);
@@ -460,6 +460,39 @@ fn exact_lease_adoption_reconciles_terminal_children_idempotently() {
         );
         assert_eq!(recovered.events(job.id).expect("events").len(), event_count);
     });
+}
+
+#[test]
+fn exact_adoption_requires_explicit_legacy_child_identity_recovery() {
+    let legacy = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = legacy.create("runner.exec");
+    legacy.start(job.id).expect("start legacy job");
+
+    let normal = super::adopt_orphaned_lease_with_operations(
+        "lease-dead",
+        || Ok(fake_dead_status(fake_daemon(4242, "lease-dead"))),
+        |_| false,
+        || Ok(Some(())),
+        || legacy.reconcile_dead_daemon_lease_jobs("lease-dead"),
+        || Ok(fake_daemon(4343, "replacement")),
+    );
+    assert!(normal
+        .expect_err("normal adoption rejects missing identity")
+        .message
+        .contains("recorded child PID"));
+    assert_eq!(legacy.get(job.id).expect("job").status, JobStatus::Running);
+
+    let adopted = super::adopt_orphaned_lease_with_operations(
+        "lease-dead",
+        || Ok(fake_dead_status(fake_daemon(4242, "lease-dead"))),
+        |_| false,
+        || Ok(Some(())),
+        || legacy.reconcile_dead_daemon_lease_jobs_allow_missing_child_identity("lease-dead"),
+        || Ok(fake_daemon(4343, "replacement")),
+    )
+    .expect("explicit legacy adoption");
+    assert_eq!(adopted.active_jobs_terminalized, 1);
+    assert_eq!(legacy.get(job.id).expect("job").status, JobStatus::Failed);
 }
 
 #[test]
