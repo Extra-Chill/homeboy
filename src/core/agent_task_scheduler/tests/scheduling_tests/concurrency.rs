@@ -457,13 +457,53 @@ pub(super) mod concurrency_tests {
 
         let started = Instant::now();
         let aggregate = scheduler.run(plan);
-        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        while !finished.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
         let scratch_index = scratch_root
             .ancestors()
             .nth(6)
             .expect("controller scratch root")
             .join("resources.json");
+        assert!(scratch_active_while_running.load(Ordering::SeqCst));
+        let cleanup_action = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "task-1")
+            .and_then(|outcome| {
+                outcome
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "cleanup_action")
+            })
+            .and_then(|artifact| artifact.path.as_deref())
+            .expect("deferred cleanup action path");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let action: Value = serde_json::from_str(
+                &fs::read_to_string(cleanup_action).expect("deferred cleanup action"),
+            )
+            .expect("deferred cleanup JSON");
+            if action["status"] == "candidate_recovered" {
+                let candidates = action["candidate_artifacts"]
+                    .as_array()
+                    .expect("recovered candidates");
+                assert!(candidates.iter().any(|artifact| {
+                    artifact["kind"] == "patch"
+                        && artifact["sha256"]
+                            .as_str()
+                            .is_some_and(|sha| sha.len() == 64)
+                }));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "deferred cleanup did not recover"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let scratch: Value = serde_json::from_str::<Value>(
             &fs::read_to_string(scratch_index).expect("scratch index"),
         )
@@ -474,7 +514,6 @@ pub(super) mod concurrency_tests {
             .find(|resource| resource["path"] == scratch_root.display().to_string())
             .cloned()
             .expect("released scratch resource");
-        assert!(scratch_active_while_running.load(Ordering::SeqCst));
         assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
         assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
             .as_array()
@@ -482,18 +521,18 @@ pub(super) mod concurrency_tests {
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
-        assert!(events.iter().any(|event| event == "task-2-started"));
+        assert!(!events.iter().any(|event| event == "task-2-started"));
         assert!(aggregate
             .outcomes
             .iter()
             .any(|outcome| outcome.task_id == "task-1"
-                && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+                && outcome.status == AgentTaskOutcomeStatus::Timeout
                 && outcome
                     .artifacts
                     .iter()
-                    .any(|artifact| artifact.kind == "patch")));
+                    .any(|artifact| artifact.kind == "cleanup_action")));
         assert!(aggregate.outcomes.iter().any(|outcome| {
-            outcome.task_id == "task-2" && outcome.status == AgentTaskOutcomeStatus::Succeeded
+            outcome.task_id == "task-2" && outcome.status == AgentTaskOutcomeStatus::Failed
         }));
         assert!(
             !workspace.join("late-change.txt").exists(),

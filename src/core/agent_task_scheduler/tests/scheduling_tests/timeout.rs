@@ -82,7 +82,7 @@ mod timeout_tests {
 
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
             HashMap::new(),
-            Duration::from_millis(250),
+            Duration::from_millis(25),
         ));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
@@ -92,9 +92,10 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status,
-            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable
+            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
+        assert_eq!(aggregate.totals.recoverable_candidates, 1);
         assert_eq!(aggregate.totals.timed_out, 0);
         assert!(aggregate
             .events
@@ -174,7 +175,7 @@ mod timeout_tests {
 
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
             HashMap::new(),
-            Duration::from_millis(250),
+            Duration::from_millis(25),
         ));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);

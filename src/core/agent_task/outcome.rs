@@ -77,8 +77,8 @@ pub enum AgentTaskOutcomeStatus {
     UnableToRemediate,
     ProviderError,
     Timeout,
-    /// The provider ended without a normal result, but its isolated attempt
-    /// produced a fingerprinted patch for controller-owned promotion.
+    /// A timed-out, cancelled, or panicked executor left a complete patch for
+    /// controller-owned review, promotion, or explicit provider adoption.
     CandidateRecoverable,
     Failed,
     FollowUpIssue,

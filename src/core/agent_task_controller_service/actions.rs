@@ -1168,8 +1168,10 @@ where
         "run_next" => {
             let run_result = agent_task_service::run_next(executor)?;
             let value = match run_result.value {
-                Some(aggregate) => serde_json::to_value(&aggregate)
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                Some(aggregate) => serde_json::to_value(
+                    &crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
+                )
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
                 None => serde_json::json!({ "claimed": false }),
             };
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {

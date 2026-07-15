@@ -1659,9 +1659,9 @@ fn recovered_terminal_agent_task_result(stored: &StoredJob) -> Option<RecoveredT
             JobStatus::Succeeded
         }
         AgentTaskAggregateStatus::Cancelled => JobStatus::Cancelled,
-        AgentTaskAggregateStatus::PartialFailure | AgentTaskAggregateStatus::Failed => {
-            JobStatus::Failed
-        }
+        AgentTaskAggregateStatus::PartialRecoverable
+        | AgentTaskAggregateStatus::PartialFailure
+        | AgentTaskAggregateStatus::Failed => JobStatus::Failed,
     };
     let artifacts = result
         .value

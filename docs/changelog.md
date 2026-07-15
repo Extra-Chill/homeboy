@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.5] - 2026-07-15
+
+### Fixed
+- make Lab agent-task recovery durable
+- validate publishable workspace manifests
+- make Lab contract computation resilient to unresolvable component context
+
 ## [0.286.4] - 2026-07-15
 
 ### Changed

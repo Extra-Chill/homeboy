@@ -81,6 +81,22 @@ pub(crate) fn promote_with_provider(
         ));
     }
 
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+        && outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| is_actionable_patch_artifact(artifact))
+            .count()
+            != 1
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "recoverable-candidate promotion requires exactly one actionable patch artifact",
+            None,
+            None,
+        ));
+    }
+
     let artifact = match select_patch_artifact(&outcome, options.artifact_id.as_deref()) {
         Ok(artifact) => artifact,
         Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {
