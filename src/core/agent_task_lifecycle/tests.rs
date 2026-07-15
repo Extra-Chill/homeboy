@@ -311,6 +311,20 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
         assert_eq!(accepted.run_id, attempt_run_id);
         assert_eq!(accepted.state, AgentTaskRunState::Running);
         assert_eq!(accepted.metadata["runner_job_id"], "job-7970");
+        assert_eq!(accepted.metadata["phase"], "awaiting_runner_result");
+        assert_eq!(
+            accepted.metadata["phase_activity"],
+            "controller handoff complete; awaiting authoritative runner daemon result"
+        );
+        assert_eq!(accepted.metadata["runner_handoff"]["state"], "in_flight");
+        assert_eq!(
+            accepted.metadata["runner_handoff"]["continuation"]["intent"],
+            "reconcile_runner_job"
+        );
+        assert_eq!(
+            accepted.metadata["runner_handoff"]["identity"]["runner_job_id"],
+            "job-7970"
+        );
         assert_eq!(
             accepted.metadata["runner_execution_record"]["status"],
             "running"
@@ -738,6 +752,86 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
         assert!(record.metadata.get("stale_running_reason").is_none());
         assert!(record.metadata.get("retryable").is_none());
         assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
+    });
+}
+
+#[test]
+fn accepted_handoff_projects_remote_failure_and_cancellation_without_a_lifecycle_event() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        for (run_id, job_status, expected_state) in [
+            (
+                "agent-task-remote-failure",
+                crate::core::api_jobs::JobStatus::Failed,
+                AgentTaskRunState::Failed,
+            ),
+            (
+                "agent-task-remote-cancellation",
+                crate::core::api_jobs::JobStatus::Cancelled,
+                AgentTaskRunState::Cancelled,
+            ),
+        ] {
+            let mut record = record_detached_lab_run(DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000000123",
+                remote_workspace: "/runner/workspace/repo",
+                remote_command: &command,
+            })
+            .expect("accepted handoff");
+            let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+            snapshot.job.status = job_status;
+            snapshot.events.clear();
+
+            reconcile_runner_job_snapshot(&mut record, &snapshot)
+                .expect("terminal daemon result reconciles");
+
+            assert_eq!(record.state, expected_state);
+            assert_eq!(record.metadata["runner_job_status"], json!(job_status));
+        }
+    });
+}
+
+#[test]
+fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transport_succeeds() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "agent-task-remote-timeout",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted handoff");
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.status = AgentTaskAggregateStatus::Failed;
+        aggregate.totals = AgentTaskAggregateTotals {
+            timed_out: 1,
+            ..Default::default()
+        };
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Timeout;
+        aggregate.events[0].state = AgentTaskState::Failed;
+
+        let mut snapshot = terminal_child_snapshot(&aggregate);
+        let identity = snapshot.events[0]
+            .data
+            .as_mut()
+            .and_then(|event| event.get_mut("identity"))
+            .and_then(Value::as_object_mut)
+            .expect("terminal lifecycle identity");
+        identity.insert("persisted_run_id".to_string(), json!(record.run_id));
+        identity.insert("run_id".to_string(), json!(record.run_id));
+
+        reconcile_runner_job_snapshot(&mut record, &snapshot)
+            .expect("remote timeout aggregate reconciles");
+
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            record.totals.as_ref().map(|totals| totals.timed_out),
+            Some(1)
+        );
+        assert_eq!(record.metadata["runner_job_status"], "succeeded");
     });
 }
 

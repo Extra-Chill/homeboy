@@ -784,6 +784,11 @@ pub(super) fn daemon_job_wait_timeout(
     ));
     error.details["runner_id"] = Value::String(runner.id.clone());
     error.details["job_id"] = Value::String(job_id.clone());
+    // The controller stopped waiting, not the daemon job. Preserve this
+    // discriminator so the Lab adapter retains the durable handoff rather than
+    // recording a pre-dispatch failure for an already accepted job.
+    error.details["status"] = Value::String("controller_wait_expired".to_string());
+    error.details["reason"] = Value::String("controller_wait_expired".to_string());
     error.details["remote_cwd"] = Value::String(cwd.to_string());
     error.details["command"] = json!(redact_argv(command));
     error.details["cancel_on_wait_timeout"] = Value::String(
@@ -839,6 +844,7 @@ pub(super) fn daemon_job_wait_timeout(
             ));
         }
     }
+    error.retryable = Some(true);
     error.with_hint(timeout_hint)
 }
 

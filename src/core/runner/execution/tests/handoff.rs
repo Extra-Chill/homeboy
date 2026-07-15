@@ -44,6 +44,9 @@ fn timeout_mirrors_remote_job_without_cancelling() {
         assert!(err.message.contains(job_id.to_string().as_str()));
         assert!(err.message.contains("lab"));
         assert!(err.message.contains("was not cancelled"));
+        assert_eq!(err.details["status"], "controller_wait_expired");
+        assert_eq!(err.details["reason"], "controller_wait_expired");
+        assert_eq!(err.retryable, Some(true));
         assert!(err.hints.iter().any(|hint| hint
             .message
             .contains(&format!("homeboy runs show {run_id}"))));
@@ -75,6 +78,29 @@ fn timeout_mirrors_remote_job_without_cancelling() {
             mirrored.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id.to_string().as_str())
         );
+    });
+}
+
+#[test]
+fn controller_wait_expiry_is_distinct_from_a_remote_job_failure() {
+    crate::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job_with_id(uuid::Uuid::new_v4());
+        let error = daemon_job_wait_timeout(
+            &runner,
+            "/srv/homeboy/project",
+            &["homeboy".to_string(), "agent-task".to_string()],
+            &job,
+            &[],
+            "runner daemon job",
+            true,
+        );
+
+        assert_eq!(
+            error.details["job_id"].as_str(),
+            Some(job.id.to_string().as_str())
+        );
+        assert_eq!(error.details["reason"], "controller_wait_expired");
     });
 }
 

@@ -424,7 +424,7 @@ fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
         )
         .expect("detached lifecycle record");
 
-        let LabOffloadOutcome::Offloaded {
+        let LabOffloadOutcome::InFlight {
             plan,
             stdout,
             stderr,
@@ -432,14 +432,14 @@ fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
             output_file_content,
         } = outcome
         else {
-            panic!("expected detached offloaded outcome");
+            panic!("expected in-flight handoff outcome");
         };
 
         assert_eq!(exit_code, 0);
-        assert!(output_file_content.is_none());
+        assert!(output_file_content.is_some());
         let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
         assert_eq!(json["success"], serde_json::json!(true));
-        assert_eq!(json["data"]["status"], "dispatched_detached");
+        assert_eq!(json["data"]["status"], "remote_in_flight");
         assert_eq!(json["data"]["followup_required"], true);
         assert_eq!(json["data"]["durable_run_id"], "run-123");
         assert_eq!(json["data"]["runner_id"], "homeboy-lab");
@@ -459,5 +459,30 @@ fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
             .expect("inspectable agent-task record");
         assert_eq!(record.metadata["runner_id"], "homeboy-lab");
         assert_eq!(record.metadata["runner_job_id"], "job-123");
+        assert_eq!(record.metadata["phase"], "awaiting_runner_result");
+        assert_eq!(
+            record.metadata["runner_handoff"]["authority"],
+            "runner_daemon"
+        );
     });
+}
+
+#[test]
+fn controller_wait_expiry_identifies_only_the_durable_handoff() {
+    let timeout = Error::new(
+        ErrorCode::InternalUnexpected,
+        "runner daemon job job-123 did not finish before timeout",
+        serde_json::json!({
+            "reason": "controller_wait_expired",
+            "job_id": "job-123",
+        }),
+    );
+    assert_eq!(controller_wait_expired_job_id(&timeout), Some("job-123"));
+
+    let remote_failure = Error::new(
+        ErrorCode::InternalUnexpected,
+        "remote command failed",
+        serde_json::json!({ "job_id": "job-123" }),
+    );
+    assert_eq!(controller_wait_expired_job_id(&remote_failure), None);
 }

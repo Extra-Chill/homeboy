@@ -130,6 +130,10 @@ pub struct ActivityReport {
 }
 
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
+    // Agent-task lifecycle is authoritative over the runner/session mirrors.
+    // Refresh accepted daemon handoffs first so controller wait expiry is not
+    // projected as a terminal local failure.
+    let _ = agent_task_lifecycle::reconcile_active_runner_handoffs();
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
     agent_tasks::collect(&mut collector, limit)?;
