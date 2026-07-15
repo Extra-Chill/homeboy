@@ -117,6 +117,7 @@ pub mod observation;
 // `crate::core::output::*` call sites keep working unchanged.
 pub use homeboy_output as output;
 pub(crate) mod ownership;
+pub mod path_materialization;
 pub mod performance_hotspots;
 pub mod phase_timing;
 pub mod plan;
