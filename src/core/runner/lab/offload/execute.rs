@@ -25,7 +25,7 @@ pub(crate) fn record_synced_remapped_workspace_entry(
 
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     if request.placement == crate::cli_surface::Placement::Auto
-        && crate::commands::utils::resource_policy::is_managed_runner_placement_context()
+        && crate::core::resource_policy_context::is_managed_runner_placement_context()
     {
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(
@@ -97,7 +97,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.routing_policy.default_lab_offload
         && request.placement == crate::cli_surface::Placement::Auto
         && contract.source_path_mode != crate::command_contract::LabSourcePathMode::RunnerResident
-        && crate::commands::utils::resource_policy::captured_context()
+        && crate::core::resource_policy_context::captured_context()
             .is_some_and(|context| context.severity != "ok")
     {
         contract.routing_policy.default_lab_offload = true;
