@@ -651,6 +651,11 @@ context = "any"
 }
 
 pub(crate) fn home_env_guard() -> MutexGuard<'static, ()> {
+    env_lock()
+}
+
+/// Serializes tests that mutate or capture process-global environment state.
+pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
     home_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 

@@ -303,7 +303,7 @@ where
 {
     pub fn new(executor: E) -> Self {
         Self {
-            scheduler: AgentTaskScheduler::new(executor),
+            scheduler: AgentTaskScheduler::new_controller(executor),
         }
     }
 

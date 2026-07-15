@@ -37,11 +37,9 @@ pub(crate) use materializer::{
     dependency_cache_manifest_command, dependency_cache_restore_command,
     dependency_cache_save_command,
 };
-#[cfg(test)]
-pub(crate) use provenance::verify_lab_workspace;
 pub(crate) use provenance::{
-    materialize_verified_lab_snapshot_git_baseline_from_env, verify_lab_workspace_from_env,
-    verify_lab_workspace_git_root, VerifiedLabWorkspaceProvenance,
+    materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace,
+    verify_lab_workspace_from_env, verify_lab_workspace_git_root, VerifiedLabWorkspaceProvenance,
 };
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, local_snapshot_stats,

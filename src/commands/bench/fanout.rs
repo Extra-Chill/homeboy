@@ -91,7 +91,7 @@ pub(super) fn run_matrix_fanout(
         "report": run_args.report,
     });
 
-    let scheduler = AgentTaskScheduler::new(LocalBenchMatrixExecutor);
+    let scheduler = AgentTaskScheduler::new_controller(LocalBenchMatrixExecutor);
     let scheduler_aggregate = scheduler.run(schedule);
     let matrix_aggregate =
         AgentTaskMatrixAggregate::from_outcomes(&matrix_plan, &scheduler_aggregate.outcomes);

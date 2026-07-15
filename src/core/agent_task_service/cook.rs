@@ -33,7 +33,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
-use super::execution::{run_loaded_plan, run_loaded_plan_with_derived_cook_baseline};
+use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
 /// Executes one provider attempt while cook retains ownership of promotion,
@@ -77,6 +77,7 @@ pub struct AgentTaskCookServiceOptions {
     pub ai_used_for: String,
     /// The route-selected provider transport. `None` executes locally.
     pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    pub harvest_context: crate::core::agent_task_scheduler::HarvestExecutionContext,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -144,7 +145,14 @@ where
             let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
                 dispatcher.dispatch_attempt(plan.clone(), &run_id, None)
             } else {
-                run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
+                run_loaded_plan_with_derived_cook_baseline(
+                    plan.clone(),
+                    Some(&run_id),
+                    executor.clone(),
+                    None,
+                    Some(cook_attempt_harvest_context(&options.harvest_context)),
+                )
+                .map(|_| ())
             };
             if let Err(error) = execution {
                 let record = agent_task_lifecycle::status(&run_id).ok();
@@ -413,6 +421,7 @@ where
                         Some(&next_run_id),
                         executor.clone(),
                         Some(baseline.capability()),
+                        Some(cook_attempt_harvest_context(&options.harvest_context)),
                     )?;
                 }
                 remediation_category_usage.add(reservation);
@@ -450,6 +459,12 @@ struct CookFollowUpBaseline {
     source_root: PathBuf,
     path: PathBuf,
     capability: DerivedCookBaselineCapability,
+}
+
+fn cook_attempt_harvest_context(
+    harvest_context: &crate::core::agent_task_scheduler::HarvestExecutionContext,
+) -> crate::core::agent_task_scheduler::HarvestExecutionContext {
+    harvest_context.clone()
 }
 
 /// Process-local authority for one materialized cook retry baseline. It is not
@@ -1158,6 +1173,32 @@ mod tests {
         RunLifecycleRecord,
     };
 
+    #[test]
+    fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
+        let _env_lock = crate::test_support::env_lock();
+        let prior = std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        let context = crate::core::agent_task_scheduler::HarvestExecutionContext::default();
+        let first_attempt = cook_attempt_harvest_context(&context);
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            "ambient state must not affect a passed cook context",
+        );
+        let retry_attempt = cook_attempt_harvest_context(&context);
+        match prior {
+            Some(value) => std::env::set_var(
+                crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                value,
+            ),
+            None => std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
+        }
+
+        assert_eq!(format!("{first_attempt:?}"), format!("{retry_attempt:?}"));
+        assert_eq!(
+            format!("{retry_attempt:?}"),
+            "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
+        );
+    }
+
     #[derive(Default)]
     struct CaptureBackend {
         body: String,
@@ -1288,6 +1329,8 @@ mod tests {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 ai_used_for: "Drafted test coverage.".to_string(),
                 attempt_dispatcher: None,
+                harvest_context:
+                    crate::core::agent_task_scheduler::HarvestExecutionContext::default(),
             };
             let mut backend = CaptureBackend::default();
             finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend)
