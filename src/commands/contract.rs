@@ -1704,6 +1704,63 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// Project a runner handoff envelope into a core `RunnerExecutionRecord`.
+///
+/// This conversion produces core execution types from the lab-contract handoff
+/// envelope. It lives in the CLI/commands layer (which legally depends on both
+/// core and command_contract) rather than on the contract type itself, so the
+/// lab-contract type layer carries no upward dependency on core's runner
+/// execution / run-outcome envelopes.
+fn handoff_runner_execution_record(
+    handoff: &crate::command_contract::RunnerHandoffEnvelope,
+) -> RunnerExecutionRecord {
+    let record = if handoff.status == "running" {
+        RunnerExecutionRecord::in_flight(
+            handoff.job_id.clone(),
+            handoff.runner_id.clone(),
+            "daemon",
+        )
+    } else {
+        RunnerExecutionRecord::terminal(
+            handoff.job_id.clone(),
+            handoff.runner_id.clone(),
+            "daemon",
+            if handoff.status == "succeeded" { 0 } else { 1 },
+        )
+    };
+    record
+        .with_job_id(handoff.job_id.clone())
+        .with_mirror_run_id(
+            handoff
+                .mirror_run_id
+                .clone()
+                .or_else(|| handoff.persisted_run_id.clone())
+                .or_else(|| handoff.durable_run_id.clone()),
+        )
+        .with_path_materialization_plan(handoff.path_materialization_plan.clone())
+        .with_artifact_refs(handoff.evidence.artifact_refs.iter().map(|artifact| {
+            crate::core::runner_execution_envelope::RunnerExecutionArtifactRef {
+                id: artifact.id.clone(),
+                name: artifact.name.clone(),
+                path: artifact.path.clone(),
+                url: artifact.url.clone(),
+            }
+        }))
+        .with_next_actions(handoff.evidence.next_commands.iter().map(|command| {
+            crate::core::runner_execution_envelope::RunnerExecutionNextAction {
+                label: command.label.clone(),
+                command: command.command.clone(),
+            }
+        }))
+}
+
+/// Project a runner handoff envelope into a core `RunOutcomeEnvelope`.
+fn handoff_run_outcome_envelope(
+    handoff: &crate::command_contract::RunnerHandoffEnvelope,
+) -> RunOutcomeEnvelope {
+    RunOutcomeEnvelope::from_runner_execution_record(&handoff_runner_execution_record(handoff))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2072,8 +2129,8 @@ mod tests {
         let handoff: crate::command_contract::RunnerHandoffEnvelope =
             serde_json::from_value(runner_handoff_example()).expect("runner handoff sample");
 
-        let record = handoff.runner_execution_record();
-        let outcome = handoff.run_outcome_envelope();
+        let record = handoff_runner_execution_record(&handoff);
+        let outcome = handoff_run_outcome_envelope(&handoff);
 
         assert_eq!(record.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
         assert_eq!(record.execution_id, "job-1");
