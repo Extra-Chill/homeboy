@@ -106,9 +106,6 @@ pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 pub use daemon_api::daemon_api_post;
 pub use failure::runner_exec_failure_error;
 pub use handoff::runner_job_cancel;
-pub use policy::{
-    preflight_remote_dispatch, RunnerRemoteDispatchPreflight, RunnerRemoteDispatchPreflightRequest,
-};
 
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {

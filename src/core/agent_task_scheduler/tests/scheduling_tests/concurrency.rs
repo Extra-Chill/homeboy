@@ -39,7 +39,7 @@ pub(super) mod concurrency_tests {
     fn schedules_tasks_with_bounded_concurrency_and_success_aggregate() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(4);
         plan.options.max_concurrency = 2;
 
@@ -92,7 +92,7 @@ pub(super) mod concurrency_tests {
     fn applies_per_executor_concurrency_below_global_limit() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.options
@@ -185,7 +185,7 @@ pub(super) mod concurrency_tests {
     fn serializes_tasks_with_the_same_declared_exclusive_resource() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         for task in &mut plan.tasks {
@@ -195,7 +195,21 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        assert!(aggregate
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.status == AgentTaskOutcomeStatus::Succeeded));
+        assert_eq!(
+            aggregate
+                .events
+                .iter()
+                .filter(|event| event.state == AgentTaskState::Running)
+                .map(|event| event.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task-1", "task-2"]
+        );
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-2"
                 && event.state == AgentTaskState::Blocked
@@ -303,7 +317,7 @@ pub(super) mod concurrency_tests {
         fs::create_dir(&child).expect("child");
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(executor);
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(executor);
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
@@ -313,6 +327,8 @@ pub(super) mod concurrency_tests {
         let aggregate = scheduler.run(plan);
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 3);
+        assert_eq!(aggregate.queue.max_concurrency, 3);
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
         let serialized = aggregate
             .events
@@ -326,8 +342,7 @@ pub(super) mod concurrency_tests {
             "all overlapping tasks must be admitted through the scheduler"
         );
         assert_eq!(serialized[0], "task-1");
-        assert!(serialized.contains(&"task-2"));
-        assert!(serialized.contains(&"task-3"));
+        assert_eq!(serialized, vec!["task-1", "task-2", "task-3"]);
     }
 
     #[derive(Clone)]

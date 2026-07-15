@@ -74,7 +74,6 @@ pub(super) fn harvest_uncommitted_patch(
             "attempt_workspace": running.request.workspace.attempt,
             "source_provenance": running.source_provenance,
             "changed_files": changed_files,
-            "source_provenance": running.source_provenance,
         }),
     });
     Ok(())
@@ -92,18 +91,12 @@ fn persist_attempt_patch_artifacts(
         if !artifact.metadata.is_object() {
             artifact.metadata = serde_json::json!({});
         }
-        artifact
-            .metadata
-            .as_object_mut()
-            .expect("patch artifact metadata object")
-            .insert(
-                "source_provenance".to_string(),
-                serde_json::json!(running.source_provenance),
-            );
         let Some(source) = artifact.path.as_deref().map(PathBuf::from) else {
+            patch_artifact_metadata(artifact, running, false);
             continue;
         };
         if !source.starts_with(attempt_root) {
+            patch_artifact_metadata(artifact, running, false);
             continue;
         }
         let contents = std::fs::read(&source).map_err(|error| HarvestError::ArtifactWrite {
@@ -118,39 +111,50 @@ fn persist_attempt_patch_artifacts(
         artifact.path = Some(path.display().to_string());
         artifact.size_bytes = Some(contents.len() as u64);
         artifact.sha256 = Some(patch_sha256(&contents));
-        if !artifact.metadata.is_object() {
-            artifact.metadata = serde_json::json!({});
-        }
-        artifact
-            .metadata
-            .as_object_mut()
-            .expect("patch artifact metadata object")
-            .extend(serde_json::Map::from_iter([
-                ("run_id".to_string(), serde_json::json!(running.run_id)),
-                ("task_id".to_string(), serde_json::json!(running.task_id)),
-                (
-                    "producer_attempt".to_string(),
-                    serde_json::json!(running.attempt),
-                ),
-                (
-                    "change_source".to_string(),
-                    serde_json::json!("attempt_workspace_artifact"),
-                ),
-                (
-                    "provider_rotation_index".to_string(),
-                    serde_json::json!(running.rotation_index),
-                ),
-                (
-                    "provider_backend".to_string(),
-                    serde_json::json!(running.request.executor.backend),
-                ),
-                (
-                    "provider_model".to_string(),
-                    serde_json::json!(running.request.executor.model()),
-                ),
-            ]));
+        patch_artifact_metadata(artifact, running, true);
     }
     Ok(())
+}
+
+fn patch_artifact_metadata(
+    artifact: &mut AgentTaskArtifact,
+    running: &RunningTask,
+    copied_from_attempt_workspace: bool,
+) {
+    let metadata = artifact
+        .metadata
+        .as_object_mut()
+        .expect("patch artifact metadata object");
+    metadata.insert(
+        "source_provenance".to_string(),
+        serde_json::json!(running.source_provenance),
+    );
+    if copied_from_attempt_workspace {
+        metadata.extend(serde_json::Map::from_iter([
+            ("run_id".to_string(), serde_json::json!(running.run_id)),
+            ("task_id".to_string(), serde_json::json!(running.task_id)),
+            (
+                "producer_attempt".to_string(),
+                serde_json::json!(running.attempt),
+            ),
+            (
+                "change_source".to_string(),
+                serde_json::json!("attempt_workspace_artifact"),
+            ),
+            (
+                "provider_rotation_index".to_string(),
+                serde_json::json!(running.rotation_index),
+            ),
+            (
+                "provider_backend".to_string(),
+                serde_json::json!(running.request.executor.backend),
+            ),
+            (
+                "provider_model".to_string(),
+                serde_json::json!(running.request.executor.model()),
+            ),
+        ]));
+    }
 }
 
 fn harvest_committed_patch_with_metadata(

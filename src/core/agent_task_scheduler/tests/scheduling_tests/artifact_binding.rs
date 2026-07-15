@@ -193,10 +193,11 @@ mod artifact_binding_tests {
     #[test]
     fn required_concept_packet_binding_uses_canonical_typed_artifact() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
-            observed: Arc::clone(&observed),
-            emit_concept_packet: true,
-        });
+        let scheduler =
+            crate::core::agent_task_scheduler::AgentTaskScheduler::new(ConceptPacketExecutor {
+                observed: Arc::clone(&observed),
+                emit_concept_packet: true,
+            });
         let mut plan = AgentTaskPlan::new(
             "plan-concept-packet-typed-artifact",
             vec![request("idea"), request("build")],
@@ -241,10 +242,11 @@ mod artifact_binding_tests {
     #[test]
     fn required_concept_packet_binding_fails_without_canonical_typed_artifact() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(ConceptPacketExecutor {
-            observed: Arc::clone(&observed),
-            emit_concept_packet: false,
-        });
+        let scheduler =
+            crate::core::agent_task_scheduler::AgentTaskScheduler::new(ConceptPacketExecutor {
+                observed: Arc::clone(&observed),
+                emit_concept_packet: false,
+            });
         let mut plan = AgentTaskPlan::new(
             "plan-concept-packet-missing-typed-artifact",
             vec![request("idea"), request("build")],
@@ -277,7 +279,18 @@ mod artifact_binding_tests {
         let observed = observed.lock().expect("observed requests");
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.skipped, 1);
+        assert_eq!(aggregate.totals.succeeded, 0);
         assert!(observed.iter().all(|request| request.task_id != "build"));
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "build"
+                && event.state == AgentTaskState::Skipped
+                && event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("required artifact binding"))
+        }));
         let idea = aggregate
             .outcomes
             .iter()
@@ -297,6 +310,7 @@ mod artifact_binding_tests {
                 && diagnostic.message.contains("required artifact binding")
                 && diagnostic.message.contains("concept_packet")
         }));
+        assert_eq!(build.status, AgentTaskOutcomeStatus::Failed);
     }
 
     #[test]

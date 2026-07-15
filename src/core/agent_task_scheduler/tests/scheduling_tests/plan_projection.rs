@@ -13,8 +13,9 @@ mod plan_projection_tests {
             "fanout/site-smoke[model=gpt-5.5,prompt=site-b]".to_string(),
             AgentTaskOutcomeStatus::Failed,
         );
-        let scheduler =
-            AgentTaskScheduler::new(RecordingExecutor::new(statuses, Duration::from_millis(0)));
+        let scheduler = crate::core::agent_task_scheduler::AgentTaskScheduler::new(
+            RecordingExecutor::new(statuses, Duration::from_millis(0)),
+        );
         let matrix_plan = expand_agent_task_matrix(
             "fanout/site-smoke",
             vec![
@@ -46,6 +47,19 @@ mod plan_projection_tests {
         assert_eq!(schedule.plan_id, "fanout/site-smoke");
         assert_eq!(schedule.totals.succeeded, 3);
         assert_eq!(schedule.totals.failed, 1);
+        assert_eq!(schedule.queue.max_concurrency, 2);
+        assert_eq!(
+            schedule
+                .events
+                .iter()
+                .filter(|event| event.state == AgentTaskState::Running)
+                .count(),
+            4
+        );
+        assert!(schedule.outcomes.iter().any(|outcome| {
+            outcome.task_id == "fanout/site-smoke[model=gpt-5.5,prompt=site-b]"
+                && outcome.status == AgentTaskOutcomeStatus::Failed
+        }));
         assert_eq!(matrix.cells.len(), 4);
         assert!(!matrix.passed);
         let failed = matrix

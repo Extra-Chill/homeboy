@@ -295,7 +295,7 @@ impl RunnerHandoffEnvelope {
 }
 
 impl RunnerHandoffArtifactManifestRef {
-    pub fn for_remote_cwd(remote_cwd: &str) -> Self {
+    pub(crate) fn for_remote_cwd(remote_cwd: &str) -> Self {
         Self {
             schema: RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA.to_string(),
             manifest_schema: RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),

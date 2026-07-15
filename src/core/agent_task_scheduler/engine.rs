@@ -338,17 +338,14 @@ where
                 let harvest_preflight = match prepare_committed_harvest(&request) {
                     Ok(preflight) => preflight,
                     Err(error) => {
-                        let outcome = committed_harvest_failure(
-                            committed_harvest_preflight_outcome(task_id.clone()),
-                            error,
-                        );
-                        events.push(event(
+                        record_harvest_setup_failure(
                             &task_id,
-                            AgentTaskState::Failed,
                             scheduled.attempt,
-                            outcome.summary.clone(),
-                        ));
-                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                            error,
+                            &mut completed_by_task,
+                            &mut outcomes,
+                            &mut events,
+                        );
                         continue;
                     }
                 };
@@ -361,20 +358,13 @@ where
                     match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
                         Ok(workspace) => workspace,
                         Err(error) => {
-                            let outcome = committed_harvest_failure(
-                                committed_harvest_preflight_outcome(task_id.clone()),
-                                error,
-                            );
-                            events.push(event(
+                            record_harvest_setup_failure(
                                 &task_id,
-                                AgentTaskState::Failed,
                                 scheduled.attempt,
-                                outcome.summary.clone(),
-                            ));
-                            record_completed_outcome(
+                                error,
                                 &mut completed_by_task,
                                 &mut outcomes,
-                                outcome,
+                                &mut events,
                             );
                             continue;
                         }
@@ -555,27 +545,11 @@ where
                         let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
                         let mut retry_attempts = running_task.retry_attempts;
                         retry_attempts.push(retry_evidence);
-                        let mut request = running_task.request;
-                        if let (Some(attempt_root), Some(source_root)) = (
-                            request.workspace.root.clone(),
-                            running_task.source_workspace_root.clone(),
-                        ) {
-                            remap_workspace_config(
-                                &mut request.executor.config,
-                                Path::new(&attempt_root),
-                                Path::new(&source_root),
-                            );
-                        }
-                        request.workspace.root = running_task.source_workspace_root.clone();
-                        let mut candidate_artifacts = running_task.candidate_artifacts;
-                        append_unique_artifacts(
-                            &mut candidate_artifacts,
-                            outcome
-                                .artifacts
-                                .iter()
-                                .filter(|artifact| is_actionable_patch_artifact(artifact))
-                                .cloned()
-                                .collect(),
+                        let (mut request, candidate_artifacts) = reset_attempt_request(
+                            running_task.request,
+                            running_task.source_workspace_root,
+                            running_task.candidate_artifacts,
+                            &outcome,
                         );
                         request.parent_plan_id = Some(plan.plan_id.clone());
                         let next_attempt = result.attempt + 1;
@@ -621,28 +595,12 @@ where
                                 ),
                             );
                             let entry = &policy.entries[running_task.rotation_index];
-                            let mut candidate_artifacts = running_task.candidate_artifacts;
-                            append_unique_artifacts(
-                                &mut candidate_artifacts,
-                                outcome
-                                    .artifacts
-                                    .iter()
-                                    .filter(|artifact| is_actionable_patch_artifact(artifact))
-                                    .cloned()
-                                    .collect(),
+                            let (mut request, candidate_artifacts) = reset_attempt_request(
+                                running_task.request,
+                                running_task.source_workspace_root,
+                                running_task.candidate_artifacts,
+                                &outcome,
                             );
-                            let mut request = running_task.request;
-                            if let (Some(attempt_root), Some(source_root)) = (
-                                request.workspace.root.clone(),
-                                running_task.source_workspace_root.clone(),
-                            ) {
-                                remap_workspace_config(
-                                    &mut request.executor.config,
-                                    Path::new(&attempt_root),
-                                    Path::new(&source_root),
-                                );
-                            }
-                            request.workspace.root = running_task.source_workspace_root.clone();
                             AgentTaskScheduleSupport::apply_rotation_entry(
                                 &mut request,
                                 entry,
@@ -828,6 +786,35 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
     })
 }
 
+fn reset_attempt_request(
+    mut request: AgentTaskRequest,
+    source_workspace_root: Option<String>,
+    mut candidate_artifacts: Vec<AgentTaskArtifact>,
+    outcome: &AgentTaskOutcome,
+) -> (AgentTaskRequest, Vec<AgentTaskArtifact>) {
+    if let (Some(attempt_root), Some(source_root)) = (
+        request.workspace.root.clone(),
+        source_workspace_root.clone(),
+    ) {
+        remap_workspace_config(
+            &mut request.executor.config,
+            Path::new(&attempt_root),
+            Path::new(&source_root),
+        );
+    }
+    request.workspace.root = source_workspace_root;
+    append_unique_artifacts(
+        &mut candidate_artifacts,
+        outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| is_actionable_patch_artifact(artifact))
+            .cloned()
+            .collect(),
+    );
+    (request, candidate_artifacts)
+}
+
 enum SchedulerEvent {
     TaskResult(TaskResult),
     Cancellation,
@@ -843,6 +830,25 @@ fn record_completed_outcome(
 ) {
     completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
     outcomes.push(outcome);
+}
+
+fn record_harvest_setup_failure(
+    task_id: &str,
+    attempt: u32,
+    error: HarvestError,
+    completed_by_task: &mut HashMap<String, AgentTaskOutcome>,
+    outcomes: &mut Vec<AgentTaskOutcome>,
+    events: &mut Vec<AgentTaskProgressEvent>,
+) {
+    let outcome =
+        committed_harvest_failure(committed_harvest_preflight_outcome(task_id.into()), error);
+    events.push(event(
+        task_id,
+        AgentTaskState::Failed,
+        attempt,
+        outcome.summary.clone(),
+    ));
+    record_completed_outcome(completed_by_task, outcomes, outcome);
 }
 
 fn child_runs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskChildRun> {

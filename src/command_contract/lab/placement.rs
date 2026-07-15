@@ -88,7 +88,7 @@ impl Commands {
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                         command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
                     }),
-            }) => LabCommandContract::local_only(
+            }) => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
@@ -100,7 +100,7 @@ impl Commands {
                                 agent_task::AgentTaskFanoutCookBatchArgs { dry_run: true, .. },
                             ),
                     }),
-            }) => LabCommandContract::local_only(
+            }) => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
             ),
@@ -112,7 +112,7 @@ impl Commands {
                                 agent_task::AgentTaskFanoutCookBatchArgs { dry_run: false, .. },
                             ),
                     }),
-            }) => LabCommandContract::local_only(
+            }) => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
@@ -270,7 +270,7 @@ impl Commands {
             .is_some_and(|contract| contract.capture_mutation_patch)
     }
 
-    pub fn lab_required_extensions(&self) -> crate::core::Result<Vec<String>> {
+    pub(crate) fn lab_required_extensions(&self) -> crate::core::Result<Vec<String>> {
         let Some(contract) = self.lab_contract() else {
             return Ok(Vec::new());
         };
@@ -291,6 +291,13 @@ impl Commands {
 
         Ok(extension_ids.into_iter().collect())
     }
+}
+
+fn agent_task_fanout_local_only_contract(
+    label: &'static str,
+    reason: &'static str,
+) -> LabCommandContract {
+    LabCommandContract::local_only(label, reason)
 }
 
 pub(crate) fn agent_task_controller_materializes_worktree(
@@ -323,53 +330,47 @@ pub(crate) fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs {
-            dispatch: args,
-            ..
-        }) => {
-            let backend = args.backend.clone().or_else(default_backend);
-            backend.as_ref().is_some_and(|backend| {
-                provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
-            }) || args
-                .backend
-                .as_ref()
-                .is_some_and(|backend| !backend.trim().is_empty())
+        agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs { dispatch, .. }) => {
+            provider_requires_cwd_git_checkout_for_dispatch(
+                dispatch.backend.as_deref(),
+                dispatch.selector.as_deref(),
+                default_backend,
+                provider_requires_cwd_git_checkout,
+            )
         }
-        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-            command:
-                agent_task::AgentTaskControllerCommand::FromSpec(
-                    agent_task::AgentTaskControllerFromSpecArgs {
-                        resume: true,
-                        dispatch:
-                            agent_task::AgentTaskControllerDispatchArgs {
-                                dispatch_backend,
-                                dispatch_selector,
-                                ..
-                            },
-                        ..
-                    },
+        agent_task::AgentTaskCommand::Controller(controller) => {
+            let dispatch = match &controller.command {
+                agent_task::AgentTaskControllerCommand::FromSpec(args) if args.resume => {
+                    Some(&args.dispatch)
+                }
+                agent_task::AgentTaskControllerCommand::RunFromSpec(args) => Some(&args.dispatch),
+                _ => None,
+            };
+            dispatch.is_some_and(|dispatch| {
+                provider_requires_cwd_git_checkout_for_dispatch(
+                    dispatch.dispatch_backend.as_deref(),
+                    dispatch.dispatch_selector.as_deref(),
+                    default_backend,
+                    provider_requires_cwd_git_checkout,
                 )
-                | agent_task::AgentTaskControllerCommand::RunFromSpec(
-                    agent_task::AgentTaskControllerRunFromSpecArgs {
-                        dispatch:
-                            agent_task::AgentTaskControllerDispatchArgs {
-                                dispatch_backend,
-                                dispatch_selector,
-                                ..
-                            },
-                        ..
-                    },
-                ),
-        }) => {
-            let backend = dispatch_backend.clone().or_else(default_backend);
-            backend.as_ref().is_some_and(|backend| {
-                provider_requires_cwd_git_checkout(backend, dispatch_selector.as_deref())
-            }) || dispatch_backend
-                .as_ref()
-                .is_some_and(|backend| !backend.trim().is_empty())
+            })
         }
         _ => false,
     }
+}
+
+fn provider_requires_cwd_git_checkout_for_dispatch(
+    configured_backend: Option<&str>,
+    selector: Option<&str>,
+    default_backend: impl FnOnce() -> Option<String>,
+    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
+) -> bool {
+    configured_backend
+        .map(ToOwned::to_owned)
+        .or_else(default_backend)
+        .as_ref()
+        .is_some_and(|backend| provider_requires_cwd_git_checkout(backend, selector))
+        || configured_backend.is_some_and(|backend| !backend.trim().is_empty())
 }
 
 pub(crate) fn apply_lab_contract_to_descriptor(
