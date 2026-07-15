@@ -771,6 +771,7 @@ pub fn adopt_orphaned_lease(
     lease_id: &str,
     confirm_pid_dead: bool,
     recover_missing_child_identity: bool,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     if !confirm_pid_dead {
@@ -795,7 +796,10 @@ pub fn adopt_orphaned_lease(
             if recover_missing_child_identity {
                 store.reconcile_dead_daemon_lease_jobs_allow_missing_child_identity(lease_id)
             } else {
-                store.reconcile_dead_daemon_lease_jobs(lease_id)
+                store.reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                    lease_id,
+                    confirmed_no_pid_job_ids,
+                )
             }
         },
         || start_or_return_live_unlocked(addr),

@@ -221,6 +221,10 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         confirm_pid_dead: bool,
 
+        /// Confirm one exact unresolved job has no live untracked child; repeat for each job
+        #[arg(long = "confirm-untracked-child-dead")]
+        confirm_untracked_child_dead: Vec<uuid::Uuid>,
+
         /// Explicitly reconcile active jobs after proving the missing-lease remote store has no daemon owner
         #[arg(long)]
         reconcile_leaseless_orphans: bool,

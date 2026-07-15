@@ -820,6 +820,58 @@ mod tests {
     }
 
     #[test]
+    fn dead_lease_reconciliation_requires_exact_confirmation_for_untracked_children() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let confirmed = store.create("runner.exec");
+        store.start(confirmed.id).expect("start confirmed job");
+        let unconfirmed = store.create("runner.exec");
+        store.start(unconfirmed.id).expect("start unconfirmed job");
+        let unrelated = Uuid::new_v4();
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id],
+            )
+            .expect_err("every unresolved no-PID job needs exact confirmation");
+        assert!(error.message.contains(&unconfirmed.id.to_string()));
+        assert_eq!(
+            store.get(confirmed.id).expect("confirmed job").status,
+            JobStatus::Running
+        );
+
+        let error = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id, unrelated],
+            )
+            .expect_err("unknown confirmation must fail closed");
+        assert!(error.message.contains(&unrelated.to_string()));
+        assert_eq!(
+            store.get(confirmed.id).expect("confirmed job").status,
+            JobStatus::Running
+        );
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+                "lease-dead",
+                &[confirmed.id, unconfirmed.id],
+            )
+            .expect("exact confirmations terminalize only the confirmed no-PID jobs");
+        assert_eq!(diagnostics.terminalized_count(), 2);
+        for job_id in [confirmed.id, unconfirmed.id] {
+            assert_eq!(store.get(job_id).expect("job").status, JobStatus::Failed);
+            assert!(store.events(job_id).expect("events").iter().any(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data["reason"]
+                        == json!("operator_confirmed_untracked_child_dead_after_dead_daemon_lease")
+                        && data["operator_confirmation"] == json!(true)
+                })
+            }));
+        }
+    }
+
+    #[test]
     fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
         let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
         let job = store.create("runner.exec");

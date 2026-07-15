@@ -146,6 +146,15 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
             return Err(error);
         }
     }
+    // Persist the spawned child identity before waiting or sampling so a daemon
+    // loss cannot leave an executing runner command without PID evidence.
+    if let Some(progress) = progress_sink.as_ref() {
+        progress(runner_command_heartbeat_data(
+            started.elapsed(),
+            pid,
+            process_tree_resource_summary(pid),
+        ));
+    }
     let guard_violation = Arc::new(Mutex::new(None));
     let collector = ResourceMetricsCollector::start(
         pid,
@@ -730,6 +739,34 @@ mod tests {
         assert_eq!(payload["elapsed_ms"], 5);
         assert_eq!(payload["process"]["root_pid"], 9);
         assert!(payload["process"]["resources"].is_null());
+    }
+
+    #[test]
+    fn command_progress_persists_child_identity_immediately_after_spawn() {
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let progress_sink = {
+            let progress = Arc::clone(&progress);
+            Arc::new(move |data| progress.lock().expect("progress lock").push(data))
+        };
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+
+        measured_command_output_until_cancelled_with_progress(
+            &mut command,
+            || false,
+            Some(progress_sink),
+            None,
+            None,
+        )
+        .expect("command completes");
+
+        let progress = progress.lock().expect("progress lock");
+        assert!(progress.iter().any(|data| {
+            data["phase"] == "heartbeat"
+                && data["process"]["root_pid"]
+                    .as_u64()
+                    .is_some_and(|pid| pid > 0)
+        }));
     }
 
     #[test]

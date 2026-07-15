@@ -324,7 +324,23 @@ impl JobStore {
         &self,
         expected_lease_id: &str,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_child_liveness(expected_lease_id, pid_is_running)
+        self.reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(expected_lease_id, &[])
+    }
+
+    /// Reconcile an exact dead daemon lease after the operator has separately
+    /// proved each listed no-PID child is gone.
+    pub fn reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+        &self,
+        expected_lease_id: &str,
+        confirmed_no_pid_job_ids: &[Uuid],
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
+            expected_lease_id,
+            pid_is_running,
+            recovered_terminal_agent_task_result,
+            confirmed_no_pid_job_ids,
+            false,
+        )
     }
 
     /// Explicit operator recovery for legacy records which predate child identity.
@@ -333,10 +349,11 @@ impl JobStore {
         &self,
         expected_lease_id: &str,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_running,
             recovered_terminal_agent_task_result,
+            &[],
             true,
         )
     }
@@ -346,10 +363,12 @@ impl JobStore {
         expected_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_alive,
             recovered_terminal_agent_task_result,
+            &[],
+            false,
         )
     }
 
@@ -359,19 +378,21 @@ impl JobStore {
         pid_is_alive: impl Fn(u32) -> bool,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
             expected_lease_id,
             pid_is_alive,
             terminal_child_result,
+            &[],
             false,
         )
     }
 
-    fn reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+    fn reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_with_no_pid_recovery(
         &self,
         expected_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+        confirmed_no_pid_job_ids: &[Uuid],
         allow_missing_child_identity: bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
         let diagnostics = self.daemon_lease_job_diagnostics(expected_lease_id);
@@ -390,6 +411,19 @@ impl JobStore {
 
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         let mut diagnostics = diagnostics;
+        let supplied_confirmation_count = confirmed_no_pid_job_ids.len();
+        let confirmed_no_pid_job_ids = confirmed_no_pid_job_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if confirmed_no_pid_job_ids.len() != supplied_confirmation_count {
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                "each --confirm-untracked-child-dead job ID must be supplied once",
+                Some(expected_lease_id.to_string()),
+                None,
+            ));
+        }
         let mut dispositions = Vec::with_capacity(diagnostics.matching_job_ids.len());
         let mut ambiguous_job_ids = Vec::new();
         for job_id in &diagnostics.matching_job_ids {
@@ -418,16 +452,42 @@ impl JobStore {
                     DeadLeaseJobDisposition::TerminalizeDead
                 } else {
                     ambiguous_job_ids.push(*job_id);
-                    continue;
+                    if confirmed_no_pid_job_ids.contains(job_id) {
+                        DeadLeaseJobDisposition::TerminalizeOperatorConfirmedNoPid
+                    } else {
+                        continue;
+                    }
                 };
             dispositions.push((*job_id, disposition));
         }
-        if !ambiguous_job_ids.is_empty() {
+        let ambiguous_job_ids = ambiguous_job_ids
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if !confirmed_no_pid_job_ids.is_subset(&ambiguous_job_ids) {
+            let invalid_job_ids = confirmed_no_pid_job_ids
+                .difference(&ambiguous_job_ids)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::validation_invalid_argument(
+                "confirm_untracked_child_dead",
+                format!(
+                    "refusing dead-daemon recovery: confirmed job(s) {invalid_job_ids} are not unresolved active jobs without a recorded child PID for lease `{expected_lease_id}`"
+                ),
+                Some(expected_lease_id.to_string()),
+                None,
+            ));
+        }
+        let missing_confirmation_job_ids = ambiguous_job_ids
+            .difference(&confirmed_no_pid_job_ids)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !missing_confirmation_job_ids.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "expected-lease-id",
                 format!(
-                    "refusing automatic dead-daemon recovery: active job(s) {} have no authoritative terminal result or recorded child PID; inspect durable lifecycle/process evidence with `homeboy daemon status` before retrying",
-                    ambiguous_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+                    "refusing automatic dead-daemon recovery: active job(s) {} have no authoritative terminal result or recorded child PID; inspect durable lifecycle/process evidence with `homeboy daemon status` and repeat --confirm-untracked-child-dead <JOB_ID> for each independently proven-dead child before retrying",
+                    missing_confirmation_job_ids.join(", "),
                 ),
                 Some(expected_lease_id.to_string()),
                 None,
@@ -502,7 +562,16 @@ impl JobStore {
             if matches!(disposition, DeadLeaseJobDisposition::ProtectedLive) {
                 continue;
             }
-            let reason = "daemon lease owner process was not running".to_string();
+            let operator_confirmed_no_pid = matches!(
+                disposition,
+                DeadLeaseJobDisposition::TerminalizeOperatorConfirmedNoPid
+            );
+            let reason = if operator_confirmed_no_pid {
+                "operator confirmed the untracked child process was dead after daemon lease loss"
+                    .to_string()
+            } else {
+                "daemon lease owner process was not running".to_string()
+            };
             stored.job.status = JobStatus::Failed;
             stored.job.updated_at_ms = now;
             stored.job.finished_at_ms = Some(now);
@@ -513,9 +582,10 @@ impl JobStore {
                     JobEventKind::Error,
                     reason,
                     serde_json::json!({
-                        "reason": "dead_daemon_lease",
+                        "reason": if operator_confirmed_no_pid { "operator_confirmed_untracked_child_dead_after_dead_daemon_lease" } else { "dead_daemon_lease" },
                         "classification": classification,
                         "daemon_lease_id": expected_lease_id,
+                        "operator_confirmation": operator_confirmed_no_pid,
                     }),
                 ),
                 (
@@ -523,8 +593,9 @@ impl JobStore {
                     "job marked failed after dead daemon lease".to_string(),
                     serde_json::json!({
                         "status": JobStatus::Failed,
-                        "reason": "dead_daemon_lease",
+                        "reason": if operator_confirmed_no_pid { "operator_confirmed_untracked_child_dead_after_dead_daemon_lease" } else { "dead_daemon_lease" },
                         "daemon_lease_id": expected_lease_id,
+                        "operator_confirmation": operator_confirmed_no_pid,
                     }),
                 ),
             ] {
@@ -1017,6 +1088,7 @@ enum DeadLeaseJobDisposition {
     RecoveredLinkedRun(RecoveredTerminalJob),
     ProtectedLive,
     TerminalizeDead,
+    TerminalizeOperatorConfirmedNoPid,
 }
 
 pub(super) struct RecoveredTerminalJob {
