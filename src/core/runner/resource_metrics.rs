@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::engine::command::{
-    isolate_process_tree, supports_process_tree_isolation, terminate_process_tree_and_reap,
-    wait_with_bounded_output, wait_with_bounded_output_until_cancelled_with_stdout_observer,
-    CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
+    isolate_process_tree, supports_process_tree_isolation, wait_with_bounded_output,
+    wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
+    StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::core::error::{Error, Result};
 
@@ -156,7 +156,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     let pid = child.id();
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
-            let cleanup = terminate_process_tree_and_reap(&mut child);
+            let cleanup = terminate_unpersisted_child_and_reap(&mut child);
             let cleanup_context = cleanup
                 .err()
                 .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
@@ -185,7 +185,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
             pid,
             process_tree_resource_summary(pid),
         )) {
-            let cleanup = terminate_process_tree_and_reap(&mut child);
+            let cleanup = terminate_unpersisted_child_and_reap(&mut child);
             let cleanup_context = cleanup
                 .err()
                 .map(|error| format!("; child cleanup also failed: {error}"))
@@ -229,6 +229,22 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         capture,
         metrics,
     })
+}
+
+/// Terminate an unrecorded child with every available ownership boundary before
+/// reaping it. The root fallback keeps cleanup safe where group/tree control is
+/// unavailable, while the caller preserves the original persistence failure.
+fn terminate_unpersisted_child_and_reap(child: &mut std::process::Child) -> Result<()> {
+    let pid = child.id();
+    let group = crate::core::process::terminate_isolated_process_group(pid);
+    let tree = crate::core::process::terminate_process_tree_best_effort(pid);
+    if group.is_err() || tree.is_err() {
+        let _ = child.kill();
+    }
+    child.wait().map_err(|error| {
+        Error::internal_io(error.to_string(), Some("reap runner child".to_string()))
+    })?;
+    tree.or(group)
 }
 
 struct ResourceMetricsCollector {
