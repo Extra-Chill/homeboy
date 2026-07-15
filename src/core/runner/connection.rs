@@ -33,7 +33,6 @@ use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 use connection_daemon::{
@@ -41,6 +40,10 @@ use connection_daemon::{
 };
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_stale_paths};
+
+#[path = "connection_stop_transport_recovery.rs"]
+mod stop_transport_recovery;
+pub(crate) use stop_transport_recovery::disconnect_with_force;
 
 use super::daemon_http_get::daemon_get;
 
@@ -1267,96 +1270,7 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
 }
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
-    disconnect_with_force(runner_id, false)
-}
-
-pub(crate) fn disconnect_with_force(
-    runner_id: &str,
-    force: bool,
-) -> Result<RunnerDisconnectReport> {
-    let promotion_lease =
-        crate::core::runtime_promotion::acquire("runner daemon disconnect", runner_id.to_string())?;
-    promotion_lease.assert_generation()?;
-    let session_path = session_path(runner_id)?;
-    let session = read_session(runner_id)?;
-    if let Some(session) = &session {
-        if session.mode == RunnerTunnelMode::DirectSsh {
-            disconnect_remote_daemon(session, force).map_err(|err| {
-                Error::validation_invalid_argument(
-                    "disconnect",
-                    format!("refusing to disconnect runner `{runner_id}` because its remote daemon was not stopped safely: {err}"),
-                    Some(runner_id.to_string()),
-                    Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
-                )
-            })?;
-        }
-        if let Some(pid) = session.tunnel_pid {
-            terminate_pid(pid);
-        }
-    }
-    if session_path.exists() {
-        std::fs::remove_file(&session_path).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("delete {}", session_path.display())),
-            )
-        })?;
-    }
-    Ok(RunnerDisconnectReport {
-        runner_id: runner_id.to_string(),
-        disconnected: session.is_some(),
-        session,
-        session_path: session_path.display().to_string(),
-    })
-}
-
-fn disconnect_remote_daemon(
-    session: &RunnerSession,
-    force: bool,
-) -> std::result::Result<(), String> {
-    let local_url = session.local_url.as_deref().ok_or_else(|| {
-        "direct SSH runner session has no live daemon tunnel; refusing unbound remote stop"
-            .to_string()
-    })?;
-    let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-        "direct SSH runner session has no daemon lease; refusing unbound remote stop".to_string()
-    })?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|error| format!("build daemon lifecycle client: {error}"))?;
-    let response = client
-        .post(format!(
-            "{}/lifecycle/stop",
-            local_url.trim_end_matches('/')
-        ))
-        .json(&serde_json::json!({ "lease_id": lease_id, "force": force }))
-        .send()
-        .map_err(|error| format!("request lease-bound daemon stop: {error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|error| format!("read lease-bound daemon stop response: {error}"))?;
-    if !status.is_success() {
-        return Err(format!(
-            "lease-bound daemon stop was refused with HTTP {}: {}",
-            status.as_u16(),
-            response_body_excerpt(&body)
-        ));
-    }
-    Ok(())
-}
-
-fn response_body_excerpt(body: &str) -> String {
-    const LIMIT: usize = 2_000;
-    let trimmed = body.trim();
-    if trimmed.len() <= LIMIT {
-        return trimmed.to_string();
-    }
-    format!(
-        "{}...<truncated>",
-        trimmed.chars().take(LIMIT).collect::<String>()
-    )
+    stop_transport_recovery::disconnect_with_force(runner_id, false)
 }
 
 mod remote_daemon {
@@ -3467,7 +3381,7 @@ esac
         let mut session = direct_ssh_session("lease-live");
         session.local_url = None;
 
-        let error = disconnect_remote_daemon(&session, false)
+        let error = stop_transport_recovery::disconnect_remote_daemon(&session, false)
             .expect_err("routine disconnect must require the live daemon tunnel and exact lease");
 
         assert!(error.contains("no live daemon tunnel"));
@@ -3492,7 +3406,8 @@ esac
         let mut session = direct_ssh_session("lease-live");
         session.local_url = Some(format!("http://{address}"));
 
-        disconnect_remote_daemon(&session, false).expect("guarded lifecycle stop accepted");
+        stop_transport_recovery::disconnect_remote_daemon(&session, false)
+            .expect("guarded lifecycle stop accepted");
         server.join().expect("server");
     }
 
