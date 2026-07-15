@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::engine::command::{
-    isolate_process_tree, terminate_process_tree_and_reap, wait_with_bounded_output,
-    wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
-    StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
+    isolate_process_tree, supports_process_tree_isolation, terminate_process_tree_and_reap,
+    wait_with_bounded_output, wait_with_bounded_output_until_cancelled_with_stdout_observer,
+    CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::core::error::{Error, Result};
 
@@ -27,6 +27,18 @@ const DEFAULT_PROCESS_COUNT_LIMIT: u64 = 128;
 const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
 #[cfg(target_os = "linux")]
 const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
+
+fn require_process_tree_isolation() -> Result<()> {
+    if supports_process_tree_isolation() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "process-tree-isolation",
+        "runner command execution requires process-tree isolation to persist child identity safely on this platform",
+        None,
+        None,
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResourceMetrics {
@@ -102,6 +114,7 @@ pub(crate) fn measured_command_output(
     command: &mut Command,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
+    require_process_tree_isolation()?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
     let child = command.spawn().map_err(|err| {
@@ -131,6 +144,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
+    require_process_tree_isolation()?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_tree(command);
     let started = Instant::now();
@@ -760,6 +774,7 @@ mod tests {
 
     #[test]
     fn command_progress_persists_child_identity_immediately_after_spawn() {
+        assert!(supports_process_tree_isolation());
         let progress = Arc::new(Mutex::new(Vec::new()));
         let progress_sink = {
             let progress = Arc::clone(&progress);
@@ -787,6 +802,22 @@ mod tests {
                     .as_u64()
                     .is_some_and(|pid| pid > 0)
         }));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_process_tree_isolation_refuses_before_spawn() {
+        let mut command = Command::new("this-command-must-not-be-spawned");
+        let error = measured_command_output_until_cancelled_with_progress(
+            &mut command,
+            || false,
+            None,
+            None,
+            None,
+        )
+        .expect_err("unsupported platforms must fail before spawning a child");
+
+        assert!(error.message.contains("process-tree isolation"));
     }
 
     #[cfg(unix)]

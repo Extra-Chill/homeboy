@@ -14,6 +14,13 @@ const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
+/// Whether this build can isolate a spawned command into a terminable process
+/// tree. Callers that require fail-closed child identity persistence must check
+/// this before spawning.
+pub const fn supports_process_tree_isolation() -> bool {
+    cfg!(unix)
+}
+
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new(program).args(args).output().map_err(|e| {
         Error::internal_io(
