@@ -80,7 +80,7 @@ pub(super) fn prepare_committed_harvest(
     let source_provenance = if let Some(capability) = derived_cook_baseline {
         validate_derived_cook_baseline(root, request, capability)?;
         Some(serde_json::json!({
-            "cook_baseline": capability.artifact_provenance(),
+            "verified_cook_baseline": capability.verified_baseline_provenance(),
             "parent_snapshot": capability.parent_snapshot(),
         }))
     } else if snapshot_signaled {
@@ -110,14 +110,30 @@ pub(super) fn prepare_committed_harvest(
                 )));
             }
         }
-        Some(serde_json::json!({
+        let mut source_provenance = serde_json::json!({
             "source_revision": provenance.source_revision,
             "workspace_snapshot_identity": provenance.workspace_identity,
             "snapshot_hash": provenance.snapshot_hash,
             "runner_id": provenance.runner_id,
             "workspace_path": root.display().to_string(),
             "materialization_mode": provenance.materialization_mode,
-        }))
+        });
+        // This is descriptive controller evidence only. Verification above
+        // remains the authority for the remote Lab snapshot.
+        if let Some(verified_baseline) =
+            std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|metadata| {
+                    metadata
+                        .get("source_provenance")
+                        .and_then(|provenance| provenance.get("verified_cook_baseline"))
+                        .cloned()
+                })
+        {
+            source_provenance["verified_cook_baseline"] = verified_baseline;
+        }
+        Some(source_provenance)
     } else {
         None
     };

@@ -492,6 +492,24 @@ impl DerivedCookBaselineCapability {
             "source_patch_artifact_sha256": self.artifact_sha256,
         })
     }
+
+    /// Evidence derived from the controller-validated capability. It is not
+    /// authorization for remote workspace or snapshot verification.
+    pub(crate) fn verified_baseline_provenance(&self) -> Value {
+        serde_json::json!({
+            "source_run_id": self.source_run_id,
+            "source_task_id": self.source_task_id,
+            "promoted_patch_artifact_sha256": self.artifact_sha256,
+            "baseline_commit": self.commit,
+            "baseline_tree": self.tree,
+            "parent_snapshot_identity": self.parent_snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .get("workspace_snapshot_identity")
+                    .cloned()
+                    .or_else(|| snapshot.get("identity").cloned())
+            }),
+        })
+    }
 }
 
 impl CookFollowUpBaseline {

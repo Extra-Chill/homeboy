@@ -1272,6 +1272,11 @@ pub(crate) fn run_lab_offload_inner(
             primary_synced_workspace: &synced,
         },
     )?;
+    if let Some(verified_cook_baseline) = request.verified_cook_baseline {
+        lab_metadata["source_provenance"] = serde_json::json!({
+            "verified_cook_baseline": verified_cook_baseline,
+        });
+    }
     lab_metadata["dependency_hydration"] =
         dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_resource_lifecycle"] =

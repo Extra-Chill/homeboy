@@ -2149,6 +2149,7 @@ mod tests {
                 local_output_file: None,
                 durable_agent_task_plan: None,
                 source_path: None,
+                verified_cook_baseline: None,
                 require_controller_git_bundle: true,
                 job_overrides: LabJobOverrides::default(),
             };
@@ -2301,6 +2302,7 @@ mod tests {
                 local_output_file: None,
                 durable_agent_task_plan: None,
                 source_path: Some(source.as_path()),
+                verified_cook_baseline: None,
                 require_controller_git_bundle: false,
                 job_overrides: LabJobOverrides::default(),
             };
