@@ -3534,9 +3534,13 @@ esac
         test_support::with_isolated_home(|_| {
             crate::core::runner::create(r#"{"id":"lab-local","kind":"local"}"#, false)
                 .expect("create runner");
+            // A reverse-tunnel session: disconnect removes local session state
+            // without the direct-SSH remote-daemon-stop path, which (since
+            // #8250) refuses to unbind a leaseless direct-SSH daemon. This test
+            // asserts local session-file cleanup, not remote stop.
             let session = RunnerSession {
                 runner_id: "lab-local".to_string(),
-                mode: RunnerTunnelMode::DirectSsh,
+                mode: RunnerTunnelMode::Reverse,
                 role: RunnerSessionRole::Controller,
                 server_id: None,
                 controller_id: None,
