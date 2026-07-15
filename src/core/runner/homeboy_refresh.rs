@@ -405,6 +405,7 @@ pub fn refresh_homeboy_binary(
         let (_report, connect_exit_code) = connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
+            &[],
             false,
             None,
             None,

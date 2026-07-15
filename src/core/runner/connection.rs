@@ -52,7 +52,7 @@ struct CliEnvelope {
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, false, None, None, None)
+    connect_with_orphan_adoption(runner_id, None, &[], false, None, None, None)
 }
 
 /// Connect using an explicit dead-lease or missing-lease selector. A
@@ -70,7 +70,7 @@ pub fn connect_with_recovery(
             None,
         ));
     }
-    connect_with_orphan_adoption(runner_id, orphan_lease_id, false, None, None, None)
+    connect_with_orphan_adoption(runner_id, orphan_lease_id, &[], false, None, None, None)
 }
 
 /// Reconnect after the explicit lease-less recovery transaction has terminalized
@@ -78,7 +78,7 @@ pub fn connect_with_recovery(
 pub fn connect_with_leaseless_orphan_reconciliation(
     runner_id: &str,
 ) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, true, None, None, None)
+    connect_with_orphan_adoption(runner_id, None, &[], true, None, None, None)
 }
 
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
@@ -86,6 +86,7 @@ pub fn connect_with_leaseless_orphan_reconciliation(
 pub fn connect_with_orphan_adoption(
     runner_id: &str,
     orphan_lease_id: Option<&str>,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
     reconcile_leaseless_orphans: bool,
     missing_lease_id: Option<&str>,
     recorded_pid: Option<u32>,
@@ -281,7 +282,13 @@ pub fn connect_with_orphan_adoption(
         })?;
     }
 
-    let daemon = ensure_remote_daemon(&client, homeboy, previous_session.as_ref(), orphan_lease_id);
+    let daemon = ensure_remote_daemon(
+        &client,
+        homeboy,
+        previous_session.as_ref(),
+        orphan_lease_id,
+        confirmed_no_pid_job_ids,
+    );
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
             runner_id,
@@ -1632,6 +1639,7 @@ mod remote_daemon {
         homeboy: &str,
         previous_session: Option<&RunnerSession>,
         orphan_lease_id: Option<&str>,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
     ) -> std::result::Result<RemoteDaemon, String> {
         let mut status = remote_daemon_status(client, homeboy)?;
         probe_remote_daemon_endpoint(client, &mut status);
@@ -1643,8 +1651,19 @@ mod remote_daemon {
                     .and_then(|daemon| daemon.lease_id.as_deref())
                     == Some(lease_id)
             {
-                return remote_daemon_adopt_orphan(client, homeboy, lease_id);
+                return remote_daemon_adopt_orphan(
+                    client,
+                    homeboy,
+                    lease_id,
+                    confirmed_no_pid_job_ids,
+                );
             }
+        }
+        if !confirmed_no_pid_job_ids.is_empty() {
+            return Err(
+                "--confirm-untracked-child-dead applies only when the remote daemon reports the exact requested lease as PID-dead"
+                    .to_string(),
+            );
         }
         let inspected_freshness =
             remote_daemon_recovery_freshness_from_status("<runner-id>", &status);
@@ -2022,8 +2041,10 @@ mod remote_daemon {
         client: &SshClient,
         homeboy: &str,
         lease_id: &str,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
     ) -> std::result::Result<RemoteDaemon, String> {
-        let command = remote_daemon_adopt_orphan_command(homeboy, lease_id);
+        let command =
+            remote_daemon_adopt_orphan_command(homeboy, lease_id, confirmed_no_pid_job_ids);
         let output = client.execute(&command);
         if !output.success {
             return Err(command_failure_message(
@@ -2065,11 +2086,20 @@ mod remote_daemon {
         })
     }
 
-    pub(super) fn remote_daemon_adopt_orphan_command(homeboy: &str, lease_id: &str) -> String {
+    pub(super) fn remote_daemon_adopt_orphan_command(
+        homeboy: &str,
+        lease_id: &str,
+        confirmed_no_pid_job_ids: &[uuid::Uuid],
+    ) -> String {
+        let confirmations = confirmed_no_pid_job_ids
+            .iter()
+            .map(|job_id| format!(" --confirm-untracked-child-dead {job_id}"))
+            .collect::<String>();
         format!(
-            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead --addr 127.0.0.1:0",
+            "{} daemon adopt-orphan --lease-id {} --confirm-pid-dead{} --addr 127.0.0.1:0",
             shell::quote_arg(homeboy),
             shell::quote_arg(lease_id),
+            confirmations,
         )
     }
 
@@ -2720,7 +2750,7 @@ esac
             .expect("enable local runner");
 
             let (report, exit_code) =
-                connect_with_orphan_adoption("local-runner", None, true, None, None, None)
+                connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
                     .expect("connect result");
 
             assert_eq!(
@@ -2914,9 +2944,11 @@ esac
 
     #[test]
     fn generated_daemon_recovery_commands_parse_against_the_actual_cli_contract() {
+        let confirmed_job_id =
+            uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
         let mut commands = vec![
             remote_state_loss_recovery_command("homeboy", "lease-dead", 4242, "127.0.0.1:7421"),
-            remote_daemon_adopt_orphan_command("homeboy", "lease-dead"),
+            remote_daemon_adopt_orphan_command("homeboy", "lease-dead", &[confirmed_job_id]),
         ];
         for contract in [
             RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
@@ -3056,11 +3088,16 @@ esac
 
     #[test]
     fn orphan_adoption_command_carries_exact_lease_and_dead_pid_confirmation() {
-        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead");
+        let job_id =
+            uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
+        let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", &[job_id]);
 
         assert!(command.contains("daemon adopt-orphan"));
         assert!(command.contains("--lease-id 'lease dead'"));
         assert!(command.contains("--confirm-pid-dead"));
+        assert!(
+            command.contains("--confirm-untracked-child-dead fbac0390-dbb1-464b-8716-0894ccc05f2f")
+        );
     }
 
     #[test]

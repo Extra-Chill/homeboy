@@ -1461,9 +1461,7 @@ fn enqueue_exec_job(
                     None
                 };
                 let progress_job = job.clone();
-                let progress_sink = Arc::new(move |data| {
-                    let _ = progress_job.progress(data);
-                });
+                let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
                 let started_job = job.clone();
                 let child_started = Arc::new(move |pid| {
                     let started_at =
@@ -1482,6 +1480,7 @@ fn enqueue_exec_job(
                     &plan,
                     || job.is_cancelled(),
                     Some(progress_sink),
+                    true,
                     Some(child_started),
                 )?;
                 let stdout = process_output.stdout.clone();
