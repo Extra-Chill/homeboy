@@ -412,7 +412,9 @@ fn is_materializable_provider_config_path_key(
     }) || matches!(
         key,
         "workspace_root" | "source" | "source_cli" | "provider_root" | "provider_support" | "path"
-    )
+    ) || location
+        .trim_start_matches("$.")
+        .starts_with("runtime_component_paths.")
 }
 
 fn is_provider_plugin_path_location(location: &str) -> bool {
