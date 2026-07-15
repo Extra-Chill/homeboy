@@ -20,8 +20,8 @@ use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
 use super::types::{
     DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics,
-    DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
-    LeaselessOrphanJobDiagnostics,
+    DaemonLinkedDurableRunState, Job, JobEvent, JobEventKind, JobStatus,
+    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics,
 };
 use crate::core::agent_task_scheduler::AgentTaskAggregateStatus;
 use crate::core::agent_task_service;
@@ -573,7 +573,10 @@ impl JobStore {
                 self.persist()?;
             }
         }
-        if matching.iter().any(|(_, resolution)| matches!(resolution, LinkedDurableRunResolution::Terminal(_))) {
+        if matching
+            .iter()
+            .any(|(_, resolution)| matches!(resolution, LinkedDurableRunResolution::Terminal(_)))
+        {
             return Ok(DaemonLeaseJobDiagnostics {
                 expected_lease_id: expected_lease_id.to_string(),
                 matching_job_ids: matching.iter().map(|(job_id, _)| *job_id).collect(),
@@ -586,7 +589,10 @@ impl JobStore {
                 matches!(resolution, LinkedDurableRunResolution::None).then_some(*job_id)
             })
             .collect::<std::collections::BTreeSet<_>>();
-        let confirmed_job_ids = confirmed_no_pid_job_ids.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        let confirmed_job_ids = confirmed_no_pid_job_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         if confirmed_job_ids != unresolved_job_ids {
             let invalid = confirmed_job_ids
                 .symmetric_difference(&unresolved_job_ids)

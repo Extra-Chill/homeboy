@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use crate::core::engine::command::{
     isolate_process_tree, supports_process_tree_isolation, wait_with_bounded_output,
-    wait_with_bounded_output_until_cancelled_with_stdout_observer,
-    CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
+    wait_with_bounded_output_until_cancelled_with_stdout_observer, CommandCaptureMetadata,
+    StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::core::error::{Error, Result};
 
@@ -241,9 +241,9 @@ fn terminate_unpersisted_child_and_reap(child: &mut std::process::Child) -> Resu
     if group.is_err() || tree.is_err() {
         let _ = child.kill();
     }
-    child
-        .wait()
-        .map_err(|error| Error::internal_io(error.to_string(), Some("reap runner child".to_string())))?;
+    child.wait().map_err(|error| {
+        Error::internal_io(error.to_string(), Some("reap runner child".to_string()))
+    })?;
     tree.or(group)
 }
 
