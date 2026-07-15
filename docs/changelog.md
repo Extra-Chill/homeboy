@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.1] - 2026-07-15
+
+### Changed
+- repair stale runner exec/handoff/dispatch assertions
+- extract path resolution into homeboy-paths crate
+- invert runner CLI parsing via resolver hooks
+- Close promotion provider scripts before execution
+- update stale-daemon refresh_command assertion for version-pinned refresh
+- Confirm exact untracked orphan jobs
+- Use configured worktree providers for cook promotion
+- extract shared Placement into homeboy-cli-contract crate
+- Preserve lazy promotion and provider failure evidence
+- Add coherent release-set deploy preflight
+
+### Fixed
+- peel refresh refs to commit identity
+- repair trace-variant rig fixture, store migration count, and Lab runtime-path preflight
+
 ## [0.286.0] - 2026-07-15
 
 ### Added
