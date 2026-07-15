@@ -82,3 +82,54 @@ pub fn resolve_agent_task_dispatch(
         None => Ok(None),
     }
 }
+
+/// Human-readable strings describing which commands support Lab-runner offload.
+///
+/// Built by the CLI layer from the command-spec table and registered via
+/// [`set_lab_runner_hint_provider`]; core reads them when composing
+/// `--runner`/`--placement` unsupported errors, without depending on
+/// `command_contract`'s spec table.
+#[derive(Debug, Clone)]
+pub struct LabRunnerHint {
+    /// Short hint listing the currently Lab-portable commands.
+    pub hint: String,
+    /// Full "`--runner` is only supported for ..." message.
+    pub unsupported_message: String,
+}
+
+type LabRunnerHintProvider = fn() -> LabRunnerHint;
+
+fn lab_runner_hint_provider() -> &'static RwLock<Option<LabRunnerHintProvider>> {
+    static PROVIDER: OnceLock<RwLock<Option<LabRunnerHintProvider>>> = OnceLock::new();
+    PROVIDER.get_or_init(|| RwLock::new(None))
+}
+
+/// Register the provider that supplies Lab-runner support hint strings. Called
+/// once during startup by the CLI layer.
+pub fn set_lab_runner_hint_provider(provider: LabRunnerHintProvider) {
+    let mut guard = lab_runner_hint_provider()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(provider);
+}
+
+/// Resolve the Lab-runner support hints via the registered provider, falling
+/// back to a generic message when no provider is registered (e.g. in tests or
+/// non-CLI embeddings).
+pub fn resolve_lab_runner_hint() -> LabRunnerHint {
+    let provider = {
+        let guard = lab_runner_hint_provider()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard
+    };
+    match provider {
+        Some(f) => f(),
+        None => LabRunnerHint {
+            hint: "Lab offload support is command-specific.".to_string(),
+            unsupported_message:
+                "--runner is only supported for commands with portable Lab offload support."
+                    .to_string(),
+        },
+    }
+}

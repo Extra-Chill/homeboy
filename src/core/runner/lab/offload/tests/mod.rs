@@ -33,7 +33,7 @@ mod workspace_sync;
 
 pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        command: crate::command_contract::LabCommandContract::portable(label, None, true, &[]),
+        command: crate::core::lab_contract::LabCommandContract::portable(label, None, true, &[]),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
@@ -42,7 +42,7 @@ pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
 
 pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        command: crate::command_contract::LabCommandContract::local_only("rig up", reason),
+        command: crate::core::lab_contract::LabCommandContract::local_only("rig up", reason),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
