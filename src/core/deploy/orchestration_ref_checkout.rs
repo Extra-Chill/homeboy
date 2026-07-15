@@ -9,7 +9,7 @@ use crate::core::git;
 const REMOTE_REF_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ExactRefIdentity {
+pub(crate) struct ExactRefIdentity {
     pub requested_ref: String,
     pub resolved_sha: String,
     pub source: String,
@@ -23,7 +23,7 @@ pub(super) struct ExactRefCheckout {
     worktree_path: PathBuf,
 }
 
-pub(super) fn resolve_exact_ref(
+pub(crate) fn resolve_exact_ref(
     component: &Component,
     requested_ref: &str,
 ) -> Result<ExactRefIdentity> {

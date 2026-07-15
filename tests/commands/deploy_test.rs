@@ -102,6 +102,25 @@ fn deploy_parser_accepts_exact_ref() {
 }
 
 #[test]
+fn deploy_parser_accepts_release_set_manifest() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "deploy",
+        "--project",
+        "project-a",
+        "--release-set",
+        "release-set.json",
+        "--dry-run",
+    ])
+    .expect("--release-set should parse");
+
+    let Commands::Deploy(args) = cli.command else {
+        panic!("expected deploy command");
+    };
+    assert_eq!(args.release_set.as_deref(), Some("release-set.json"));
+}
+
+#[test]
 fn deploy_resume_run_id_propagates_to_multi_target_config() {
     let cli = Cli::try_parse_from([
         "homeboy",
@@ -313,6 +332,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         allow_stale_source: false,
         allow_downgrade: false,
         head: false,
+        release_set: None,
         requested_ref: None,
         tagged: false,
         resume: None,

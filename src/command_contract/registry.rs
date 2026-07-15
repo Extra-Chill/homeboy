@@ -35,6 +35,14 @@ impl ContractRegistryEntry {
 
 pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
     ContractRegistryEntry {
+        schema_id: crate::core::release_set::RELEASE_SET_SCHEMA,
+        name: "release-set",
+        title: "Release set manifest",
+        owner: "homeboy-core",
+        summary: "Caller-supplied, product-agnostic required or optional component membership and immutable source references.",
+        rust_type: "homeboy::core::release_set::ReleaseSetManifest",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA,
         name: "lifecycle-contract",
         title: "Loop lifecycle contract",

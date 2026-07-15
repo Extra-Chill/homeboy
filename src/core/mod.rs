@@ -139,6 +139,7 @@ pub mod quality;
 pub use homeboy_redaction as redaction;
 pub mod refactor;
 pub mod release;
+pub mod release_set;
 pub mod report_compare;
 pub(crate) mod report_compare_render;
 pub mod resource_cleanup_intent;

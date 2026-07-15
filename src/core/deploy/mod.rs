@@ -32,6 +32,16 @@ pub use types::{
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
 
+/// Resolve an exact component source reference for a caller-owned preflight.
+/// The resolver is shared with deploy materialization so acceptance criteria do
+/// not diverge between a release-set proof and the eventual deploy action.
+pub(crate) fn preflight_exact_ref(
+    component: &component::Component,
+    requested_ref: &str,
+) -> Result<String> {
+    Ok(orchestration_ref_checkout::resolve_exact_ref(component, requested_ref)?.resolved_sha)
+}
+
 use crate::core::component;
 use crate::core::context::resolve_project_ssh_with_base_path;
 use crate::core::error::{Error, Result};
