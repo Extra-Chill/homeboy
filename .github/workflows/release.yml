@@ -443,9 +443,9 @@ jobs:
         if: inputs.release_tag == ''
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Preflight crates.io packages
+      - name: Preflight internal workspace packages
         if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
-        run: cargo package --workspace --allow-dirty --no-verify
+        run: cargo package --workspace --exclude homeboy --allow-dirty --no-verify
 
       - uses: Extra-Chill/homeboy-action@v2
         id: release
