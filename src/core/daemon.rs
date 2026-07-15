@@ -1449,22 +1449,12 @@ fn enqueue_exec_job(
         request.metadata.as_ref(),
     );
     let runner = job_store
-        .run_background_with_source_snapshot_metadata_and_path_materialization_plan(
+        .run_background_deferred_start_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot.clone(),
             run_ref_metadata,
             path_materialization_plan.clone(),
             move |job| {
-                job.progress(json!({
-                    "phase": "started",
-                    "runner_id": plan.runner.id,
-                    "cwd": plan.cwd,
-                    "command": plan.command,
-                    "capture_patch": request.capture_patch,
-                    "job_id": job.job_id(),
-                    "source_snapshot": source_snapshot,
-                    "path_materialization_plan": path_materialization_plan,
-                }))?;
                 let baseline = if request.capture_patch {
                     Some(capture_baseline(&plan.cwd)?)
                 } else {
@@ -1474,10 +1464,25 @@ fn enqueue_exec_job(
                 let progress_sink = Arc::new(move |data| {
                     let _ = progress_job.progress(data);
                 });
+                let started_job = job.clone();
+                let child_started = Arc::new(move |pid| {
+                    let started_at =
+                        crate::core::engine::invocation::InvocationChildRecord::process_started_at(
+                            pid,
+                        )
+                        .ok_or_else(|| {
+                            Error::internal_unexpected(
+                                "capture runner child process start identity",
+                            )
+                        })?;
+                    started_job.start_with_child_identity(pid, started_at)?;
+                    Ok(())
+                });
                 let process_output = execute_runner_process_until_cancelled_with_progress(
                     &plan,
                     || job.is_cancelled(),
                     Some(progress_sink),
+                    Some(child_started),
                 )?;
                 let stdout = process_output.stdout.clone();
                 let stderr = process_output.stderr.clone();

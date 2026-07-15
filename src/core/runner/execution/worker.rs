@@ -24,7 +24,12 @@ pub(crate) fn exec_worker_local_until_cancelled_with_progress(
 ) -> Result<(RunnerExecOutput, i32)> {
     let mut is_cancelled = is_cancelled;
     exec_worker_local_with_process_output(runner_id, options, |plan| {
-        execute_runner_process_until_cancelled_with_progress(plan, &mut is_cancelled, progress_sink)
+        execute_runner_process_until_cancelled_with_progress(
+            plan,
+            &mut is_cancelled,
+            progress_sink,
+            None,
+        )
     })
 }
 

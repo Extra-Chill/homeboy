@@ -327,6 +327,20 @@ impl JobStore {
         self.reconcile_dead_daemon_lease_jobs_with_child_liveness(expected_lease_id, pid_is_running)
     }
 
+    /// Explicit operator recovery for legacy records which predate child identity.
+    /// Callers must first prove the exact daemon lease PID is dead and no owner remains.
+    pub fn reconcile_dead_daemon_lease_jobs_allow_missing_child_identity(
+        &self,
+        expected_lease_id: &str,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+            expected_lease_id,
+            pid_is_running,
+            recovered_terminal_agent_task_result,
+            true,
+        )
+    }
+
     pub(super) fn reconcile_dead_daemon_lease_jobs_with_child_liveness(
         &self,
         expected_lease_id: &str,
@@ -344,6 +358,21 @@ impl JobStore {
         expected_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+            expected_lease_id,
+            pid_is_alive,
+            terminal_child_result,
+            false,
+        )
+    }
+
+    fn reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result_internal(
+        &self,
+        expected_lease_id: &str,
+        pid_is_alive: impl Fn(u32) -> bool,
+        terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
+        allow_missing_child_identity: bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
         let diagnostics = self.daemon_lease_job_diagnostics(expected_lease_id);
         if diagnostics.unowned_count() > 0 {
@@ -369,14 +398,24 @@ impl JobStore {
                 if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
                     DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code)
                 } else if let Some(pid) = last_progress_child_pid(&stored.events) {
-                    if pid_is_alive(pid) {
-                        diagnostics.protected_job_ids.push(*job_id);
-                        DeadLeaseJobDisposition::ProtectedLive
-                    } else if let Some(recovered) = terminal_child_result(stored) {
-                        DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
-                    } else {
-                        DeadLeaseJobDisposition::TerminalizeDead
-                    }
+                    if pid_is_alive(pid)
+                    && last_progress_child_started_at(&stored.events).is_none_or(|expected| {
+                        crate::core::engine::invocation::InvocationChildRecord::process_started_at(
+                            pid,
+                        )
+                        .as_deref()
+                            == Some(expected.as_str())
+                    })
+                {
+                    diagnostics.protected_job_ids.push(*job_id);
+                    DeadLeaseJobDisposition::ProtectedLive
+                } else if let Some(recovered) = terminal_child_result(stored) {
+                    DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
+                } else {
+                    DeadLeaseJobDisposition::TerminalizeDead
+                }
+                } else if allow_missing_child_identity {
+                    DeadLeaseJobDisposition::TerminalizeDead
                 } else {
                     ambiguous_job_ids.push(*job_id);
                     continue;
@@ -741,6 +780,54 @@ impl JobStore {
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
+        self.run_background_with_start_policy(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            true,
+            run,
+        )
+    }
+
+    pub(crate) fn run_background_deferred_start_with_source_snapshot_metadata_and_path_materialization_plan<
+        T,
+        F,
+    >(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
+        self.run_background_with_start_policy(
+            operation,
+            source_snapshot,
+            metadata,
+            path_materialization_plan,
+            false,
+            run,
+        )
+    }
+
+    fn run_background_with_start_policy<T, F>(
+        &self,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        start_before_run: bool,
+        run: F,
+    ) -> JobRunner
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
+    {
         let job = self.create_with_source_snapshot_metadata_and_path_materialization_plan(
             operation,
             source_snapshot,
@@ -752,7 +839,7 @@ impl JobStore {
         let worker_store = self.clone();
 
         let handle = thread::spawn(move || {
-            if worker_store.start(job_id).is_err() {
+            if start_before_run && worker_store.start(job_id).is_err() {
                 return;
             }
             let job_handle = JobHandle {
@@ -804,6 +891,58 @@ impl JobStore {
 
         self.append_status_event(job_id, next_status, message)?;
         self.get(job_id)
+    }
+
+    pub(crate) fn start_with_child_identity(
+        &self,
+        job_id: Uuid,
+        pid: u32,
+        started_at: String,
+    ) -> Result<Job> {
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let (prior, started) = {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            validate_transition(stored.job.status, JobStatus::Running)?;
+            let prior = stored.clone();
+            let now = timestamp_ms();
+            stored.job.status = JobStatus::Running;
+            stored.job.started_at_ms = Some(now);
+            stored.job.updated_at_ms = now;
+            let sequence = self.next_event_sequence.fetch_add(2, Ordering::SeqCst) + 1;
+            stored.events.push(JobEvent {
+                sequence,
+                job_id,
+                kind: JobEventKind::Progress,
+                timestamp_ms: now,
+                message: Some("runner child spawned".to_string()),
+                data: Some(serde_json::json!({ "phase": "spawned", "process": { "root_pid": pid, "started_at": started_at } })),
+            });
+            stored.events.push(JobEvent {
+                sequence: sequence + 1,
+                job_id,
+                kind: JobEventKind::Status,
+                timestamp_ms: now,
+                message: Some("job started".to_string()),
+                data: Some(serde_json::json!({ "status": JobStatus::Running })),
+            });
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+            (prior, stored.job.clone())
+        };
+
+        if let Some(persistence) = &self.persistence {
+            let durable = DurableJobStore {
+                jobs: inner.jobs.values().cloned().collect(),
+            };
+            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+                *inner.jobs.get_mut(&job_id).expect("job exists") = prior;
+                return Err(error);
+            }
+        }
+        Ok(started)
     }
 
     pub(super) fn ensure_transition(&self, job_id: Uuid, next_status: JobStatus) -> Result<()> {
@@ -979,6 +1118,18 @@ fn last_progress_child_pid(events: &[JobEvent]) -> Option<u32> {
         .filter(|pid| *pid > 0)
 }
 
+fn last_progress_child_started_at(events: &[JobEvent]) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Progress)
+        .and_then(|event| event.data.as_ref())
+        .and_then(|data| data.get("process"))
+        .and_then(|process| process.get("started_at"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 impl JobHandle {
     pub(crate) fn job_id(&self) -> Uuid {
         self.job_id
@@ -989,6 +1140,11 @@ impl JobHandle {
             .get(self.job_id)
             .map(|job| job.status == JobStatus::Cancelled)
             .unwrap_or(true)
+    }
+
+    pub(crate) fn start_with_child_identity(&self, pid: u32, started_at: String) -> Result<Job> {
+        self.store
+            .start_with_child_identity(self.job_id, pid, started_at)
     }
 
     pub(crate) fn stdout(&self, message: impl Into<String>) -> Result<JobEvent> {

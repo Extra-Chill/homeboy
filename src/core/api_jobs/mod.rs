@@ -656,6 +656,60 @@ mod tests {
     }
 
     #[test]
+    fn child_identity_is_durable_before_a_job_becomes_running() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store
+            .start_with_child_identity(job.id, 4242, "fixture-start".to_string())
+            .expect("record child before running");
+
+        let running = store.get(job.id).expect("running job");
+        assert_eq!(running.status, JobStatus::Running);
+        assert!(store.events(job.id).expect("events").iter().any(|event| {
+            event.kind == JobEventKind::Progress
+                && event.data.as_ref().is_some_and(|data| {
+                    data["process"]["root_pid"] == 4242
+                        && data["process"]["started_at"] == "fixture-start"
+                })
+        }));
+    }
+
+    #[test]
+    fn explicit_legacy_recovery_terminalizes_missing_child_identity() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start legacy job");
+
+        store
+            .reconcile_dead_daemon_lease_jobs_allow_missing_child_identity("lease-dead")
+            .expect("explicit legacy recovery");
+
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn reused_pid_with_a_different_start_identity_is_terminalized() {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": std::process::id(), "started_at": "not-this-process" } })),
+            )
+            .expect("record reused identity");
+
+        let diagnostics = store
+            .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| true)
+            .expect("reconcile reused PID");
+
+        assert!(diagnostics.protected_job_ids.is_empty());
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
     fn dead_child_recovers_linked_terminal_result_and_artifacts() {
         let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
         let job = store.create("runner.exec");
