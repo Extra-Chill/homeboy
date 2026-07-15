@@ -1,6 +1,7 @@
 //! Agent-task command promotion source resolution and review/loop reporting tests.
 
 use super::support::*;
+use crate::core::agent_task_service::DerivedCookBaselineCapability;
 
 #[test]
 fn promotion_source_resolves_completed_run_id() {
@@ -285,7 +286,12 @@ struct MirroredAttemptDispatcher {
 }
 
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for MirroredAttemptDispatcher {
-    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> homeboy::core::Result<()> {
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> homeboy::core::Result<()> {
         homeboy::core::agent_tasks::service::run_loaded_plan(
             plan,
             Some(run_id),

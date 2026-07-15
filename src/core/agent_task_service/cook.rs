@@ -39,7 +39,14 @@ use super::AgentTaskRunResult;
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
-    fn dispatch_attempt(&self, plan: AgentTaskPlan, run_id: &str) -> Result<()>;
+    /// `derived_cook_baseline` is process-local authority for a gate-fix retry.
+    /// Implementations must not serialize it into the provider request.
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +142,7 @@ where
             .unwrap_or(true);
         if needs_execution {
             let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
-                dispatcher.dispatch_attempt(plan.clone(), &run_id)
+                dispatcher.dispatch_attempt(plan.clone(), &run_id, None)
             } else {
                 run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
             };
@@ -394,12 +401,20 @@ where
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
-                run_loaded_plan_with_derived_cook_baseline(
-                    follow_up_plan,
-                    Some(&next_run_id),
-                    executor.clone(),
-                    Some(baseline.capability()),
-                )?;
+                if let Some(dispatcher) = &options.attempt_dispatcher {
+                    dispatcher.dispatch_attempt(
+                        follow_up_plan,
+                        &next_run_id,
+                        Some(baseline.capability()),
+                    )?;
+                } else {
+                    run_loaded_plan_with_derived_cook_baseline(
+                        follow_up_plan,
+                        Some(&next_run_id),
+                        executor.clone(),
+                        Some(baseline.capability()),
+                    )?;
+                }
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
             }
@@ -439,7 +454,7 @@ struct CookFollowUpBaseline {
 
 /// Process-local authority for one materialized cook retry baseline. It is not
 /// serializable and never enters a request, environment, or durable record.
-pub(crate) struct DerivedCookBaselineCapability {
+pub struct DerivedCookBaselineCapability {
     canonical_path: PathBuf,
     commit: String,
     tree: String,
