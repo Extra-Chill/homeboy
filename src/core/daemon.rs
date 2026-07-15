@@ -1936,6 +1936,11 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
             state.schema
         )));
     }
+    if state.lease_id.trim().is_empty() {
+        return Err(Error::internal_unexpected(
+            "refusing to write a daemon lease without a lease ID; leases are identified by their lease_id",
+        ));
+    }
     let body = serde_json::to_string_pretty(&state).map_err(|e| {
         Error::internal_json(e.to_string(), Some("serialize daemon state".to_string()))
     })?;
@@ -2182,7 +2187,18 @@ fn read_lease_if_identity_matches(
     Ok(state)
 }
 
+/// Test-only override for the current-binary hash. Hashing the running
+/// executable is cheap for a released ~30-50 MB binary but pathologically slow
+/// for a multi-hundred-MB debug test binary — slow enough to make an in-process
+/// mock-daemon server (which computes it during startup) miss a client's
+/// connect timeout. Tests set this to a fixed value to keep daemon startup fast
+/// and deterministic; it is never consulted in a released binary run.
+pub(crate) const DAEMON_BINARY_SHA_OVERRIDE_ENV: &str = "HOMEBOY_TEST_DAEMON_BINARY_SHA";
+
 fn current_binary_sha256() -> Result<Option<String>> {
+    if let Ok(value) = std::env::var(DAEMON_BINARY_SHA_OVERRIDE_ENV) {
+        return Ok((!value.is_empty()).then_some(value));
+    }
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
