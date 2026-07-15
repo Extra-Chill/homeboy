@@ -8,6 +8,7 @@ use crate::core::observation::ObservationStore;
 use crate::core::{git, paths, Error, Result};
 
 pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
+const INTERRUPTED_RETENTION: &str = "P1D";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerScratchResource {
@@ -35,6 +36,8 @@ pub struct ControllerScratchResource {
     pub terminal_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_evidence: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +114,7 @@ pub fn allocate_attempt(
         finalized_at: None,
         terminal_reason: None,
         terminal_evidence: None,
+        interrupted_at: None,
     });
     write_index(&index)?;
 
@@ -166,6 +170,12 @@ pub struct ControllerScratchCleanupOutput {
     pub reclaimed_bytes: u64,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub skipped: Vec<ControllerScratchSkipped>,
+    pub remaining_candidate_count: usize,
+    pub remaining_candidate_bytes: u64,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+    pub drain_command: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +184,10 @@ pub struct ControllerScratchCandidate {
     pub run_id: String,
     pub task_id: String,
     pub size_bytes: u64,
+    pub owner_pid: u32,
+    pub lease_id: String,
+    pub reason: String,
+    pub lifecycle_state: String,
     pub source_ref: Option<String>,
 }
 
@@ -181,7 +195,15 @@ pub struct ControllerScratchCandidate {
 pub struct ControllerScratchSkipped {
     pub path: String,
     pub run_id: Option<String>,
+    pub owner_pid: Option<u32>,
+    pub lifecycle_state: Option<String>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ControllerScratchCleanupOptions {
+    pub apply: bool,
+    pub limit: usize,
 }
 
 /// Registers provider-created controller scratch returned in an outcome's
@@ -262,6 +284,7 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
                 finalized_at: None,
                 terminal_reason: None,
                 terminal_evidence: None,
+                interrupted_at: None,
             };
             index
                 .resources
@@ -296,66 +319,101 @@ pub fn finalize_run(run_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn cleanup(apply: bool) -> Result<ControllerScratchCleanupOutput> {
-    let index = read_index()?;
+pub fn cleanup(options: ControllerScratchCleanupOptions) -> Result<ControllerScratchCleanupOutput> {
+    let mut index = read_index()?;
     let mut candidates = Vec::new();
-    let mut skipped = legacy_unknown_paths()?;
+    let mut skipped = legacy_unknown_paths(&std::env::temp_dir())?;
     let mut applied_count = 0;
     let mut reclaimed_bytes = 0;
-    for resource in index.resources {
+    let now = chrono::Utc::now();
+    let mut eligible = Vec::new();
+    let mut reconciled = false;
+    for resource in &mut index.resources {
         let path = PathBuf::from(&resource.path);
         if !path.exists() {
             continue;
         }
-        let reason = cleanup_block_reason(&resource, &path)?;
+        let lifecycle_state = resource.lifecycle_state.clone();
+        let interrupted_at = resource.interrupted_at.clone();
+        let reason = cleanup_block_reason(resource, &path, now)?;
+        reconciled |= resource.lifecycle_state != lifecycle_state
+            || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
             skipped.push(ControllerScratchSkipped {
-                path: resource.path,
-                run_id: Some(resource.run_id),
+                path: resource.path.clone(),
+                run_id: Some(resource.run_id.clone()),
+                owner_pid: Some(resource.owner_pid),
+                lifecycle_state: Some(resource.lifecycle_state.clone()),
                 reason,
             });
             continue;
         }
         let size_bytes = path_size(&path)?;
-        let candidate = ControllerScratchCandidate {
-            path: resource.path,
-            run_id: resource.run_id,
-            task_id: resource.task_id,
+        eligible.push(ControllerScratchCandidate {
+            path: resource.path.clone(),
+            run_id: resource.run_id.clone(),
+            task_id: resource.task_id.clone(),
             size_bytes,
-            source_ref: resource.source_ref,
-        };
-        if apply {
-            fs::remove_dir_all(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", path.display())),
-                )
-            })?;
-            applied_count += 1;
-            reclaimed_bytes += size_bytes;
+            owner_pid: resource.owner_pid,
+            lease_id: resource.lease_id.clone(),
+            reason: resource.terminal_reason.clone().unwrap_or_default(),
+            lifecycle_state: resource.lifecycle_state.clone(),
+            source_ref: resource.source_ref.clone(),
+        });
+    }
+    if reconciled {
+        write_index(&index)?;
+    }
+
+    let candidate_count = eligible.len();
+    let estimated_bytes = eligible.iter().map(|candidate| candidate.size_bytes).sum();
+    let remaining: Vec<_> = eligible.iter().skip(options.limit).collect();
+    let remaining_candidate_count = remaining.len();
+    let remaining_candidate_bytes = remaining.iter().map(|candidate| candidate.size_bytes).sum();
+    let has_more = remaining_candidate_count > 0;
+    for candidate in eligible.into_iter().take(options.limit) {
+        if options.apply {
+            match remove_candidate(&candidate, now)? {
+                Some(bytes) => {
+                    applied_count += 1;
+                    reclaimed_bytes += bytes;
+                }
+                None => skipped.push(ControllerScratchSkipped {
+                    path: candidate.path.clone(),
+                    run_id: Some(candidate.run_id.clone()),
+                    owner_pid: Some(candidate.owner_pid),
+                    lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                    reason: "resource changed or disappeared before deletion".to_string(),
+                }),
+            }
         }
         candidates.push(candidate);
     }
-    let estimated_bytes = candidates
-        .iter()
-        .map(|candidate| candidate.size_bytes)
-        .sum();
     Ok(ControllerScratchCleanupOutput {
         command: "cleanup.controller-scratch",
-        mode: if apply { "apply" } else { "dry_run" },
-        candidate_count: candidates.len(),
+        mode: if options.apply { "apply" } else { "dry_run" },
+        candidate_count,
         applied_count,
         skipped_count: skipped.len(),
         estimated_bytes,
         reclaimed_bytes,
         candidates,
         skipped,
+        remaining_candidate_count,
+        remaining_candidate_bytes,
+        has_more,
+        next_command: has_more.then(|| cleanup_command(options)),
+        drain_command: cleanup_command(ControllerScratchCleanupOptions {
+            apply: true,
+            limit: options.limit.saturating_mul(10).max(1),
+        }),
     })
 }
 
 fn cleanup_block_reason(
-    resource: &ControllerScratchResource,
+    resource: &mut ControllerScratchResource,
     path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<String>> {
     if !resource.reconstructable {
         return Ok(Some(
@@ -377,6 +435,19 @@ fn cleanup_block_reason(
     if crate::core::process::pid_is_running(resource.owner_pid) {
         return Ok(Some("owner process is still running".to_string()));
     }
+    if resource.lifecycle_state == "active" {
+        resource.lifecycle_state = "interrupted".to_string();
+        resource.finalized_at = Some(now.to_rfc3339());
+        resource.interrupted_at = Some(now.to_rfc3339());
+        resource.terminal_reason = Some("owner_process_dead".to_string());
+        resource.terminal_evidence = Some(serde_json::json!({
+            "owner_pid": resource.owner_pid,
+            "stale_retention": INTERRUPTED_RETENTION,
+        }));
+        return Ok(Some(
+            "active lease owner is proven dead; interrupted retention has started".to_string(),
+        ));
+    }
     let terminal = ObservationStore::open_initialized()?
         .get_run(&resource.run_id)?
         .map(|run| run.status != "running")
@@ -389,7 +460,12 @@ fn cleanup_block_reason(
             "resource has not been finalized by its owning run".to_string(),
         ));
     }
-    if !retention_expired(resource, path) {
+    let retention = if resource.lifecycle_state == "interrupted" {
+        INTERRUPTED_RETENTION
+    } else {
+        &resource.retention
+    };
+    if !retention_expired(resource.finalized_at.as_deref(), retention, path, now) {
         return Ok(Some("retention has not expired".to_string()));
     }
     if git_dirty_or_unpushed(path) {
@@ -398,23 +474,24 @@ fn cleanup_block_reason(
     Ok(None)
 }
 
-fn retention_expired(resource: &ControllerScratchResource, path: &Path) -> bool {
-    let seconds = resource
-        .retention
+fn retention_expired(
+    finalized_at: Option<&str>,
+    retention: &str,
+    path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let seconds = retention
         .strip_suffix('s')
         .and_then(|value| value.parse::<i64>().ok())
         .or_else(|| {
-            resource
-                .retention
+            retention
                 .strip_prefix('P')
                 .and_then(|value| value.strip_suffix('D'))
                 .and_then(|value| value.parse::<i64>().ok())
                 .map(|days| days * 86400)
         })
         .unwrap_or(i64::MAX);
-    let reference = resource
-        .finalized_at
-        .as_deref()
+    let reference = finalized_at
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&chrono::Utc))
         .or_else(|| {
@@ -424,8 +501,47 @@ fn retention_expired(resource: &ControllerScratchResource, path: &Path) -> bool 
                 .ok()
                 .map(chrono::DateTime::<chrono::Utc>::from)
         });
-    reference
-        .is_some_and(|time| chrono::Utc::now().signed_duration_since(time).num_seconds() >= seconds)
+    reference.is_some_and(|time| now.signed_duration_since(time).num_seconds() >= seconds)
+}
+
+fn remove_candidate(
+    candidate: &ControllerScratchCandidate,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<u64>> {
+    let mut index = read_index()?;
+    let Some(resource) = index.resources.iter_mut().find(|resource| {
+        resource.lease_id == candidate.lease_id
+            && !resource.lease_id.is_empty()
+            && resource.path == candidate.path
+            && resource.owner_pid == candidate.owner_pid
+    }) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&resource.path);
+    if !path.exists() || cleanup_block_reason(resource, &path, now)?.is_some() {
+        write_index(&index)?;
+        return Ok(None);
+    }
+    let bytes = path_size(&path)?;
+    fs::remove_dir_all(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("remove {}", path.display())),
+        )
+    })?;
+    write_index(&index)?;
+    Ok(Some(bytes))
+}
+
+fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
+    let mut command = format!(
+        "homeboy cleanup --include controller-scratch --limit {}",
+        options.limit
+    );
+    if options.apply {
+        command.push_str(" --apply");
+    }
+    command
 }
 
 fn git_dirty_or_unpushed(path: &Path) -> bool {
@@ -445,15 +561,14 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     .unwrap_or(true)
 }
 
-fn legacy_unknown_paths() -> Result<Vec<ControllerScratchSkipped>> {
+fn legacy_unknown_paths(root: &Path) -> Result<Vec<ControllerScratchSkipped>> {
     let index = read_index()?;
     let known: std::collections::HashSet<_> = index
         .resources
         .iter()
         .map(|resource| resource.path.as_str())
         .collect();
-    let root = std::env::temp_dir();
-    let entries = match fs::read_dir(&root) {
+    let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(_) => return Ok(Vec::new()),
     };
@@ -468,6 +583,8 @@ fn legacy_unknown_paths() -> Result<Vec<ControllerScratchSkipped>> {
             unknown.push(ControllerScratchSkipped {
                 path: path.display().to_string(),
                 run_id: None,
+                owner_pid: None,
+                lifecycle_state: None,
                 reason: "legacy scratch path has no Homeboy ownership metadata; report-only"
                     .to_string(),
             });
@@ -554,6 +671,7 @@ mod tests {
             finalized_at: Some(chrono::Utc::now().to_rfc3339()),
             terminal_reason: None,
             terminal_evidence: None,
+            interrupted_at: None,
         }
     }
 
@@ -566,9 +684,70 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_block_reason(&resource, &scratch).expect("check"),
+            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
             Some("owner process is still running".to_string())
         );
+    }
+
+    #[test]
+    fn dead_active_owner_transitions_to_interrupted_and_waits_stale_retention() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![resource(&scratch, root.path())],
+            })
+            .expect("index");
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+            })
+            .expect("reconcile");
+            assert_eq!(output.candidate_count, 0);
+            assert_eq!(
+                output
+                    .skipped
+                    .iter()
+                    .find(|skipped| skipped.path == scratch.display().to_string())
+                    .expect("scratch skip")
+                    .reason,
+                "active lease owner is proven dead; interrupted retention has started"
+            );
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .next()
+                .expect("resource");
+            assert_eq!(resource.lifecycle_state, "interrupted");
+            assert_eq!(
+                resource.terminal_reason.as_deref(),
+                Some("owner_process_dead")
+            );
+            assert_eq!(
+                resource.interrupted_at.as_deref(),
+                resource.finalized_at.as_deref()
+            );
+            let interrupted_at = resource.finalized_at.as_deref().expect("finalized");
+            let interrupted_at = chrono::DateTime::parse_from_rfc3339(interrupted_at)
+                .expect("timestamp")
+                .with_timezone(&chrono::Utc);
+            assert!(!retention_expired(
+                resource.finalized_at.as_deref(),
+                INTERRUPTED_RETENTION,
+                &scratch,
+                interrupted_at
+            ));
+            assert!(retention_expired(
+                resource.finalized_at.as_deref(),
+                INTERRUPTED_RETENTION,
+                &scratch,
+                interrupted_at + chrono::Duration::days(1)
+            ));
+        });
     }
 
     #[test]
@@ -636,35 +815,56 @@ mod tests {
 
     #[test]
     fn unknown_legacy_path_is_report_only() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let path = root.path().join("homeboy-legacy");
+            fs::create_dir(&path).expect("legacy");
+
+            let skipped = legacy_unknown_paths(root.path()).expect("inventory");
+            assert_eq!(skipped.len(), 1);
+            assert_eq!(skipped[0].path, path.display().to_string());
+            assert_eq!(skipped[0].run_id, None);
+            assert_eq!(skipped[0].owner_pid, None);
+            assert_eq!(
+                skipped[0].reason,
+                "legacy scratch path has no Homeboy ownership metadata; report-only"
+            );
+            assert!(path.exists());
+        });
+    }
+
+    #[test]
+    fn released_resource_waits_for_its_configured_retention() {
         let root = tempfile::tempdir().expect("root");
-        let path = root.path().join("legacy");
-        fs::create_dir(&path).expect("legacy");
-        let resource = ControllerScratchResource {
-            reconstructable: false,
-            ..resource(&path, root.path())
-        };
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "released".to_string();
+        resource.retention = "P7D".to_string();
 
         assert_eq!(
-            cleanup_block_reason(&resource, &path).expect("check"),
-            Some("resource is not explicitly reconstructable".to_string())
+            cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+            Some("retention has not expired".to_string())
         );
-        assert!(path.exists());
     }
 
     #[test]
     fn dirty_or_unpushed_checkout_is_preserved() {
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        run_git(&scratch, &["init", "-b", "main"]);
-        fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
-        let resource = resource(&scratch, root.path());
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            run_git(&scratch, &["init", "-b", "main"]);
+            fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
 
-        assert_eq!(
-            cleanup_block_reason(&resource, &scratch).expect("check"),
-            Some("git checkout has dirty or unpushed state".to_string())
-        );
-        assert!(scratch.exists());
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now()).expect("check"),
+                Some("git checkout has dirty or unpushed state".to_string())
+            );
+            assert!(scratch.exists());
+        });
     }
 
     #[test]
@@ -694,22 +894,163 @@ mod tests {
                 ],
             );
             run_git(&scratch, &["push", "-u", "origin", "main"]);
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
             write_index(&ControllerScratchIndex {
                 schema: schema(),
-                resources: vec![resource(&scratch, root.path())],
+                resources: vec![resource],
             })
             .expect("resource index");
 
-            let inventory = cleanup(false).expect("inventory");
+            let inventory = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+            })
+            .expect("inventory");
             assert_eq!(inventory.candidate_count, 1);
             assert!(inventory.estimated_bytes > 0);
             assert_eq!(inventory.reclaimed_bytes, 0);
+            assert_eq!(inventory.candidates[0].owner_pid, u32::MAX);
+            assert_eq!(inventory.candidates[0].lifecycle_state, "released");
+            assert!(inventory.candidates[0].reason.is_empty());
 
-            let applied = cleanup(true).expect("apply");
+            let applied = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+            })
+            .expect("apply");
             assert_eq!(applied.applied_count, 1);
             assert_eq!(applied.reclaimed_bytes, inventory.estimated_bytes);
             assert!(!scratch.exists());
+            let retained = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == "test-lease")
+                .expect("retained lifecycle evidence");
+            assert_eq!(retained.lifecycle_state, "released");
+            assert_eq!(retained.path, scratch.display().to_string());
+
+            let repeated = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+            })
+            .expect("repeated apply");
+            assert_eq!(repeated.applied_count, 0);
+            assert_eq!(repeated.candidate_count, 0);
         });
+    }
+
+    #[test]
+    fn apply_revalidates_a_resource_that_becomes_live() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            let mut stored = resource(&scratch, root.path());
+            stored.lifecycle_state = "released".to_string();
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![stored],
+            })
+            .expect("index");
+
+            let candidate = ControllerScratchCandidate {
+                path: scratch.display().to_string(),
+                run_id: "missing-terminal-run".to_string(),
+                task_id: "task-1".to_string(),
+                size_bytes: 0,
+                owner_pid: u32::MAX,
+                lease_id: "test-lease".to_string(),
+                reason: String::new(),
+                lifecycle_state: "released".to_string(),
+                source_ref: None,
+            };
+            let index = read_index().expect("index");
+            let resource = &mut index.resources.into_iter().next().expect("resource");
+            resource.owner_pid = std::process::id();
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![resource.clone()],
+            })
+            .expect("live index");
+
+            assert_eq!(
+                remove_candidate(&candidate, chrono::Utc::now()).expect("remove"),
+                None
+            );
+            assert!(scratch.exists());
+        });
+    }
+
+    #[test]
+    fn bounded_cleanup_reports_continuation() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let remote = root.path().join("remote.git");
+            run_git(
+                root.path(),
+                &["init", "--bare", remote.to_str().expect("remote")],
+            );
+            let first = clean_checkout(root.path(), &remote, "first");
+            let second = root.path().join("second");
+            run_git(
+                root.path(),
+                &[
+                    "clone",
+                    "-b",
+                    "main",
+                    remote.to_str().expect("remote"),
+                    second.to_str().expect("second"),
+                ],
+            );
+            let mut first_resource = resource(&first, root.path());
+            first_resource.lifecycle_state = "released".to_string();
+            let mut second_resource = resource(&second, root.path());
+            second_resource.lease_id = "second-lease".to_string();
+            second_resource.lifecycle_state = "released".to_string();
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![first_resource, second_resource],
+            })
+            .expect("index");
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+            })
+            .expect("preview");
+            assert_eq!(output.candidate_count, 2);
+            assert_eq!(output.candidates.len(), 1);
+            assert_eq!(output.remaining_candidate_count, 1);
+            assert!(output.remaining_candidate_bytes > 0);
+            assert!(output.has_more);
+            assert_eq!(
+                output.next_command.as_deref(),
+                Some("homeboy cleanup --include controller-scratch --limit 1")
+            );
+            assert_eq!(
+                output.drain_command,
+                "homeboy cleanup --include controller-scratch --limit 10 --apply"
+            );
+        });
+    }
+
+    fn clean_checkout(root: &Path, remote: &Path, name: &str) -> PathBuf {
+        let scratch = root.join(name);
+        fs::create_dir(&scratch).expect("scratch");
+        fs::write(scratch.join("generated.txt"), name).expect("content");
+        run_git(&scratch, &["init", "-b", "main"]);
+        run_git(&scratch, &["config", "user.email", "homeboy@example.test"]);
+        run_git(&scratch, &["config", "user.name", "Homeboy Test"]);
+        run_git(&scratch, &["add", "."]);
+        run_git(&scratch, &["commit", "-m", "initial"]);
+        run_git(
+            &scratch,
+            &["remote", "add", "origin", remote.to_str().expect("remote")],
+        );
+        run_git(&scratch, &["push", "-u", "origin", "main"]);
+        scratch
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
