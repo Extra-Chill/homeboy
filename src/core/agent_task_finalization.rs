@@ -836,6 +836,17 @@ mod tests {
         ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
         ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
     };
+    use crate::core::{
+        agent_task::{
+            AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
+            AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+        },
+        agent_task_scheduler::{
+            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
+            AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState,
+            AGENT_TASK_AGGREGATE_SCHEMA,
+        },
+    };
     use std::process::Command;
 
     #[derive(Default)]
@@ -851,6 +862,7 @@ mod tests {
         committed: bool,
         pushed: bool,
         created: bool,
+        create_calls: u8,
         updated: bool,
         last_body: String,
     }
@@ -949,6 +961,7 @@ mod tests {
                 return Err(Error::git_command_failed("gh pr create failed"));
             }
             self.created = true;
+            self.create_calls += 1;
             self.last_body = body.to_string();
             Ok(AgentTaskPrRef {
                 number: 123,
@@ -1320,6 +1333,145 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(generic_executor_lifecycle(
+                ProviderRuntimeState::Succeeded,
+                "openai/gpt-5.6-terra",
+            )),
+            gate_proof: Some(successful_gate_proof()),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+
+        let report = finalize_pr_with_backend(finalization_options, &mut backend)
+            .expect("succeeded generic executor outcome finalizes");
+
+        assert_eq!(report.pr_action, "created");
+        assert!(backend.committed && backend.pushed && backend.created);
+        assert_eq!(backend.create_calls, 1);
+        assert_eq!(
+            report.evidence.lifecycle.as_ref().unwrap().provider_runtime[0].metadata
+                ["evidence_source"],
+            "canonical_executor_outcome"
+        );
+        assert!(
+            report.evidence.lifecycle.as_ref().unwrap().provider_runtime[0]
+                .external_runtime_ids
+                .is_empty()
+        );
+
+        for rejected_state in [ProviderRuntimeState::Failed, ProviderRuntimeState::TimedOut] {
+            let mut rejected_backend = MockBackend {
+                changed_files: vec!["src/lib.rs".to_string()],
+                lifecycle: Some(generic_executor_lifecycle(
+                    rejected_state,
+                    "openai/gpt-5.6-terra",
+                )),
+                gate_proof: Some(successful_gate_proof()),
+                ..Default::default()
+            };
+            let mut rejected_options = options();
+            rejected_options.manual_finalization = false;
+
+            assert!(finalize_pr_with_backend(rejected_options, &mut rejected_backend).is_err());
+            assert!(!rejected_backend.committed);
+        }
+    }
+
+    #[test]
+    fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_work() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = AgentTaskPlan::new(
+                "mixed-executor-plan",
+                vec![
+                    durable_task("native", "native-executor", Some("native-model")),
+                    durable_task("generic", "opencode", Some("openai/gpt-5.6-terra")),
+                    durable_task("skipped", "opencode", None),
+                ],
+            );
+            let aggregate = AgentTaskAggregate {
+                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: AgentTaskAggregateTotals {
+                    succeeded: 2,
+                    skipped: 1,
+                    ..Default::default()
+                },
+                outcomes: vec![
+                    durable_succeeded_outcome(
+                        "native",
+                        json!({
+                            "provider": "native-executor",
+                            "provider_run_id": "native-run-123",
+                            "model": "native-model",
+                        }),
+                    ),
+                    durable_succeeded_outcome("generic", serde_json::Value::Null),
+                ],
+                events: vec![AgentTaskProgressEvent {
+                    task_id: "skipped".to_string(),
+                    state: AgentTaskState::Skipped,
+                    attempt: 1,
+                    message: Some("not applicable".to_string()),
+                }],
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: AgentTaskQueueStatus::default(),
+            };
+            let record = crate::core::agent_task_lifecycle::record_completed_run(
+                &plan,
+                &aggregate,
+                Some("cook-3678"),
+            )
+            .expect("durable aggregate recorded");
+            let runtimes = &record.lifecycle.provider_runtime;
+
+            assert_eq!(
+                record.state,
+                crate::core::agent_task_lifecycle::AgentTaskRunState::Succeeded
+            );
+            assert_eq!(runtimes.len(), 2);
+            assert_eq!(runtimes[0].external_runtime_ids[0].value, "native-run-123");
+            assert_eq!(runtimes[1].backend, "opencode");
+            assert_eq!(
+                runtimes[1].metadata["evidence_source"],
+                "canonical_executor_outcome"
+            );
+            assert!(runtimes.iter().all(|runtime| runtime.task_id != "skipped"));
+            assert_eq!(record.artifact_refs[0].kind, "patch");
+
+            let mut backend = MockBackend {
+                changed_files: vec!["src/lib.rs".to_string()],
+                lifecycle: Some(record.lifecycle),
+                gate_proof: Some(successful_gate_proof()),
+                ..Default::default()
+            };
+            let mut finalization_options = options();
+            finalization_options.manual_finalization = false;
+
+            let report = finalize_pr_with_backend(finalization_options.clone(), &mut backend)
+                .expect("mixed durable evidence finalizes");
+            assert_eq!(report.pr_action, "created");
+            assert_eq!(backend.create_calls, 1);
+
+            backend.existing_pr = Some(AgentTaskPrRef {
+                number: 123,
+                url: "https://github.com/Extra-Chill/homeboy/pull/123".to_string(),
+            });
+            let repeated = finalize_pr_with_backend(finalization_options, &mut backend)
+                .expect("existing PR is reused");
+            assert_eq!(repeated.pr_action, "updated");
+            assert_eq!(backend.create_calls, 1);
+            assert!(backend.updated);
+        });
+    }
+
     fn real_git_finalization_options(
         path: &std::path::Path,
         changed_files: Vec<String>,
@@ -1508,6 +1660,71 @@ mod tests {
                 metadata: json!({ "model": model }),
             }],
             ..RunLifecycleRecord::default()
+        }
+    }
+
+    fn generic_executor_lifecycle(state: ProviderRuntimeState, model: &str) -> RunLifecycleRecord {
+        RunLifecycleRecord {
+            execution: RunExecutionLifecycle {
+                state: RunExecutionState::Succeeded,
+                started_at: None,
+                finished_at: Some("2026-01-01T00:00:00Z".to_string()),
+                updated_at: None,
+            },
+            provider_runtime: vec![ProviderRuntimeLifecycle {
+                task_id: "task".to_string(),
+                backend: "opencode".to_string(),
+                state,
+                stream_uri: None,
+                external_runtime_ids: Vec::new(),
+                metadata: json!({
+                    "evidence_source": "canonical_executor_outcome",
+                    "executor": { "backend": "opencode", "model": model },
+                    "model": model,
+                }),
+            }],
+            ..RunLifecycleRecord::default()
+        }
+    }
+
+    fn durable_task(task_id: &str, backend: &str, model: Option<&str>) -> AgentTaskRequest {
+        serde_json::from_value(json!({
+            "task_id": task_id,
+            "executor": { "backend": backend, "model": model },
+            "instructions": "run",
+        }))
+        .expect("durable task")
+    }
+
+    fn durable_succeeded_outcome(task_id: &str, metadata: serde_json::Value) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: task_id.to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("succeeded".to_string()),
+            failure_classification: None,
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: format!("{task_id}-patch"),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some(format!("/tmp/{task_id}.patch")),
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                metadata: serde_json::Value::Null,
+            }],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: serde_json::Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata,
         }
     }
 
