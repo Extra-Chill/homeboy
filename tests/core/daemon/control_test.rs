@@ -303,7 +303,7 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
             crate::core::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
         super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
 
-        let replay = super::replay_leaseless_recovery(&status)
+        let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0")
             .expect("replay lookup")
             .expect("exact completed recovery replays");
 
