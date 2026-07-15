@@ -1374,11 +1374,18 @@ impl AgentTaskScheduleSupport {
         attempt: u32,
         max_same_provider_retries: u32,
         max_provider_executions: u32,
+        retry_max_attempts: u32,
         retry_budget_total: Option<u32>,
         retry_budget_used: u32,
         retryable_failure_classifications: &[AgentTaskFailureClassification],
     ) -> bool {
+        // A zero legacy limit means no legacy cap. It does not authorize
+        // retries for an otherwise unbounded default budget.
+        let legacy_retry_permits_attempt = (retry_max_attempts == 0
+            && max_provider_executions != u32::MAX)
+            || attempt < retry_max_attempts;
         attempt < max_provider_executions
+            && legacy_retry_permits_attempt
             && attempt <= max_same_provider_retries
             && retry_budget_total
                 .map(|budget| retry_budget_used < budget)

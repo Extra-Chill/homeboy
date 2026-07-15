@@ -385,10 +385,17 @@ pub(super) mod concurrency_tests {
                     .expect("scratch roots")
                     .push(scratch_root.clone());
                 std::thread::sleep(Duration::from_millis(3_000));
+                let run_id = scratch_root
+                    .ancestors()
+                    .nth(4)
+                    .and_then(std::path::Path::file_name)
+                    .expect("scheduler scratch run id");
                 let scratch_index = scratch_root
                     .ancestors()
                     .nth(6)
                     .expect("controller scratch root")
+                    .join("test-indexes")
+                    .join(run_id)
                     .join("resources.json");
                 let active = serde_json::from_str::<Value>(
                     &fs::read_to_string(scratch_index).expect("scratch index"),
@@ -462,10 +469,17 @@ pub(super) mod concurrency_tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
+        let run_id = scratch_root
+            .ancestors()
+            .nth(4)
+            .and_then(std::path::Path::file_name)
+            .expect("scheduler scratch run id");
         let scratch_index = scratch_root
             .ancestors()
             .nth(6)
             .expect("controller scratch root")
+            .join("test-indexes")
+            .join(run_id)
             .join("resources.json");
         assert!(scratch_active_while_running.load(Ordering::SeqCst));
         let cleanup_action = aggregate
@@ -671,6 +685,8 @@ pub(super) mod concurrency_tests {
             "workspace_root": source.display().to_string(),
         });
         plan.options.retry.max_attempts = 2;
+        plan.options.execution_budget.max_provider_executions = 2;
+        plan.options.execution_budget.max_same_provider_retries = 1;
         plan.options.retry.retryable_failure_classifications =
             vec![AgentTaskFailureClassification::Transient];
 

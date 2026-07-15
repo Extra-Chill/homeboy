@@ -582,6 +582,7 @@ mod committed_harvest_tests {
             scratch: crate::core::controller_scratch::ControllerScratchAllocation {
                 path: PathBuf::from("/test/controller-scratch/1"),
                 lease_id: "test-lease-1".to_string(),
+                index_path: PathBuf::from("/test/controller-scratch/resources.json"),
             },
             adoption: None,
             join_handle: None,
@@ -787,6 +788,7 @@ mod committed_harvest_tests {
             scratch: crate::core::controller_scratch::ControllerScratchAllocation {
                 path: PathBuf::from("/test/controller-scratch/1"),
                 lease_id: "test-lease-1".to_string(),
+                index_path: PathBuf::from("/test/controller-scratch/resources.json"),
             },
             adoption: None,
             join_handle: None,
