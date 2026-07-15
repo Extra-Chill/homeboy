@@ -34,11 +34,16 @@ fn exact_live_remote_daemon_owner(
     session: &RunnerSession,
     status: &remote_daemon::RemoteDaemonStatus,
 ) -> bool {
+    let (Some(expected_lease), Some(expected_pid)) = (
+        session.remote_daemon_lease_id.as_deref(),
+        session.remote_daemon_pid,
+    ) else {
+        return false;
+    };
     status.active_jobs == 0
         && status.reachable
         && status.daemon.as_ref().is_some_and(|daemon| {
-            daemon.lease_id.as_deref() == session.remote_daemon_lease_id.as_deref()
-                && daemon.pid == session.remote_daemon_pid
+            daemon.lease_id.as_deref() == Some(expected_lease) && daemon.pid == Some(expected_pid)
         })
 }
 
@@ -196,6 +201,28 @@ mod tests {
             assert!(!stop_called);
             assert!(error.contains("refusing disconnect"));
         }
+    }
+
+    #[test]
+    fn transport_drop_refuses_missing_exact_pid_without_ssh_stop() {
+        let mut session = direct_ssh_session("lease-live");
+        session.remote_daemon_pid = None;
+        let mut status = remote_daemon_status(true, 0, "lease-live", 4242, None);
+        status.daemon.as_mut().expect("daemon").pid = None;
+        let mut stop_called = false;
+
+        complete_stop_transport_recovery(
+            &session,
+            &status,
+            || {
+                stop_called = true;
+                Ok(())
+            },
+            || unreachable!("missing exact PID must not re-probe"),
+        )
+        .expect_err("missing exact PID must stay protected");
+
+        assert!(!stop_called);
     }
 
     #[test]
