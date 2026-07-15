@@ -831,9 +831,10 @@ fn prepare_committed_harvest(request: &AgentTaskRequest) -> Result<HarvestPrefli
             source_provenance: None,
         });
     };
-    let snapshot_signaled = std::env::var_os(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
-        .is_some()
-        || std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).is_some();
+    // Lab fallback records route context without transporting a snapshot. Only
+    // source-snapshot metadata identifies a workspace that requires Lab checks.
+    let snapshot_signaled =
+        std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).is_some();
     let is_repository = git_is_repository(root)?;
     if !snapshot_signaled && !is_repository {
         return Ok(HarvestPreflight {
@@ -1521,7 +1522,10 @@ mod committed_harvest_tests {
             .lock()
             .expect("Lab environment lock");
         std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
-        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            r#"{"status":"run_local"}"#,
+        );
         let temp = tempfile::tempdir().expect("tempdir");
         let runner_workspace = temp.path().join("runner-workspace");
         std::fs::create_dir(&runner_workspace).expect("runner workspace");
@@ -1572,6 +1576,7 @@ mod committed_harvest_tests {
 
         assert!(preflight.base_sha.is_some());
         assert!(!controller_workspace.exists());
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
     }
 
     #[test]
@@ -1737,6 +1742,74 @@ mod committed_harvest_tests {
         drop(attempt);
         std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
         std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    }
+
+    #[test]
+    fn source_snapshot_candidate_requires_lab_dispatch_metadata() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = SourceSnapshot {
+            runner_id: "lab".to_string(),
+            local_path: Some("/controller/source".to_string()),
+            remote_path: Some(workspace.path().display().to_string()),
+            workspace_root: None,
+            git_branch: Some("main".to_string()),
+            git_sha: Some("a".repeat(40)),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            workspace_snapshot_identity: Some("snapshot:missing-lab".to_string()),
+            snapshot_hash: "sha256:missing-lab".to_string(),
+            synced_at: "2026-01-01T00:00:00Z".to_string(),
+            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+        };
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&snapshot).expect("snapshot JSON"),
+        );
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "snapshot-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.path().display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+
+        let error = match prepare_committed_harvest(&request) {
+            Ok(_) => panic!("source snapshot candidates must require Lab provenance"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, HarvestError::Git { ref command, ref message }
+            if command == "verify Lab snapshot harvest provenance"
+                && message.contains("missing Lab dispatch transport metadata"))
+        );
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
     }
 
     #[test]
