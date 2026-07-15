@@ -775,12 +775,17 @@ struct LeaselessRecoveryReceipt {
     historical_lease_ids: Vec<String>,
     evidence_snapshot_path: String,
     ownership_proof: Vec<String>,
-    replacement: DaemonStartResult,
+    phase: StateLossRecoveryPhase,
+    replacement: Option<DaemonStartResult>,
+    replacement_startup_token: Option<String>,
 }
 
 impl LeaselessRecoveryReceipt {
-    fn into_result(self) -> DaemonLeaselessRecoveryResult {
-        DaemonLeaselessRecoveryResult {
+    fn into_result(self) -> Result<DaemonLeaselessRecoveryResult> {
+        let replacement = self.replacement.ok_or_else(|| {
+            Error::internal_unexpected("lease-less receipt has no replacement daemon identity")
+        })?;
+        Ok(DaemonLeaselessRecoveryResult {
             affected_job_count: self.affected_job_ids.len(),
             affected_job_ids: self.affected_job_ids,
             affected_jobs: self.affected_jobs,
@@ -788,31 +793,58 @@ impl LeaselessRecoveryReceipt {
             evidence_snapshot_path: self.evidence_snapshot_path,
             ownership_proof: self.ownership_proof,
             retry_guidance: "Recovery already completed for this exact replacement daemon; no additional daemon was started.".to_string(),
-            replacement: self.replacement,
-        }
+            replacement,
+        })
     }
 }
 
 fn replay_leaseless_recovery(
     status: &super::DaemonStatus,
 ) -> Result<Option<DaemonLeaselessRecoveryResult>> {
-    if status.freshness.active_jobs != 0 || !status.fresh || !status.running {
+    let receipt_path = crate::core::paths::daemon_leaseless_recovery_receipt_file()?;
+    let Some(mut receipt) = read_leaseless_recovery_receipt(&receipt_path)? else {
         return Ok(None);
-    }
+    };
     let Some(state) = status.state.as_ref() else {
         return Ok(None);
     };
-    let receipt_path = crate::core::paths::daemon_leaseless_recovery_receipt_file(&state.lease_id)?;
-    let Some(receipt) = read_leaseless_recovery_receipt(&receipt_path)? else {
+    if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
+        if status.running
+            && receipt.replacement_startup_token.as_deref() == Some(&state.startup_token)
+        {
+            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+            receipt.replacement = Some(DaemonStartResult {
+                pid: state.pid,
+                address: state.address.clone(),
+                state_path: state.state_path.clone(),
+                lease_id: state.lease_id.clone(),
+            });
+            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+        } else if status.running {
+            return Err(Error::validation_invalid_argument(
+                "reconcile_leaseless_orphans",
+                "lease-less recovery replay found a mismatched live daemon",
+                None,
+                None,
+            ));
+        } else {
+            return Ok(None);
+        }
+    }
+    if status.freshness.active_jobs != 0 || !status.fresh || !status.running {
         return Ok(None);
-    };
-    if receipt.replacement.lease_id != state.lease_id
-        || receipt.replacement.pid != state.pid
-        || receipt.replacement.address != state.address
+    }
+    let replacement = receipt.replacement.as_ref().ok_or_else(|| {
+        Error::internal_unexpected("completed lease-less receipt has no replacement")
+    })?;
+    if receipt.phase != StateLossRecoveryPhase::ReplacementStarted
+        || replacement.lease_id != state.lease_id
+        || replacement.pid != state.pid
+        || replacement.address != state.address
     {
         return Ok(None);
     }
-    Ok(Some(receipt.into_result()))
+    Ok(Some(receipt.into_result()?))
 }
 
 fn read_leaseless_recovery_receipt(path: &Path) -> Result<Option<LeaselessRecoveryReceipt>> {
@@ -1142,19 +1174,42 @@ pub fn reconcile_leaseless_orphans(
     }
     let affected_job_count = reconciled.reconciled_count();
     drop(owner_lock);
-    let replacement = start_or_return_live_unlocked(addr)?;
     let receipt = LeaselessRecoveryReceipt {
         affected_job_ids: reconciled.reconciled_job_ids,
         affected_jobs: reconciled.affected_jobs,
         historical_lease_ids: reconciled.historical_lease_ids,
         evidence_snapshot_path: snapshot_path.display().to_string(),
         ownership_proof,
-        replacement,
+        phase: StateLossRecoveryPhase::Reconciled,
+        replacement: None,
+        replacement_startup_token: None,
     };
-    let receipt_path =
-        crate::core::paths::daemon_leaseless_recovery_receipt_file(&receipt.replacement.lease_id)?;
+    let receipt_path = crate::core::paths::daemon_leaseless_recovery_receipt_file()?;
     write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let mut result = receipt.into_result();
+    let mut receipt = receipt;
+    let startup_token = uuid::Uuid::new_v4().to_string();
+    receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
+    receipt.replacement_startup_token = Some(startup_token.clone());
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    let replacement = start_or_return_live_unlocked_with_startup_token(addr, &startup_token)?;
+    let status = read_status()?;
+    if !status.running
+        || status
+            .state
+            .as_ref()
+            .is_none_or(|state| state.startup_token != startup_token)
+    {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "replacement startup did not publish the expected lease-less recovery startup token",
+            None,
+            None,
+        ));
+    }
+    receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+    receipt.replacement = Some(replacement);
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    let mut result = receipt.into_result()?;
     result.affected_job_count = affected_job_count;
     result.retry_guidance = "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string();
     Ok(result)

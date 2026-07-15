@@ -295,11 +295,12 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
             historical_lease_ids: vec!["stale-lease".to_string()],
             evidence_snapshot_path: "/fake/recovery.snapshot".to_string(),
             ownership_proof: vec!["owner lock was acquired".to_string()],
-            replacement: replacement.clone(),
+            phase: super::StateLossRecoveryPhase::ReplacementStarted,
+            replacement: Some(replacement.clone()),
+            replacement_startup_token: Some("fake-startup-token".to_string()),
         };
         let path =
-            crate::core::paths::daemon_leaseless_recovery_receipt_file(&replacement.lease_id)
-                .expect("receipt path");
+            crate::core::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
         super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
 
         let replay = super::replay_leaseless_recovery(&status)
