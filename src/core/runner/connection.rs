@@ -43,7 +43,9 @@ use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_st
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
-pub(crate) use stop_transport_recovery::disconnect_with_force;
+pub(crate) use stop_transport_recovery::{
+    disconnect_with_force, disconnect_with_session, recorded_session,
+};
 
 use super::daemon_http_get::daemon_get;
 
@@ -3409,6 +3411,31 @@ esac
         stop_transport_recovery::disconnect_remote_daemon(&session, false)
             .expect("guarded lifecycle stop accepted");
         server.join().expect("server");
+    }
+
+    #[test]
+    fn refresh_disconnect_refuses_a_session_that_changed_after_promotion_started() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            let recorded = direct_ssh_session("lease-original");
+            let mut replacement = direct_ssh_session("lease-replacement");
+            replacement.local_url = Some("http://127.0.0.1:9".to_string());
+            write_session(&replacement).expect("record replacement session");
+
+            let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
+                .expect_err("refresh must not stop through a different tunnel");
+
+            assert!(error.message.contains("session changed during refresh"));
+            assert_eq!(
+                read_session("homeboy-lab")
+                    .expect("read session")
+                    .expect("session")
+                    .remote_daemon_lease_id
+                    .as_deref(),
+                Some("lease-replacement")
+            );
+        });
     }
 
     #[test]

@@ -13,12 +13,12 @@ use crate::core::error::{Error, Result};
 use crate::core::git::{run_git, run_git_output};
 use crate::core::output::MergeOutput;
 
-use super::connection::active_jobs_before_daemon_replacement;
+use super::connection::{active_jobs_before_daemon_replacement, disconnect_with_session};
 use super::{
-    connect_with_orphan_adoption, disconnect_with_force, exec, load,
-    materialize_runner_extension_with_env, merge, normalize_runner_command_env_for_homeboy_path,
-    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
+    connect_with_orphan_adoption, exec, load, materialize_runner_extension_with_env, merge,
+    normalize_runner_command_env_for_homeboy_path, plan_controller_snapshot_extension,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
 
@@ -255,15 +255,12 @@ pub fn refresh_homeboy_binary(
     // A refresh owns the lease it observed before changing the runner binary.
     // If its local session disappears during that transition, reconnect can
     // explicitly reconcile only that exact proven-dead lease.
-    let refresh_owned_lease = options
+    let refresh_session = options
         .reconnect
-        .then(|| {
-            super::status(&plan.runner_id)
-                .ok()
-                .and_then(|report| report.session)
-                .and_then(refresh_owned_lease)
-        })
+        .then(|| super::connection::recorded_session(&plan.runner_id))
+        .transpose()?
         .flatten();
+    let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -295,6 +292,7 @@ pub fn refresh_homeboy_binary(
 
     promotion_lease.assert_generation()?;
     let runner = load(&plan.runner_id)?;
+    let previous_homeboy_path = runner.settings.homeboy_path.clone();
     let disconnected_ssh =
         runner.kind == RunnerKind::Ssh && status_is_disconnected(&plan.runner_id)?;
     let exec_options = refresh_execution_options(&plan, required_commands, disconnected_ssh);
@@ -401,8 +399,16 @@ pub fn refresh_homeboy_binary(
             active_jobs.iter().map(|job| job.job_id.as_str()),
             options.force,
         )?;
-        disconnect_with_force(&plan.runner_id, options.force)?;
-        let (_report, connect_exit_code) = connect_with_orphan_adoption(
+        if let Err(error) =
+            disconnect_with_session(&plan.runner_id, refresh_session.as_ref(), options.force)
+        {
+            return rollback_refresh_error(
+                &plan.runner_id,
+                previous_homeboy_path.as_deref(),
+                error,
+            );
+        }
+        let (report, connect_exit_code) = match connect_with_orphan_adoption(
             &plan.runner_id,
             refresh_owned_lease.as_deref(),
             &[],
@@ -410,8 +416,43 @@ pub fn refresh_homeboy_binary(
             None,
             None,
             None,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                return rollback_refresh_error(
+                    &plan.runner_id,
+                    previous_homeboy_path.as_deref(),
+                    error,
+                )
+            }
+        };
         daemon_refreshed = connect_exit_code == 0;
+        if !daemon_refreshed {
+            if let Err(rollback_error) =
+                restore_runner_homeboy_path(&plan.runner_id, previous_homeboy_path.as_deref())
+            {
+                return Err(reconnect_rollback_error(&report, rollback_error));
+            }
+            return Ok((
+                HomeboyBinaryRefreshOutput {
+                    variant: "refresh_homeboy",
+                    command: "runner.refresh_homeboy",
+                    runner_id: plan.runner_id.clone(),
+                    dry_run: false,
+                    plan: plan.clone(),
+                    identity: Some(identity),
+                    updated_fields: Vec::new(),
+                    daemon_refreshed: false,
+                    interrupted_job_ids,
+                    selected_binary_path: plan.binary_path.clone(),
+                    reconnect_required: true,
+                    followup_commands: plan.followup_commands.clone(),
+                    failure: Some(refresh_reconnect_failure(&plan, &exec_output, &report)),
+                    bootstrap_provenance: None,
+                },
+                connect_exit_code,
+            ));
+        }
     } else {
         interrupted_job_ids = Vec::new();
     }
@@ -987,6 +1028,92 @@ fn refreshed_runner_patch(runner_id: &str, homeboy_path: &str) -> Result<Value> 
     Ok(serde_json::json!({
         "homeboy_path": homeboy_path,
     }))
+}
+
+fn restore_runner_homeboy_path(runner_id: &str, homeboy_path: Option<&str>) -> Result<()> {
+    crate::core::config::with_config_lock(|| {
+        let patch = serde_json::json!({ "homeboy_path": homeboy_path });
+        match merge(Some(runner_id), &patch.to_string(), &[])? {
+            MergeOutput::Single(_) | MergeOutput::Bulk(_) => Ok(()),
+        }
+    })
+}
+
+fn rollback_refresh_error<T>(
+    runner_id: &str,
+    previous_homeboy_path: Option<&str>,
+    primary_error: Error,
+) -> Result<T> {
+    rollback_refresh_error_with(primary_error, || {
+        restore_runner_homeboy_path(runner_id, previous_homeboy_path)
+    })
+}
+
+fn rollback_refresh_error_with<T, Restore>(mut primary_error: Error, restore: Restore) -> Result<T>
+where
+    Restore: FnOnce() -> Result<()>,
+{
+    if let Err(rollback_error) = restore() {
+        primary_error.message = format!(
+            "{}; additionally failed to restore the pre-refresh runner binary: {}",
+            error_context(&primary_error),
+            error_context(&rollback_error)
+        );
+        primary_error.details["rollback_error"] = serde_json::json!({
+            "code": rollback_error.code.as_str(),
+            "message": rollback_error.message,
+            "details": rollback_error.details,
+        });
+    }
+    Err(primary_error)
+}
+
+fn reconnect_rollback_error(report: &super::RunnerConnectReport, rollback_error: Error) -> Error {
+    let primary_error = Error::validation_invalid_argument(
+        "reconnect",
+        report
+            .failure_message
+            .as_deref()
+            .unwrap_or("runner connect returned a non-zero exit code"),
+        Some(report.runner_id.clone()),
+        None,
+    );
+    let mut error = primary_error;
+    error.message = format!(
+        "{}; additionally failed to restore the pre-refresh runner binary: {}",
+        error.message,
+        error_context(&rollback_error)
+    );
+    error.details["rollback_error"] = serde_json::json!({
+        "code": rollback_error.code.as_str(),
+        "message": rollback_error.message,
+        "details": rollback_error.details,
+    });
+    error
+}
+
+fn error_context(error: &Error) -> String {
+    if error.details.is_null() || error.details == serde_json::json!({}) {
+        error.message.clone()
+    } else {
+        format!("{}: {}", error.message, error.details)
+    }
+}
+
+fn refresh_reconnect_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: &RunnerExecOutput,
+    report: &super::RunnerConnectReport,
+) -> HomeboyBinaryRefreshFailure {
+    let mut failure = refresh_failure(plan, execution.clone(), 1);
+    failure.verification = Some(format!(
+        "reconnect failed after selection and the configured binary was restored: {}",
+        report
+            .failure_message
+            .as_deref()
+            .unwrap_or("runner connect returned a non-zero exit code")
+    ));
+    failure
 }
 
 fn build_local_homeboy_binary(source_path: Option<&Path>) -> Result<PathBuf> {
@@ -1617,6 +1744,156 @@ mod tests {
         assert!(script.contains("binary='/opt/homeboy/bin/homeboy'"));
         assert!(script.contains("\"$binary\" self identity"));
         assert!(!script.contains("cargo build"));
+    }
+
+    #[test]
+    fn select_without_materialization_sha_promotes_the_verified_binary() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let mut plan = ssh_bootstrap_plan();
+            plan.mode = "select".to_string();
+            plan.binary_path = "/selected/homeboy".to_string();
+
+            let promoted = ssh_bootstrap_promote_with(
+                &plan,
+                || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
+                |path| {
+                    let patch = refreshed_runner_patch("lab-local", path)?;
+                    match merge(Some("lab-local"), &patch.to_string(), &[])? {
+                        MergeOutput::Single(result) => Ok(result.updated_fields),
+                        MergeOutput::Bulk(_) => Ok(Vec::new()),
+                    }
+                },
+            )
+            .expect("select has no materialization SHA requirement");
+
+            assert_eq!(promoted.source_sha, None);
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/selected/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn disconnect_failure_after_selection_restores_the_pre_refresh_binary() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
+                false,
+            )
+            .expect("runner");
+            let patch =
+                refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
+            merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
+
+            let error = rollback_refresh_error::<()>(
+                "lab-local",
+                Some("/stable/homeboy"),
+                Error::validation_invalid_argument(
+                    "disconnect",
+                    "request lease-bound daemon stop: tunnel unavailable",
+                    None,
+                    None,
+                ),
+            )
+            .expect_err("disconnect failure rolls back selection");
+            assert!(error.message.contains("lease-bound daemon stop"));
+
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/stable/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn reconnect_error_after_disconnect_restores_the_pre_refresh_binary() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
+                false,
+            )
+            .expect("runner");
+            let patch =
+                refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
+            merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
+
+            let error = rollback_refresh_error::<()>(
+                "lab-local",
+                Some("/stable/homeboy"),
+                Error::internal_io("reconnect transport failed".to_string(), None),
+            )
+            .expect_err("reconnect error rolls back selection");
+            assert_eq!(error.details["error"], "reconnect transport failed");
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/stable/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn nonzero_reconnect_report_rollback_restores_the_pre_refresh_binary() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
+                false,
+            )
+            .expect("runner");
+            let patch =
+                refreshed_runner_patch("lab-local", "/selected/homeboy").expect("selection patch");
+            merge(Some("lab-local"), &patch.to_string(), &[]).expect("select binary");
+
+            restore_runner_homeboy_path("lab-local", Some("/stable/homeboy"))
+                .expect("rollback after nonzero reconnect report");
+
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/stable/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn rollback_failure_keeps_the_primary_refresh_error() {
+        let error = rollback_refresh_error_with::<(), _>(
+            Error::validation_invalid_argument("disconnect", "primary stop failure", None, None),
+            || {
+                Err(Error::internal_io(
+                    "rollback write failure".to_string(),
+                    None,
+                ))
+            },
+        )
+        .expect_err("rollback failure is surfaced with the primary failure");
+
+        assert!(error.message.contains("primary stop failure"));
+        assert!(error.message.contains("rollback write failure"));
+        assert_eq!(
+            error.details["rollback_error"]["details"]["error"],
+            "rollback write failure"
+        );
     }
 
     #[test]

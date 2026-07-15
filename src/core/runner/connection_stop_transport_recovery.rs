@@ -6,8 +6,24 @@ use super::*;
 
 const REMOTE_LEASE_BOUND_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Capture the recorded session before a binary promotion changes runner
+/// configuration. The caller can later require this remote daemon owner.
+pub(crate) fn recorded_session(runner_id: &str) -> Result<Option<RunnerSession>> {
+    read_session(runner_id)
+}
+
 pub(crate) fn disconnect_with_force(
     runner_id: &str,
+    force: bool,
+) -> Result<RunnerDisconnectReport> {
+    disconnect_with_session(runner_id, None, force)
+}
+
+/// Stop the daemon through the current live session after confirming it still
+/// owns the remote daemon observed by a caller's promotion transaction.
+pub(crate) fn disconnect_with_session(
+    runner_id: &str,
+    expected_session: Option<&RunnerSession>,
     force: bool,
 ) -> Result<RunnerDisconnectReport> {
     let promotion_lease =
@@ -15,6 +31,20 @@ pub(crate) fn disconnect_with_force(
     promotion_lease.assert_generation()?;
     let session_path = session_path(runner_id)?;
     let session = read_session(runner_id)?;
+    if let Some(expected_session) = expected_session {
+        if !session.as_ref().is_some_and(|current_session| {
+            same_remote_daemon_ownership(runner_id, expected_session, current_session)
+        }) {
+            return Err(Error::validation_invalid_argument(
+                "disconnect",
+                format!(
+                    "runner `{runner_id}` remote daemon ownership changed during refresh; refusing to stop a different daemon"
+                ),
+                Some(runner_id.to_string()),
+                Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+            ));
+        }
+    }
     if let Some(session) = &session {
         if session.mode == RunnerTunnelMode::DirectSsh {
             disconnect_remote_daemon(session, force).map_err(|err| {
@@ -44,6 +74,23 @@ pub(crate) fn disconnect_with_force(
         session,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn same_remote_daemon_ownership(
+    runner_id: &str,
+    expected: &RunnerSession,
+    current: &RunnerSession,
+) -> bool {
+    expected.runner_id == runner_id
+        && current.runner_id == runner_id
+        && expected.mode == RunnerTunnelMode::DirectSsh
+        && current.mode == RunnerTunnelMode::DirectSsh
+        && expected.role == RunnerSessionRole::Controller
+        && current.role == RunnerSessionRole::Controller
+        && expected.server_id == current.server_id
+        && expected.remote_daemon_address == current.remote_daemon_address
+        && expected.remote_daemon_lease_id == current.remote_daemon_lease_id
+        && expected.remote_daemon_pid == current.remote_daemon_pid
 }
 
 pub(super) fn disconnect_remote_daemon(
