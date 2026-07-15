@@ -232,10 +232,16 @@ pub(crate) trait AgentTaskPromotionWorkspaceProvider {
 pub(crate) struct ExternalPromotionWorkspaceProvider {
     invocation: Option<CommandInvocation>,
     provenance: Option<serde_json::Value>,
+    configured_fallback: Option<ConfiguredPromotionWorkspaceProvider>,
+}
+
+struct ConfiguredPromotionWorkspaceProvider {
+    config: crate::core::defaults::HomeboyConfig,
+    executable: Option<PathBuf>,
 }
 
 impl ExternalPromotionWorkspaceProvider {
-    pub(crate) fn from_options(options: &AgentTaskPromotionOptions) -> Result<Self> {
+    pub(crate) fn from_options(options: &AgentTaskPromotionOptions) -> Self {
         let config = crate::core::defaults::load_config();
         Self::from_options_with_config_and_environment(
             options,
@@ -250,57 +256,37 @@ impl ExternalPromotionWorkspaceProvider {
         config: &crate::core::defaults::HomeboyConfig,
         executable: Option<PathBuf>,
         promotion_command: Option<String>,
-    ) -> Result<Self> {
+    ) -> Self {
         if let Some(invocation) = options.provider_invocation.clone() {
-            return Ok(Self {
+            return Self {
                 invocation: Some(invocation),
                 provenance: None,
-            });
+                configured_fallback: None,
+            };
         }
         if let Some(command) = options.provider_command.clone().or(promotion_command) {
             eprintln!(
                 "Warning: agent-task promotion provider string command is deprecated; use argv-capable provider invocation instead"
             );
-            return Ok(Self {
+            return Self {
                 invocation: Some(CommandInvocation {
                     argv: command.split_whitespace().map(str::to_string).collect(),
                     display: Some(command),
                     ..Default::default()
                 }),
                 provenance: None,
-            });
+                configured_fallback: None,
+            };
         }
 
-        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-            &options.to_worktree,
-            config,
-        )?;
-        let executable = executable.map(Ok).unwrap_or_else(|| {
-            std::env::current_exe().map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("resolve current Homeboy executable for promotion provider".to_string()),
-                )
-            })
-        })?;
-        let workspace = resolution.worktree.path;
-        Ok(Self {
-            invocation: Some(CommandInvocation {
-                argv: vec![
-                    executable.display().to_string(),
-                    "agent-task".to_string(),
-                    "promotion-provider".to_string(),
-                    "--workspace".to_string(),
-                    workspace.clone(),
-                ],
-                ..Default::default()
+        Self {
+            invocation: None,
+            provenance: None,
+            configured_fallback: Some(ConfiguredPromotionWorkspaceProvider {
+                config: config.clone(),
+                executable,
             }),
-            provenance: Some(serde_json::json!({
-                "id": resolution.provider_id,
-                "handle": resolution.worktree.handle,
-                "path": workspace,
-            })),
-        })
+        }
     }
 
     pub(crate) fn provenance(&self) -> Option<&serde_json::Value> {
@@ -309,6 +295,66 @@ impl ExternalPromotionWorkspaceProvider {
 
     pub(super) fn invocation(&self) -> Option<&CommandInvocation> {
         self.invocation.as_ref()
+    }
+
+    fn resolve_configured_fallback(&mut self, to_workspace: &str) -> Result<()> {
+        let configured_fallback = self.configured_fallback.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion_provider",
+                format!(
+                    "agent-task promotion requires a workspace provider command; pass --provider-command or set {PROMOTION_PROVIDER_COMMAND_ENV}"
+                ),
+                None,
+                None,
+            )
+        })?;
+        let resolution = worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            to_workspace,
+            &configured_fallback.config,
+        )?;
+        let executable = configured_fallback
+            .executable
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                std::env::current_exe().map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(
+                            "resolve current Homeboy executable for promotion provider".to_string(),
+                        ),
+                    )
+                })
+            })?;
+        let workspace = resolution.worktree.path;
+        self.invocation = Some(CommandInvocation {
+            argv: vec![
+                executable.display().to_string(),
+                "agent-task".to_string(),
+                "promotion-provider".to_string(),
+                "--workspace".to_string(),
+                workspace.clone(),
+            ],
+            ..Default::default()
+        });
+        self.provenance = Some(serde_json::json!({
+            "id": resolution.provider_id,
+            "handle": resolution.worktree.handle,
+            "path": workspace,
+        }));
+        Ok(())
+    }
+
+    fn with_configured_provider_provenance(&self, mut error: Error) -> Error {
+        if let Some(provenance) = self.provenance() {
+            if !error.details.is_object() {
+                error.details = serde_json::json!({});
+            }
+            if let Some(details) = error.details.as_object_mut() {
+                details.insert("worktree_provider".to_string(), provenance.clone());
+            }
+        }
+        error
     }
 }
 
@@ -323,6 +369,9 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
+        if self.invocation.is_none() {
+            self.resolve_configured_fallback(&request.to_workspace)?;
+        }
         let invocation = self.invocation.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "promotion_provider",
@@ -334,6 +383,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
             )
         })?;
         run_provider_command(invocation, &request)
+            .map_err(|error| self.with_configured_provider_provenance(error))
     }
 
     fn verify(
