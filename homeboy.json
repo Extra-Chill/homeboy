@@ -459,7 +459,7 @@
           ],
           "label": "runner execution orchestration",
           "patterns": [
-            "\\b(execute_[A-Za-z0-9_]+|dispatch_[A-Za-z0-9_]+)\\s*\\("
+            "\\b(execute_[A-Za-z0-9_]+|dispatch_(job|jobs|runner|remote|exec|command|work|workload)[A-Za-z0-9_]*)\\s*\\("
           ]
         }
       ]

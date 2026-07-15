@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::command_contract::export::{write_contract_export_documents, ContractExportDocument};
 use crate::command_contract::{
     contract_constants, registered_contract, registered_contracts, ArtifactPostprocessPlan,
     CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
@@ -710,22 +711,20 @@ fn artifact_reference_type(reference: &ArtifactReference) -> &'static str {
 }
 
 fn export_contracts(args: ContractExportArgs) -> CmdResult<ContractExportOutput> {
-    fs::create_dir_all(&args.dir).map_err(|error| io_error(error, &args.dir))?;
-
-    let exports = [
-        ExportDocument {
+    let documents = vec![
+        ContractExportDocument {
             file_name: "command-registry.json",
             schema: COMMAND_REGISTRY_EXPORT_SCHEMA,
             description: "Top-level command registry metadata derived from Homeboy's command contract registry.",
             value: serde_json::to_value(command_registry_export()).map_err(json_error)?,
         },
-        ExportDocument {
+        ContractExportDocument {
             file_name: "public-output-variants.json",
             schema: PUBLIC_OUTPUT_VARIANTS_EXPORT_SCHEMA,
             description: "Public command output variants and their discriminator/golden fixture anchors.",
             value: serde_json::to_value(public_output_variants_export()).map_err(json_error)?,
         },
-        ExportDocument {
+        ContractExportDocument {
             file_name: "schema-catalog.json",
             schema: CONTRACT_SCHEMA_CATALOG_SCHEMA,
             description: "Homeboy-owned contract schema IDs with field metadata and canonical examples.",
@@ -733,17 +732,14 @@ fn export_contracts(args: ContractExportArgs) -> CmdResult<ContractExportOutput>
         },
     ];
 
-    let mut files = Vec::new();
-    for export in exports {
-        let path = args.dir.join(export.file_name);
-        let body = serde_json::to_string_pretty(&export.value).map_err(json_error)?;
-        fs::write(&path, format!("{body}\n")).map_err(|error| io_error(error, &path))?;
-        files.push(ContractExportFile {
-            path: path.to_string_lossy().to_string(),
-            schema: export.schema,
-            description: export.description,
-        });
-    }
+    let files = write_contract_export_documents(&args.dir, documents)?
+        .into_iter()
+        .map(|written| ContractExportFile {
+            path: written.path.to_string_lossy().to_string(),
+            schema: written.schema,
+            description: written.description,
+        })
+        .collect();
 
     Ok((
         ContractExportOutput {
@@ -756,13 +752,6 @@ fn export_contracts(args: ContractExportArgs) -> CmdResult<ContractExportOutput>
         },
         0,
     ))
-}
-
-struct ExportDocument {
-    file_name: &'static str,
-    schema: &'static str,
-    description: &'static str,
-    value: Value,
 }
 
 fn command_registry_export() -> CommandRegistryExport {
@@ -1538,10 +1527,6 @@ fn output_contract(value: CommandOutputContractKind) -> &'static str {
         CommandOutputContractKind::JsonEnvelope => "json_envelope",
         CommandOutputContractKind::RawOnly => "raw_only",
     }
-}
-
-fn io_error(error: std::io::Error, path: &Path) -> homeboy::core::Error {
-    homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
 }
 
 fn json_error(error: serde_json::Error) -> homeboy::core::Error {
