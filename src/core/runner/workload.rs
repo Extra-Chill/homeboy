@@ -1,4 +1,3 @@
-use crate::cli_surface::Cli;
 use crate::command_contract::{
     RunnerWorkload, RunnerWorkloadAgentTask, RunnerWorkloadAgentTaskDispatchKind,
     RunnerWorkloadAgentTaskLifecycleMirrorPolicy, RunnerWorkloadAssignment,
@@ -132,13 +131,14 @@ impl RunnerWorkloadCommandIdentity {
 
 /// Parse the dispatched argv through the CLI contract so target positionals do
 /// not become part of a command label.
+///
+/// The actual CLI parse lives in the CLI layer and is invoked through the
+/// `command_label` resolver hook, so core does not depend on the full CLI
+/// parser (`cli_surface::Cli`).
 fn dispatched_command_identity(command: &[String]) -> Option<RunnerWorkloadCommandIdentity> {
     let argv = cli_argv_from_dispatched_command(command)?;
-    let cli = Cli::try_parse_from(argv).ok()?;
-    let route_contract = cli.command.lab_route_contract().ok()??;
-    Some(RunnerWorkloadCommandIdentity::from_label(
-        route_contract.command.hot_label,
-    ))
+    let label = super::resolve_command_label(&argv)?;
+    Some(RunnerWorkloadCommandIdentity::from_label(&label))
 }
 
 fn cli_argv_from_dispatched_command(command: &[String]) -> Option<Vec<String>> {
@@ -661,6 +661,18 @@ mod tests {
     use crate::core::api_jobs::JobArtifactMetadata;
     use crate::core::plan::{HomeboyPlan, PlanKind};
 
+    /// Register the command-label resolver the way production startup does, so
+    /// tests that build workloads from dispatched argv resolve a hot-command
+    /// label (the parse now goes through the resolver hook rather than core
+    /// calling the CLI parser directly).
+    fn register_test_command_label_resolver() {
+        crate::core::runner::set_command_label_resolver(|argv| {
+            let cli = <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).ok()?;
+            let route_contract = cli.command.lab_route_contract().ok()??;
+            Some(route_contract.command.hot_label.to_string())
+        });
+    }
+
     fn plan() -> HomeboyPlan {
         HomeboyPlan::builder_for_description(PlanKind::LabOffload, "test").build()
     }
@@ -782,6 +794,7 @@ mod tests {
                 .map(|arg| (*arg).to_string())
                 .collect::<Vec<_>>();
 
+            register_test_command_label_resolver();
             let workload = build_runner_workload_for_dispatched_command(
                 RunnerWorkloadBuildInput {
                     plan: &plan,
@@ -1077,6 +1090,7 @@ mod tests {
             "homeboy-lab",
         ]
         .map(str::to_string);
+        register_test_command_label_resolver();
         let workload = build_runner_workload_for_dispatched_command(
             RunnerWorkloadBuildInput {
                 plan: &plan,

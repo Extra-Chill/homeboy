@@ -8,8 +8,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::cli_surface::{Cli, Commands};
-use crate::commands::agent_task::AgentTaskCommand;
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::agent_task_dispatch_service::{
     resolve_dispatch_request, AgentTaskDispatchCommand, ResolvedAgentTaskProviderPolicy,
@@ -205,21 +203,13 @@ pub(in crate::core::runner) fn inject_agent_task_resolved_provider_policy_in_arg
         return Ok(args.to_vec());
     }
 
-    let cli = Cli::try_parse_from(args).map_err(|error| {
-        Error::validation_invalid_argument(
-            "agent-task",
-            "failed to parse agent-task arguments while compiling Lab provider policy",
-            Some(error.to_string()),
-            None,
-        )
-    })?;
-    let dispatch: AgentTaskDispatchCommand = match cli.command {
-        Commands::AgentTask(agent_task) => match agent_task.command {
-            AgentTaskCommand::Cook(args) => args.dispatch.into(),
-            _ => return Ok(args.to_vec()),
-        },
-        _ => return Ok(args.to_vec()),
-    };
+    // The CLI parse + `agent-task cook` dispatch extraction happens in the CLI
+    // layer via a resolver hook, so core does not depend on the full CLI parser.
+    let dispatch: AgentTaskDispatchCommand =
+        match crate::core::runner::resolve_agent_task_dispatch(args)? {
+            Some(dispatch) => dispatch,
+            None => return Ok(args.to_vec()),
+        };
     let request = resolve_dispatch_request(dispatch)?;
     let rotation = defaults::load_config().agent_task.rotation;
     let policy = ResolvedAgentTaskProviderPolicy {
