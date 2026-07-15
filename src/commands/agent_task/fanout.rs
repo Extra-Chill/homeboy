@@ -131,6 +131,11 @@ where
     // placement would require independent process boundaries, so every cell
     // shares the immutable context captured by its owning process.
     let total = plan.cooks.len();
+    let harvest_context = if std::env::var_os("HOMEBOY_RUNNER_HOSTED_EXEC").is_some() {
+        homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()?
+    } else {
+        homeboy::core::agent_task_scheduler::HarvestExecutionContext::default()
+    };
     let workers = total.min(std::thread::available_parallelism().map_or(1, usize::from));
     let plan = Arc::new(plan);
     let next = Arc::new(Mutex::new(0usize));
@@ -141,6 +146,7 @@ where
             let next = Arc::clone(&next);
             let tx = tx.clone();
             let executor = executor.clone();
+            let harvest_context = harvest_context.clone();
             scope.spawn(move || loop {
                 let index = {
                     let mut next = next.lock().expect("batch cook work queue");
@@ -161,6 +167,7 @@ where
                     let mut options = invocation.options;
                     options.initial_run_id = run_id;
                     options.initial_plan = initial_plan;
+                    options.harvest_context = harvest_context.clone();
                     let result = agent_task_service::run_cook(options, executor.clone())?;
                     Ok(serde_json::json!({
                         "exit_code": result.exit_code,
@@ -631,6 +638,8 @@ impl BatchCookSpec {
                     .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
                 attempt_dispatcher: None,
+                harvest_context:
+                    crate::core::agent_task_scheduler::HarvestExecutionContext::default(),
             },
         })
     }

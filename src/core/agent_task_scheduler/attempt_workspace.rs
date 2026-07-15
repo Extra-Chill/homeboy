@@ -13,13 +13,13 @@ use super::*;
 /// Immutable provenance for one scheduler execution. Controller-local callers
 /// use an empty context; only a Lab subprocess captures its paired transport.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HarvestExecutionContext {
+pub struct HarvestExecutionContext {
     source_snapshot: Option<crate::core::source_snapshot::SourceSnapshot>,
     lab_offload: Option<serde_json::Value>,
 }
 
 impl HarvestExecutionContext {
-    pub(crate) fn from_current_process() -> crate::core::Result<Self> {
+    pub fn from_current_process() -> crate::core::Result<Self> {
         let source = std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok();
         let lab = std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
         match (source, lab) {

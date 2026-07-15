@@ -195,6 +195,9 @@ where
                 .or_else(|| agent_task_service::ai_model_from_tool(&args.ai_tool)),
             ai_used_for: args.ai_used_for,
             attempt_dispatcher,
+            harvest_context:
+                homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process(
+                )?,
         },
         executor,
     )?;

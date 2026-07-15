@@ -33,7 +33,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
-use super::execution::{run_loaded_plan, run_loaded_plan_with_derived_cook_baseline};
+use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
 /// Executes one provider attempt while cook retains ownership of promotion,
@@ -77,6 +77,7 @@ pub struct AgentTaskCookServiceOptions {
     pub ai_used_for: String,
     /// The route-selected provider transport. `None` executes locally.
     pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+    pub harvest_context: crate::core::agent_task_scheduler::HarvestExecutionContext,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -144,7 +145,14 @@ where
             let execution = if let Some(dispatcher) = &options.attempt_dispatcher {
                 dispatcher.dispatch_attempt(plan.clone(), &run_id, None)
             } else {
-                run_loaded_plan(plan.clone(), Some(&run_id), executor.clone()).map(|_| ())
+                run_loaded_plan_with_derived_cook_baseline(
+                    plan.clone(),
+                    Some(&run_id),
+                    executor.clone(),
+                    None,
+                    Some(options.harvest_context.clone()),
+                )
+                .map(|_| ())
             };
             if let Err(error) = execution {
                 let record = agent_task_lifecycle::status(&run_id).ok();
@@ -413,6 +421,7 @@ where
                         Some(&next_run_id),
                         executor.clone(),
                         Some(baseline.capability()),
+                        Some(options.harvest_context.clone()),
                     )?;
                 }
                 remediation_category_usage.add(reservation);
@@ -1288,6 +1297,8 @@ mod tests {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 ai_used_for: "Drafted test coverage.".to_string(),
                 attempt_dispatcher: None,
+                harvest_context:
+                    crate::core::agent_task_scheduler::HarvestExecutionContext::default(),
             };
             let mut backend = CaptureBackend::default();
             finalize_cook_pr_with_backend(&options, run_id, &promotion(run_id), &mut backend)
