@@ -3,9 +3,11 @@
 set -euo pipefail
 
 if homeboy --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
-  supports_placement=true
+  placement_mode=global
+elif homeboy review audit --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+  placement_mode=scoped
 else
-  supports_placement=false
+  placement_mode=legacy
 fi
 
-echo "HOMEBOY_ACTION_SUPPORTS_PLACEMENT=${supports_placement}" >> "${GITHUB_ENV}"
+echo "HOMEBOY_ACTION_PLACEMENT_MODE=${placement_mode}" >> "${GITHUB_ENV}"

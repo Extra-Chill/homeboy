@@ -92,7 +92,7 @@ assert_equals \
   "review lint keeps path with changed-since"
 
 GITHUB_ACTIONS="true"
-HOMEBOY_ACTION_SUPPORTS_PLACEMENT="true"
+HOMEBOY_ACTION_PLACEMENT_MODE="global"
 assert_equals \
   "homeboy --placement local --output /tmp/workspace/out.json review audit data-machine --path /tmp/workspace --changed-since origin/main" \
   "$(build_run_command "review audit" "${COMPONENT}" "${WORKSPACE}" "${OUTPUT_JSON}")" \
@@ -140,7 +140,7 @@ assert_equals \
   "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
   "GitHub Actions report retry selects local placement"
 
-unset GITHUB_ACTIONS HOMEBOY_ACTION_SUPPORTS_PLACEMENT
+unset GITHUB_ACTIONS HOMEBOY_ACTION_PLACEMENT_MODE
 
 assert_equals \
   "homeboy review test data-machine --path /tmp/workspace --changed-since origin/main" \

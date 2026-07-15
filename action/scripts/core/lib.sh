@@ -843,16 +843,17 @@ review_subcommand_run_command() {
   local component_id="$2"
   local workspace="$3"
   local global_flags="$4"
-  local review_cmd base_cmd rest
+  local placement_flags review_cmd base_cmd rest
 
   review_cmd="${cmd#review }"
   base_cmd="$(printf '%s' "${review_cmd}" | awk '{print $1}')"
   rest="$(printf '%s' "${review_cmd#${base_cmd}}" | xargs)"
+  placement_flags="$(homeboy_command_placement_flags "review ${base_cmd}")"
 
   if [ -n "${rest}" ]; then
-    printf 'homeboy %sreview %s %s %s --path %s\n' "${global_flags}" "${base_cmd}" "${component_id}" "${rest}" "${workspace}"
+    printf 'homeboy %sreview %s %s%s %s --path %s\n' "${global_flags}" "${base_cmd}" "${placement_flags}" "${component_id}" "${rest}" "${workspace}"
   else
-    printf 'homeboy %sreview %s %s --path %s\n' "${global_flags}" "${base_cmd}" "${component_id}" "${workspace}"
+    printf 'homeboy %sreview %s %s%s --path %s\n' "${global_flags}" "${base_cmd}" "${placement_flags}" "${component_id}" "${workspace}"
   fi
 }
 
@@ -861,11 +862,15 @@ homeboy_global_flags() {
   local flags=""
 
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    if homeboy_supports_placement; then
+    homeboy_placement_mode
+    case "${HOMEBOY_ACTION_PLACEMENT_MODE}" in
+      global)
       flags="${flags}--placement local "
-    else
+      ;;
+      legacy)
       flags="${flags}--force-hot --allow-local-hot "
-    fi
+      ;;
+    esac
   fi
 
   # --output is a global flag and must appear before the subcommand
@@ -879,16 +884,30 @@ homeboy_global_flags() {
 
 # The action preflights this after selecting the binary. Keep this fallback for
 # direct script consumers and cache the probe within a shell process.
-homeboy_supports_placement() {
-  if [ -z "${HOMEBOY_ACTION_SUPPORTS_PLACEMENT+x}" ]; then
+homeboy_placement_mode() {
+  if [ -z "${HOMEBOY_ACTION_PLACEMENT_MODE+x}" ]; then
     if homeboy --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
-      HOMEBOY_ACTION_SUPPORTS_PLACEMENT=true
+      HOMEBOY_ACTION_PLACEMENT_MODE=global
+    elif homeboy review audit --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+      HOMEBOY_ACTION_PLACEMENT_MODE=scoped
     else
-      HOMEBOY_ACTION_SUPPORTS_PLACEMENT=false
+      HOMEBOY_ACTION_PLACEMENT_MODE=legacy
     fi
   fi
 
-  [ "${HOMEBOY_ACTION_SUPPORTS_PLACEMENT}" = "true" ]
+}
+
+homeboy_command_placement_flags() {
+  local command="$1"
+
+  homeboy_placement_mode
+  if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${HOMEBOY_ACTION_PLACEMENT_MODE}" = "scoped" ]; then
+    case "${command}" in
+      review\ audit|review\ lint|review\ test|review\ build|review)
+        printf '%s' '--placement local '
+        ;;
+    esac
+  fi
 }
 
 build_run_command() {
@@ -957,7 +976,7 @@ build_review_report_command() {
 
   global_flags="$(homeboy_global_flags)"
 
-  full_cmd="homeboy ${global_flags}review ${component_id} --path ${workspace} --report=pr-comment"
+  full_cmd="homeboy ${global_flags}review $(homeboy_command_placement_flags review)${component_id} --path ${workspace} --report=pr-comment"
 
   local scope
   scope="$(scope_flags_for "review")"

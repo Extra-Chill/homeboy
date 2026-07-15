@@ -8,7 +8,7 @@ TMPDIR="$(mktemp -d)"
 cleanup() {
   rm -f "${FAKE_BIN}/homeboy"
   rmdir "${FAKE_BIN}" 2>/dev/null || true
-  rm -f "${TMPDIR}/github-env-current" "${TMPDIR}/github-env-legacy" "${TMPDIR}/github-env" "${TMPDIR}/github-output"
+  rm -f "${TMPDIR}/github-env-scoped" "${TMPDIR}/github-env-global" "${TMPDIR}/github-env-legacy" "${TMPDIR}/github-env" "${TMPDIR}/github-output"
   rmdir "${TMPDIR}/homeboy-ci-results" 2>/dev/null || true
   rmdir "${TMPDIR}" 2>/dev/null || true
 }
@@ -34,11 +34,25 @@ assert_contains() {
   esac
 }
 
+assert_not_contains() {
+  local value="$1" unexpected="$2" label="$3"
+  case "${value}" in
+    *"${unexpected}"*)
+      printf 'FAIL: %s\nunexpected: %s\nactual: %s\n' "${label}" "${unexpected}" "${value}"
+      exit 1
+      ;;
+    *) printf 'PASS: %s\n' "${label}" ;;
+  esac
+}
+
 cat > "${FAKE_BIN}/homeboy" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--help" ]; then
+if [ "${*: -1}" = "--help" ]; then
   printf 'help\n' >> "${HOMEBOY_HELP_LOG}"
-  if [ "${HOMEBOY_FAKE_GENERATION}" = "current" ]; then
+  if [ "${HOMEBOY_FAKE_GENERATION}" = "global" ] && [ "$#" -eq 1 ]; then
+    printf '  --placement <auto|local|lab>\n'
+  fi
+  if [ "${HOMEBOY_FAKE_GENERATION}" = "scoped" ] && [ "$*" = "review audit --help" ]; then
     printf '  --placement <auto|local|lab>\n'
   fi
   exit 0
@@ -68,34 +82,35 @@ export HOMEBOY_CALL_LOG="${TMPDIR}/calls.log"
 source "${ROOT}/scripts/core/lib.sh"
 
 test_generation() {
-  local generation="$1" placement_flags="$2"
+  local generation="$1" run_command="$2" bench_command="$3" refactor_command="$4" autofix_command="$5" report_command="$6" help_calls="$7"
   : > "${HOMEBOY_HELP_LOG}"
   : > "${HOMEBOY_CALL_LOG}"
   export HOMEBOY_FAKE_GENERATION="${generation}"
-  unset HOMEBOY_ACTION_SUPPORTS_PLACEMENT
+  unset HOMEBOY_ACTION_PLACEMENT_MODE
 
   export GITHUB_ENV="${TMPDIR}/github-env-${generation}"
   : > "${GITHUB_ENV}"
   bash "${ROOT}/scripts/setup/detect-homeboy-placement.sh"
-  IFS='=' read -r _ HOMEBOY_ACTION_SUPPORTS_PLACEMENT < "${GITHUB_ENV}"
-  export HOMEBOY_ACTION_SUPPORTS_PLACEMENT
+  IFS='=' read -r _ HOMEBOY_ACTION_PLACEMENT_MODE < "${GITHUB_ENV}"
+  export HOMEBOY_ACTION_PLACEMENT_MODE
 
-  assert_equals "homeboy ${placement_flags}--output /tmp/out.json review lint component --path /tmp/workspace" "$(build_run_command 'review lint' component /tmp/workspace /tmp/out.json)" "${generation} review builder preserves output ordering"
-  assert_equals "homeboy ${placement_flags}--output /tmp/out.json bench component --path /tmp/workspace" "$(build_run_command bench component /tmp/workspace /tmp/out.json)" "${generation} bench builder"
-  assert_equals "homeboy ${placement_flags}refactor component --all --path /tmp/workspace" "$(build_run_command 'refactor --all' component /tmp/workspace)" "${generation} refactor builder"
-  assert_equals "homeboy ${placement_flags}refactor component --from lint --write --path /tmp/workspace" "$(build_autofix_command 'refactor --from lint --write' component /tmp/workspace)" "${generation} autofix builder"
-  assert_equals "homeboy ${placement_flags}review component --path /tmp/workspace --report=pr-comment" "$(build_review_report_command component /tmp/workspace)" "${generation} report builder"
-  assert_equals 1 "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" "${generation} capability is detected once"
+  assert_equals "${run_command}" "$(build_run_command 'review lint' component /tmp/workspace /tmp/out.json)" "${generation} review builder preserves output ordering"
+  assert_equals "${bench_command}" "$(build_run_command bench component /tmp/workspace /tmp/out.json)" "${generation} bench builder"
+  assert_equals "${refactor_command}" "$(build_run_command 'refactor --all' component /tmp/workspace)" "${generation} refactor builder"
+  assert_equals "${autofix_command}" "$(build_autofix_command 'refactor --from lint --write' component /tmp/workspace)" "${generation} autofix builder"
+  assert_equals "${report_command}" "$(build_review_report_command component /tmp/workspace)" "${generation} report builder"
+  assert_equals "${help_calls}" "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" "${generation} capability probes"
 }
 
-test_generation current '--placement local '
-test_generation legacy '--force-hot --allow-local-hot '
+test_generation scoped 'homeboy --output /tmp/out.json review lint --placement local component --path /tmp/workspace' 'homeboy --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy refactor component --all --path /tmp/workspace' 'homeboy refactor component --from lint --write --path /tmp/workspace' 'homeboy review --placement local component --path /tmp/workspace --report=pr-comment' 2
+test_generation global 'homeboy --placement local --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --placement local --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --placement local refactor component --all --path /tmp/workspace' 'homeboy --placement local refactor component --from lint --write --path /tmp/workspace' 'homeboy --placement local review component --path /tmp/workspace --report=pr-comment' 1
+test_generation legacy 'homeboy --force-hot --allow-local-hot --output /tmp/out.json review lint component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot --output /tmp/out.json bench component --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --all --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot refactor component --from lint --write --path /tmp/workspace' 'homeboy --force-hot --allow-local-hot review component --path /tmp/workspace --report=pr-comment' 2
 
-# Exercise the action execution script with a current-generation binary.
+# Exercise the action execution script with a scoped-placement binary.
 : > "${HOMEBOY_HELP_LOG}"
 : > "${HOMEBOY_CALL_LOG}"
-export HOMEBOY_FAKE_GENERATION=current
-unset HOMEBOY_ACTION_SUPPORTS_PLACEMENT
+export HOMEBOY_FAKE_GENERATION=scoped
+unset HOMEBOY_ACTION_PLACEMENT_MODE
 export GITHUB_ACTION_PATH="${ROOT}"
 export GITHUB_WORKSPACE="${TMPDIR}"
 export GITHUB_OUTPUT="${TMPDIR}/github-output"
@@ -103,10 +118,11 @@ export GITHUB_ENV="${TMPDIR}/github-env"
 export RESOLVED_COMMANDS='review audit'
 export COMPONENT_NAME=component
 bash "${ROOT}/scripts/setup/detect-homeboy-placement.sh"
-IFS='=' read -r _ HOMEBOY_ACTION_SUPPORTS_PLACEMENT < "${GITHUB_ENV}"
-export HOMEBOY_ACTION_SUPPORTS_PLACEMENT
+IFS='=' read -r _ HOMEBOY_ACTION_PLACEMENT_MODE < "${GITHUB_ENV}"
+export HOMEBOY_ACTION_PLACEMENT_MODE
 bash "${ROOT}/scripts/core/run-homeboy-commands.sh"
-assert_contains "$(< "${HOMEBOY_CALL_LOG}")" '--placement local --output ' 'current binary runs through action command execution with local placement'
-assert_equals 1 "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" 'current execution detects placement once'
+assert_contains "$(< "${HOMEBOY_CALL_LOG}")" 'review audit --placement local component' 'scoped binary runs through action command execution with local placement'
+assert_not_contains "$(< "${HOMEBOY_CALL_LOG}")" '--force-hot' 'scoped binary does not receive removed hot flags'
+assert_equals 2 "$(wc -l < "${HOMEBOY_HELP_LOG}" | xargs)" 'scoped execution probes global and owning command help'
 
 printf 'All placement compatibility checks passed.\n'
