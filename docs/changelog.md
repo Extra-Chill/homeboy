@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.8] - 2026-07-15
+
+### Changed
+- Keep detached Lab workloads alive after SSH handoff
+- break secret_env_plan <-> env_materialization_plan cycle
+- extract contract export writing + fix dispatch marker
+- extract runner-exec artifact promotion into core
+- extract agent-task config/policy types into leaf module
+- Finalize clean committed branches
+- extract bench artifact persistence into core service
+- recover cycle-break cuts 2-4 (policy relocate, projection move, path-materialization leaf)
+- Recover provider rotation from incompatible scratch indexes
+- Preserve managed workspaces across agent-task retry
+- extract artifact preview/capture + runner-attach into core
+- Remove terminal legacy agent-task backfill
+- Finalize committed manual branches
+
+### Fixed
+- distinguish missing command-status fixture from contract violation
+- treat *_fixture(s).rs as test paths in is_test_path
+- fix(agent-task): reclaim provider verification scratch
+- Fix agent-task promotion recovery state
+
 ## [0.286.7] - 2026-07-15
 
 ### Changed
