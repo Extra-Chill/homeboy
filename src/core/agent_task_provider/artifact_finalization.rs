@@ -18,6 +18,10 @@ pub(crate) struct ExecutorArtifactRootIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    volume_serial_number: u64,
+    #[cfg(windows)]
+    file_id: [u8; 16],
 }
 
 impl ExecutorArtifactRootIdentity {
@@ -28,7 +32,7 @@ impl ExecutorArtifactRootIdentity {
                 Some(format!("inspect executor artifact root {}", path.display())),
             )
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if is_link_or_reparse_point(&metadata) || !metadata.is_dir() {
             return Err(Error::validation_invalid_argument(
                 "artifacts_path",
                 "Homeboy executor artifact root must be a real directory",
@@ -60,7 +64,23 @@ impl ExecutorArtifactRootIdentity {
                 inode: metadata.ino(),
             })
         }
+        #[cfg(windows)]
+        {
+            let identity = windows_file_identity_from_path(&path, true).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("open executor artifact root {}", path.display())),
+                )
+            })?;
+            Ok(Self {
+                path,
+                finalized_path,
+                volume_serial_number: identity.volume_serial_number,
+                file_id: identity.file_id,
+            })
+        }
         #[cfg(not(unix))]
+        #[cfg(not(windows))]
         Ok(Self {
             path,
             finalized_path,
@@ -77,7 +97,7 @@ impl ExecutorArtifactRootIdentity {
                 )),
             )
         })?;
-        if current.file_type().is_symlink() || !current.is_dir() {
+        if is_link_or_reparse_point(&current) || !current.is_dir() {
             return Err(Error::validation_invalid_argument(
                 "artifacts_path",
                 "Homeboy executor artifact root changed during provider execution",
@@ -97,6 +117,28 @@ impl ExecutorArtifactRootIdentity {
                 None,
             ));
         }
+        #[cfg(windows)]
+        {
+            let identity = windows_file_identity_from_path(&self.path, true).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!(
+                        "open executor artifact root {}",
+                        self.path.display()
+                    )),
+                )
+            })?;
+            if identity.volume_serial_number != self.volume_serial_number
+                || identity.file_id != self.file_id
+            {
+                return Err(Error::validation_invalid_argument(
+                    "artifacts_path",
+                    "Homeboy executor artifact root changed during provider execution",
+                    Some(self.path.display().to_string()),
+                    None,
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -109,7 +151,7 @@ pub(crate) fn finalize_provider_file_artifacts(
     outcome: &mut AgentTaskOutcome,
     root: &ExecutorArtifactRootIdentity,
 ) -> Result<()> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let mut diagnostics = Vec::new();
         for artifact in &mut outcome.artifacts {
@@ -121,7 +163,7 @@ pub(crate) fn finalize_provider_file_artifacts(
         return Ok(());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         root.verify()?;
         for artifact in &mut outcome.artifacts {
@@ -201,7 +243,7 @@ fn staged_file(
             )
         }
     })?;
-    if link.file_type().is_symlink() {
+    if is_link_or_reparse_point(&link) {
         return Err(Error::validation_invalid_argument(
             "artifact.path",
             "executor artifact must not be a symlink",
@@ -232,8 +274,8 @@ fn staged_file(
             Some("create finalized artifact directory".to_string()),
         )
     })?;
-    // O_NOFOLLOW fixes the leaf we read. Verify that fixed descriptor still
-    // names the canonical in-root file before copying any bytes from it.
+    // The platform-specific open fixes the leaf we read. Verify that fixed
+    // descriptor still names the canonical in-root file before copying bytes.
     let mut input = open_regular_file_no_follow(&candidate).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -325,6 +367,61 @@ fn staged_file(
     ))
 }
 
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsFileIdentity {
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> std::io::Result<WindowsFileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    };
+
+    let mut info = FILE_ID_INFO::default();
+    let result = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(WindowsFileIdentity {
+        volume_serial_number: info.VolumeSerialNumber,
+        file_id: info.FileId.Identifier,
+    })
+}
+
+#[cfg(windows)]
+fn windows_file_identity_from_path(
+    path: &Path,
+    directory: bool,
+) -> std::io::Result<WindowsFileIdentity> {
+    let file = open_regular_file_no_follow_with_directory(path, directory)?;
+    windows_file_identity(&file)
+}
+
+#[cfg(windows)]
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 #[cfg(unix)]
 fn verify_open_file_canonical_identity(
     root: &ExecutorArtifactRootIdentity,
@@ -377,6 +474,61 @@ fn verify_open_file_canonical_identity(
     root.verify()
 }
 
+#[cfg(windows)]
+fn verify_open_file_canonical_identity(
+    root: &ExecutorArtifactRootIdentity,
+    candidate: &Path,
+    input: &File,
+    declared: &Path,
+) -> Result<()> {
+    root.verify()?;
+    let canonical = candidate.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "canonicalize executor artifact {}",
+                candidate.display()
+            )),
+        )
+    })?;
+    if !canonical.starts_with(&root.path) {
+        return Err(outside_root_error(declared));
+    }
+    let canonical_file = open_regular_file_no_follow(&canonical).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "open canonical executor artifact {}",
+                canonical.display()
+            )),
+        )
+    })?;
+    let opened = windows_file_identity(input).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect opened executor artifact".to_string()),
+        )
+    })?;
+    let canonical_identity = windows_file_identity(&canonical_file).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "inspect canonical executor artifact {}",
+                canonical.display()
+            )),
+        )
+    })?;
+    if opened != canonical_identity {
+        return Err(Error::validation_invalid_argument(
+            "artifact.path",
+            "opened executor artifact no longer matches its canonical in-root path",
+            Some(declared.display().to_string()),
+            None,
+        ));
+    }
+    root.verify()
+}
+
 #[cfg(unix)]
 fn open_regular_file_no_follow(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -385,6 +537,43 @@ fn open_regular_file_no_follow(path: &Path) -> std::io::Result<File> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "executor artifact is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_follow(path: &Path) -> std::io::Result<File> {
+    open_regular_file_no_follow_with_directory(path, false)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_follow_with_directory(
+    path: &Path,
+    directory: bool,
+) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if is_link_or_reparse_point(&metadata)
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
         return Err(std::io::Error::other(
             "executor artifact is not a regular file",
         ));
@@ -414,7 +603,7 @@ fn reject_symlink_path_components(root: &Path, candidate: &Path) -> Result<()> {
                 Some(format!("inspect executor artifact {}", current.display())),
             )
         })?;
-        if metadata.file_type().is_symlink() {
+        if is_link_or_reparse_point(&metadata) {
             return Err(Error::validation_invalid_argument(
                 "artifact.path",
                 "executor artifact path must not traverse a symlink",
@@ -455,7 +644,7 @@ fn ensure_metadata(
         .expect("artifact metadata object")
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(any(not(any(unix, windows)), test))]
 fn mark_review_only_for_unsupported_platform(
     artifact: &mut AgentTaskArtifact,
 ) -> AgentTaskDiagnostic {
@@ -476,7 +665,7 @@ fn is_legacy_outside_root(error: &Error) -> bool {
         .contains("outside the Homeboy-owned artifact root")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::agent_task::{
@@ -516,6 +705,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
     fn finalization_persists_opened_bytes_in_canonical_store_with_hash_parity() {
         with_isolated_home(|home| {
@@ -545,6 +735,7 @@ mod tests {
         });
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
     fn finalization_rejects_replaced_executor_root() {
         with_isolated_home(|home| {
@@ -559,6 +750,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn finalization_rejects_nested_symlink_before_opening_leaf() {
         with_isolated_home(|home| {
@@ -577,6 +769,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn finalization_rejects_symlink_leaf() {
         with_isolated_home(|home| {
@@ -591,6 +784,7 @@ mod tests {
         });
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
     fn external_patch_remains_visible_without_becoming_an_aggregate_apply_candidate() {
         with_isolated_home(|home| {
@@ -612,6 +806,7 @@ mod tests {
         });
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
     fn finalization_rejects_open_descriptor_that_no_longer_matches_canonical_path() {
         with_isolated_home(|home| {
@@ -647,5 +842,33 @@ mod tests {
             diagnostic.class,
             "agent_task.artifact_finalization_unavailable"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finalization_rejects_nested_junction_escape() {
+        use std::process::Command;
+
+        with_isolated_home(|home| {
+            let root_path = home.path().join("executor");
+            let outside = home.path().join("outside");
+            let junction = root_path.join("nested");
+            fs::create_dir(&root_path).expect("executor root");
+            fs::create_dir(&outside).expect("outside root");
+            fs::write(outside.join("result.patch"), b"outside").expect("source");
+            let status = Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&outside)
+                .status()
+                .expect("create junction");
+            assert!(status.success(), "create junction");
+            let root = ExecutorArtifactRootIdentity::capture(&root_path).expect("capture root");
+
+            assert!(
+                finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root)
+                    .is_err()
+            );
+        });
     }
 }
