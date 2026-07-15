@@ -429,6 +429,46 @@ fn provider_command_receives_executor_config_env() {
 }
 
 #[test]
+fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
+    crate::test_support::with_isolated_home(|_| {
+        let state = unique_state_path("scratch-attempts");
+        let state_path = state.to_string_lossy().replace('\\', "\\\\");
+        let command = format!(
+            "node {}",
+            script(&format!(
+                "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let tmp=req.executor.config.runtime_env.TMPDIR; let entries=[]; try {{ entries=JSON.parse(fs.readFileSync('{state_path}','utf8')); }} catch (_) {{}} entries.push({{tmp,keep:req.executor.config.runtime_env.KEEP}}); fs.writeFileSync('{state_path}',JSON.stringify(entries)); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:entries.length===1?'failed':'succeeded',failure_classification:entries.length===1?'execution_failed':null,summary:tmp}}));"
+            ))
+        );
+        let (mut request, provider) = request("task-scratch-retry", command);
+        request.executor.config = json!({ "runtime_env": { "KEEP": "preserved" } });
+        let mut plan = AgentTaskPlan::new("plan-scratch-retry", vec![request]);
+        plan.options.retry.max_attempts = 2;
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::ExecutionFailed];
+
+        let aggregate =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]))
+            .with_run_id("run-scratch-retry")
+            .run(plan);
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        let attempts: Vec<Value> =
+            serde_json::from_str(&fs::read_to_string(&state).expect("attempt records"))
+                .expect("attempt JSON");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["keep"], "preserved");
+        assert_eq!(attempts[1]["keep"], "preserved");
+        assert_ne!(attempts[0]["tmp"], attempts[1]["tmp"]);
+        for attempt in attempts {
+            let tmpdir = PathBuf::from(attempt["tmp"].as_str().expect("TMPDIR"));
+            assert!(tmpdir.is_dir());
+        }
+    });
+}
+
+#[test]
 fn provider_command_receives_declared_secret_env() {
     let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_SECRET_{}", std::process::id());
     std::env::set_var(&secret_name, "hydrated-secret");

@@ -393,6 +393,30 @@ where
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
+                let run_id = self.run_id.as_deref().unwrap_or(&plan.plan_id);
+                let scratch = match crate::core::controller_scratch::allocate_attempt(
+                    run_id,
+                    &plan.plan_id,
+                    &request.task_id,
+                    scheduled.attempt,
+                ) {
+                    Ok(scratch) => scratch,
+                    Err(error) => {
+                        let outcome =
+                            scratch_allocation_failure(task_id.clone(), error.to_string());
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                };
+                request
+                    .executor
+                    .set_runtime_tmpdir(scratch.path.to_string_lossy().as_ref());
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -790,6 +814,28 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
         "artifacts": outcome.artifacts,
         "evidence_refs": outcome.evidence_refs,
     })
+}
+
+fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id,
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(format!("could not allocate provider scratch root: {error}")),
+        failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.controller_scratch_allocation_failed".to_string(),
+            message: error,
+            data: serde_json::Value::Null,
+        }],
+        outputs: serde_json::Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: serde_json::Value::Null,
+    }
 }
 
 enum SchedulerEvent {

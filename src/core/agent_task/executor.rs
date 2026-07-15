@@ -58,6 +58,23 @@ impl AgentTaskExecutor {
         }
     }
 
+    /// Set the scheduler-owned temporary directory through the declared runtime
+    /// environment contract without inferring environment names from config.
+    pub fn set_runtime_tmpdir(&mut self, path: &str) {
+        if !self.config.is_object() {
+            self.config = Value::Object(Default::default());
+        }
+        let config = self.config.as_object_mut().expect("executor config object");
+        if !config.get("runtime_env").is_some_and(Value::is_object) {
+            config.insert("runtime_env".to_string(), Value::Object(Default::default()));
+        }
+        config
+            .get_mut("runtime_env")
+            .and_then(Value::as_object_mut)
+            .expect("runtime environment object")
+            .insert("TMPDIR".to_string(), Value::String(path.to_string()));
+    }
+
     pub fn runtime_selection(&self) -> AgentTaskRuntimeSelection {
         let explicit = self.runtime_selection.clone().unwrap_or_default();
         AgentTaskRuntimeSelection {
@@ -130,6 +147,28 @@ mod tests {
         assert_eq!(executor.config["workspace"]["root"], "/candidate");
         assert_eq!(executor.config["workspace_root"], "/candidate");
         assert_eq!(executor.config["unrelated_root"], "/original");
+    }
+
+    #[test]
+    fn sets_only_tmpdir_in_declared_runtime_environment() {
+        let mut executor = AgentTaskExecutor {
+            backend: "test".to_string(),
+            selector: None,
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: None,
+            config: json!({
+                "runtime_env": { "KEEP": "value", "TMPDIR": "/old" },
+                "unrelated_tmpdir": "/unchanged"
+            }),
+        };
+
+        executor.set_runtime_tmpdir("/allocated");
+
+        assert_eq!(executor.config["runtime_env"]["TMPDIR"], "/allocated");
+        assert_eq!(executor.config["runtime_env"]["KEEP"], "value");
+        assert_eq!(executor.config["unrelated_tmpdir"], "/unchanged");
     }
 }
 
