@@ -1152,8 +1152,9 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request, None)
-            .expect("local Git harvest preflight ignores unrelated Lab metadata");
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
+                .expect("local Git harvest preflight ignores unrelated Lab metadata");
 
         assert_eq!(
             preflight.base_sha.as_deref(),
