@@ -3,8 +3,27 @@
 set -euo pipefail
 
 RESULTS="${FIRST_RESULTS:-}"
-if [ -z "${RESULTS}" ]; then
-  RESULTS='{}'
+COMMANDS="${COMMANDS:-}"
+
+results_are_complete() {
+  [ -n "${RESULTS}" ] || return 1
+  printf '%s\n' "${RESULTS}" | jq -e --arg commands "${COMMANDS}" '
+    . as $results |
+    ($commands | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $expected |
+    ($results | type) == "object"
+    and all($expected[]; . as $command | $results[$command] == "pass" or $results[$command] == "fail")
+  ' >/dev/null 2>&1
+}
+
+if ! results_are_complete; then
+  if [ -n "${COMMANDS}" ]; then
+    RESULTS="$(printf '%s\n' "${COMMANDS}" | jq -Rc '
+      split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0)) | map({key: ., value: "fail"}) | from_entries
+    ')"
+    echo "::error::Current Homeboy command results were missing, malformed, interrupted, or incomplete; marking all expected commands failed."
+  else
+    RESULTS='{}'
+  fi
 fi
 
 if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" = "true" ] \

@@ -4,19 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELECT_RESULTS="${SCRIPT_DIR}/select-final-results.sh"
-
-assert_equals() {
-  local expected="$1"
-  local actual="$2"
-  local label="$3"
-
-  if [ "${expected}" != "${actual}" ]; then
-    printf 'FAIL: %s\nexpected: %s\nactual:   %s\n' "${label}" "${expected}" "${actual}"
-    exit 1
-  fi
-
-  printf 'PASS: %s\n' "${label}"
-}
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
 
 read_multiline_output() {
   local file="$1"
@@ -45,23 +34,38 @@ read_multiline_output() {
   return 1
 }
 
-run_select() {
-  local first_results="$1"
-  local output_file
+assert_equals() {
+  local expected="$1"
+  local actual="$2"
+  local label="$3"
 
-  output_file="$(mktemp "${TMPDIR:-/tmp}/homeboy-select-results.XXXXXX")"
-  GITHUB_OUTPUT="${output_file}" \
-    FIRST_RESULTS="${first_results}" \
-    HOMEBOY_DIFFERENTIAL_GATING=false \
-    bash "${SELECT_RESULTS}"
-
-  printf '%s\n' "${output_file}"
+  if [ "${expected}" != "${actual}" ]; then
+    printf 'FAIL: %s\nexpected: %s\nactual:   %s\n' "${label}" "${expected}" "${actual}"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "${label}"
 }
 
-pass_output="$(run_select '{"lint":"pass"}')"
-assert_equals '{"lint":"pass"}' "$(read_multiline_output "${pass_output}" results)" "passing JSON result round-trips without extra braces"
+assert_failed_results() {
+  local label="$1"
+  local input="$2"
+  : > "${TMP_DIR}/output"
+  FIRST_RESULTS="${input}" COMMANDS='review audit,review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
+    GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
+  if ! grep -q '"review audit":"fail"' "${TMP_DIR}/output" || ! grep -q '"review test":"fail"' "${TMP_DIR}/output"; then
+    printf 'FAIL: %s\n' "${label}"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "${label}"
+}
 
-empty_output="$(run_select '')"
-assert_equals '{}' "$(read_multiline_output "${empty_output}" results)" "empty result falls back to empty object"
+assert_failed_results "missing current results synthesize failures" ''
+assert_failed_results "malformed current results synthesize failures" '{"review test":"fail"}}'
+assert_failed_results "incomplete current results synthesize failures" '{"review audit":"pass"}'
 
-printf 'All select-final-results checks passed.\n'
+: > "${TMP_DIR}/output"
+FIRST_RESULTS='{"review test":"pass"}' COMMANDS='review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
+assert_equals '{"review test":"pass"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "passing current results round-trip"
+
+printf 'All final-result selection checks passed.\n'

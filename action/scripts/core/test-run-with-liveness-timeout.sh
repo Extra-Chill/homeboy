@@ -12,7 +12,8 @@ HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=2 bash "${RUNNER}" "fast command" bash 
 printf 'PASS: successful command preserves exit status\n'
 
 set +e
-HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=1 bash "${RUNNER}" "stalled autofix" bash -c 'sleep 3' >"${TMP_DIR}/timeout.log" 2>&1
+child_pid_file="${TMP_DIR}/child.pid"
+HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=1 bash "${RUNNER}" "stalled autofix" bash -c 'sleep 30 & echo $! > "$0"; wait' "${child_pid_file}" >"${TMP_DIR}/timeout.log" 2>&1
 exit_code=$?
 set -e
 
@@ -26,6 +27,13 @@ if ! grep -q 'stalled autofix exceeded its 1s execution timeout' "${TMP_DIR}/tim
   exit 1
 fi
 printf 'PASS: timeout returns actionable evidence\n'
+
+child_pid="$(<"${child_pid_file}")"
+if kill -0 "${child_pid}" 2>/dev/null; then
+  printf 'FAIL: timeout leaves descendant process %s alive\n' "${child_pid}"
+  exit 1
+fi
+printf 'PASS: timeout terminates descendant process group\n'
 
 set +e
 HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=invalid bash "${RUNNER}" "invalid timeout" bash -c 'exit 0' >"${TMP_DIR}/invalid.log" 2>&1
@@ -44,8 +52,12 @@ if ! grep -q '^  execution-timeout-seconds:' "${ACTION}"; then
 fi
 
 wrapper_count="$(grep -c 'run-with-liveness-timeout.sh' "${ACTION}")"
-if [ "${wrapper_count}" -ne 2 ]; then
-  printf 'FAIL: action must bound command and non-PR autofix phases, got %s wrappers\n' "${wrapper_count}"
+if [ "${wrapper_count}" -ne 1 ]; then
+  printf 'FAIL: action must leave command timeout enforcement to the per-command runner, got %s action wrappers\n' "${wrapper_count}"
   exit 1
 fi
-printf 'PASS: action applies bounded execution to command and autofix phases\n'
+if ! grep -q 'run-with-liveness-timeout.sh' "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh"; then
+  printf 'FAIL: quality commands are not individually bounded\n'
+  exit 1
+fi
+printf 'PASS: action applies bounded execution to each quality command and autofix\n'

@@ -62,7 +62,8 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::group::${GROUP_PREFIX} ${CMD}"
   CMD_EXIT=0
   set +e
-  eval "${FULL_CMD}" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
+  bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
+    "homeboy ${CMD}" bash -c "${FULL_CMD}" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
   CMD_EXIT=${PIPESTATUS[0]}
   set -e
   echo "::endgroup::"

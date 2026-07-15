@@ -12,19 +12,29 @@ if ! [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 start_seconds="$(date +%s)"
-if command -v timeout >/dev/null 2>&1; then
-  timeout --foreground --signal=TERM --kill-after=30s "${timeout_seconds}" "$@" &
-else
-  perl -e 'alarm shift; exec @ARGV' "${timeout_seconds}" "$@" &
-fi
+
+# Job control gives the child command its own process group. Killing only the
+# wrapper leaves grandchildren such as cargo and homeboy running after a timeout.
+set -m
+"$@" &
 command_pid=$!
+set +m
 
 (
   while kill -0 "${command_pid}" 2>/dev/null; do
-    sleep 60
+    sleep 1
     if kill -0 "${command_pid}" 2>/dev/null; then
       elapsed="$(( $(date +%s) - start_seconds ))"
-      echo "::notice::${label} is still running after ${elapsed}s (timeout: ${timeout_seconds}s)."
+      if [ "${elapsed}" -ge "${timeout_seconds}" ]; then
+        echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout; terminating its process group."
+        kill -TERM -- "-${command_pid}" 2>/dev/null || true
+        sleep 5
+        kill -KILL -- "-${command_pid}" 2>/dev/null || true
+        exit 0
+      fi
+      if [ "$(( elapsed % 60 ))" -eq 0 ]; then
+        echo "::notice::${label} is still running after ${elapsed}s (timeout: ${timeout_seconds}s)."
+      fi
     fi
   done
 ) &
@@ -37,7 +47,7 @@ set -e
 kill "${liveness_pid}" 2>/dev/null || true
 wait "${liveness_pid}" 2>/dev/null || true
 
-if [ "${command_exit}" -eq 124 ] || [ "${command_exit}" -eq 142 ]; then
+if [ "$(( $(date +%s) - start_seconds ))" -ge "${timeout_seconds}" ]; then
   echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout and was terminated. Inspect this step's logs and rerun after resolving the blocked command; the caller can continue when this action is advisory."
   exit 124
 fi

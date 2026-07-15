@@ -89,6 +89,7 @@ output="$(RESULTS='{"review audit":"fail"}' run_post_comment)"
 assert_contains "${output}" "PR comment posted successfully" "failed run comments"
 assert_equals "1" "$(wc -l < "${HOMEBOY_CALL_LOG}" | xargs)" "failed run posts section with tooling footer"
 assert_contains "$(cat "${HOMEBOY_CALL_LOG}")" "--footer-file" "failed run delegates tooling footer to core"
+assert_contains "$(cat "${HOMEBOY_CALL_LOG}")" "--section-key review-audit" "failed run replaces the current command section rather than retaining stale green content"
 
 export COMMANDS="refactor"
 export AUTOFIX_ENABLED="true"
