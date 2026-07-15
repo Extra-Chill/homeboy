@@ -7,6 +7,7 @@ mod artifact_envelope;
 mod cohorts;
 mod contract;
 mod coverage;
+mod coverage_reconciliation_persistence;
 mod defaults;
 mod envelope;
 mod hotspots;
@@ -14,6 +15,8 @@ mod normalize;
 mod observations;
 mod parse;
 mod result_envelope_persistence;
+mod run_dir_writers;
+mod run_evidence_persistence;
 mod schema_defaults;
 mod schemas;
 mod types;
@@ -37,6 +40,9 @@ pub use coverage::{
     reconcile_fuzz_coverage, FuzzArtifact, FuzzCoverage, FuzzCoverageGap, FuzzCoverageGroupSummary,
     FuzzCoverageReconciliation, FuzzCoverageSkip, FuzzCoverageSummary, FuzzFinding, FuzzProvenance,
     FuzzReplayMetadata, FuzzThreshold, FuzzThresholdOperator,
+};
+pub use coverage_reconciliation_persistence::{
+    persist_fuzz_coverage_reconciliation, FUZZ_COVERAGE_RECONCILIATION_ARTIFACT_KIND,
 };
 pub use defaults::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_gate_profile_contract,
@@ -65,6 +71,8 @@ pub use result_envelope_persistence::{
     persist_fuzz_run_result_envelope, report_fuzz_result_envelope,
     FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
+pub use run_dir_writers::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
+pub use run_evidence_persistence::{persist_fuzz_run_evidence, FuzzRunEvidence};
 pub use schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,
     FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION,

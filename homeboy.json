@@ -450,7 +450,7 @@
           ],
           "label": "run artifact persistence",
           "patterns": [
-            "\\b(RunDir::create|write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
+            "\\b(write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
           ]
         },
         {
