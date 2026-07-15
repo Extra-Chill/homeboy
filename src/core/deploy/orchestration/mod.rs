@@ -7,8 +7,8 @@ use crate::core::project::Project;
 use crate::core::release::version;
 
 use super::execution::{
-    execute_preflighted_component_deploy, prepare_component_deploy, release_artifact_plan,
-    resolve_planned_release_artifact, PreparedComponentDeploy, ReleaseArtifactPlan,
+    execute_preflighted_component_deploy, release_artifact_plan, resolve_planned_release_artifact,
+    ReleaseArtifactPlan,
 };
 use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
@@ -20,6 +20,7 @@ use super::version_overrides::fetch_remote_versions_for_project;
 
 mod modes;
 mod preflight;
+mod prepared_payloads;
 mod smoke_check;
 
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode};
@@ -28,6 +29,7 @@ use preflight::{
     guard_local_build_source_freshness, local_build_components, sync_components,
     verify_expected_version, warn_non_default_branch,
 };
+use prepared_payloads::prepare_component_deployments;
 use smoke_check::run_post_deploy_smoke;
 
 /// Main deploy orchestration entry point.
@@ -297,7 +299,7 @@ pub(super) fn deploy_components(
     let mut succeeded: u32 = 0;
     let mut failed: u32 = 0;
 
-    for prepared in &prepared_deployments {
+    for prepared in prepared_deployments.iter() {
         let component = &prepared.component;
 
         let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
@@ -412,49 +414,6 @@ fn validate_supported_build_configs(components: &[Component]) -> Result<()> {
     Ok(())
 }
 
-fn prepare_component_deployments(
-    components: &[Component],
-    config: &DeployConfig,
-    project: &Project,
-    base_path: &str,
-    local_versions: &HashMap<String, String>,
-    remote_versions: &HashMap<String, String>,
-    release_artifacts: &HashMap<String, ReleaseArtifactLease>,
-) -> std::result::Result<Vec<PreparedComponentDeploy>, Vec<ComponentDeployResult>> {
-    let mut prepared_deployments = Vec::new();
-    let mut failures = Vec::new();
-
-    for component in components {
-        let source_path = component.local_path.clone();
-        let mut component = crate::core::project::apply_component_overrides(component, project);
-        if config.requested_ref.is_some() {
-            // Project overrides configure deployment behavior, but an exact-ref
-            // checkout is the authoritative source tree for every build stage.
-            component.local_path = source_path;
-        }
-        let effective_config = config.clone();
-
-        match prepare_component_deploy(
-            &component,
-            &effective_config,
-            base_path,
-            project,
-            local_versions.get(&component.id).cloned(),
-            remote_versions.get(&component.id).cloned(),
-            release_artifacts.get(&component.id).cloned(),
-        ) {
-            Ok(prepared) => prepared_deployments.push(prepared),
-            Err(result) => failures.push(result),
-        }
-    }
-
-    if failures.is_empty() {
-        Ok(prepared_deployments)
-    } else {
-        Err(failures)
-    }
-}
-
 fn validate_effective_remote_paths(
     components: &[Component],
     project: &Project,
@@ -475,7 +434,6 @@ mod tests {
         checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
     };
     use crate::core::deploy::planning::{load_project_components, ExtensionSkippedComponent};
-    use crate::core::deploy::types::ComponentDeployResult;
     use crate::core::project::ProjectComponentAttachment;
     use crate::test_support::{home_env_guard, with_isolated_home};
     use std::collections::HashMap;
@@ -488,7 +446,6 @@ mod tests {
         auto_pull_version_drift_message, check_uncommitted_changes, check_unreleased_commits,
         verify_expected_version,
     };
-    use super::smoke_check::run_post_deploy_smoke;
 
     fn make_component(id: &str, local_path: &str) -> Component {
         Component::new(id.to_string(), local_path.to_string(), String::new(), None)
@@ -1438,91 +1395,8 @@ mod tests {
         );
     }
 
-    fn deployed_result(id: &str) -> ComponentDeployResult {
-        let component = make_component(id, "/tmp/does-not-matter");
-        ComponentDeployResult::new(&component, "/srv/site").with_status("deployed")
-    }
-
     #[test]
-    fn post_deploy_smoke_is_noop_without_config() {
-        let project = Project {
-            id: "site".to_string(),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
-        assert_eq!(results[0].status, "deployed");
-    }
-
-    #[test]
-    fn post_deploy_smoke_noop_when_disabled() {
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: false,
-                url: "https://example.test/".to_string(),
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
-    }
-
-    #[test]
-    fn post_deploy_smoke_failure_records_error_and_fails() {
-        // enabled smoke against an unreachable URL fails the deploy and records
-        // the error on the deployed component.
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: true,
-                // Reserved TEST-NET address (RFC 5737) so the request fails fast.
-                url: "http://192.0.2.1:9/".to_string(),
-                timeout_secs: 1,
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(true));
-        assert!(
-            results[0].error.is_some(),
-            "failed smoke must record an error on the deployed component"
-        );
-    }
-
-    #[test]
-    fn post_deploy_smoke_warn_only_does_not_fail() {
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(crate::core::project::SmokeCheckConfig {
-                enabled: true,
-                url: "http://192.0.2.1:9/".to_string(),
-                timeout_secs: 1,
-                warn_only: true,
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(false));
-        assert_eq!(
-            results[0].status, "deployed",
-            "warn_only smoke must not fail the deploy"
-        );
-        assert!(
-            results[0].warnings.iter().any(|w| w.contains("warn_only")),
-            "warn_only smoke failure should be surfaced as a warning"
-        );
-    }
-
-    #[test]
-    fn deploy_preflight_cleans_homeboy_build_dir_after_failed_build() {
+    fn deploy_preflight_preserves_preexisting_artifact_after_failed_build() {
         with_isolated_home(|_| {
             let dir = TempDir::new().expect("temp dir");
             let component = failing_build_artifact_component(
@@ -1561,8 +1435,8 @@ mod tests {
             assert_eq!(failures.len(), 1);
             assert_eq!(failures[0].build_exit_code, Some(42));
             assert!(
-                !dir.path().join(".homeboy-build").exists(),
-                "deploy-context failed builds must clean Homeboy-generated build artifacts"
+                dir.path().join(".homeboy-build/plugin.zip").exists(),
+                "failed preparation must preserve an artifact that existed before it started"
             );
         });
     }

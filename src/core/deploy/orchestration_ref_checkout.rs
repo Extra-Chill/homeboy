@@ -39,7 +39,7 @@ pub(crate) fn resolve_exact_ref(
 }
 
 impl ExactRefCheckout {
-    pub(super) fn materialize(component: &Component, requested_ref: &str) -> Result<Self> {
+    pub(crate) fn materialize(component: &Component, requested_ref: &str) -> Result<Self> {
         let identity = resolve_exact_ref(component, requested_ref)?;
         let source_root = source_root(component)?;
         let component_prefix = git::get_component_path_prefix(&component.local_path);
@@ -104,7 +104,7 @@ impl ExactRefCheckout {
         })
     }
 
-    pub(super) fn verify(&self) -> Result<()> {
+    pub(crate) fn verify(&self) -> Result<()> {
         let actual_sha = git::run_git(
             &self.worktree_path,
             &["rev-parse", "--verify", "HEAD^{commit}"],
@@ -128,7 +128,7 @@ impl ExactRefCheckout {
 
     /// Hydrate dependencies in the detached source tree, never the configured
     /// checkout. This makes an exact-ref build self-contained.
-    pub(super) fn hydrate_dependencies(
+    pub(crate) fn hydrate_dependencies(
         &self,
         skip: bool,
     ) -> Result<Option<deps::DependencyInstallResult>> {
