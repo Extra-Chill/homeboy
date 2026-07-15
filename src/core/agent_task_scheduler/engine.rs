@@ -453,9 +453,10 @@ where
                     source_provenance: harvest_preflight.source_provenance,
                     scratch: scratch.clone(),
                     adoption: scheduled.adoption,
+                    join_handle: None,
                 });
 
-                thread::spawn(move || {
+                let join_handle = thread::spawn(move || {
                     let _attempt_workspace = attempt_workspace;
                     let outcome = executor.execute(request, context);
                     let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
@@ -465,6 +466,10 @@ where
                         scratch,
                     }));
                 });
+                running
+                    .last_mut()
+                    .expect("running task inserted")
+                    .join_handle = Some(join_handle);
             }
 
             AgentTaskScheduleSupport::expire_timed_out_tasks(
@@ -481,7 +486,6 @@ where
 
             let wait_timeout = running
                 .iter()
-                .filter(|task| !task.timeout_cancel_requested)
                 .filter_map(|task| {
                     task.timeout_ms
                         .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
@@ -508,6 +512,10 @@ where
                         continue;
                     };
                     debug_assert_eq!(result.scratch, running_task.scratch);
+                    let mut running_task = running_task;
+                    if let Some(join_handle) = running_task.join_handle.take() {
+                        let _ = join_handle.join();
+                    }
                     let mut outcome = result.outcome;
                     attach_candidate_adoption_provenance(
                         &mut outcome,
@@ -621,7 +629,7 @@ where
                             execution_budget.max_provider_rotations,
                         ) {
                             release_scratch(&result.scratch, "provider_rotation", &outcome);
-                            let mut rotation_attempts = running_task.rotation_attempts;
+                            let mut rotation_attempts = running_task.rotation_attempts.clone();
                             rotation_attempts.push(
                                 AgentTaskScheduleSupport::rotation_attempt_record(
                                     &running_task.request,
@@ -807,7 +815,7 @@ pub(super) struct ScheduledTask {
     pub(super) adoption: Option<AgentTaskCandidateAdoption>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct RunningTask {
     pub(super) task_id: String,
     pub(super) request: AgentTaskRequest,
@@ -843,6 +851,7 @@ pub(super) struct RunningTask {
     pub(super) source_provenance: Option<serde_json::Value>,
     pub(super) scratch: crate::core::controller_scratch::ControllerScratchAllocation,
     pub(super) adoption: Option<AgentTaskCandidateAdoption>,
+    pub(super) join_handle: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -861,6 +870,93 @@ struct TaskResult {
     attempt: u32,
     outcome: AgentTaskOutcome,
     scratch: crate::core::controller_scratch::ControllerScratchAllocation,
+}
+
+pub(super) fn deferred_cleanup_action_artifact(
+    running: &RunningTask,
+) -> Result<AgentTaskArtifact, HarvestError> {
+    use sha2::{Digest, Sha256};
+
+    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    let directory = crate::core::artifacts::root()
+        .map_err(|error| HarvestError::ArtifactDirectory {
+            path: Path::new("<artifact-root>").to_path_buf(),
+            message: error.message,
+        })?
+        .join("agent-task")
+        .join("deferred-cleanup")
+        .join(crate::core::paths::sanitize_path_segment(run_id));
+    std::fs::create_dir_all(&directory).map_err(|error| HarvestError::ArtifactDirectory {
+        path: directory.clone(),
+        message: error.to_string(),
+    })?;
+    let id = format!(
+        "{}-attempt-{}-deferred-cleanup",
+        crate::core::paths::sanitize_path_segment(&running.task_id),
+        running.attempt
+    );
+    let path = directory.join(format!("{id}.json"));
+    let action = serde_json::json!({
+        "schema": "homeboy/agent-task-deferred-cleanup/v1",
+        "status": "pending",
+        "run_id": running.run_id,
+        "task_id": running.task_id,
+        "attempt": running.attempt,
+        "safe_next_action": "Wait for cleanup completion; mutable workspace recovery is intentionally deferred until provider exit.",
+    });
+    let content = serde_json::to_vec_pretty(&action).expect("cleanup action serializes");
+    std::fs::write(&path, &content).map_err(|error| HarvestError::ArtifactWrite {
+        path: path.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(AgentTaskArtifact {
+        schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: id.clone(),
+        kind: "cleanup_action".to_string(),
+        name: Some("deferred-cleanup.json".to_string()),
+        label: Some("deferred attempt workspace cleanup".to_string()),
+        role: Some("cleanup_action".to_string()),
+        semantic_key: None,
+        path: Some(path.display().to_string()),
+        url: None,
+        mime: Some("application/json".to_string()),
+        size_bytes: Some(content.len() as u64),
+        sha256: Some(format!("{:x}", Sha256::digest(&content))),
+        metadata: serde_json::json!({ "run_id": running.run_id, "task_id": running.task_id, "attempt": running.attempt }),
+    })
+}
+
+pub(super) fn complete_deferred_cleanup_recovery(
+    path: &Path,
+    outcome: &AgentTaskOutcome,
+    cleanup: Result<(), String>,
+) {
+    let mut action = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let candidates = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
+        .cloned()
+        .collect::<Vec<_>>();
+    action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    match cleanup {
+        Err(error) => {
+            action["status"] = serde_json::json!("failed");
+            action["diagnostic"] = serde_json::json!(error.chars().take(512).collect::<String>());
+        }
+        Ok(()) if candidates.is_empty() => {
+            action["status"] = serde_json::json!("completed_no_candidate")
+        }
+        Ok(()) => {
+            action["status"] = serde_json::json!("candidate_recovered");
+            action["candidate_artifacts"] =
+                serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
+        }
+    }
+    let _ = std::fs::write(path, serde_json::to_vec_pretty(&action).unwrap_or_default());
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {

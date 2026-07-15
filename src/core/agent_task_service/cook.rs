@@ -200,6 +200,7 @@ where
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         ) {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,

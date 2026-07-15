@@ -42,6 +42,8 @@ pub struct AgentTaskAggregateSummary {
     pub unable_to_remediate: usize,
     pub follow_up_issue: usize,
     pub cancelled: usize,
+    #[serde(default)]
+    pub recoverable_candidates: usize,
     pub apply_candidates: usize,
     pub issue_report_candidates: usize,
     pub retry_candidates: usize,
@@ -294,7 +296,7 @@ fn count_status(summary: &mut AgentTaskAggregateSummary, status: AgentTaskOutcom
         AgentTaskOutcomeStatus::UnableToRemediate => summary.unable_to_remediate += 1,
         AgentTaskOutcomeStatus::ProviderError => summary.provider_error += 1,
         AgentTaskOutcomeStatus::Timeout => summary.timed_out += 1,
-        AgentTaskOutcomeStatus::CandidateRecoverable => summary.succeeded += 1,
+        AgentTaskOutcomeStatus::CandidateRecoverable => summary.recoverable_candidates += 1,
         AgentTaskOutcomeStatus::Failed => summary.failed += 1,
         AgentTaskOutcomeStatus::FollowUpIssue => summary.follow_up_issue += 1,
         AgentTaskOutcomeStatus::Cancelled => summary.cancelled += 1,
@@ -390,7 +392,7 @@ fn reconcile_outcome(
             AgentTaskOutcomeStatus::Succeeded => empty_or_unknown_patch_reason(outcome)
                 .unwrap_or_else(|| "succeeded without apply-back artifact".to_string()),
             AgentTaskOutcomeStatus::CandidateRecoverable => {
-                "recoverable candidate without an apply-back artifact".to_string()
+                "recoverable patch candidate needs review or explicit adoption".to_string()
             }
             AgentTaskOutcomeStatus::ProviderError
             | AgentTaskOutcomeStatus::Timeout

@@ -775,7 +775,9 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
+        /// Backward-compatible aggregate projection for older durable records.
         CandidateRecoverable,
+        PartialRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
@@ -794,6 +796,8 @@ mod aggregate {
         pub succeeded: usize,
         #[serde(default)]
         pub candidate_recoverable: usize,
+        #[serde(default)]
+        pub recoverable_candidates: usize,
         #[serde(default)]
         pub failed: usize,
         #[serde(default)]

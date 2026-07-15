@@ -580,6 +580,7 @@ pub(crate) fn project_terminal_artifacts(
     let store = crate::core::observation::ObservationStore::open_initialized()?;
     let status = match record.state {
         AgentTaskRunState::Succeeded => "pass",
+        AgentTaskRunState::PartialRecoverable => "fail",
         AgentTaskRunState::PartialFailure => "fail",
         AgentTaskRunState::Failed => "fail",
         AgentTaskRunState::Cancelled => "fail",

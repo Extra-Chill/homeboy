@@ -92,9 +92,10 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status,
-            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable
+            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable
         );
         assert_eq!(aggregate.totals.candidate_recoverable, 1);
+        assert_eq!(aggregate.totals.recoverable_candidates, 1);
         assert_eq!(aggregate.totals.timed_out, 0);
         assert!(aggregate
             .events

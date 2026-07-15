@@ -175,6 +175,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled

@@ -1,4 +1,254 @@
 use super::*;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+
+/// Merge a completed deferred-cleanup candidate into its timeout outcome.
+///
+/// The worker owns the mutable workspace until it exits; this lifecycle-side
+/// operation is the only place where its immutable recovery result is adopted.
+/// A per-run advisory lock makes concurrent status/artifact/Cook readers
+/// reread and persist one coherent aggregate and terminal projection.
+pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
+    let run_id = resolve_run_id(run_id)?;
+    let lock_path = paths::homeboy_data()?
+        .join("agent-task-runs")
+        .join(&run_id)
+        .join("deferred-candidate.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open deferred candidate lock".to_string()),
+            )
+        })?;
+    let _lock = DeferredCandidateLock::lock(file)?;
+
+    let mut record = store::read_record(&run_id)?;
+    let plan = store::read_plan_path(&record.plan_path)?;
+    let mut aggregate = match store::read_aggregate(&run_id) {
+        Ok(aggregate) => aggregate,
+        // The worker may finish before the aggregate is committed. A later
+        // read retries from durable state rather than inventing a projection.
+        Err(_) => return Ok(false),
+    };
+    let mut changed = false;
+
+    for outcome in &mut aggregate.outcomes {
+        if outcome.status != AgentTaskOutcomeStatus::Timeout {
+            continue;
+        }
+        let Some(action) = outcome.artifacts.iter().find(|artifact| {
+            artifact.schema == crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA
+                && artifact.kind == "cleanup_action"
+                && artifact.role.as_deref() == Some("cleanup_action")
+                && artifact.metadata.get("run_id").and_then(Value::as_str) == Some(run_id.as_str())
+                && artifact.metadata.get("task_id").and_then(Value::as_str)
+                    == Some(outcome.task_id.as_str())
+        }) else {
+            continue;
+        };
+        let Some(path) = action.path.as_deref() else {
+            continue;
+        };
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let action_value: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if action_value.get("schema").and_then(Value::as_str)
+            != Some("homeboy/agent-task-deferred-cleanup/v1")
+            || action_value.get("run_id").and_then(Value::as_str) != Some(run_id.as_str())
+            || action_value.get("task_id").and_then(Value::as_str) != Some(outcome.task_id.as_str())
+            || action_value.get("attempt") != action.metadata.get("attempt")
+        {
+            continue;
+        }
+        match action_value.get("status").and_then(Value::as_str) {
+            Some("pending") | Some("completed") | Some("completed_no_candidate") | None => continue,
+            Some("failed") => {
+                let diagnostic = action_value
+                    .get("diagnostic")
+                    .and_then(Value::as_str)
+                    .unwrap_or("deferred cleanup failed");
+                if !outcome
+                    .diagnostics
+                    .iter()
+                    .any(|entry| entry.class == "agent_task.deferred_cleanup_failed")
+                {
+                    outcome.diagnostics.push(AgentTaskDiagnostic {
+                        class: "agent_task.deferred_cleanup_failed".to_string(),
+                        message: diagnostic.chars().take(512).collect(),
+                        data: json!({ "safe_next_action": "Inspect the deferred cleanup diagnostic before retrying the provider." }),
+                    });
+                    changed = true;
+                }
+            }
+            Some("candidate_recovered") => {
+                let Some(candidates) = action_value
+                    .get("candidate_artifacts")
+                    .and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                let mut recovered = Vec::new();
+                for value in candidates {
+                    let Ok(artifact) = serde_json::from_value::<AgentTaskArtifact>(value.clone())
+                    else {
+                        continue;
+                    };
+                    let portable = artifact.url.as_deref()
+                        == Some(&candidate_artifact_url(
+                            &run_id,
+                            &outcome.task_id,
+                            &artifact.id,
+                        ));
+                    let valid_sha = artifact.sha256.as_deref().is_some_and(|sha| {
+                        sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    });
+                    let content_matches = artifact
+                        .path
+                        .as_deref()
+                        .and_then(|candidate_path| fs::read(candidate_path).ok())
+                        .is_some_and(|bytes| {
+                            let actual = format!("{:x}", Sha256::digest(bytes));
+                            artifact.sha256.as_deref() == Some(actual.as_str())
+                        });
+                    if artifact.schema == crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA
+                        && portable
+                        && valid_sha
+                        && content_matches
+                        && crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact(
+                            &artifact,
+                        )
+                    {
+                        recovered.push(artifact);
+                    }
+                }
+                if recovered.is_empty() {
+                    continue;
+                }
+                crate::core::agent_task_timeout_artifacts::append_unique_artifacts(
+                    &mut outcome.artifacts,
+                    recovered,
+                );
+                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+                outcome.failure_classification = None;
+                outcome.summary =
+                    Some("deferred cleanup recovered a canonical patch candidate".to_string());
+                outcome.metadata["deferred_candidate_reconciled_at"] = json!(now_timestamp());
+                outcome.metadata["safe_next_action"] =
+                    json!("Promote the recovered candidate through controller-owned gates.");
+                changed = true;
+            }
+            Some(_) => continue,
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    aggregate.status = aggregate_status(&aggregate.outcomes);
+    aggregate.totals = aggregate_totals(plan.tasks.len(), &aggregate.outcomes);
+    let aggregate_path = store::aggregate_path(&run_id)?.display().to_string();
+    apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
+    store::write_aggregate_and_record(&record, &aggregate)?;
+    record_terminal_artifact_projection(&mut record, &aggregate)?;
+    Ok(true)
+}
+
+fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> String {
+    use crate::core::execution_contract::encode_uri_component;
+
+    format!(
+        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
+        encode_uri_component(run_id),
+        encode_uri_component(task_id),
+        encode_uri_component(artifact_id),
+    )
+}
+
+struct DeferredCandidateLock {
+    #[allow(dead_code)] // Retains the advisory lock until this guard drops.
+    file: File,
+}
+impl DeferredCandidateLock {
+    #[cfg(unix)]
+    fn lock(file: File) -> Result<Self> {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some("lock deferred candidate".to_string()),
+            ));
+        }
+        Ok(Self { file })
+    }
+    #[cfg(not(unix))]
+    fn lock(file: File) -> Result<Self> {
+        Ok(Self { file })
+    }
+}
+
+fn aggregate_status(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggregateStatus {
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.status == AgentTaskOutcomeStatus::Cancelled)
+    {
+        return AgentTaskAggregateStatus::Cancelled;
+    }
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
+    {
+        return AgentTaskAggregateStatus::PartialRecoverable;
+    }
+    let succeeded = outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+        )
+    });
+    let failed = outcomes.iter().any(|outcome| {
+        !matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+        )
+    });
+    match (succeeded, failed) {
+        (true, false) => AgentTaskAggregateStatus::Succeeded,
+        (true, true) => AgentTaskAggregateStatus::PartialFailure,
+        _ => AgentTaskAggregateStatus::Failed,
+    }
+}
+
+fn aggregate_totals(total_tasks: usize, outcomes: &[AgentTaskOutcome]) -> AgentTaskAggregateTotals {
+    let mut totals = AgentTaskAggregateTotals {
+        queued: total_tasks.saturating_sub(outcomes.len()),
+        ..Default::default()
+    };
+    for outcome in outcomes {
+        match outcome.status {
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
+                totals.succeeded += 1
+            }
+            AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
+            AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
+            AgentTaskOutcomeStatus::CandidateRecoverable => totals.recoverable_candidates += 1,
+            _ => totals.failed += 1,
+        }
+    }
+    totals
+}
 
 pub fn submit_plan(
     plan: &AgentTaskPlan,
@@ -100,6 +350,7 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
@@ -189,6 +440,7 @@ pub fn record_runner_job_identity(
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = resolve_run_id(run_id)?;
+    let _ = reconcile_deferred_candidate(&resolved_run_id)?;
     let mut record = store::read_record(&resolved_run_id)?;
     if !is_terminal_run_state(record.state) {
         if let (Ok(aggregate), Ok(plan)) = (
@@ -646,6 +898,7 @@ fn is_terminal_run_state(state: AgentTaskRunState) -> bool {
     matches!(
         state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
@@ -1027,6 +1280,7 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
@@ -1255,6 +1509,7 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
@@ -1362,8 +1617,8 @@ fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTa
 }
 
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
-    let run_id = resolve_run_id(run_id)?;
-    let record = store::read_record(&run_id)?;
+    let record = status(run_id)?;
+    let run_id = record.run_id.clone();
     let aggregate = store::read_aggregate(&run_id).ok();
     let latest_executor_evidence = record.latest_executor_evidence.as_ref();
     Ok(AgentTaskRunArtifacts {
@@ -1386,7 +1641,7 @@ pub fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
 }
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
-    let record = store::read_record(&resolve_run_id(run_id)?)?;
+    let record = status(run_id)?;
     record.aggregate_path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",

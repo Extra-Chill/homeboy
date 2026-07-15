@@ -30,6 +30,28 @@ use super::*;
 
 pub(crate) struct AgentTaskScheduleSupport;
 
+fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id: task_id.to_string(),
+        status: AgentTaskOutcomeStatus::Timeout,
+        summary: Some(format!("provider exceeded timeout_ms={timeout_ms}")),
+        failure_classification: Some(AgentTaskFailureClassification::Timeout),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: source.to_string(),
+            message: format!("provider exceeded timeout_ms={timeout_ms}"),
+            data: serde_json::json!({ "timeout_ms": timeout_ms }),
+        }],
+        outputs: Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: Value::Null,
+    }
+}
+
 impl AgentTaskScheduleSupport {
     pub(super) fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
@@ -631,33 +653,105 @@ impl AgentTaskScheduleSupport {
 
     pub(super) fn expire_timed_out_tasks<E>(
         running: &mut Vec<RunningTask>,
-        _quarantined: &mut Vec<QuarantinedTask>,
-        _outcomes: &mut Vec<AgentTaskOutcome>,
-        _events: &mut Vec<AgentTaskProgressEvent>,
+        quarantined: &mut Vec<QuarantinedTask>,
+        outcomes: &mut Vec<AgentTaskOutcome>,
+        events: &mut Vec<AgentTaskProgressEvent>,
         executor: &E,
     ) where
         E: AgentTaskExecutorAdapter,
     {
         let mut index = 0;
         while index < running.len() {
-            let timed_out = running[index]
-                .timeout_ms
-                .map(|timeout_ms| {
-                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
-                })
-                .unwrap_or(false);
-
-            if !timed_out {
+            let Some(timeout_ms) = running[index].timeout_ms else {
+                index += 1;
+                continue;
+            };
+            let elapsed = running[index].started_at.elapsed();
+            if elapsed <= Duration::from_millis(timeout_ms) {
+                index += 1;
+                continue;
+            }
+            if !running[index].timeout_cancel_requested {
+                executor.cancel(&running[index].task_id);
+                running[index].timeout_cancel_requested = true;
+                events.push(event(
+                    &running[index].task_id,
+                    AgentTaskState::Running,
+                    running[index].attempt,
+                    Some(
+                        "deadline expired; cancellation requested and bounded grace started"
+                            .to_string(),
+                    ),
+                ));
+                index += 1;
+                continue;
+            }
+            if elapsed <= timeout_with_grace(timeout_ms) {
                 index += 1;
                 continue;
             }
 
-            let task = &mut running[index];
-            if !task.timeout_cancel_requested {
-                executor.cancel(&task.task_id);
-                task.timeout_cancel_requested = true;
+            let mut task = running.remove(index);
+            let mut outcome =
+                deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.deferred_cleanup".to_string(),
+                message: "grace expired; deferred cleanup owns the still-running attempt workspace".to_string(),
+                data: serde_json::json!({ "cleanup": "deferred_cleanup_pending", "grace_ms": timeout_with_grace(timeout_ms).as_millis() }),
+            });
+            let action_path = match super::deferred_cleanup_action_artifact(&task) {
+                Ok(action) => {
+                    let path = action.path.clone().map(std::path::PathBuf::from);
+                    outcome.artifacts.push(action);
+                    path
+                }
+                Err(error) => {
+                    outcome.diagnostics.push(AgentTaskDiagnostic {
+                        class: "agent_task.deferred_cleanup_action_failed".to_string(),
+                        message: "could not persist deferred cleanup action".to_string(),
+                        data: serde_json::json!({ "error": format!("{error:?}") }),
+                    });
+                    None
+                }
+            };
+            outcome.metadata = serde_json::json!({ "deferred_cleanup_pending": true });
+            events.push(event(
+                &task.task_id,
+                Self::state_for_outcome(&outcome),
+                task.attempt,
+                outcome.summary.clone(),
+            ));
+            outcomes.push(outcome);
+            quarantined.push(QuarantinedTask {
+                workspace_key: task.workspace_key.clone(),
+            });
+            if let (Some(join_handle), Some(action_path)) = (task.join_handle.take(), action_path) {
+                std::thread::spawn(move || {
+                    let joined = join_handle
+                        .join()
+                        .map_err(|_| "provider worker panicked".to_string());
+                    let mut recovered = deferred_timeout_outcome(
+                        &task.task_id,
+                        task.timeout_ms.unwrap_or_default(),
+                        "deferred_cleanup",
+                    );
+                    let harvest = joined.and_then(|_| {
+                        super::harvest_uncommitted_patch(&mut recovered, &task)
+                            .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
+                            .map_err(|error| format!("{error:?}"))
+                    });
+                    if harvest.is_ok() {
+                        super::finalize_candidate_artifacts(&mut recovered, &task);
+                    }
+                    let cleanup = harvest.and_then(|_| {
+                        task._attempt_workspace
+                            .as_ref()
+                            .map(|workspace| workspace.cleanup())
+                            .unwrap_or(Ok(()))
+                    });
+                    super::complete_deferred_cleanup_recovery(&action_path, &recovered, cleanup);
+                });
             }
-            index += 1;
         }
     }
 
@@ -1382,7 +1476,7 @@ impl AgentTaskScheduleSupport {
             .iter()
             .all(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
         {
-            return AgentTaskAggregateStatus::CandidateRecoverable;
+            return AgentTaskAggregateStatus::PartialRecoverable;
         }
         let failed = outcomes.iter().any(|outcome| {
             !matches!(
@@ -1429,7 +1523,10 @@ impl AgentTaskScheduleSupport {
                 AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
                     totals.succeeded += 1
                 }
-                AgentTaskOutcomeStatus::CandidateRecoverable => totals.candidate_recoverable += 1,
+                AgentTaskOutcomeStatus::CandidateRecoverable => {
+                    totals.candidate_recoverable += 1;
+                    totals.recoverable_candidates += 1;
+                }
                 AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
                 AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
                 AgentTaskOutcomeStatus::Failed
