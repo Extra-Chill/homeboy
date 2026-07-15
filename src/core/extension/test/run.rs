@@ -202,10 +202,73 @@ fn run_main_test_workflow_inner(
 
     if let Some(ref scope) = changed_scope {
         if scope.selected_files.is_empty() {
+            let changed_ref = scope.changed_since.as_deref().unwrap_or("unknown");
+
+            // Fail closed when production/test source changed but the scope
+            // selected zero tests: passing green there is not release evidence,
+            // it just means the change-to-test mapping missed the impacted
+            // files. Documentation/config-only changes leave
+            // `source_changes_without_tests` empty and still pass. (#8340)
+            if !scope.source_changes_without_tests.is_empty() {
+                let impacted = &scope.source_changes_without_tests;
+                let preview = impacted
+                    .iter()
+                    .take(10)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = impacted.len().saturating_sub(10);
+                let impacted_summary = if more > 0 {
+                    format!("{preview}, and {more} more")
+                } else {
+                    preview
+                };
+
+                let message = format!(
+                    "Changed-scope test gate selected zero tests, but {} source file(s) changed since {changed_ref}: {impacted_summary}. Zero selection is not valid test evidence for a source change.",
+                    impacted.len(),
+                );
+                let findings = Some(vec![HomeboyFinding::builder("test", message.clone())
+                    .rule("changed_scope_zero_tests_for_source_change")
+                    .category("test-scope")
+                    .severity("error")
+                    .build()]);
+                let hints = Some(vec![
+                    format!(
+                        "Add or route a test for the changed source, or run the full suite: homeboy test {}",
+                        args.component_id
+                    ),
+                    "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
+                ]);
+
+                return Ok(TestRunWorkflowResult {
+                    status: "failed".to_string(),
+                    component: args.component_label,
+                    exit_code: 1,
+                    test_counts: None,
+                    findings,
+                    failure_analysis_input: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    autofix: None,
+                    hints,
+                    test_scope: Some(scope.clone()),
+                    summary: if args.json_summary {
+                        Some(build_test_summary(None, None, 0))
+                    } else {
+                        None
+                    },
+                    raw_output: None,
+                    extension_phase_timings: Vec::new(),
+                });
+            }
+
+            // No source-relevant change: a genuine no-test scope
+            // (documentation/config only) may pass.
             let hints = Some(vec![
                 format!(
-                    "No impacted tests found for --changed-since {}",
-                    scope.changed_since.as_deref().unwrap_or("unknown")
+                    "No impacted tests found for --changed-since {changed_ref} (no production or test source changed)"
                 ),
                 format!(
                     "Run full suite if needed: homeboy test {}",
