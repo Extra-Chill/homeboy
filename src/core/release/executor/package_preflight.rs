@@ -15,6 +15,17 @@ pub(crate) fn run_package_preflight(component_local_path: &str) -> Result<()> {
     super::lockfile_guard::guard_local_file_dependencies(component_path)
 }
 
+/// Whether the package-completeness structure assertion should run.
+///
+/// `--skip-build-validation` is documented to bypass build-structure
+/// assertions in both `preflight.package` and `package`. Package-completeness
+/// (every tracked runtime file present in the ZIP) is such a structure
+/// assertion, so an explicit override must skip it rather than fail closed
+/// (#8189).
+pub(crate) fn should_validate_package_completeness(skip_build_validation: bool) -> bool {
+    !skip_build_validation
+}
+
 /// Confirm that the durable artifacts produced by the final package step
 /// include every tracked runtime file in the configured release scope.
 pub(crate) fn validate_package_completeness(
@@ -298,6 +309,16 @@ mod tests {
         }];
         validate_package_completeness(&component, repo.path(), &artifacts)
             .expect("excluded runtime file should not fail");
+    }
+
+    #[test]
+    fn skip_build_validation_bypasses_package_completeness() {
+        // #8189: when the operator passes --skip-build-validation, the
+        // package-completeness structure assertion must not run, matching the
+        // documented CLI contract.
+        assert!(!should_validate_package_completeness(true));
+        // Default release behavior still enforces completeness.
+        assert!(should_validate_package_completeness(false));
     }
 
     fn run_git(repo: &Path, args: &[&str]) {

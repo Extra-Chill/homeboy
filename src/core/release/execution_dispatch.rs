@@ -115,11 +115,18 @@ pub(super) fn execute_release_plan_step(
                 context.options.skip_build_validation,
             )
             .and_then(|result| {
-                executor::package_preflight::validate_package_completeness(
-                    context.component,
-                    std::path::Path::new(&context.component.local_path),
-                    &context.state.artifacts,
-                )?;
+                // `--skip-build-validation` bypasses build-structure
+                // assertions in both `preflight.package` and `package`;
+                // package-completeness is one such assertion (#8189).
+                if executor::package_preflight::should_validate_package_completeness(
+                    context.options.skip_build_validation,
+                ) {
+                    executor::package_preflight::validate_package_completeness(
+                        context.component,
+                        std::path::Path::new(&context.component.local_path),
+                        &context.state.artifacts,
+                    )?;
+                }
                 Ok(result)
             })
             .unwrap_or_else(|err| failed_result("package", "package", err)),
