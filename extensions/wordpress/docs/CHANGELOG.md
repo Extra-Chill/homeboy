@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.4] - 2026-07-15
+
+### Changed
+- Default WP Codebox PHPUnit mounts to readonly
+
 ## [3.24.3] - 2026-07-13
 
 ### Fixed
