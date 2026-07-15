@@ -735,12 +735,23 @@ impl AgentTaskScheduleSupport {
                         task.timeout_ms.unwrap_or_default(),
                         "deferred_cleanup",
                     );
+                    // A completed join proves the provider no longer owns the
+                    // checkout, so its committed candidate is safe to harvest.
+                    recovered.status = AgentTaskOutcomeStatus::Succeeded;
+                    recovered.failure_classification = None;
                     let harvest = joined.and_then(|_| {
                         super::harvest_uncommitted_patch(&mut recovered, &task)
                             .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
                             .map_err(|error| format!("{error:?}"))
                     });
                     if harvest.is_ok() {
+                        // The provider has exited, so runtime artifact discovery can no
+                        // longer race its writes to the isolated attempt workspace.
+                        Self::reconcile_timeout_artifacts(
+                            &mut recovered,
+                            &task.request,
+                            "deferred_cleanup",
+                        );
                         super::finalize_candidate_artifacts(&mut recovered, &task);
                     }
                     let cleanup = harvest.and_then(|_| {

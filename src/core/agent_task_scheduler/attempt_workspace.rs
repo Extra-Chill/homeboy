@@ -32,6 +32,7 @@ impl AttemptWorkspace {
         if !remove.success() {
             return Err(format!("git worktree remove exited {remove}"));
         }
+        self.retain.store(true, Ordering::Release);
         Ok(())
     }
 }

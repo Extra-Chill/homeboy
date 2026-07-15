@@ -487,8 +487,14 @@ where
             let wait_timeout = running
                 .iter()
                 .filter_map(|task| {
-                    task.timeout_ms
-                        .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
+                    task.timeout_ms.map(|ms| {
+                        let deadline = if task.timeout_cancel_requested {
+                            timeout_with_grace(ms)
+                        } else {
+                            std::time::Duration::from_millis(ms)
+                        };
+                        deadline.saturating_sub(task.started_at.elapsed())
+                    })
                 })
                 .min();
             match wait_timeout.map_or_else(

@@ -82,7 +82,7 @@ mod timeout_tests {
 
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
             HashMap::new(),
-            Duration::from_millis(250),
+            Duration::from_millis(25),
         ));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
@@ -175,7 +175,7 @@ mod timeout_tests {
 
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
             HashMap::new(),
-            Duration::from_millis(250),
+            Duration::from_millis(25),
         ));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
