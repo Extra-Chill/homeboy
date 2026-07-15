@@ -407,10 +407,21 @@ fn validate_runner_workload_command_fallback(
         ));
     }
 
+    let dispatched_family = dispatched_command_family(command_args);
+
     if let Some(dispatched_label) =
         dispatched_command_label(command_args, &workload.kind.command_label)
     {
-        if dispatched_label != workload.kind.command_label {
+        // A differing surface label is only drift when the commands are not the
+        // same workload family. Same-family labels (e.g. `test` and `trace`,
+        // both Quality) canonicalize to one runner-workload identity, so a
+        // labelled dispatch that resolves to the workload's family is a match
+        // even when the surface label differs (#7972). When the dispatched
+        // family is Unknown we cannot canonicalize, so fall back to strict
+        // label matching.
+        let canonical_same_family = dispatched_family != RunnerWorkloadCommandFamily::Unknown
+            && dispatched_family == workload.kind.command_family;
+        if dispatched_label != workload.kind.command_label && !canonical_same_family {
             return Err(workload_error(
                 "runner_workload.kind.command_label",
                 format!(
@@ -421,7 +432,6 @@ fn validate_runner_workload_command_fallback(
         }
     }
 
-    let dispatched_family = dispatched_command_family(command_args);
     if dispatched_family != RunnerWorkloadCommandFamily::Unknown
         && dispatched_family != workload.kind.command_family
     {
@@ -1061,11 +1071,16 @@ mod tests {
             proof_id: None,
         });
 
+        // A dispatch whose label belongs to no known workload family (here
+        // `status`) cannot be canonicalized to this `trace` (Quality) workload,
+        // so the strict label check still rejects genuine command drift. (A
+        // same-family alias like `test` is intentionally accepted — see
+        // `runner_workload_validation_rejects_dispatch_drift`.)
         let err = validate_runner_workload_dispatch(
             Some(&workload),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "test".to_string()],
+            &["homeboy".to_string(), "status".to_string()],
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
