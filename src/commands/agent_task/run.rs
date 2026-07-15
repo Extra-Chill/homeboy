@@ -115,18 +115,12 @@ where
         ));
     }
 
-    // Capture the exact workspace state before dispatch. The provider may
-    // commit and leave a clean tree, so resolving this after it runs would
-    // silently widen the promotion range.
-    let source_worktree_path = agent_task_service::source_worktree_path(
-        args.dispatch.cwd.clone(),
-        args.dispatch.workspace.clone(),
-    );
-    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
-
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
+    }
+    if dispatch_args.cwd.is_none() && dispatch_args.workspace.is_none() {
+        dispatch_args.workspace = Some(args.to_worktree.clone());
     }
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
@@ -153,6 +147,15 @@ where
         (run_id, dispatch_service::build_dispatch_plan(&request)?)
     };
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
+    // Capture the resolved task workspace before dispatch. The provider may
+    // commit and leave a clean tree, so resolving this after it runs would
+    // silently widen the promotion range.
+    let source_worktree_path = initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.root.as_ref())
+        .map(std::path::PathBuf::from);
+    let task_base_sha = source_worktree_path.as_deref().and_then(git_head_sha);
     // Keep this cook on one runtime generation through provider work and PR finalization.
     let _runtime_generation = homeboy::core::runtime_promotion::pin_cook_generation(&cook_id)?;
     let title = args

@@ -249,10 +249,11 @@ fn run_split_placement_cook(
         .clone()
         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
     let attempt_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, 1);
-    let source_path = homeboy::core::agent_tasks::service::source_worktree_path(
-        cook.dispatch.cwd.clone(),
-        cook.dispatch.workspace.clone(),
-    );
+    let source_path = plan
+        .tasks
+        .first()
+        .and_then(|task| task.workspace.root.as_ref())
+        .map(PathBuf::from);
     let mut controller = cook.clone();
     controller.dispatch.run_id = Some(cook_id);
     controller.attempt_run_id = Some(attempt_run_id);
@@ -470,6 +471,9 @@ fn materialize_agent_task_cook_plan(
     if dispatch.prompt.is_none() {
         dispatch.prompt = cook.goal.clone();
     }
+    if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
+        dispatch.workspace = Some(cook.to_worktree.clone());
+    }
     let request =
         homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
     homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan(&request).map(Some)
@@ -510,6 +514,34 @@ fn materialize_agent_task_retry_handoff(
     let primary_workspace = retry_plan_primary_workspace(&source_plan)?;
     let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
+    let retry_workspace = retry_plan_primary_workspace(&plan).map_err(|error| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry lost its git-backed task workspace while serializing the replacement plan",
+            Some(primary_workspace.display().to_string()),
+            Some(vec![
+                format!(
+                    "The original persisted plan uses {}; inspect the replacement plan for workspace serialization loss.",
+                    primary_workspace.display()
+                ),
+                error.message,
+            ]),
+        )
+    })?;
+    if retry_workspace != primary_workspace {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task retry changed its git-backed task workspace while serializing the replacement plan",
+            Some(format!(
+                "original: {}; replacement: {}",
+                primary_workspace.display(),
+                retry_workspace.display()
+            )),
+            Some(vec![
+                "Retry preserves the original task workspace; inspect the replacement plan serialization before retrying through Lab.".to_string(),
+            ]),
+        ));
+    }
     let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
         Error::internal_json(
             error.to_string(),
@@ -603,7 +635,7 @@ fn retry_plan_primary_workspace(
         1 => Ok(roots.into_iter().next().expect("one retry workspace")),
         0 => Err(Error::validation_invalid_argument(
             "workspace",
-            "agent-task retry --run through Lab requires one git-backed task workspace; the controller cwd cannot become the task primary",
+            "agent-task retry --run through Lab cannot rematerialize a task workspace because the original persisted plan has none; the controller cwd cannot become the task primary",
             None,
             Some(vec![
                 "Record workspace.root or executor.config.workspace_root in the task plan before retrying.".to_string(),
@@ -2209,6 +2241,10 @@ mod tests {
             let remote_plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan =
                 serde_json::from_str(&remote.plan).expect("serialized retry plan");
             assert_eq!(remote_plan, handoff.plan);
+            assert_eq!(
+                remote_plan.tasks[0].workspace.root.as_deref(),
+                Some(workspace.path().to_str().expect("workspace utf8"))
+            );
             // The emitted command is accepted by the real CLI parser without
             // inventing a global --cwd. The route carries the selected task
             // checkout separately, and workspace staging maps it to the job cwd.
@@ -2233,6 +2269,112 @@ mod tests {
             assert_eq!(
                 replacement.metadata["pre_execution_failure"]["phase"],
                 "detached_lab_handoff_preacceptance"
+            );
+        });
+    }
+
+    #[test]
+    fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            git_init(workspace.path());
+            let provider_dir = tempfile::tempdir().expect("provider dir");
+            let provider = provider_dir.path().join("provider");
+            let payload = serde_json::json!({
+                "worktrees": [{
+                    "handle": "blocks-engine@cook-six-fixture-generic-parity",
+                    "path": workspace.path(),
+                    "branch": "main",
+                    "safety": { "dirty": false, "unpushed": false, "primary": false }
+                }]
+            });
+            fs::write(
+                &provider,
+                format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", payload),
+            )
+            .expect("write provider");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let mut permissions = fs::metadata(&provider)
+                    .expect("provider metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&provider, permissions).expect("make provider executable");
+            }
+            let mut config = homeboy::core::defaults::HomeboyConfig::default();
+            config.worktree_providers.insert(
+                "fixture".to_string(),
+                homeboy::core::defaults::WorktreeProviderConfig {
+                    enabled: true,
+                    kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                    apply_enabled: false,
+                    commands: homeboy::core::defaults::WorktreeProviderCommands {
+                        resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                        ..Default::default()
+                    },
+                    list_result_mapping: Some(
+                        homeboy::core::defaults::WorktreeProviderListResultMapping {
+                            items: "$.worktrees".to_string(),
+                            handle: "$.handle".to_string(),
+                            path: "$.path".to_string(),
+                            branch: "$.branch".to_string(),
+                            dirty: "$.safety.dirty".to_string(),
+                            unpushed: "$.safety.unpushed".to_string(),
+                            primary: "$.safety.primary".to_string(),
+                        },
+                    ),
+                },
+            );
+            homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+            let cook_cli = Cli::parse_from([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "blocks-engine@cook-six-fixture-generic-parity",
+                "--verify",
+                "true",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "retry this task",
+            ]);
+            let plan = materialize_agent_task_cook_plan(&cook_cli)
+                .expect("materialize cook plan")
+                .expect("cook plan");
+            let expected_root = workspace.path().display().to_string();
+            assert_eq!(
+                plan.tasks[0].workspace.root.as_deref(),
+                Some(expected_root.as_str())
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("submit plan");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "failed-run",
+                &plan,
+                "lab_handoff_preacceptance",
+                &Error::internal_unexpected("Lab rejected the initial attempt"),
+            )
+            .expect("persist failed attempt");
+
+            let retry_args = ["homeboy", "agent-task", "retry", "failed-run", "--run"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let retry_cli = Cli::parse_from(&retry_args);
+            let handoff = materialize_agent_task_retry_handoff(&retry_cli, &retry_args)
+                .expect("materialize retry handoff")
+                .expect("retry handoff");
+
+            assert_eq!(
+                handoff.primary_workspace,
+                workspace.path().canonicalize().expect("root")
+            );
+            assert_eq!(
+                handoff.plan.tasks[0].workspace.root.as_deref(),
+                Some(expected_root.as_str())
             );
         });
     }
@@ -2277,6 +2419,43 @@ mod tests {
                 Err(error) => error,
             };
             assert!(error.message.contains("multiple task workspaces"));
+            assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
+        });
+    }
+
+    #[test]
+    fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+                "missing-workspace",
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "retry-task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "retry"
+                }))
+                .expect("task")],
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some("failed-run")).expect("source plan");
+            let source_plan = agent_task_lifecycle::load_plan("failed-run").expect("source plan");
+            agent_task_lifecycle::record_pre_execution_failure(
+                "failed-run",
+                &source_plan,
+                "provider_execution",
+                &Error::internal_unexpected("failed"),
+            )
+            .expect("source failure");
+            let normalized = ["homeboy", "agent-task", "retry", "failed-run", "--run"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&normalized);
+
+            let error = match materialize_agent_task_retry_handoff(&cli, &normalized) {
+                Ok(_) => panic!("missing original workspace must fail before creating a retry"),
+                Err(error) => error,
+            };
+
+            assert!(error.message.contains("original persisted plan has none"));
             assert!(agent_task_lifecycle::status("failed-run-retry-1").is_err());
         });
     }
