@@ -5,8 +5,9 @@ use super::{
 use crate::core::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use crate::core::error::{Error, Result};
 use crate::core::git::{
-    commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    commit_at, get_head_commit, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at,
+    remote_branch_commit, CommitOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState,
+    PushOptions,
 };
 use crate::core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
@@ -63,6 +64,30 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         files.sort();
         files.dedup();
         Ok(files)
+    }
+
+    fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>> {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", &format!("{}...HEAD", base)])
+            .current_dir(path)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(format!(
+                "git diff from base failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool> {
+        let local_commit = get_head_commit(path)?;
+        Ok(remote_branch_commit(path, head)?
+            .is_some_and(|remote_commit| remote_commit == local_commit))
     }
 
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
