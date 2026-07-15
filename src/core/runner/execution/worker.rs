@@ -28,6 +28,7 @@ pub(crate) fn exec_worker_local_until_cancelled_with_progress(
             plan,
             &mut is_cancelled,
             progress_sink,
+            true,
             None,
         )
     })

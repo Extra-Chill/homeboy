@@ -114,7 +114,6 @@ pub(crate) fn measured_command_output(
     command: &mut Command,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
-    require_process_tree_isolation()?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
     let child = command.spawn().map_err(|err| {
@@ -140,11 +139,14 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     command: &mut Command,
     mut is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    require_child_identity_acknowledgement: bool,
     stdout_line_observer: Option<StdoutLineObserver>,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
-    require_process_tree_isolation()?;
+    if require_child_identity_acknowledgement {
+        require_process_tree_isolation()?;
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_process_tree(command);
     let started = Instant::now();
@@ -167,7 +169,15 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     }
     // The first PID event is an acknowledgement boundary: without durable
     // identity evidence, terminate and reap rather than leaving work running.
-    if let Some(progress) = progress_sink.as_ref() {
+    if require_child_identity_acknowledgement {
+        let progress = progress_sink.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "child-identity-acknowledgement",
+                "durable runner execution requires a child identity acknowledgement sink",
+                None,
+                None,
+            )
+        })?;
         if let Err(error) = progress(runner_command_heartbeat_data(
             started.elapsed(),
             pid,
@@ -772,6 +782,7 @@ mod tests {
         assert!(payload["process"]["resources"].is_null());
     }
 
+    #[cfg(unix)]
     #[test]
     fn command_progress_persists_child_identity_immediately_after_spawn() {
         assert!(supports_process_tree_isolation());
@@ -790,6 +801,7 @@ mod tests {
             &mut command,
             || false,
             Some(progress_sink),
+            true,
             None,
             None,
         )
@@ -812,6 +824,7 @@ mod tests {
             &mut command,
             || false,
             None,
+            true,
             None,
             None,
         )
@@ -843,6 +856,7 @@ mod tests {
             &mut command,
             || false,
             Some(progress_sink),
+            true,
             None,
             None,
         )
@@ -859,6 +873,18 @@ mod tests {
             !marker.exists(),
             "child process tree must not continue running"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_measured_command_execution_remains_available() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+
+        let output = measured_command_output(&mut command, None)
+            .expect("ordinary measured command execution remains available");
+
+        assert!(output.output.status.success());
     }
 
     #[test]

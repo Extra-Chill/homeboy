@@ -422,6 +422,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     plan: &PreparedRunnerProcess,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
 ) -> Result<ProcessOutput> {
     let mut command = std::process::Command::new(&plan.command[0]);
@@ -432,6 +433,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         &mut command,
         is_cancelled,
         progress_sink,
+        require_child_identity_acknowledgement,
         child_started,
         &plan.env,
         &plan.secret_env_names,
@@ -526,6 +528,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
+    require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     env: &HashMap<String, String>,
     secret_env_names: &[String],
@@ -549,6 +552,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
         command,
         is_cancelled,
         progress_sink,
+        require_child_identity_acknowledgement,
         stdout_line_observer,
         child_started,
         concurrency_limit,

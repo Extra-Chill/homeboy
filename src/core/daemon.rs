@@ -1480,6 +1480,7 @@ fn enqueue_exec_job(
                     &plan,
                     || job.is_cancelled(),
                     Some(progress_sink),
+                    true,
                     Some(child_started),
                 )?;
                 let stdout = process_output.stdout.clone();
