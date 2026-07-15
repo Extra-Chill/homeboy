@@ -856,6 +856,7 @@ mod tests {
         existing_pr: Option<AgentTaskPrRef>,
         create_error: bool,
         hydrate_error: bool,
+        hydrate_run_id: Option<String>,
         lifecycle: Option<RunLifecycleRecord>,
         gate_proof: Option<AgentTaskPrDurableGateProof>,
         candidate: Option<crate::core::agent_task_promotion::AgentTaskPromotionCandidate>,
@@ -876,6 +877,9 @@ mod tests {
                     None,
                     None,
                 ));
+            }
+            if let Some(run_id) = self.hydrate_run_id.as_deref() {
+                return RealAgentTaskPrFinalizationBackend.hydrate_run(run_id);
             }
             Ok(self.lifecycle.clone().unwrap_or_default())
         }
@@ -1383,6 +1387,67 @@ mod tests {
     }
 
     #[test]
+    fn durable_finalization_accepts_status_backfilled_legacy_executor_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = legacy_generic_terminal_run("cook-3678", false);
+            let mut backend = MockBackend {
+                changed_files: vec!["src/lib.rs".to_string()],
+                hydrate_run_id: Some(run_id),
+                gate_proof: Some(successful_gate_proof()),
+                ..Default::default()
+            };
+            let mut finalization_options = options();
+            finalization_options.manual_finalization = false;
+
+            let report = finalize_pr_with_backend(finalization_options, &mut backend)
+                .expect("status-backfilled run finalizes");
+
+            assert_eq!(report.pr_action, "created");
+            assert!(backend.committed && backend.pushed && backend.created);
+        });
+    }
+
+    #[test]
+    fn durable_finalization_fails_closed_when_status_backfill_does_not_persist() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = legacy_generic_terminal_run("failed-backfill-finalization", false);
+            crate::core::agent_task_lifecycle::fail_next_record_write_for_test();
+            let mut backend = MockBackend {
+                hydrate_run_id: Some(run_id.clone()),
+                gate_proof: Some(successful_gate_proof()),
+                ..Default::default()
+            };
+            let mut finalization_options = options();
+            finalization_options.run_id = run_id;
+            finalization_options.manual_finalization = false;
+
+            let error = finalize_pr_with_backend(finalization_options, &mut backend)
+                .expect_err("unpersisted runtime evidence cannot finalize");
+
+            assert_eq!(error.code, crate::core::ErrorCode::InternalIoError);
+            assert!(!backend.committed);
+        });
+    }
+
+    #[test]
+    fn durable_finalization_rejects_status_backfilled_timed_out_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let run_id = legacy_generic_terminal_run("timed-out-backfill-finalization", true);
+            let mut backend = MockBackend {
+                hydrate_run_id: Some(run_id.clone()),
+                gate_proof: Some(successful_gate_proof()),
+                ..Default::default()
+            };
+            let mut finalization_options = options();
+            finalization_options.run_id = run_id;
+            finalization_options.manual_finalization = false;
+
+            assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+            assert!(!backend.committed);
+        });
+    }
+
+    #[test]
     fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_work() {
         crate::test_support::with_isolated_home(|_| {
             let plan = AgentTaskPlan::new(
@@ -1726,6 +1791,51 @@ mod tests {
             follow_up: None,
             metadata,
         }
+    }
+
+    fn legacy_generic_terminal_run(run_id: &str, timed_out: bool) -> String {
+        let plan = AgentTaskPlan::new(
+            "legacy-generic-plan",
+            vec![durable_task(
+                "task",
+                "opencode",
+                Some("openai/gpt-5.6-terra"),
+            )],
+        );
+        let mut aggregate = AgentTaskAggregate {
+            schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![durable_succeeded_outcome("task", serde_json::Value::Null)],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: AgentTaskQueueStatus::default(),
+        };
+        if timed_out {
+            aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
+            aggregate.totals = AgentTaskAggregateTotals {
+                candidate_recoverable: 1,
+                ..Default::default()
+            };
+            aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        }
+        let record = crate::core::agent_task_lifecycle::record_completed_run(
+            &plan,
+            &aggregate,
+            Some(run_id),
+        )
+        .expect("terminal record");
+        crate::core::agent_task_lifecycle::rewrite_record_for_test(&record.run_id, |record| {
+            record.lifecycle.provider_runtime.clear();
+        })
+        .expect("legacy lifecycle persisted");
+        record.run_id
     }
 
     fn successful_gate_proof() -> AgentTaskPrDurableGateProof {

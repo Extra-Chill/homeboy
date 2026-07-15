@@ -101,6 +101,22 @@ pub(super) fn write_record(record: &AgentTaskRunRecord) -> Result<()> {
     write_record_with_aggregate(record, read_mirrored_aggregate(&record.run_id)?)
 }
 
+/// Serialize a record read-modify-write so independent lifecycle projections do
+/// not replace metadata written by another controller operation.
+pub(super) fn mutate_record(
+    run_id: &str,
+    mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
+) -> Result<Option<AgentTaskRunRecord>> {
+    crate::core::config::with_config_lock(|| {
+        let mut record = read_record(run_id)?;
+        if !mutate(&mut record) {
+            return Ok(None);
+        }
+        write_record(&record)?;
+        Ok(Some(record))
+    })
+}
+
 /// Commit the controller projection and child aggregate in one observation row.
 /// The JSON aggregate is a post-commit cache: readers use the committed row, so
 /// interruption before or after cache persistence exposes a complete state.
