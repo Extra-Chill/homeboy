@@ -18,7 +18,6 @@ use super::replay::{run_minimize, run_replay};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates, fuzz_coverage_completeness,
     fuzz_observation_hotspots, fuzz_performance_hotspots, gate_status, run_report, run_validate,
-    FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
@@ -34,6 +33,7 @@ use super::{run_contract, run_discover, FuzzArgs};
 use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::FuzzConfig;
+use homeboy::core::fuzz::FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND;
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzCase, FuzzCoverageSkip, FuzzCoverageSummary, FuzzExecutionRequest,
     FuzzFinding, FuzzFindingStatus, FuzzSamplingRequest, FuzzSequencePlan, FuzzTargetInventory,

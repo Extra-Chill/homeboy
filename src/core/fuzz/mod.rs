@@ -13,6 +13,7 @@ mod hotspots;
 mod normalize;
 mod observations;
 mod parse;
+mod result_envelope_persistence;
 mod schema_defaults;
 mod schemas;
 mod types;
@@ -58,6 +59,11 @@ pub use parse::{
     parse_fuzz_case_log_file, parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file,
     parse_fuzz_results_file, parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
     parse_fuzz_workload_file,
+};
+pub use result_envelope_persistence::{
+    fuzz_result_envelope_evidence_ref, fuzz_result_envelope_json, persist_fuzz_result_envelope,
+    persist_fuzz_run_result_envelope, report_fuzz_result_envelope,
+    FUZZ_RESULT_ENVELOPE_ARTIFACT_KIND,
 };
 pub use schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,

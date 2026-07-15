@@ -4,8 +4,8 @@ use homeboy::core::artifact_ref::{artifact_uri, EvidenceRef};
 use homeboy::core::fuzz::inspect_fuzz_result_envelope_artifact;
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
 
-use super::report::fuzz_result_envelope_evidence_ref;
 use super::types::{FuzzInspectArgs, FuzzInspectCandidate, FuzzInspectOutput};
+use homeboy::core::fuzz::fuzz_result_envelope_evidence_ref;
 
 /// Artifact kinds that hold the raw fuzz runner input/result pair, ordered by
 /// inspection preference. `fuzz_results` is the verbatim file a runner wrote to
