@@ -1938,6 +1938,38 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
 }
 
 #[test]
+fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provider_run_id() {
+    with_isolated_home(|_| {
+        let mut plan = test_plan();
+        plan.tasks[0].executor.backend = "opencode".to_string();
+        plan.tasks[0].executor.model = Some("openai/gpt-5.6-terra".to_string());
+        let aggregate = succeeded_aggregate(&plan);
+
+        let record = record_completed_run(&plan, &aggregate, Some("generic-executor-outcome"))
+            .expect("recorded");
+        let runtime = record
+            .lifecycle
+            .provider_runtime
+            .first()
+            .expect("canonical executor runtime evidence");
+
+        assert!(record.provider_handles.is_empty());
+        assert_eq!(record.metadata["provider_run_ids"], json!([]));
+        assert_eq!(runtime.backend, "opencode");
+        assert_eq!(runtime.state, ProviderRuntimeState::Succeeded);
+        assert!(runtime.external_runtime_ids.is_empty());
+        assert_eq!(
+            runtime.metadata["evidence_source"],
+            "canonical_executor_outcome"
+        );
+        assert_eq!(
+            runtime.metadata["executor"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+    });
+}
+
+#[test]
 fn submitted_run_can_be_loaded_marked_running_and_completed() {
     with_isolated_home(|_| {
         let plan = test_plan();

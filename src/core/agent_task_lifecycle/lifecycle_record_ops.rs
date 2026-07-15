@@ -51,11 +51,44 @@ pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
 pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan: &AgentTaskPlan) {
     set_run_state(record, record.state);
     record.lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, record.updated_at.clone());
-    record.lifecycle.provider_runtime = record
+    let mut provider_runtime: Vec<ProviderRuntimeLifecycle> = record
         .provider_handles
         .iter()
         .map(provider_runtime_for_handle)
         .collect();
+    for task in &record.tasks {
+        if record
+            .provider_handles
+            .iter()
+            .any(|handle| handle.task_id == task.task_id)
+            || matches!(
+                task.state,
+                AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped
+            )
+        {
+            continue;
+        }
+        // A completed generic executor may only produce the canonical aggregate
+        // outcome, without a provider-native run id. Preserve its terminal
+        // evidence rather than treating the missing external id as no execution.
+        provider_runtime.push(ProviderRuntimeLifecycle {
+            task_id: task.task_id.clone(),
+            backend: task.backend.clone(),
+            state: provider_runtime_state_for_task_state(Some(task.state)),
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({
+                "evidence_source": "canonical_executor_outcome",
+                "executor": {
+                    "backend": task.backend,
+                    "selector": task.selector,
+                    "model": task.model,
+                },
+                "model": task.model,
+            }),
+        });
+    }
+    record.lifecycle.provider_runtime = provider_runtime;
     record.lifecycle.external_runtime_ids = record
         .lifecycle
         .provider_runtime
