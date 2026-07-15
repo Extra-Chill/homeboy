@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.5] - 2026-07-15
+
+### Changed
+- Harden WP Codebox PHPUnit diagnostic artifacts
+
 ## [3.24.4] - 2026-07-15
 
 ### Changed
