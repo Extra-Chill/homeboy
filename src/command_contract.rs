@@ -21,7 +21,6 @@ mod constants;
 mod descriptors;
 mod lab;
 mod output;
-mod output_routing;
 mod public_variants;
 mod registry;
 pub mod safety_manifest;
