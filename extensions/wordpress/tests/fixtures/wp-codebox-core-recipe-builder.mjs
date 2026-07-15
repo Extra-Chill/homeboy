@@ -29,7 +29,7 @@ export function buildWordPressPhpunitRecipe(options = {}) {
 		schema: 'wp-codebox/workspace-recipe/v1',
 		inputs: {
 			extra_plugins: options.extra_plugins ?? [],
-			mounts: normalizeRecipeMounts(options.mounts, 'readwrite'),
+			mounts: normalizeRecipeMounts(options.mounts, 'readonly'),
 		},
 		workflow: {
 			steps: [{

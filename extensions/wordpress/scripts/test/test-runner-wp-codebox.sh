@@ -850,6 +850,7 @@ PHPUNIT_ARGS_JSON=$(printf '%s\0' "${PASSTHROUGH_ARGS[@]}" | php -r '
     $parts = array_values(array_filter(explode("\0", $raw), static function ($value) { return $value !== ""; }));
     echo json_encode($parts, JSON_UNESCAPED_SLASHES);
 ' 2>/dev/null || printf '[]')
+PHPUNIT_ARGS_JSON=$(printf '%s' "$PHPUNIT_ARGS_JSON" | jq -c '. + ["--cache-result-file=/tmp/wp-codebox-phpunit.result.cache"]' 2>/dev/null || printf '["--cache-result-file=/tmp/wp-codebox-phpunit.result.cache"]')
 
 SELECTED_TEST_FILE_REL=""
 if [ -n "$SELECTED_TEST_FILE" ]; then
@@ -888,7 +889,7 @@ EXTRA_PLUGINS_JSON="[]"
 homeboy_wp_codebox_add_recipe_mount() {
     local source="$1"
     local target="$2"
-    local mode="${3:-readwrite}"
+    local mode="${3:-readonly}"
     MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$source" --arg target "$target" --arg mode "$mode" '$mounts + [{source: $source, target: $target, mode: $mode}]')
 }
 
@@ -1017,18 +1018,13 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
     done <<< "$DEPENDENCY_PATHS"
 fi
 
-RESULT_FILE="${PLUGIN_PATH}/.pg-test-result.txt"
-PHPUNIT_RESULT_CACHE_FILE="${PLUGIN_PATH}/.phpunit.result.cache"
+RESULT_FILE=""
 WP_CODEBOX_TMPFILE=""
 PHPUNIT_STDOUT_TMPFILE=""
 RECIPE_FILE=""
 RECIPE_OPTIONS_FILE=""
 RECIPE_BUILDER_SOURCE_FILE=""
 WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE=0
-
-cleanup_wp_codebox_phpunit_runtime_files() {
-    rm -f "$RESULT_FILE" "$PHPUNIT_RESULT_CACHE_FILE"
-}
 
 persist_wp_codebox_phpunit_failure_artifacts() {
     [ "$WP_CODEBOX_PHPUNIT_PERSIST_ON_FAILURE" = "1" ] || return 0
@@ -1103,7 +1099,6 @@ cleanup_wp_codebox_phpunit_files() {
     if [ "$status" -ne 0 ]; then
         persist_wp_codebox_phpunit_failure_artifacts
     fi
-    cleanup_wp_codebox_phpunit_runtime_files
     [ -n "$WP_CODEBOX_TMPFILE" ] && rm -f "$WP_CODEBOX_TMPFILE"
     [ -n "$PHPUNIT_STDOUT_TMPFILE" ] && rm -f "$PHPUNIT_STDOUT_TMPFILE"
     [ -n "$RECIPE_FILE" ] && rm -f "$RECIPE_FILE"
@@ -1113,7 +1108,6 @@ cleanup_wp_codebox_phpunit_files() {
 }
 
 trap cleanup_wp_codebox_phpunit_files EXIT
-cleanup_wp_codebox_phpunit_runtime_files
 
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
 if [ -z "$ARTIFACTS_DIR" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
@@ -1122,6 +1116,7 @@ fi
 if [ -z "$ARTIFACTS_DIR" ]; then
     ARTIFACTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wp-codebox-test-artifacts.XXXXXX")
 fi
+RESULT_FILE="${ARTIFACTS_DIR}/files/phpunit/.pg-test-result.txt"
 
 run_phpunit_prepare_steps
 
@@ -1397,8 +1392,7 @@ if echo "$PHPUNIT_OUTPUT" | grep -qE '^STAGE_(FAIL|FATAL):'; then
     FAILED_STEP="WP Codebox bootstrap (${FAILED_STAGE_DETAIL%%:*} stage)"
     FAILURE_OUTPUT="$FAILED_STAGE_LINE"
     dump_diagnostics "BOOTSTRAP FAILURE: $FAILED_STAGE_DETAIL"
-    rm -f "$RESULT_FILE"
-    exit ${wp_codebox_exit:-1}
+    exit $((wp_codebox_exit == 0 ? 1 : wp_codebox_exit))
 fi
 
 if [ $wp_codebox_exit -ne 0 ] && is_changed_since_registration_drift; then
@@ -1406,14 +1400,12 @@ if [ $wp_codebox_exit -ne 0 ] && is_changed_since_registration_drift; then
     FAILURE_OUTPUT="Changed-since WordPress PHPUnit detected broad missing registration drift."
     dump_registration_drift_preflight
     write_phpunit_discovery_result failed "wordpress-registration-drift" "Changed-since WordPress PHPUnit detected broad missing registration drift in the test runtime."
-    rm -f "$RESULT_FILE"
     exit 1
 fi
 
 if echo "$PHPUNIT_OUTPUT" | grep -q "SOME TESTS FAILED"; then
     FAILED_STEP="PHPUnit tests (wp-codebox backend)"
     FAILURE_REPLAY_MODE="none"
-    rm -f "$RESULT_FILE"
     exit ${wp_codebox_exit:-1}
 fi
 
@@ -1422,14 +1414,12 @@ if echo "$PHPUNIT_STDOUT" | grep -q 'Error in bootstrap script:'; then
     FAILURE_OUTPUT=$(echo "$PHPUNIT_STDOUT" | grep 'Error in bootstrap script:' | head -1)
     dump_diagnostics "PHPUNIT BOOTSTRAP FAILURE"
     write_phpunit_discovery_result failed "phpunit-bootstrap-failure" "PHPUnit bootstrap failed before executing tests."
-    rm -f "$RESULT_FILE"
     exit 1
 fi
 
 if [ $wp_codebox_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(FAILURES|ERRORS)!'; then
     FAILED_STEP="PHPUnit tests (wp-codebox backend)"
     FAILURE_REPLAY_MODE="none"
-    rm -f "$RESULT_FILE"
     exit $wp_codebox_exit
 fi
 
@@ -1437,19 +1427,16 @@ if [ $wp_codebox_exit -ne 0 ] && echo "$PHPUNIT_STDOUT" | grep -qE '^(PHP Parse 
     FAILED_STEP="WP Codebox PHP crash (before runner took control)"
     FAILURE_OUTPUT=$(echo "$PHPUNIT_STDOUT" | grep -E '^(PHP Parse error|Parse error:|PHP Fatal error|Fatal error:)' | head -5)
     dump_diagnostics "PHP CRASH"
-    rm -f "$RESULT_FILE"
     exit $wp_codebox_exit
 fi
 
 if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     if component_has_composer_test_script; then
-        rm -f "$RESULT_FILE"
         run_composer_test_script
         exit $?
     fi
 
     if component_npm_test_script; then
-        rm -f "$RESULT_FILE"
         run_npm_test_script
         exit $?
     fi
@@ -1467,7 +1454,6 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
         echo "  Check phpunit.xml(.dist), tests/ directory layout, and Test.php/test- naming."
         FAILED_STEP="PHPUnit tests (configured suite discovered no test files, wp-codebox)"
         write_phpunit_discovery_result failed "no-phpunit-tests-configured" "Plugin activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran."
-        rm -f "$RESULT_FILE"
         exit 1
     fi
 
@@ -1477,28 +1463,24 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NO_TEST_FILES"; then
     echo "  PHPUnit discovery found zero tests; no PHPUnit assertions ran."
     echo "  Add matching PHPUnit files or a component phpunit.xml(.dist) if this suite should run here."
     write_phpunit_discovery_result skipped "no-phpunit-tests" "Plugin activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran."
-    rm -f "$RESULT_FILE"
     exit 0
 fi
 
 if [ $wp_codebox_exit -ne 0 ]; then
     FAILED_STEP="WP Codebox exited with code $wp_codebox_exit (unclassified)"
     dump_diagnostics "UNCLASSIFIED WP CODEBOX FAILURE (exit=$wp_codebox_exit)"
-    rm -f "$RESULT_FILE"
     exit $wp_codebox_exit
 fi
 
 if [ -z "$PHPUNIT_OUTPUT" ] && [ -z "$PHPUNIT_STDOUT" ]; then
     dump_diagnostics "NO OUTPUT CAPTURED"
     FAILED_STEP="PHPUnit tests (no output, wp-codebox)"
-    rm -f "$RESULT_FILE"
     exit 1
 fi
 
 if echo "$PHPUNIT_STDOUT" | grep -qE 'No tests executed|OK \(0 tests'; then
     dump_diagnostics "ZERO TESTS EXECUTED"
     FAILED_STEP="PHPUnit tests (zero tests executed, wp-codebox)"
-    rm -f "$RESULT_FILE"
     exit 1
 fi
 
@@ -1507,8 +1489,6 @@ if echo "$PHPUNIT_OUTPUT" | grep -q "^NOTICE:"; then
     echo "--- Bootstrap notices (non-fatal) ---"
     echo "$PHPUNIT_OUTPUT" | grep "^NOTICE:"
 fi
-
-rm -f "$RESULT_FILE"
 
 echo ""
 echo "WP Codebox test run complete."

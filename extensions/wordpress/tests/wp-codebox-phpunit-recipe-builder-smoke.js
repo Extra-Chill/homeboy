@@ -30,7 +30,10 @@ const input = {
 		slug: 'fixture-plugin',
 		activate: false,
 	}],
-	mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
+	mounts: [
+		{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' },
+		{ source: '/tmp/writable-workspace', target: '/tmp/writable-workspace', mode: 'readwrite' },
+	],
 };
 
 const result = spawnSync(process.execPath, [script], {
@@ -45,7 +48,8 @@ const recipe = JSON.parse(result.stdout);
 
 assert.equal(recipe.schema, 'wp-codebox/workspace-recipe/v1');
 assert.deepEqual(recipe.inputs.extra_plugins, input.extra_plugins);
-assert.equal(recipe.inputs.mounts[0].mode, 'readwrite');
+assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
+assert.equal(recipe.inputs.mounts[1].mode, 'readwrite');
 assert.deepEqual(recipe.workflow.steps, [{
 	command: 'fixture.wordpress.phpunit',
 	args: [
