@@ -746,8 +746,14 @@ mod tests {
         let confirmed = store.create("runner.exec");
         store.start(confirmed.id).expect("start confirmed job");
         let live_child = store.create("runner.exec");
+        store.start(live_child.id).expect("start live child");
         store
-            .start_with_child_identity(live_child.id, 4242, "live-child".to_string())
+            .append_event(
+                live_child.id,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "process": { "root_pid": 4242 } })),
+            )
             .expect("record live child");
         let before = std::fs::read(&path).expect("store bytes");
 
