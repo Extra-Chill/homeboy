@@ -814,6 +814,10 @@ pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
     stop_unlocked_with_force(force)
 }
 
+pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
+    stop_with_force_for_lease(expected_lease_id, false)
+}
+
 fn stop_with_force_for_lease(expected_lease_id: &str, force: bool) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
     let path = state_path()?;
