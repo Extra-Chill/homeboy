@@ -13,9 +13,17 @@ pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
 pub struct ControllerScratchResource {
     pub path: String,
     pub run_id: String,
+    #[serde(default)]
+    pub plan_id: String,
     pub task_id: String,
+    #[serde(default)]
+    pub attempt: u32,
     pub root_bound: String,
     pub owner_pid: u32,
+    #[serde(default)]
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub lease_id: String,
     pub reconstructable: bool,
     pub retention: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,6 +31,84 @@ pub struct ControllerScratchResource {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerScratchAllocation {
+    pub path: PathBuf,
+    pub lease_id: String,
+}
+
+/// Allocate and durably register one scheduler-owned temporary root for a
+/// provider dispatch attempt. Allocation remains separate from terminal lease
+/// handling and retention policy.
+pub fn allocate_attempt(
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+) -> Result<ControllerScratchAllocation> {
+    let root = paths::homeboy_data()?.join("controller-scratch/attempts");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", root.display())),
+        )
+    })?;
+    let root = root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("canonicalize {}", root.display())),
+        )
+    })?;
+    let lease_id = uuid::Uuid::new_v4().to_string();
+    let path = root
+        .join(paths::sanitize_path_segment(run_id))
+        .join(paths::sanitize_path_segment(plan_id))
+        .join(paths::sanitize_path_segment(task_id))
+        .join(format!("attempt-{attempt}"))
+        .join(&lease_id);
+    fs::create_dir_all(&path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", path.display())),
+        )
+    })?;
+    let path = path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("canonicalize {}", path.display())),
+        )
+    })?;
+    if path == root || !path.starts_with(&root) {
+        return Err(Error::validation_invalid_argument(
+            "controller_scratch.path",
+            "allocated scratch path must be contained by its root",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+
+    let mut index = read_index()?;
+    index.resources.push(ControllerScratchResource {
+        path: path.display().to_string(),
+        run_id: run_id.to_string(),
+        plan_id: plan_id.to_string(),
+        task_id: task_id.to_string(),
+        attempt,
+        root_bound: root.display().to_string(),
+        owner_pid: std::process::id(),
+        lifecycle_state: "active".to_string(),
+        lease_id: lease_id.clone(),
+        reconstructable: true,
+        retention: "P7D".to_string(),
+        source_ref: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        finalized_at: None,
+    });
+    write_index(&index)?;
+
+    Ok(ControllerScratchAllocation { path, lease_id })
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -116,9 +202,13 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
             let resource = ControllerScratchResource {
                 path: path.display().to_string(),
                 run_id: run_id.to_string(),
+                plan_id: String::new(),
                 task_id: outcome.task_id.clone(),
+                attempt: 0,
                 root_bound: root.display().to_string(),
                 owner_pid: std::process::id(),
+                lifecycle_state: "provider_registered".to_string(),
+                lease_id: String::new(),
                 reconstructable: value
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
@@ -412,9 +502,13 @@ mod tests {
         ControllerScratchResource {
             path: path.display().to_string(),
             run_id: "missing-terminal-run".to_string(),
+            plan_id: String::new(),
             task_id: "task-1".to_string(),
+            attempt: 0,
             root_bound: root.display().to_string(),
             owner_pid: u32::MAX,
+            lifecycle_state: "active".to_string(),
+            lease_id: "test-lease".to_string(),
             reconstructable: true,
             retention: "0s".to_string(),
             source_ref: None,
@@ -435,6 +529,33 @@ mod tests {
             cleanup_block_reason(&resource, &scratch).expect("check"),
             Some("owner process is still running".to_string())
         );
+    }
+
+    #[test]
+    fn allocation_is_unique_contained_and_durably_indexed() {
+        crate::test_support::with_isolated_home(|_| {
+            let first = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("first");
+            let second = allocate_attempt("run-1", "plan-1", "task-1", 2).expect("second");
+            let index = read_index().expect("index");
+
+            assert_ne!(first.path, second.path);
+            assert!(first.path.is_dir());
+            assert!(second.path.is_dir());
+            let resource = index
+                .resources
+                .iter()
+                .find(|resource| resource.lease_id == first.lease_id)
+                .expect("first resource");
+            assert!(Path::new(&resource.path).starts_with(&resource.root_bound));
+            assert_eq!(resource.run_id, "run-1");
+            assert_eq!(resource.plan_id, "plan-1");
+            assert_eq!(resource.task_id, "task-1");
+            assert_eq!(resource.attempt, 1);
+            assert_eq!(resource.lifecycle_state, "active");
+            assert_eq!(resource.owner_pid, std::process::id());
+            assert!(resource.reconstructable);
+            assert!(!resource.created_at.is_empty());
+        });
     }
 
     #[test]
