@@ -22,6 +22,7 @@ mod descriptors;
 mod lab;
 mod lab_routing;
 mod output;
+mod output_routing;
 mod public_variants;
 mod registry;
 pub mod safety_manifest;
