@@ -1544,11 +1544,11 @@ fn current_workspace_summary(
         source_dirty: git_state.dirty,
         synthetic_checkout_commit: synthetic_checkout
             .as_ref()
-            .and_then(|identity| identity.synthetic_commit.clone()),
+            .map(|identity| identity.synthetic_commit.clone()),
         synthetic_checkout_ref: synthetic_checkout
             .as_ref()
-            .and_then(|identity| identity.synthetic_ref.clone()),
-        synthetic_checkout_tree: synthetic_checkout.and_then(|identity| identity.synthetic_tree),
+            .map(|identity| identity.synthetic_ref.clone()),
+        synthetic_checkout_tree: synthetic_checkout.map(|identity| identity.synthetic_tree),
     }
 }
 

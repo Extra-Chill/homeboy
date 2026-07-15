@@ -191,10 +191,12 @@ fn verify_materialized_snapshot_git_checkout(
     if git(workspace, &["log", "-1", "--format=%B"])? != format!("Homeboy snapshot {identity}") {
         return Err("snapshot-git commit message does not match its snapshot identity".to_string());
     }
-    if git(workspace, &["show", "-s", "--format=%an <%ae>", "HEAD"])?
-        != "Homeboy Snapshot <homeboy-snapshot@localhost>"
+    if git(
+        workspace,
+        &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"],
+    )? != "Homeboy Snapshot <homeboy-snapshot@localhost>|Homeboy Snapshot <homeboy-snapshot@localhost>"
     {
-        return Err("snapshot-git commit author does not match Homeboy identity".to_string());
+        return Err("snapshot-git commit author/committer does not match Homeboy identity".to_string());
     }
     let expected_note = format!(
         "snapshot_identity={identity}\nsource_head={}",
@@ -780,9 +782,9 @@ mod tests {
         );
         snapshot.sync_excludes = excludes;
         snapshot.workspace_snapshot_identity = Some(identity);
-        snapshot.synthetic_checkout_commit = synthetic.synthetic_commit;
-        snapshot.synthetic_checkout_ref = synthetic.synthetic_ref;
-        snapshot.synthetic_checkout_tree = synthetic.synthetic_tree;
+        snapshot.synthetic_checkout_commit = Some(synthetic.synthetic_commit);
+        snapshot.synthetic_checkout_ref = Some(synthetic.synthetic_ref);
+        snapshot.synthetic_checkout_tree = Some(synthetic.synthetic_tree);
         let mut lab = lab(&remote, &snapshot);
         lab["sync_mode"] = serde_json::json!("snapshot-git");
         lab["workspace_verification"]["identity"] =
