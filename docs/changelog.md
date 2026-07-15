@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.7] - 2026-07-15
+
+### Changed
+- extract observation bundle serialization into core service
+- extract run-evidence persistence into core service
+- Model reusable deploy payload preparation
+- drop lab handoff dependency on core::artifacts
+- extract result-envelope persistence into core service
+- delegate loop-sync persistence to core service
+- Harden snapshot Git provenance verification
+
+### Fixed
+- prevent scheduler retry and scratch-state hangs
+
 ## [0.286.6] - 2026-07-15
 
 ### Changed
