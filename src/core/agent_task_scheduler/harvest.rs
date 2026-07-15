@@ -579,6 +579,10 @@ mod committed_harvest_tests {
             artifact_nonce: "test-artifact".to_string(),
             task_base_sha: Some(base),
             source_provenance: None,
+            scratch: crate::core::controller_scratch::ControllerScratchAllocation {
+                path: PathBuf::from("/test/controller-scratch/1"),
+                lease_id: "test-lease-1".to_string(),
+            },
         };
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
@@ -761,6 +765,10 @@ mod committed_harvest_tests {
             artifact_nonce: "test".to_string(),
             task_base_sha: Some(baseline),
             source_provenance: Some(source_provenance.clone()),
+            scratch: crate::core::controller_scratch::ControllerScratchAllocation {
+                path: PathBuf::from("/test/controller-scratch/1"),
+                lease_id: "test-lease-1".to_string(),
+            },
         };
         persist_attempt_patch_artifacts(
             &mut outcome,

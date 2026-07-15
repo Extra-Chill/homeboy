@@ -465,6 +465,21 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
             let tmpdir = PathBuf::from(attempt["tmp"].as_str().expect("TMPDIR"));
             assert!(tmpdir.is_dir());
         }
+        let index: Value = serde_json::from_str(
+            &fs::read_to_string(
+                crate::core::paths::homeboy_data()
+                    .expect("homeboy data")
+                    .join("controller-scratch/resources.json"),
+            )
+            .expect("scratch index"),
+        )
+        .expect("scratch index JSON");
+        let resources = index["resources"].as_array().expect("scratch resources");
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0]["lifecycle_state"], "released");
+        assert_eq!(resources[0]["terminal_reason"], "retry");
+        assert_eq!(resources[1]["lifecycle_state"], "released");
+        assert_eq!(resources[1]["terminal_reason"], "succeeded");
     });
 }
 

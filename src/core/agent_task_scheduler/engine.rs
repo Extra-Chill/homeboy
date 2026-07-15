@@ -360,6 +360,30 @@ where
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
+                let run_id = self.run_id.as_deref().unwrap_or(&plan.plan_id);
+                let scratch = match crate::core::controller_scratch::allocate_attempt(
+                    run_id,
+                    &plan.plan_id,
+                    &request.task_id,
+                    scheduled.attempt,
+                ) {
+                    Ok(scratch) => scratch,
+                    Err(error) => {
+                        let outcome =
+                            scratch_allocation_failure(task_id.clone(), error.to_string());
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                };
+                request
+                    .executor
+                    .set_runtime_tmpdir(scratch.path.to_string_lossy().as_ref());
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -415,6 +439,7 @@ where
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
                     source_provenance: harvest_preflight.source_provenance,
+                    scratch: scratch.clone(),
                 });
 
                 thread::spawn(move || {
@@ -424,6 +449,7 @@ where
                         task_id,
                         attempt,
                         outcome,
+                        scratch,
                     }));
                 });
             }
@@ -468,6 +494,7 @@ where
                     let Some(running_task) = running_task else {
                         continue;
                     };
+                    debug_assert_eq!(result.scratch, running_task.scratch);
                     let mut outcome = result.outcome;
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
@@ -529,6 +556,7 @@ where
                         retry_budget_used,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
+                        release_scratch(&result.scratch, "retry", &outcome);
                         retry_budget_used += 1;
                         let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
                         let mut retry_attempts = running_task.retry_attempts;
@@ -573,6 +601,7 @@ where
                             max_attempts,
                             execution_budget.max_provider_rotations,
                         ) {
+                            release_scratch(&result.scratch, "provider_rotation", &outcome);
                             let mut rotation_attempts = running_task.rotation_attempts;
                             rotation_attempts.push(
                                 AgentTaskScheduleSupport::rotation_attempt_record(
@@ -650,6 +679,15 @@ where
                         &execution_budget,
                         result.attempt,
                         running_task.rotation_index,
+                    );
+                    release_scratch(
+                        &result.scratch,
+                        if running_task.timeout_cancel_requested {
+                            "scheduler_timeout_completion"
+                        } else {
+                            terminal_reason(&outcome, cancellation.is_cancelled())
+                        },
+                        &outcome,
                     );
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
@@ -743,6 +781,7 @@ pub(super) struct RunningTask {
     pub(super) task_base_sha: Option<String>,
     /// Verified source identity for snapshot-backed candidate artifacts.
     pub(super) source_provenance: Option<serde_json::Value>,
+    pub(super) scratch: crate::core::controller_scratch::ControllerScratchAllocation,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +799,7 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+    scratch: crate::core::controller_scratch::ControllerScratchAllocation,
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
@@ -772,6 +812,56 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
         "artifacts": outcome.artifacts,
         "evidence_refs": outcome.evidence_refs,
     })
+}
+
+fn release_scratch(
+    allocation: &crate::core::controller_scratch::ControllerScratchAllocation,
+    reason: &str,
+    outcome: &AgentTaskOutcome,
+) {
+    let evidence = serde_json::json!({
+        "task_id": outcome.task_id,
+        "status": outcome.status,
+        "outcome": outcome,
+    });
+    let _ = crate::core::controller_scratch::release_attempt(allocation, reason, evidence);
+}
+
+fn terminal_reason(outcome: &AgentTaskOutcome, cancelled: bool) -> &'static str {
+    if cancelled || outcome.status == AgentTaskOutcomeStatus::Cancelled {
+        "cancelled"
+    } else if outcome.status == AgentTaskOutcomeStatus::Timeout {
+        "provider_timeout"
+    } else if matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) {
+        "succeeded"
+    } else {
+        "provider_failure"
+    }
+}
+
+fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id,
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(format!("could not allocate provider scratch root: {error}")),
+        failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.controller_scratch_allocation_failed".to_string(),
+            message: error,
+            data: serde_json::Value::Null,
+        }],
+        outputs: serde_json::Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: serde_json::Value::Null,
+    }
 }
 
 fn reset_attempt_request(

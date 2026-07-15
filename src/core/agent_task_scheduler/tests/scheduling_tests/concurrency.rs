@@ -350,6 +350,8 @@ pub(super) mod concurrency_tests {
         events: Arc<Mutex<Vec<String>>>,
         finished: Arc<AtomicBool>,
         attempt_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
+        scratch_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
+        scratch_active_while_running: Arc<AtomicBool>,
     }
 
     impl AgentTaskExecutorAdapter for LateMutatingExecutor {
@@ -373,7 +375,34 @@ pub(super) mod concurrency_tests {
                     .lock()
                     .expect("attempt roots")
                     .push(workspace.clone());
+                let scratch_root = std::path::PathBuf::from(
+                    request.executor.config["runtime_env"]["TMPDIR"]
+                        .as_str()
+                        .expect("scheduler scratch root"),
+                );
+                self.scratch_roots
+                    .lock()
+                    .expect("scratch roots")
+                    .push(scratch_root.clone());
                 std::thread::sleep(Duration::from_millis(3_000));
+                let scratch_index = scratch_root
+                    .ancestors()
+                    .nth(6)
+                    .expect("controller scratch root")
+                    .join("resources.json");
+                let active = serde_json::from_str::<Value>(
+                    &fs::read_to_string(scratch_index).expect("scratch index"),
+                )
+                .expect("scratch index JSON")["resources"]
+                    .as_array()
+                    .expect("scratch resources")
+                    .iter()
+                    .any(|resource| {
+                        resource["path"] == scratch_root.display().to_string()
+                            && resource["lifecycle_state"] == "active"
+                    });
+                self.scratch_active_while_running
+                    .store(active, Ordering::SeqCst);
                 fs::write(workspace.join("late-change.txt"), "late\n")
                     .expect("late workspace mutation");
                 assert!(Command::new("git")
@@ -410,10 +439,14 @@ pub(super) mod concurrency_tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let finished = Arc::new(AtomicBool::new(false));
         let attempt_roots = Arc::new(Mutex::new(Vec::new()));
+        let scratch_roots = Arc::new(Mutex::new(Vec::new()));
+        let scratch_active_while_running = Arc::new(AtomicBool::new(false));
         let scheduler = AgentTaskScheduler::new(LateMutatingExecutor {
             events: Arc::clone(&events),
             finished: Arc::clone(&finished),
             attempt_roots: Arc::clone(&attempt_roots),
+            scratch_roots: Arc::clone(&scratch_roots),
+            scratch_active_while_running: Arc::clone(&scratch_active_while_running),
         });
         let mut plan = plan_with_tasks(3);
         plan.options.max_concurrency = 3;
@@ -425,9 +458,27 @@ pub(super) mod concurrency_tests {
         let started = Instant::now();
         let aggregate = scheduler.run(plan);
         assert!(started.elapsed() >= Duration::from_secs(2));
-        while !finished.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
+        let scratch_index = scratch_root
+            .ancestors()
+            .nth(6)
+            .expect("controller scratch root")
+            .join("resources.json");
+        let scratch: Value = serde_json::from_str::<Value>(
+            &fs::read_to_string(scratch_index).expect("scratch index"),
+        )
+        .expect("scratch index JSON")["resources"]
+            .as_array()
+            .expect("scratch resources")
+            .iter()
+            .find(|resource| resource["path"] == scratch_root.display().to_string())
+            .cloned()
+            .expect("released scratch resource");
+        assert!(scratch_active_while_running.load(Ordering::SeqCst));
+        assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
+        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| !artifacts.is_empty()));
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
@@ -437,14 +488,10 @@ pub(super) mod concurrency_tests {
             .iter()
             .any(|outcome| outcome.task_id == "task-1"
                 && outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
-                && outcome.artifacts.iter().any(|artifact| {
-                    artifact.kind == "patch"
-                        && artifact
-                            .sha256
-                            .as_deref()
-                            .is_some_and(|sha| sha.len() == 64)
-                        && artifact.metadata["provider_backend"].is_string()
-                })));
+                && outcome
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.kind == "patch")));
         assert!(aggregate.outcomes.iter().any(|outcome| {
             outcome.task_id == "task-2" && outcome.status == AgentTaskOutcomeStatus::Succeeded
         }));

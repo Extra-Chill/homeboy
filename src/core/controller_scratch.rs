@@ -31,6 +31,10 @@ pub struct ControllerScratchResource {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,10 +109,42 @@ pub fn allocate_attempt(
         source_ref: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         finalized_at: None,
+        terminal_reason: None,
+        terminal_evidence: None,
     });
     write_index(&index)?;
 
     Ok(ControllerScratchAllocation { path, lease_id })
+}
+
+/// Releases one scheduler-owned attempt after its candidate evidence has been
+/// harvested. The first terminal record is authoritative, making retries and
+/// duplicate provider completions safe to replay.
+pub fn release_attempt(
+    allocation: &ControllerScratchAllocation,
+    reason: &str,
+    evidence: serde_json::Value,
+) -> Result<()> {
+    let mut index = read_index()?;
+    let Some(resource) = index.resources.iter_mut().find(|resource| {
+        resource.lease_id == allocation.lease_id
+            && Path::new(&resource.path) == allocation.path.as_path()
+    }) else {
+        return Err(Error::validation_invalid_argument(
+            "controller_scratch.lease_id",
+            "allocated scratch lease is not registered",
+            Some(allocation.lease_id.clone()),
+            None,
+        ));
+    };
+    if resource.finalized_at.is_none() {
+        resource.lifecycle_state = "released".to_string();
+        resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
+        resource.terminal_reason = Some(reason.to_string());
+        resource.terminal_evidence = Some(evidence);
+        write_index(&index)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -224,6 +260,8 @@ pub fn register_outcome_resources(run_id: &str, outcomes: &[AgentTaskOutcome]) -
                     .map(str::to_string),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 finalized_at: None,
+                terminal_reason: None,
+                terminal_evidence: None,
             };
             index
                 .resources
@@ -514,6 +552,8 @@ mod tests {
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             finalized_at: Some(chrono::Utc::now().to_rfc3339()),
+            terminal_reason: None,
+            terminal_evidence: None,
         }
     }
 
@@ -555,6 +595,42 @@ mod tests {
             assert_eq!(resource.owner_pid, std::process::id());
             assert!(resource.reconstructable);
             assert!(!resource.created_at.is_empty());
+        });
+    }
+
+    #[test]
+    fn release_is_idempotent_and_preserves_first_terminal_evidence() {
+        crate::test_support::with_isolated_home(|_| {
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 1).expect("allocate");
+            release_attempt(
+                &allocation,
+                "provider_failure",
+                serde_json::json!({ "artifact": "first" }),
+            )
+            .expect("first release");
+            release_attempt(
+                &allocation,
+                "cancelled",
+                serde_json::json!({ "artifact": "second" }),
+            )
+            .expect("replayed release");
+
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == allocation.lease_id)
+                .expect("resource");
+            assert_eq!(resource.lifecycle_state, "released");
+            assert_eq!(
+                resource.terminal_reason.as_deref(),
+                Some("provider_failure")
+            );
+            assert_eq!(
+                resource.terminal_evidence,
+                Some(serde_json::json!({ "artifact": "first" }))
+            );
+            assert!(resource.finalized_at.is_some());
         });
     }
 
