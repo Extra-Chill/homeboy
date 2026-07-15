@@ -444,6 +444,10 @@ pub enum AuditFinding {
     UnboundedOutputCapture,
     /// Declared command scenario output differs from its expected status contract.
     CommandStatusContractViolation,
+    /// A declared command-status scenario references a golden fixture file that
+    /// is missing or unreadable. This is test-data hygiene (write or remove the
+    /// fixture), distinct from an actual status-contract violation.
+    CommandStatusFixtureMissing,
     /// A command-layer module accumulates orchestration/business logic that
     /// should live in a core service. Command modules are expected to stay thin
     /// adapters (argument parsing, typed request construction, output
@@ -522,6 +526,7 @@ impl AuditFinding {
             "non_portable_artifact_path",
             "unbounded_output_capture",
             "command_status_contract_violation",
+            "command_status_fixture_missing",
             "thin_command_adapter_violation",
         ]
     }
