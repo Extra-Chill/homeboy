@@ -4,6 +4,44 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.0] - 2026-07-15
+
+### Added
+- unify agent task execution budgets
+- scope Lab execution placement flags
+- persist daemon termination evidence
+- coordinate declared agent-task resources
+
+### Changed
+- align stale assertions with current service/bench/daemon contracts
+- Persist runner child identity for orphan recovery
+- move shared resource-policy context into core
+- Use configured worktree providers for cook promotion
+- Improve fuzz Lab ergonomics
+- Persist deploy timing and resumable target state
+- Reuse the release artifact during deployment
+- Version portable snapshot content identity
+- Ignore runner metadata in snapshot identity
+- repair stale git-sync and rig-lint conflict fixtures
+- Generate PR bodies from typed review dossiers
+- break paths<->defaults dependency cycle via resolver hook
+- add hermetic Homeboy test context
+- extract process and finding types into dedicated crates
+
+### Fixed
+- scope harvest provenance to snapshots
+- Fix Lab cook harvest path provenance
+- guard stale and downgrade deployments
+- Fix Git Lab harvest provenance validation
+- build release packages once
+- verify and reuse release deploy assets
+- repair broken test-target build from merge collisions
+- Fix explicit Lab runner resource preflight
+- remap Lab cook attempt plan paths
+- correct artifact size sort and lab-runner default eligibility
+- preserve Lab cook provider policy
+- report live Lab cook progress accurately
+
 ## [0.285.2] - 2026-07-14
 
 ### Changed
