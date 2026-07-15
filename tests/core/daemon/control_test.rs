@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::Duration;
@@ -16,6 +16,29 @@ use crate::core::daemon::{
     DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
 };
 use crate::test_support::with_isolated_home;
+
+#[cfg(unix)]
+#[test]
+fn detached_daemon_owner_does_not_inherit_the_launcher_session() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf '%s\\n' \"$$\"; sleep 30"]);
+    super::detach_from_launcher_session(&mut command);
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("child");
+    let mut stdout = String::new();
+    BufReader::new(child.stdout.take().expect("child stdout"))
+        .read_line(&mut stdout)
+        .expect("read child pid");
+    let pid = stdout.trim().parse::<libc::pid_t>().expect("child pid");
+
+    // A session leader has a session ID equal to its PID, so the child can no
+    // longer receive SSH-launcher session teardown signals.
+    assert_eq!(unsafe { libc::getsid(pid) }, pid);
+    assert_eq!(unsafe { libc::kill(-pid, libc::SIGTERM) }, 0);
+    child.wait().expect("reap child");
+}
 
 #[derive(Default)]
 struct FakeEnsureState {
