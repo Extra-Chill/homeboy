@@ -225,6 +225,7 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
         permissions.set_mode(0o755);
         std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
     }
+    let provider_path = provider.into_temp_path();
     let mut config = HomeboyConfig::default();
     config.worktree_providers.insert(
         "fixture".to_string(),
@@ -234,7 +235,7 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
             apply_enabled: true,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![
-                    provider.path().display().to_string(),
+                    provider_path.display().to_string(),
                     "{handle}".to_string(),
                 ]),
                 ..Default::default()
@@ -323,6 +324,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
         permissions.set_mode(0o755);
         std::fs::set_permissions(provider.path(), permissions).expect("make provider executable");
     }
+    let provider_path = provider.into_temp_path();
     let mut config = HomeboyConfig::default();
     config.worktree_providers.insert(
         "fixture".to_string(),
@@ -332,7 +334,7 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
             apply_enabled: false,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![
-                    provider.path().display().to_string(),
+                    provider_path.display().to_string(),
                     "{handle}".to_string(),
                 ]),
                 ..Default::default()
