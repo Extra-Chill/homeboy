@@ -10,7 +10,7 @@ use crate::core::{paths, runner, Result};
 pub(crate) fn index_published_artifact_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
-    source_path: Option<&Path>,
+    source_paths: &[&Path],
 ) -> Result<()> {
     if source.artifact_type != "file" || !json_artifact(source) {
         return Ok(());
@@ -26,11 +26,15 @@ pub(crate) fn index_published_artifact_refs(
     };
 
     let artifact_root = paths::artifact_root()?;
-    let source_bases = source_path
-        .and_then(Path::parent)
-        .into_iter()
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
+    let mut source_bases = Vec::new();
+    for source_path in source_paths {
+        if let Some(parent) = source_path.parent() {
+            let parent = parent.to_path_buf();
+            if !source_bases.contains(&parent) {
+                source_bases.push(parent);
+            }
+        }
+    }
     index_manifest_refs(store, source, &manifest, |locator| {
         let Some(path) = artifact_store_path(&artifact_root, locator) else {
             return Ok(None);

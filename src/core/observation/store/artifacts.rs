@@ -275,10 +275,14 @@ impl ObservationStore {
                 "Inserted artifact record {id} but could not read it back"
             ))
         })?;
+        // Nested publication artifacts referenced by a manifest are authored
+        // relative to the *original* manifest path, not the UUID-addressed
+        // stored copy. Pass both so the materializer can locate a nested
+        // artifact-store ref next to the manifest as recorded.
         crate::core::publication_artifacts::index_published_artifact_refs(
             self,
             &artifact,
-            Some(&stored_path),
+            &[stored_path.as_path(), path],
         )?;
         Ok(artifact)
     }
