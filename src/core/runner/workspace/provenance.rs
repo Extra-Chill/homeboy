@@ -25,6 +25,9 @@ pub(crate) struct VerifiedLabWorkspaceProvenance {
     sync_excludes: Vec<String>,
     local_source_path: Option<String>,
     remote_workspace_path: String,
+    synthetic_checkout_commit: Option<String>,
+    synthetic_checkout_ref: Option<String>,
+    synthetic_checkout_tree: Option<String>,
 }
 
 /// Creates a deterministic Git root for a verified Lab snapshot so generic
@@ -110,13 +113,101 @@ pub(crate) fn verify_lab_workspace_git_root(
 ) -> std::result::Result<(), String> {
     match provenance.materialization_mode.as_str() {
         "git" => verify_git_materialization_root(workspace, provenance),
-        "snapshot" | "snapshot-git" => {
-            verify_synthetic_snapshot_git_baseline(workspace, provenance)
-        }
+        "snapshot" => verify_synthetic_snapshot_git_baseline(workspace, provenance),
+        "snapshot-git" => verify_materialized_snapshot_git_checkout(workspace, provenance),
         mode => Err(format!(
             "unsupported workspace materialization mode `{mode}`"
         )),
     }
+}
+
+fn verify_materialized_snapshot_git_checkout(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<(), String> {
+    verify_snapshot_workspace_content(workspace, provenance)?;
+    let root = workspace
+        .canonicalize()
+        .map_err(|error| format!("could not canonicalize workspace: {error}"))?;
+    let git_root = PathBuf::from(git(workspace, &["rev-parse", "--show-toplevel"])?)
+        .canonicalize()
+        .map_err(|error| format!("could not canonicalize Git root: {error}"))?;
+    if root != git_root {
+        return Err("Git top-level does not exactly match the managed workspace root".to_string());
+    }
+    if let Some(path) = nested_git_metadata(workspace)? {
+        return Err(format!(
+            "snapshot workspace contains nested Git metadata at {}",
+            path.display()
+        ));
+    }
+    let expected_commit = provenance
+        .synthetic_checkout_commit
+        .as_deref()
+        .filter(|value| is_git_revision(value))
+        .ok_or("snapshot-git provenance is missing a valid synthetic checkout commit")?;
+    let expected_ref = provenance
+        .synthetic_checkout_ref
+        .as_deref()
+        .filter(|value| value.starts_with("refs/heads/"))
+        .ok_or("snapshot-git provenance is missing a synthetic checkout branch ref")?;
+    let expected_tree = provenance
+        .synthetic_checkout_tree
+        .as_deref()
+        .filter(|value| is_git_revision(value))
+        .ok_or("snapshot-git provenance is missing a valid synthetic checkout tree")?;
+    if git(workspace, &["symbolic-ref", "--quiet", "HEAD"])? != expected_ref {
+        return Err("snapshot-git HEAD is not on the recorded synthetic checkout ref".to_string());
+    }
+    if git(workspace, &["rev-parse", "HEAD"])? != expected_commit
+        || git(workspace, &["rev-parse", expected_ref])? != expected_commit
+    {
+        return Err(
+            "snapshot-git HEAD/ref does not match the recorded synthetic checkout commit"
+                .to_string(),
+        );
+    }
+    if !git(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("snapshot-git workspace is not clean".to_string());
+    }
+    if git(workspace, &["rev-parse", "HEAD^{tree}"])? != expected_tree
+        || git(workspace, &["write-tree"])? != expected_tree
+    {
+        return Err("snapshot-git checkout tree does not match recorded provenance".to_string());
+    }
+    if git(workspace, &["rev-list", "--parents", "-n", "1", "HEAD"])?
+        .split_whitespace()
+        .count()
+        != 1
+    {
+        return Err("snapshot-git synthetic checkout commit must not have parents".to_string());
+    }
+    let identity = provenance.workspace_identity.as_str();
+    if git(workspace, &["log", "-1", "--format=%B"])? != format!("Homeboy snapshot {identity}") {
+        return Err("snapshot-git commit message does not match its snapshot identity".to_string());
+    }
+    if git(workspace, &["show", "-s", "--format=%an <%ae>", "HEAD"])?
+        != "Homeboy Snapshot <homeboy-snapshot@localhost>"
+    {
+        return Err("snapshot-git commit author does not match Homeboy identity".to_string());
+    }
+    let expected_note = format!(
+        "snapshot_identity={identity}\nsource_head={}",
+        provenance.source_revision
+    );
+    if git(
+        workspace,
+        &["notes", "--ref=homeboy-snapshot", "show", "HEAD"],
+    )? != expected_note
+    {
+        return Err("snapshot-git note does not match the verified source snapshot".to_string());
+    }
+    Ok(())
 }
 
 fn verify_git_materialization_root(
@@ -423,6 +514,9 @@ pub(crate) fn verify_lab_workspace(
         sync_excludes: snapshot.sync_excludes,
         local_source_path: snapshot.local_path,
         remote_workspace_path: recorded_remote_path.to_string(),
+        synthetic_checkout_commit: snapshot.synthetic_checkout_commit,
+        synthetic_checkout_ref: snapshot.synthetic_checkout_ref,
+        synthetic_checkout_tree: snapshot.synthetic_checkout_tree,
     };
     if provenance.materialization_mode != "git" {
         verify_snapshot_workspace_content(materialized_workspace_path, &provenance)?;
@@ -561,6 +655,9 @@ mod tests {
             dirty: false,
             sync_mode: LAB_SOURCE_SNAPSHOT_SYNC_MODE.to_string(),
             workspace_snapshot_identity: Some("snapshot:verified-content".to_string()),
+            synthetic_checkout_commit: None,
+            synthetic_checkout_ref: None,
+            synthetic_checkout_tree: None,
             snapshot_hash: "sha256:verified-source".to_string(),
             synced_at: "2026-01-01T00:00:00Z".to_string(),
             sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
@@ -653,6 +750,49 @@ mod tests {
         )
         .expect("synthetic baseline");
         (workspace, provenance)
+    }
+
+    fn materialized_production_snapshot_git_workspace(
+    ) -> (tempfile::TempDir, VerifiedLabWorkspaceProvenance) {
+        let source = git_workspace();
+        let remote_root = tempfile::tempdir().expect("runner root");
+        let remote = remote_root.path().join("workspace");
+        let excludes = vec![".git".to_string(), ".git/**".to_string()];
+        let identity = super::super::snapshot::snapshot_identity(source.path(), &excludes, &[])
+            .expect("snapshot identity");
+        let runner: crate::core::runner::Runner = serde_json::from_value(serde_json::json!({
+            "id": "lab", "kind": "local"
+        }))
+        .expect("local runner");
+        let synthetic = super::super::snapshot::materialize_snapshot_git(
+            &runner,
+            source.path(),
+            &remote.display().to_string(),
+            &excludes,
+            &identity,
+        )
+        .expect("production snapshot-git materialization");
+        let mut snapshot = SourceSnapshot::collect_local(
+            "lab",
+            source.path(),
+            Some(&remote.display().to_string()),
+            LAB_SOURCE_SNAPSHOT_SYNC_MODE,
+        );
+        snapshot.sync_excludes = excludes;
+        snapshot.workspace_snapshot_identity = Some(identity);
+        snapshot.synthetic_checkout_commit = synthetic.synthetic_commit;
+        snapshot.synthetic_checkout_ref = synthetic.synthetic_ref;
+        snapshot.synthetic_checkout_tree = synthetic.synthetic_tree;
+        let mut lab = lab(&remote, &snapshot);
+        lab["sync_mode"] = serde_json::json!("snapshot-git");
+        lab["workspace_verification"]["identity"] =
+            serde_json::json!(snapshot.workspace_snapshot_identity);
+        lab["workspace_verification"]["primary_workspace"]["identity"] =
+            serde_json::json!(snapshot.workspace_snapshot_identity);
+        let provenance =
+            verify_lab_workspace(&remote.display().to_string(), &remote, snapshot, lab)
+                .expect("verified production snapshot-git provenance");
+        (remote_root, provenance)
     }
 
     #[test]
@@ -817,9 +957,6 @@ mod tests {
         let (workspace, provenance) = materialized_snapshot_workspace();
         verify_lab_workspace_git_root(workspace.path(), &provenance)
             .expect("deterministic synthetic baseline");
-        let (workspace, provenance) = materialized_snapshot_workspace_for_mode("snapshot-git");
-        verify_lab_workspace_git_root(workspace.path(), &provenance)
-            .expect("deterministic snapshot-git baseline");
         git(workspace.path(), &["checkout", "--quiet", "--detach"])
             .expect("detach synthetic baseline");
         verify_lab_workspace_git_root(workspace.path(), &provenance)
@@ -894,6 +1031,48 @@ mod tests {
         assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
             .expect_err("mismatched snapshot metadata must fail")
             .contains("does not match verified provenance"));
+    }
+
+    #[test]
+    fn production_snapshot_git_checkout_verifier_rejects_tampering() {
+        let (workspace, provenance) = materialized_production_snapshot_git_workspace();
+        verify_lab_workspace_git_root(workspace.path().join("workspace").as_path(), &provenance)
+            .expect("production snapshot-git checkout");
+
+        let workspace_path = workspace.path().join("workspace");
+        git(&workspace_path, &["checkout", "--quiet", "--detach"])
+            .expect("detach snapshot-git checkout");
+        verify_lab_workspace_git_root(&workspace_path, &provenance)
+            .expect_err("snapshot-git ref/HEAD tampering must fail");
+
+        let (workspace, provenance) = materialized_production_snapshot_git_workspace();
+        let workspace_path = workspace.path().join("workspace");
+        let tree = git(&workspace_path, &["rev-parse", "HEAD^{tree}"]).expect("baseline tree");
+        let changed = git(
+            &workspace_path,
+            &["commit-tree", &tree, "-m", "changed message"],
+        )
+        .expect("changed message commit");
+        let reference = provenance.synthetic_checkout_ref.as_deref().unwrap();
+        git(&workspace_path, &["update-ref", reference, &changed]).expect("move ref");
+        verify_lab_workspace_git_root(&workspace_path, &provenance)
+            .expect_err("snapshot-git message/commit tampering must fail");
+
+        let (workspace, provenance) = materialized_production_snapshot_git_workspace();
+        let workspace_path = workspace.path().join("workspace");
+        std::fs::write(workspace_path.join("file.txt"), "changed tree\n").expect("change tree");
+        git(&workspace_path, &["add", "--all"]).expect("stage changed tree");
+        let tree = git(&workspace_path, &["write-tree"]).expect("changed tree");
+        let changed = git(
+            &workspace_path,
+            &["commit-tree", &tree, "-m", "changed tree"],
+        )
+        .expect("changed tree commit");
+        let reference = provenance.synthetic_checkout_ref.as_deref().unwrap();
+        git(&workspace_path, &["update-ref", reference, &changed]).expect("move ref");
+        git(&workspace_path, &["reset", "--hard", "--quiet"]).expect("checkout changed tree");
+        verify_lab_workspace_git_root(&workspace_path, &provenance)
+            .expect_err("snapshot-git tree tampering must fail");
     }
 
     #[test]

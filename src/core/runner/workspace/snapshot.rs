@@ -516,6 +516,8 @@ pub(crate) fn materialize_snapshot_git(
 pub(crate) struct SyntheticCheckoutIdentity {
     /// Commit SHA of the synthetic checkout created in the runner workspace.
     pub(crate) synthetic_commit: Option<String>,
+    pub(crate) synthetic_ref: Option<String>,
+    pub(crate) synthetic_tree: Option<String>,
 }
 
 fn initialize_synthetic_git_checkout(
@@ -563,26 +565,38 @@ fn initialize_synthetic_git_checkout(
     // checkout identity). Best-effort: a read-back failure must not fail the
     // sync, since the checkout itself already succeeded above. The source
     // commit is recorded separately via the local worktree git state.
-    let synthetic_commit = synthetic_checkout_head(runner, remote_path);
+    let synthetic_commit = synthetic_checkout_value(runner, remote_path, "rev-parse HEAD");
+    let synthetic_ref = synthetic_checkout_value(runner, remote_path, "symbolic-ref --quiet HEAD");
+    let synthetic_tree = synthetic_checkout_value(runner, remote_path, "rev-parse HEAD^{tree}");
 
-    Ok(SyntheticCheckoutIdentity { synthetic_commit })
+    Ok(SyntheticCheckoutIdentity {
+        synthetic_commit,
+        synthetic_ref,
+        synthetic_tree,
+    })
 }
 
 /// Best-effort read of the synthetic checkout's HEAD commit SHA from the
 /// materialized runner workspace. Returns `None` when the runner is remote and
 /// unreachable, or the read otherwise fails — provenance is advisory evidence,
 /// not a correctness gate.
-fn synthetic_checkout_head(runner: &Runner, remote_path: &str) -> Option<String> {
+fn synthetic_checkout_value(runner: &Runner, remote_path: &str, command: &str) -> Option<String> {
     match runner.kind {
-        RunnerKind::Local => git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok(),
+        RunnerKind::Local => run_shell_capture(&format!(
+            "git -C {} {command}",
+            shell::quote_arg(remote_path)
+        )),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner).ok()?;
             if client.is_local {
-                git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok()
+                run_shell_capture(&format!(
+                    "git -C {} {command}",
+                    shell::quote_arg(remote_path)
+                ))
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let remote_command = format!(
-                    "git -C {remote_path} rev-parse HEAD",
+                    "git -C {remote_path} {command}",
                     remote_path = shell::quote_arg(remote_path),
                 );
                 let ssh_command = format!(

@@ -967,6 +967,8 @@ mod tests {
                 source_ref: None,
                 source_dirty: None,
                 synthetic_checkout_commit: None,
+                synthetic_checkout_ref: None,
+                synthetic_checkout_tree: None,
             },
             workspace_lease: RunnerWorkspaceLease {
                 runner_id: runner_id.to_string(),

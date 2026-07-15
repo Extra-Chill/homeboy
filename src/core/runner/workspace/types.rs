@@ -458,6 +458,10 @@ pub struct RunnerWorkspaceCurrentSummary {
     /// into the runner workspace. `None` for plain `snapshot`/`git` syncs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synthetic_checkout_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_tree: Option<String>,
 }
 
 /// File + byte counts for a synced/snapshotted workspace tree.

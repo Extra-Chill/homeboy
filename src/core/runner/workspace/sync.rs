@@ -111,10 +111,14 @@ pub fn sync_workspace(
                 workspace_cleanliness,
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
-            let synthetic_checkout_commit = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
-            {
-                materialize_snapshot_git(&runner, &local_path, &remote_path, &excludes, &snapshot)?
-                    .synthetic_commit
+            let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                Some(materialize_snapshot_git(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                    &snapshot,
+                )?)
             } else {
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
                 None
@@ -154,7 +158,7 @@ pub fn sync_workspace(
                 &remote_path,
                 options.mode,
                 true,
-                synthetic_checkout_commit,
+                synthetic_checkout,
             );
             let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
@@ -1527,7 +1531,7 @@ fn current_workspace_summary(
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
     materialized: bool,
-    synthetic_checkout_commit: Option<String>,
+    synthetic_checkout: Option<super::snapshot::SyntheticCheckoutIdentity>,
 ) -> RunnerWorkspaceCurrentSummary {
     let git_state = local_git_state(local_path);
     RunnerWorkspaceCurrentSummary {
@@ -1538,7 +1542,13 @@ fn current_workspace_summary(
         source_commit: git_state.commit,
         source_ref: git_state.ref_name,
         source_dirty: git_state.dirty,
-        synthetic_checkout_commit,
+        synthetic_checkout_commit: synthetic_checkout
+            .as_ref()
+            .and_then(|identity| identity.synthetic_commit.clone()),
+        synthetic_checkout_ref: synthetic_checkout
+            .as_ref()
+            .and_then(|identity| identity.synthetic_ref.clone()),
+        synthetic_checkout_tree: synthetic_checkout.and_then(|identity| identity.synthetic_tree),
     }
 }
 

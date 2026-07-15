@@ -24,6 +24,8 @@ fn synced_workspace(local_path: String) -> RunnerWorkspaceSyncOutput {
             source_ref: None,
             source_dirty: None,
             synthetic_checkout_commit: None,
+            synthetic_checkout_ref: None,
+            synthetic_checkout_tree: None,
         },
         workspace_lease: crate::core::runner::RunnerWorkspaceLease {
             runner_id: "lab".to_string(),
@@ -63,6 +65,9 @@ fn source_snapshot(local_path: String) -> SourceSnapshot {
         dirty: false,
         sync_mode: "lab_offload".to_string(),
         workspace_snapshot_identity: Some("snapshot:workspace".to_string()),
+        synthetic_checkout_commit: None,
+        synthetic_checkout_ref: None,
+        synthetic_checkout_tree: None,
         snapshot_hash: "sha256:source".to_string(),
         synced_at: "2026-06-28T00:00:00Z".to_string(),
         sync_excludes: Vec::new(),
