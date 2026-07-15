@@ -21,6 +21,20 @@ impl AttemptWorkspace {
     pub(super) fn retain_for_diagnostics(&self) {
         self.retain.store(true, Ordering::Release);
     }
+
+    pub(super) fn cleanup(&self) -> Result<(), String> {
+        let remove = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.root)
+            .current_dir(&self.source_root)
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !remove.success() {
+            return Err(format!("git worktree remove exited {remove}"));
+        }
+        self.retain.store(true, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl Drop for AttemptWorkspace {

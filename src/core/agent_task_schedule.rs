@@ -628,6 +628,53 @@ mod config {
         /// as `--dispatch-provider-config` / `--provider-config`).
         #[serde(default, skip_serializing_if = "Value::is_null")]
         pub provider_config: Value,
+        /// Explicitly opt a later provider into continuing one verified patch
+        /// candidate. The scheduler never adopts a candidate implicitly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub adoption: Option<AgentTaskCandidateAdoption>,
+    }
+
+    /// Immutable identity for a patch handed from one provider attempt to the
+    /// next. Content is resolved from the selected run artifact at dispatch
+    /// time, rather than persisted in rotation policy.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct AgentTaskCandidateAdoption {
+        #[serde(skip)]
+        pub source_run_id: String,
+        #[serde(skip)]
+        pub source_task_id: String,
+        #[serde(skip)]
+        pub source_attempt: u32,
+        #[serde(skip)]
+        pub provider_backend: String,
+        #[serde(skip)]
+        pub provider_selector: Option<String>,
+        #[serde(skip)]
+        pub provider_model: Option<String>,
+        #[serde(skip)]
+        pub task_base_sha: String,
+        #[serde(skip)]
+        pub repository_identity: String,
+        #[serde(skip)]
+        pub workspace_identity: String,
+        #[serde(skip)]
+        pub artifact_id: String,
+        #[serde(skip)]
+        pub sha256: String,
+        pub decision: AgentTaskCandidateAdoptionDecision,
+        /// Scheduler-populated content resolved from the selected artifact.
+        /// This is never accepted from or serialized into rotation policy.
+        #[serde(skip)]
+        pub content: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentTaskCandidateAdoptionDecision {
+        /// At rotation time, select exactly one actionable patch from the
+        /// immediately preceding provider attempt. No future artifact ID or
+        /// digest appears in static policy.
+        AdoptPreviousCandidate,
     }
 
     /// Durable evidence for one dispatch attempt of a task under a provider
@@ -728,7 +775,9 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
+        /// Backward-compatible aggregate projection for older durable records.
         CandidateRecoverable,
+        PartialRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
@@ -747,6 +796,8 @@ mod aggregate {
         pub succeeded: usize,
         #[serde(default)]
         pub candidate_recoverable: usize,
+        #[serde(default)]
+        pub recoverable_candidates: usize,
         #[serde(default)]
         pub failed: usize,
         #[serde(default)]

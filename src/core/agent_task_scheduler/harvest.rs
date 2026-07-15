@@ -583,6 +583,8 @@ mod committed_harvest_tests {
                 path: PathBuf::from("/test/controller-scratch/1"),
                 lease_id: "test-lease-1".to_string(),
             },
+            adoption: None,
+            join_handle: None,
         };
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
@@ -769,6 +771,8 @@ mod committed_harvest_tests {
                 path: PathBuf::from("/test/controller-scratch/1"),
                 lease_id: "test-lease-1".to_string(),
             },
+            adoption: None,
+            join_handle: None,
         };
         persist_attempt_patch_artifacts(
             &mut outcome,

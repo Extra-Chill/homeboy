@@ -30,6 +30,7 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
     if matches!(
         state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled

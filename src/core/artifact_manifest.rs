@@ -343,9 +343,17 @@ pub fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
 
 pub fn normalize_relative_artifact_path(relative: impl AsRef<Path>) -> Result<String> {
     let relative = relative.as_ref();
+    // Artifact contracts cross operating-system boundaries, so treat Windows
+    // separators and drive prefixes as unsafe even when Homeboy runs on Unix.
+    let portable = relative.to_string_lossy().replace('\\', "/");
+    let relative = Path::new(&portable);
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
+        || has_windows_drive_prefix(&portable)
         || relative.components().any(disallowed_component)
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::Normal(part) if part.eq_ignore_ascii_case(".git")))
     {
         return Err(Error::validation_invalid_argument(
             "path",
@@ -575,6 +583,13 @@ fn disallowed_component(component: Component<'_>) -> bool {
     )
 }
 
+fn has_windows_drive_prefix(path: &str) -> bool {
+    path.as_bytes()
+        .get(1)
+        .is_some_and(|separator| *separator == b':')
+        && path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+}
+
 fn canonicalize_existing_dir(path: &Path, field: &str) -> Result<PathBuf> {
     let canonical = path.canonicalize().map_err(|e| {
         Error::internal_io(
@@ -776,11 +791,24 @@ mod tests {
                 .expect("normalized path"),
             "logs/output.txt"
         );
+        assert_eq!(
+            normalize_relative_artifact_path("logs\\output.txt").expect("normalized path"),
+            "logs/output.txt"
+        );
     }
 
     #[test]
     fn rejects_unsafe_relative_artifact_paths() {
-        for path in ["", ".", "logs/../secret.txt", "/tmp/output.txt"] {
+        for path in [
+            "",
+            ".",
+            "logs/../secret.txt",
+            "/tmp/output.txt",
+            "C:\\temp\\output.txt",
+            "\\\\server\\share\\output.txt",
+            ".git/config",
+            "artifacts/.git/config",
+        ] {
             let err = normalize_relative_artifact_path(path).expect_err("unsafe path");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
         }

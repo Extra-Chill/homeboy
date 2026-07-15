@@ -70,6 +70,7 @@ where
         let status = match output.status {
             AgentTaskAggregateStatus::Succeeded => DeterministicLoopStatus::Succeeded,
             AgentTaskAggregateStatus::CandidateRecoverable => DeterministicLoopStatus::Failed,
+            AgentTaskAggregateStatus::PartialRecoverable => DeterministicLoopStatus::Failed,
             AgentTaskAggregateStatus::PartialFailure | AgentTaskAggregateStatus::Failed => {
                 DeterministicLoopStatus::Failed
             }
