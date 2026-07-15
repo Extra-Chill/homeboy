@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.15] - 2026-07-15
+
+### Fixed
+- fail closed when review commands do not finish
+
 ## [2.8.14] - 2026-07-15
 
 ### Fixed
