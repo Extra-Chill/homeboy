@@ -1,6 +1,6 @@
 //! Durable handoff and run-location evidence for detached Lab jobs.
 
-use crate::core::runner_execution_envelope::PathMaterializationPlan;
+use crate::core::path_materialization::PathMaterializationPlan;
 
 use super::RunnerWorkloadArtifactRef;
 
