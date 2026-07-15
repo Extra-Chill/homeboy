@@ -387,7 +387,7 @@ where
                 // Requests retain artifact facts for review, never authorization.
                 follow_up_request.inputs["cook_loop"]["artifact_provenance"] =
                     baseline.artifact_provenance();
-                let follow_up_plan = AgentTaskPlan::new(
+                let mut follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
                 );
