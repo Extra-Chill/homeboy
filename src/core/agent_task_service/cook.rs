@@ -1172,15 +1172,10 @@ mod tests {
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
     };
-    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _lock = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env_lock = crate::test_support::env_lock();
         let prior = std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
         let context = crate::core::agent_task_scheduler::HarvestExecutionContext::default();
         let first_attempt = cook_attempt_harvest_context(&context);
