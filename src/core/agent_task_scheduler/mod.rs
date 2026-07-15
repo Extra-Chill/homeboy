@@ -1296,8 +1296,17 @@ fn git_is_repository(cwd: &Path) -> Result<bool, HarvestError> {
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Result<String, HarvestError> {
+    git_output_with_env(cwd, args, &[])
+}
+
+fn git_output_with_env(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<String, HarvestError> {
     let output = Command::new("git")
         .args(args)
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .output()
         .map_err(|error| HarvestError::Git {
@@ -1408,6 +1417,242 @@ mod committed_harvest_tests {
             .expect("git command runs");
         assert!(output.status.success(), "git {args:?} failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn test_request(root: &Path) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "lab-snapshot-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(root.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn verified_lab_snapshot_baseline_harvests_committed_and_uncommitted_changes() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = temp.path().join("lab-snapshot");
+        std::fs::create_dir(&snapshot).expect("snapshot directory");
+        std::fs::write(snapshot.join("base.txt"), "base\n").expect("snapshot content");
+        let request = test_request(&snapshot);
+        let path = snapshot.display().to_string();
+        let source_snapshot = SourceSnapshot {
+            runner_id: "lab".to_string(),
+            local_path: Some("/controller/source".to_string()),
+            remote_path: Some(path.clone()),
+            workspace_root: None,
+            git_branch: Some("main".to_string()),
+            git_sha: Some("a".repeat(40)),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            workspace_snapshot_identity: Some("snapshot:committed-harvest".to_string()),
+            snapshot_hash: "sha256:committed-harvest".to_string(),
+            synced_at: "2026-01-01T00:00:00Z".to_string(),
+            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+        };
+        let content_hash =
+            crate::core::runner::workspace_content_hash(&snapshot, &source_snapshot.sync_excludes)
+                .expect("content hash");
+        let content_hash_algorithm = crate::core::runner::workspace_content_hash_algorithm(
+            crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("default content hash algorithm");
+        let lab = serde_json::json!({
+            "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
+            "source_snapshot": source_snapshot,
+            "workspace_verification": {
+                "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:committed-harvest",
+                "content_hash_algorithm": content_hash_algorithm,
+                "permission_policy": crate::core::runner::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                "content_hash": content_hash, "sync_excludes": source_snapshot.sync_excludes,
+                "source_snapshot": source_snapshot,
+                "primary_workspace": { "identity": "snapshot:committed-harvest", "remote_path": snapshot.display().to_string() }
+            }
+        });
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&source_snapshot).expect("snapshot JSON"),
+        );
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::to_string(&lab).expect("Lab JSON"),
+        );
+        let base = prepare_committed_harvest(&request)
+            .expect("verified snapshot baseline")
+            .base_sha
+            .expect("baseline SHA");
+        assert!(snapshot.join(".git").is_dir());
+
+        let mut committed_request = request.clone();
+        let committed_workspace = prepare_attempt_workspace(&mut committed_request, Some(&base))
+            .expect("committed attempt workspace")
+            .expect("committed attempt checkout");
+        let committed_root = PathBuf::from(
+            committed_request
+                .workspace
+                .root
+                .as_deref()
+                .expect("committed attempt root"),
+        );
+        std::fs::write(committed_root.join("committed.txt"), "committed\n")
+            .expect("committed change");
+        git(&committed_root, &["add", "committed.txt"]);
+        git(
+            &committed_root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "provider commit",
+            ],
+        );
+        let mut committed_outcome =
+            committed_harvest_preflight_outcome("lab-snapshot-task".to_string());
+        committed_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        let committed_running = running_task(committed_request, base.clone(), 1);
+        harvest_committed_patch(&mut committed_outcome, &committed_running)
+            .expect("harvest committed snapshot change");
+        assert!(committed_outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.name.as_deref() == Some("committed-changes.patch")));
+        drop(committed_workspace);
+
+        let mut uncommitted_request = request.clone();
+        let uncommitted_workspace =
+            prepare_attempt_workspace(&mut uncommitted_request, Some(&base))
+                .expect("uncommitted attempt workspace")
+                .expect("uncommitted attempt checkout");
+        let uncommitted_root = PathBuf::from(
+            uncommitted_request
+                .workspace
+                .root
+                .as_deref()
+                .expect("uncommitted attempt root"),
+        );
+        std::fs::write(uncommitted_root.join("uncommitted.txt"), "uncommitted\n")
+            .expect("uncommitted change");
+        let mut uncommitted_outcome =
+            committed_harvest_preflight_outcome("lab-snapshot-task".to_string());
+        uncommitted_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        let uncommitted_running = running_task(uncommitted_request, base, 2);
+        harvest_uncommitted_patch(&mut uncommitted_outcome, &uncommitted_running)
+            .expect("harvest uncommitted snapshot change");
+        assert!(uncommitted_outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.name.as_deref() == Some("uncommitted-changes.patch")));
+        drop(uncommitted_workspace);
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    }
+
+    fn running_task(request: AgentTaskRequest, base: String, attempt: u32) -> RunningTask {
+        RunningTask {
+            task_id: "lab-snapshot-task".to_string(),
+            request,
+            workspace_key: None,
+            executor_key: "test".to_string(),
+            model_key: None,
+            resource_units: 1,
+            exclusive_resource_keys: Vec::new(),
+            attempt,
+            started_at: Instant::now(),
+            timeout_ms: None,
+            rotation_index: 0,
+            rotation_attempts: Vec::new(),
+            candidate_artifacts: Vec::new(),
+            same_provider_retries: 0,
+            provider_rotations: 0,
+            retry_attempts: Vec::new(),
+            source_workspace_root: None,
+            _attempt_workspace: None,
+            run_id: Some("lab-snapshot-harvest-test".to_string()),
+            artifact_nonce: format!("test-{attempt}"),
+            task_base_sha: Some(base),
+            source_provenance: None,
+        }
+    }
+
+    #[test]
+    fn invalid_lab_snapshot_provenance_does_not_initialize_git() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let snapshot = temp.path().join("lab-snapshot");
+        std::fs::create_dir(&snapshot).expect("snapshot directory");
+        let request = test_request(&snapshot);
+        let source_snapshot = SourceSnapshot {
+            runner_id: "lab".to_string(),
+            local_path: Some("/controller/source".to_string()),
+            remote_path: Some(snapshot.display().to_string()),
+            workspace_root: None,
+            git_branch: Some("main".to_string()),
+            git_sha: Some("not-a-git-revision".to_string()),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            workspace_snapshot_identity: Some("snapshot:invalid".to_string()),
+            snapshot_hash: "sha256:invalid".to_string(),
+            synced_at: "2026-01-01T00:00:00Z".to_string(),
+            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+        };
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&source_snapshot).expect("snapshot JSON"),
+        );
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::to_string(&serde_json::json!({
+                "runner_id": "lab",
+                "remote_workspace": snapshot.display().to_string(),
+                "sync_mode": "snapshot",
+                "source_snapshot": source_snapshot,
+            }))
+            .expect("Lab JSON"),
+        );
+        let error = match prepare_committed_harvest(&request) {
+            Ok(_) => panic!("invalid provenance fails closed"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, HarvestError::Git { ref message, .. } if message.contains("invalid source revision"))
+        );
+        assert!(!snapshot.join(".git").exists());
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
     }
 
     #[test]
