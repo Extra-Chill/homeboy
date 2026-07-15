@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.24.6] - 2026-07-15
+
+### Fixed
+- prevent recursive codebox readiness checks
+
 ## [3.24.5] - 2026-07-15
 
 ### Changed
