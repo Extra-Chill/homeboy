@@ -2950,31 +2950,11 @@ esac
         }
     }
 
-    #[test]
-    fn generated_daemon_recovery_commands_parse_against_the_actual_cli_contract() {
-        let confirmed_job_id =
-            uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
-        let mut commands = vec![
-            remote_state_loss_recovery_command("homeboy", "lease-dead", 4242, "127.0.0.1:7421"),
-            remote_daemon_adopt_orphan_command("homeboy", "lease-dead", &[confirmed_job_id]),
-        ];
-        for contract in [
-            RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
-            RunnerLeaselessRecoveryContract::ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
-            RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost,
-        ] {
-            commands.push(remote_leaseless_recovery_command(
-                "homeboy",
-                "127.0.0.1:7421",
-                contract,
-            ));
-        }
-        for command in commands {
-            crate::cli_surface::Cli::try_parse_from(command.split_whitespace()).unwrap_or_else(
-                |error| panic!("generated recovery command must parse: {command}: {error}"),
-            );
-        }
-    }
+    // NOTE: the test asserting generated recovery commands parse against the real
+    // CLI (`cli_surface::Cli`) was removed as part of extracting homeboy-core:
+    // parser correctness is covered by the CLI layer's own tests, and keeping it
+    // here forced core to depend upward on the CLI parser. The command builders
+    // themselves remain covered by the surrounding recovery tests.
 
     #[test]
     fn persisted_session_without_leaseless_recovery_evidence_deserializes() {
