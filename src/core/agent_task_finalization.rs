@@ -297,6 +297,8 @@ pub trait AgentTaskPrFinalizationBackend {
             AgentTaskPrCandidateState::Dirty { changed_files }
         })
     }
+    fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>>;
+    fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool>;
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;
     fn find_open_pr(
@@ -842,6 +844,8 @@ mod tests {
         branch: String,
         changed_files: Vec<String>,
         candidate_state: Option<AgentTaskPrCandidateState>,
+        changed_files_since: Vec<String>,
+        branch_published: bool,
         existing_pr: Option<AgentTaskPrRef>,
         create_error: bool,
         push_error: bool,
@@ -854,6 +858,11 @@ mod tests {
         pushed: bool,
         created: bool,
         create_calls: u8,
+        changed_files_calls: u8,
+        changed_files_since_calls: u8,
+        branch_is_published_calls: u8,
+        commit_calls: u8,
+        push_calls: u8,
         updated: bool,
         last_body: String,
     }
@@ -923,6 +932,7 @@ mod tests {
         }
 
         fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
+            self.changed_files_calls += 1;
             Ok(self.changed_files.clone())
         }
 
@@ -943,8 +953,19 @@ mod tests {
             }))
         }
 
+        fn changed_files_since(&mut self, _path: &str, _base: &str) -> Result<Vec<String>> {
+            self.changed_files_since_calls += 1;
+            Ok(self.changed_files_since.clone())
+        }
+
+        fn branch_is_published(&mut self, _path: &str, _head: &str) -> Result<bool> {
+            self.branch_is_published_calls += 1;
+            Ok(self.branch_published)
+        }
+
         fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
             self.committed = true;
+            self.commit_calls += 1;
             Ok(())
         }
 
@@ -953,6 +974,7 @@ mod tests {
                 return Err(Error::git_command_failed("git push failed"));
             }
             self.pushed = true;
+            self.push_calls += 1;
             Ok(())
         }
 
@@ -1016,6 +1038,11 @@ mod tests {
         assert!(backend.committed);
         assert!(backend.pushed);
         assert!(backend.created);
+        assert_eq!(backend.changed_files_calls, 0);
+        assert_eq!(backend.changed_files_since_calls, 0);
+        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.commit_calls, 1);
+        assert_eq!(backend.push_calls, 1);
         assert!(backend.last_body.contains("## AI assistance"));
         assert!(backend.last_body.contains("## Summary"));
         assert!(backend.last_body.contains("## How to test"));
@@ -1215,6 +1242,11 @@ mod tests {
         assert!(!backend.committed);
         assert!(!backend.pushed);
         assert!(!backend.created);
+        assert_eq!(backend.changed_files_calls, 0);
+        assert_eq!(backend.changed_files_since_calls, 0);
+        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.commit_calls, 0);
+        assert_eq!(backend.push_calls, 0);
     }
 
     #[test]
