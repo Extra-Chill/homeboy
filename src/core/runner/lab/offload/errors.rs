@@ -178,6 +178,25 @@ pub(crate) fn in_flight_daemon_disconnect_error(
     disconnected
 }
 
+/// Returns the accepted daemon job only for the controller's local wait expiry.
+/// Other errors carrying a job id are not enough: the explicit discriminator
+/// prevents a remote command failure from being turned into a detached handoff.
+pub(crate) fn controller_wait_expired_job_id(error: &Error) -> Option<&str> {
+    (error
+        .details
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        == Some("controller_wait_expired"))
+    .then(|| {
+        error
+            .details
+            .get("job_id")
+            .and_then(serde_json::Value::as_str)
+    })
+    .flatten()
+    .filter(|job_id| !job_id.trim().is_empty())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn in_flight_daemon_disconnect_outcome(
     plan: HomeboyPlan,
@@ -207,13 +226,15 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
             .build(),
     );
     let error = in_flight_daemon_disconnect_error(runner_id, job_id, Some(run_id), reason, err);
+    let controller_wait_expired = controller_wait_expired_job_id(err).is_some();
     let details = serde_json::json!({
-        "status": "dispatched_detached",
+        "status": "remote_in_flight",
+        "handoff_state": "controller_wait_expired",
         "followup_required": true,
         "durable_run_id": run_id,
         "runner_id": runner_id,
         "job_id": job_id,
-        "reason": reason,
+        "reason": if controller_wait_expired { "controller_wait_expired" } else { reason },
         "message": error.message,
         "retrieval_commands": {
             "status": format!("homeboy agent-task status {run_id}"),
@@ -228,11 +249,11 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
     }))
     .unwrap_or_else(|_| {
         format!(
-            "Lab offload detached after dispatch. Durable run `{run_id}` continues remotely; inspect with `homeboy agent-task status {run_id}`."
+        "Lab offload controller handoff completed. Durable run `{run_id}` continues remotely; inspect with `homeboy agent-task status {run_id}`."
         )
     });
     let mut stderr = format!(
-        "Lab offload detached after dispatch: durable agent-task run `{run_id}` continues remotely on runner `{runner_id}` daemon job `{job_id}`.\n"
+        "Lab offload controller handoff completed: durable agent-task run `{run_id}` continues remotely on runner `{runner_id}` daemon job `{job_id}`.\n"
     );
     stderr.push_str(&format!("Reason: {reason}\n"));
     stderr.push_str(&format!("Next: homeboy agent-task status {run_id}\n"));
@@ -242,12 +263,12 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
         "Runner job: homeboy runner job logs {runner_id} {job_id} --follow\n"
     ));
 
-    Ok(LabOffloadOutcome::Offloaded {
+    Ok(LabOffloadOutcome::InFlight {
         plan,
         stdout: format!("{stdout}\n"),
         stderr,
         exit_code: 0,
-        output_file_content: None,
+        output_file_content: Some(format!("{stdout}\n")),
     })
 }
 

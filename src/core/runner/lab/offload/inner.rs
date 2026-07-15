@@ -315,13 +315,17 @@ pub(crate) fn exec_lab_context(
     secret_env_names.dedup();
 
     let pre_dispatch_started = std::time::Instant::now();
+    let source_checkout = context
+        .source_snapshot
+        .as_ref()
+        .and_then(|snapshot| serde_json::to_value(snapshot).ok());
     if let Some(run_id) = context.agent_task_run_id.as_deref() {
         agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             runner_id,
             "executor_preflight",
             Some(&remote_cwd),
-            None,
+            source_checkout.as_ref(),
             None,
             request.durable_agent_task_plan,
         )?;
@@ -347,7 +351,7 @@ pub(crate) fn exec_lab_context(
                 runner_id,
                 "provider_preflight",
                 Some(&remote_cwd),
-                None,
+                source_checkout.as_ref(),
                 None,
                 request.durable_agent_task_plan,
             )?;
@@ -397,7 +401,7 @@ pub(crate) fn exec_lab_context(
             runner_id,
             "provider_dispatch",
             Some(&remote_cwd),
-            None,
+            source_checkout.as_ref(),
             None,
             request.durable_agent_task_plan,
         )?;
@@ -418,11 +422,12 @@ pub(crate) fn exec_lab_context(
                 workspace.preserve();
             }
             let health = runner_daemon_health_failure(&err);
-            if health
+            let in_flight_job_id = health
                 .as_ref()
                 .and_then(|health| health.job_id.as_deref())
-                .is_none()
-            {
+                .or_else(|| controller_wait_expired_job_id(&err))
+                .map(str::to_string);
+            if in_flight_job_id.is_none() {
                 if let Some(run_id) = context.agent_task_run_id.as_deref() {
                     // The controller parent already exists, so a failed handoff
                     // must terminalize it rather than leave a queued ghost.
@@ -443,7 +448,7 @@ pub(crate) fn exec_lab_context(
                         .skip_reason(reason.clone())
                         .build(),
                 );
-                if let Some(job_id) = health.job_id.as_deref() {
+                if let Some(job_id) = in_flight_job_id.as_deref() {
                     if let Some(run_id) = context.agent_task_run_id.as_deref() {
                         return in_flight_daemon_disconnect_outcome(
                             context.plan,
@@ -504,6 +509,20 @@ pub(crate) fn exec_lab_context(
                         ]),
                     )),
                 };
+            }
+            if let Some(job_id) = in_flight_job_id.as_deref() {
+                if let Some(run_id) = context.agent_task_run_id.as_deref() {
+                    return in_flight_daemon_disconnect_outcome(
+                        context.plan,
+                        runner_id,
+                        job_id,
+                        run_id,
+                        &remote_cwd,
+                        &context.remote_command,
+                        "controller wait expired; awaiting authoritative daemon result",
+                        &err,
+                    );
+                }
             }
             return Err(err);
         }

@@ -505,6 +505,31 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     Ok(record)
 }
 
+/// Refresh every accepted runner handoff before a read model (such as activity)
+/// projects lifecycle state. A controller wait expiry is not terminal: the
+/// runner daemon remains the authority until it reports a terminal job result.
+pub fn reconcile_active_runner_handoffs() -> Result<usize> {
+    let run_ids = list_records()?
+        .into_iter()
+        .filter(|record| {
+            record.state == AgentTaskRunState::Running
+                && record.runner_id().is_some()
+                && record.runner_job_id().is_some()
+        })
+        .map(|record| record.run_id)
+        .collect::<Vec<_>>();
+    let mut reconciled = 0;
+    for run_id in run_ids {
+        // `status` owns snapshot validation, persistence, and the exact
+        // no-PID daemon-loss projection. A bad remote record must not prevent
+        // unrelated activity from being listed.
+        if status(&run_id).is_ok() {
+            reconciled += 1;
+        }
+    }
+    Ok(reconciled)
+}
+
 fn reconcile_runner_job_state(record: &mut AgentTaskRunRecord) -> Result<()> {
     if record.state != AgentTaskRunState::Running {
         return Ok(());
@@ -1310,6 +1335,34 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
     }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_detached_handoff"));
+    metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
+    metadata.insert(
+        "phase_activity".to_string(),
+        json!("controller handoff complete; awaiting authoritative runner daemon result"),
+    );
+    metadata.insert("provider_state".to_string(), json!("active"));
+    let source_snapshot = metadata
+        .get("source_checkout")
+        .cloned()
+        .unwrap_or(Value::Null);
+    metadata.insert(
+        "runner_handoff".to_string(),
+        json!({
+            "state": "in_flight",
+            "authority": "runner_daemon",
+            "identity": {
+                "run_id": run_id,
+                "runner_id": input.runner_id,
+                "runner_job_id": input.runner_job_id,
+            },
+            "source_snapshot": source_snapshot,
+            "continuation": {
+                "intent": "reconcile_runner_job",
+                "on_active": "retain_running",
+                "on_terminal": "project_authoritative_daemon_result_once",
+            },
+        }),
+    );
     metadata.insert("runner_id".to_string(), json!(input.runner_id));
     metadata.insert("runner_job_id".to_string(), json!(input.runner_job_id));
     metadata.insert(
