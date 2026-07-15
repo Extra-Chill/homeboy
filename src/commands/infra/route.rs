@@ -187,9 +187,12 @@ pub fn route_after_parse(
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             durable_agent_task_plan,
+            // A serialized run-plan has no workspace CLI argument. Carry its
+            // canonical plan root through the portable source channel so Lab
+            // snapshots it before remapping nested plan/config paths.
             source_path: run_handoff
                 .as_ref()
-                .and_then(|handoff| handoff.primary_workspace.as_deref())
+                .map(|handoff| handoff.primary_workspace.as_path())
                 .or_else(|| {
                     retry_handoff
                         .as_ref()
@@ -516,10 +519,11 @@ struct AgentTaskRetryHandoff {
     primary_workspace: PathBuf,
 }
 
+#[derive(Debug)]
 struct AgentTaskRunHandoff {
     args: Vec<String>,
     plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
-    primary_workspace: Option<PathBuf>,
+    primary_workspace: PathBuf,
 }
 
 /// A submitted run is portable only after its controller-owned plan has been
@@ -550,6 +554,7 @@ fn materialize_agent_task_run_handoff(
         .iter()
         .position(|arg| arg == "agent-task")
         .ok_or_else(|| Error::internal_unexpected("agent-task run argv was missing agent-task"))?;
+    let primary_workspace = plan_primary_workspace(&plan)?;
     let mut args = retry_handoff_prefix(&normalized_args[..agent_task_index]);
     args.extend([
         "agent-task".to_string(),
@@ -565,14 +570,14 @@ fn materialize_agent_task_run_handoff(
 
     Ok(Some(AgentTaskRunHandoff {
         args,
-        primary_workspace: plan_primary_workspace(&plan)?,
+        primary_workspace,
         plan,
     }))
 }
 
 fn plan_primary_workspace(
     plan: &homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
-) -> homeboy::core::Result<Option<PathBuf>> {
+) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
         let root = task
@@ -596,12 +601,38 @@ fn plan_primary_workspace(
         }
     }
     match roots.len() {
-        0 => Ok(None),
-        1 => Ok(roots.into_iter().next()),
+        0 => Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task run through Lab requires exactly one task workspace before handoff",
+            Some(format!("plan_id={}", plan.plan_id)),
+            Some(vec![
+                "Declare one task workspace.root, executor.config.workspace_root, or metadata.workspace.root in the submitted plan.".to_string(),
+            ]),
+        )),
+        1 => {
+            let root = roots.into_iter().next().expect("one workspace root");
+            root.canonicalize().map_err(|error| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "agent-task run through Lab could not resolve the declared task workspace before handoff",
+                    Some(format!("workspace={}", root.display())),
+                    Some(vec![
+                        error.to_string(),
+                        "Restore the managed worktree or submit a plan with an existing workspace root before retrying.".to_string(),
+                    ]),
+                )
+            })
+        }
         _ => Err(Error::validation_invalid_argument(
             "workspace",
             "agent-task run through Lab found multiple task workspaces and cannot choose a primary checkout",
-            None,
+            Some(
+                roots
+                    .iter()
+                    .map(|root| root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
             Some(vec![
                 "Run one workspace-scoped plan at a time, or split the tasks into separate runs."
                     .to_string(),
@@ -2444,8 +2475,79 @@ mod tests {
                 .expect("serialized plan"),
                 plan
             );
-            assert_eq!(handoff.primary_workspace.as_deref(), Some(workspace.path()));
+            assert_eq!(
+                handoff.primary_workspace,
+                workspace.path().canonicalize().unwrap()
+            );
         });
+    }
+
+    #[test]
+    fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
+        crate::test_support::with_isolated_home(|_| {
+            let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+                "queued-controller-run-without-workspace",
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "run this queued task"
+                }))
+                .expect("task")],
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some("controller-queued-without-workspace"))
+                .expect("submit controller run");
+            let args = [
+                "homeboy",
+                "agent-task",
+                "run",
+                "controller-queued-without-workspace",
+                "--runner",
+                "homeboy-lab",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&args);
+
+            let error = materialize_agent_task_run_handoff(&cli, &args)
+                .expect_err("workspace-less controller plan must fail before Lab handoff");
+
+            assert_eq!(error.details["field"], "workspace");
+            assert!(error
+                .message
+                .contains("requires exactly one task workspace"));
+        });
+    }
+
+    #[test]
+    fn controller_owned_run_refuses_an_ambiguous_plan_workspace() {
+        let first = tempfile::tempdir().expect("first workspace");
+        let second = tempfile::tempdir().expect("second workspace");
+        let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+            "ambiguous-controller-run",
+            vec![
+                serde_json::from_value(serde_json::json!({
+                    "task_id": "first",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "first task",
+                    "workspace": { "root": first.path() }
+                }))
+                .expect("first task"),
+                serde_json::from_value(serde_json::json!({
+                    "task_id": "second",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "second task",
+                    "workspace": { "root": second.path() }
+                }))
+                .expect("second task"),
+            ],
+        );
+
+        let error = plan_primary_workspace(&plan)
+            .expect_err("multiple controller plan workspaces must fail before handoff");
+
+        assert_eq!(error.details["field"], "workspace");
+        assert!(error.message.contains("multiple task workspaces"));
     }
 
     #[test]

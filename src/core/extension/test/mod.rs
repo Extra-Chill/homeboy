@@ -26,6 +26,14 @@ pub struct TestScopeOutput {
     pub selected_count: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub selected_files: Vec<String>,
+    /// Changed files that are production or test source (per the component's
+    /// drift source/test patterns) yet selected zero tests. A non-empty list
+    /// with `selected_count == 0` is a false-green: source changed but the
+    /// changed-scope gate would otherwise pass without running any test.
+    /// Documentation/config-only changes leave this empty so a genuine no-test
+    /// scope can still pass. (#8340)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub source_changes_without_tests: Vec<String>,
 }
 
 pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure};
@@ -495,6 +503,22 @@ pub fn compute_changed_test_files_for_files(
     compute_changed_test_files_with_drift_options(component, changed_files, &opts)
 }
 
+/// Return the subset of `changed_files` that are production or test source per
+/// the component's drift source/test patterns.
+///
+/// This is the "should have selected a test" signal: if any such file changed
+/// but the computed test scope is empty, the changed-scope gate is producing a
+/// false green (source changed, zero tests run). Documentation, config, and
+/// other non-source changes are excluded so a legitimate no-test scope is not
+/// forced to fail. (#8340)
+pub fn source_relevant_changed_files(opts: &DriftOptions, changed_files: &[String]) -> Vec<String> {
+    changed_files
+        .iter()
+        .filter(|file| drift::is_source_relevant_change(opts, file))
+        .cloned()
+        .collect()
+}
+
 fn compute_changed_test_files_with_drift_options(
     component: &Component,
     changed_files: &[String],
@@ -521,13 +545,21 @@ pub fn compute_changed_test_scope_for_files(
     git_ref: &str,
     changed_files: &[String],
 ) -> crate::core::error::Result<TestScopeOutput> {
-    let selected_files = compute_changed_test_files_for_files(component, git_ref, changed_files)?;
+    let opts = resolve_drift_options(component, git_ref)?;
+    let selected_files =
+        compute_changed_test_files_with_drift_options(component, changed_files, &opts)?;
+    let source_changes_without_tests = if selected_files.is_empty() {
+        source_relevant_changed_files(&opts, changed_files)
+    } else {
+        Vec::new()
+    };
 
     Ok(TestScopeOutput {
         mode: "changed".to_string(),
         changed_since: Some(git_ref.to_string()),
         selected_count: selected_files.len(),
         selected_files,
+        source_changes_without_tests,
     })
 }
 
@@ -539,14 +571,10 @@ pub fn compute_changed_test_scope(
     component: &Component,
     git_ref: &str,
 ) -> crate::core::error::Result<TestScopeOutput> {
-    let selected_files = compute_changed_test_files(component, git_ref)?;
+    let source_path = component_source_path(component);
+    let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
 
-    Ok(TestScopeOutput {
-        mode: "changed".to_string(),
-        changed_since: Some(git_ref.to_string()),
-        selected_count: selected_files.len(),
-        selected_files,
-    })
+    compute_changed_test_scope_for_files(component, git_ref, &changed_files)
 }
 
 fn changed_test_file_for_path(file: &str) -> Option<String> {
@@ -924,6 +952,97 @@ mod tests {
                 .iter()
                 .any(|f| f.ends_with("tests/scope_test.rs")),
             "expected changed test file to be included"
+        );
+    }
+
+    /// Initialize a git repo with a committed baseline (`src/lib.rs`,
+    /// `README.md`) so a follow-up commit can be diffed with `HEAD~1`.
+    fn init_scope_repo(root: &Path) -> Component {
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='scope-test'\nversion='0.1.0'\n",
+        )
+        .expect("Cargo.toml");
+        fs::write(root.join("src/lib.rs"), "pub fn thing() {}\n").expect("lib");
+        fs::write(root.join("README.md"), "# scope-test\n").expect("readme");
+
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "tests@example.com"],
+            vec!["config", "user.name", "Tests"],
+            vec!["add", "."],
+            vec!["commit", "-m", "init"],
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git setup command");
+        }
+
+        Component::new(
+            "scope-test".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        )
+    }
+
+    fn commit_change(root: &Path, rel: &str, contents: &str) {
+        fs::write(root.join(rel), contents).expect("write change");
+        for args in [vec!["add", rel], vec!["commit", "-m", "change"]] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .expect("git change command");
+        }
+    }
+
+    #[test]
+    fn changed_source_without_selected_tests_flags_false_green() {
+        // #8340: a production source change that maps to no tests must record
+        // the impacted files so the gate can fail closed instead of passing on
+        // zero selection.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        // Change production source only; no test file changes, and the trivial
+        // edit does not drift any existing test.
+        commit_change(root, "src/lib.rs", "pub fn thing() {}\npub fn added() {}\n");
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "no test should be selected");
+        assert!(
+            output
+                .source_changes_without_tests
+                .iter()
+                .any(|f| f.ends_with("src/lib.rs")),
+            "changed production source with zero tests must be flagged, got {:?}",
+            output.source_changes_without_tests
+        );
+    }
+
+    #[test]
+    fn docs_only_change_allows_empty_test_scope() {
+        // #8340: a documentation-only change legitimately selects zero tests and
+        // must NOT be flagged as a false green.
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component = init_scope_repo(root);
+        commit_change(root, "README.md", "# scope-test\n\nmore docs\n");
+
+        let output = compute_changed_test_scope(&component, "HEAD~1")
+            .expect("scope computation should succeed");
+
+        assert_eq!(output.selected_count, 0, "docs change selects no tests");
+        assert!(
+            output.source_changes_without_tests.is_empty(),
+            "docs-only change must not be flagged as a source change, got {:?}",
+            output.source_changes_without_tests
         );
     }
 }

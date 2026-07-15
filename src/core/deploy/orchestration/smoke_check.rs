@@ -52,3 +52,98 @@ pub(super) fn run_post_deploy_smoke(
     }
     Some(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::component::Component;
+    use crate::core::project::SmokeCheckConfig;
+
+    fn deployed_result(id: &str) -> ComponentDeployResult {
+        let component = Component::new(
+            id.to_string(),
+            "/tmp/does-not-matter".to_string(),
+            String::new(),
+            None,
+        );
+        ComponentDeployResult::new(&component, "/srv/site").with_status("deployed")
+    }
+
+    #[test]
+    fn post_deploy_smoke_is_noop_without_config() {
+        let project = Project {
+            id: "site".to_string(),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+        assert_eq!(results[0].status, "deployed");
+    }
+
+    #[test]
+    fn post_deploy_smoke_noop_when_disabled() {
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(SmokeCheckConfig {
+                enabled: false,
+                url: "https://example.test/".to_string(),
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+    }
+
+    #[test]
+    fn post_deploy_smoke_failure_records_error_and_fails() {
+        // enabled smoke against an unreachable URL fails the deploy and records
+        // the error on the deployed component.
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(SmokeCheckConfig {
+                enabled: true,
+                // Reserved TEST-NET address (RFC 5737) so the request fails fast.
+                url: "http://192.0.2.1:9/".to_string(),
+                timeout_secs: 1,
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(true));
+        assert!(
+            results[0].error.is_some(),
+            "failed smoke must record an error on the deployed component"
+        );
+    }
+
+    #[test]
+    fn post_deploy_smoke_warn_only_does_not_fail() {
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(SmokeCheckConfig {
+                enabled: true,
+                url: "http://192.0.2.1:9/".to_string(),
+                timeout_secs: 1,
+                warn_only: true,
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(false));
+        assert_eq!(
+            results[0].status, "deployed",
+            "warn_only smoke must not fail the deploy"
+        );
+        assert!(
+            results[0].warnings.iter().any(|w| w.contains("warn_only")),
+            "warn_only smoke failure should be surfaced as a warning"
+        );
+    }
+}
