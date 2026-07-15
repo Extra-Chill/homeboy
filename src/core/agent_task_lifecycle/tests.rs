@@ -2023,44 +2023,6 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
 }
 
 #[test]
-fn status_backfills_legacy_terminal_generic_runtime_evidence_once() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "opencode".to_string();
-        plan.tasks[0].executor.model = Some("openai/gpt-5.6-terra".to_string());
-        let aggregate = succeeded_aggregate(&plan);
-        let record = record_completed_run(&plan, &aggregate, Some("legacy-generic-runtime"))
-            .expect("terminal record");
-
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.lifecycle.provider_runtime.clear();
-        })
-        .expect("legacy lifecycle persisted");
-        let before = store::read_record(&record.run_id).expect("legacy record");
-
-        let migrated = status(&record.run_id).expect("status migrates legacy record");
-        let after_first = store::read_record(&record.run_id).expect("migrated record");
-        let repeated = status(&record.run_id).expect("repeated status is stable");
-        let after_second = store::read_record(&record.run_id).expect("stable record");
-
-        assert_ne!(before, after_first);
-        assert_eq!(after_first, after_second);
-        assert_eq!(migrated, repeated);
-        assert_eq!(migrated.updated_at, record.updated_at);
-        assert_eq!(migrated.lifecycle.updated_at, record.lifecycle.updated_at);
-        assert_eq!(migrated.lifecycle.provider_runtime.len(), 1);
-        assert_eq!(
-            migrated.lifecycle.provider_runtime[0].state,
-            ProviderRuntimeState::Succeeded
-        );
-        assert_eq!(
-            migrated.lifecycle.provider_runtime[0].metadata["evidence_source"],
-            "canonical_executor_outcome"
-        );
-    });
-}
-
-#[test]
 fn status_preserves_existing_terminal_runtime_evidence() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
@@ -2084,72 +2046,6 @@ fn status_preserves_existing_terminal_runtime_evidence() {
         assert_eq!(
             loaded.lifecycle.provider_runtime[0].metadata["manual"],
             true
-        );
-    });
-}
-
-#[test]
-fn status_fails_closed_when_terminal_runtime_backfill_cannot_persist() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "opencode".to_string();
-        let aggregate = succeeded_aggregate(&plan);
-        let record = record_completed_run(&plan, &aggregate, Some("failed-runtime-backfill"))
-            .expect("terminal record");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.lifecycle.provider_runtime.clear();
-        })
-        .expect("legacy lifecycle persisted");
-        store::fail_next_record_write_for_test();
-
-        let error = status(&record.run_id).expect_err("backfill persistence failure is surfaced");
-        let persisted = store::read_record(&record.run_id).expect("unmodified persisted record");
-
-        assert_eq!(error.code, ErrorCode::InternalIoError, "{}", error.message);
-        assert!(persisted.lifecycle.provider_runtime.is_empty());
-    });
-}
-
-#[test]
-fn status_backfills_candidate_recoverable_runtime_once_without_touching_promotion() {
-    with_isolated_home(|_| {
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "opencode".to_string();
-        let mut aggregate = succeeded_aggregate(&plan);
-        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
-        aggregate.totals = AgentTaskAggregateTotals {
-            candidate_recoverable: 1,
-            ..Default::default()
-        };
-        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
-        aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
-        let record = record_completed_run(&plan, &aggregate, Some("timed-out-runtime"))
-            .expect("terminal record");
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.lifecycle.provider_runtime.clear();
-        })
-        .expect("legacy lifecycle persisted");
-        let promotion = json!({ "status": "applied", "id": "promotion-1" });
-        let promoted =
-            record_promotion(&record.run_id, promotion.clone()).expect("promotion persisted");
-
-        let migrated = status(&record.run_id).expect("status backfills timed-out evidence");
-        let after_first = store::read_record(&record.run_id).expect("migrated record");
-        let repeated = status(&record.run_id).expect("repeated status is stable");
-        let after_second = store::read_record(&record.run_id).expect("stable record");
-
-        assert_eq!(migrated.state, AgentTaskRunState::CandidateRecoverable);
-        assert_eq!(
-            migrated.lifecycle.provider_runtime[0].state,
-            ProviderRuntimeState::TimedOut
-        );
-        assert_eq!(after_first, after_second);
-        assert_eq!(migrated, repeated);
-        assert_eq!(migrated.metadata["latest_promotion"], promotion);
-        assert_eq!(migrated.updated_at, promoted.updated_at);
-        assert_eq!(
-            migrated.lifecycle.execution.updated_at,
-            promoted.lifecycle.execution.updated_at
         );
     });
 }
