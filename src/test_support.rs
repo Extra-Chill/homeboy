@@ -128,9 +128,18 @@ pub(crate) struct HomeGuard {
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
+    prior_daemon_binary_sha: Option<String>,
     context: HermeticTestContext,
     _guard: MutexGuard<'static, ()>,
 }
+
+/// A fixed, well-formed (64-hex) SHA the daemon uses in place of hashing the
+/// running executable during tests. Hashing the multi-hundred-MB debug test
+/// binary costs ~20s per daemon-state write; a stable placeholder keeps daemon
+/// tests fast and deterministic. It is only honored via
+/// `HOMEBOY_TEST_DAEMON_BINARY_SHA`, which no released binary sets.
+const TEST_DAEMON_BINARY_SHA: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 pub(crate) struct AuditGuard {
     _guard: MutexGuard<'static, ()>,
@@ -190,6 +199,8 @@ impl HomeGuard {
         let prior_invocation_runtime =
             std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
+        let prior_daemon_binary_sha =
+            std::env::var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -214,6 +225,11 @@ impl HomeGuard {
             crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
             context.invocation_runtime.path(),
         );
+        // Avoid hashing the giant debug test binary on every daemon-state write.
+        std::env::set_var(
+            crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
+            TEST_DAEMON_BINARY_SHA,
+        );
         Self {
             prior,
             prior_xdg_data_home,
@@ -221,6 +237,7 @@ impl HomeGuard {
             prior_runtime_tmpdir,
             prior_invocation_runtime,
             prior_no_update_check,
+            prior_daemon_binary_sha,
             context,
             _guard: guard,
         }
@@ -389,6 +406,12 @@ impl Drop for HomeGuard {
         match &self.prior_no_update_check {
             Some(value) => std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", value),
             None => std::env::remove_var("HOMEBOY_NO_UPDATE_CHECK"),
+        }
+        match &self.prior_daemon_binary_sha {
+            Some(value) => {
+                std::env::set_var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV, value)
+            }
+            None => std::env::remove_var(crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV),
         }
         reset_cached_test_state();
     }
