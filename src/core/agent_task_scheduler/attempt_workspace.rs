@@ -19,14 +19,32 @@ pub(crate) struct HarvestExecutionContext {
 }
 
 impl HarvestExecutionContext {
-    pub(crate) fn lab_subprocess_from_env() -> Self {
-        Self {
-            source_snapshot: std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok()),
-            lab_offload: std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok()),
+    pub(crate) fn from_current_process() -> crate::core::Result<Self> {
+        let source = std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok();
+        let lab = std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
+        match (source, lab) {
+            (None, None) => Ok(Self::default()),
+            (Some(source), Some(lab)) if !source.trim().is_empty() && !lab.trim().is_empty() => {
+                let lab_offload: serde_json::Value = serde_json::from_str(&lab).map_err(|error| {
+                    incomplete_transport_error(format!("invalid Lab offload metadata: {error}"))
+                })?;
+                if !lab_offload.is_object() {
+                    return Err(incomplete_transport_error(
+                        "Lab offload metadata must be a JSON object".to_string(),
+                    ));
+                }
+                Ok(Self {
+                    source_snapshot: serde_json::from_str(&source).map_err(|error| {
+                        incomplete_transport_error(format!("invalid source snapshot metadata: {error}"))
+                    })?,
+                    lab_offload: Some(lab_offload),
+                })
+            }
+            (source, lab) => Err(incomplete_transport_error(format!(
+                "expected paired non-empty source snapshot and Lab offload metadata (source_snapshot={}, lab_offload={})",
+                source.is_some_and(|value| !value.trim().is_empty()),
+                lab.is_some_and(|value| !value.trim().is_empty()),
+            ))),
         }
     }
 
@@ -47,6 +65,15 @@ impl HarvestExecutionContext {
             snapshot_harvest_error("is missing Lab dispatch transport metadata".to_string())
         })
     }
+}
+
+fn incomplete_transport_error(message: String) -> crate::core::Error {
+    crate::core::Error::validation_invalid_argument(
+        "lab_transport",
+        format!("incomplete Lab snapshot transport: {message}"),
+        None,
+        Some(vec!["Run the command on the controller without Lab transport metadata, or use a Lab child process with the exact paired snapshot metadata.".to_string()]),
+    )
 }
 
 #[derive(Debug)]

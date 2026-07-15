@@ -33,11 +33,25 @@ where
     E: AgentTaskExecutorAdapter,
 {
     pub fn new(executor: E) -> Self {
+        Self::new_controller(executor)
+    }
+
+    /// Construct a controller-local scheduler that intentionally ignores
+    /// ambient Lab transport metadata.
+    pub(crate) fn new_controller(executor: E) -> Self {
         Self {
             executor: Arc::new(executor),
             run_id: None,
             harvest_context: HarvestExecutionContext::default(),
         }
+    }
+
+    /// Build a scheduler at a process execution boundary. Both Lab transport
+    /// values must be present and valid, otherwise execution is rejected
+    /// before provider dispatch or harvest setup.
+    pub(crate) fn for_current_process(executor: E) -> crate::core::Result<Self> {
+        Ok(Self::new_controller(executor)
+            .with_harvest_context(HarvestExecutionContext::from_current_process()?))
     }
 
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {

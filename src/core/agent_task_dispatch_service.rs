@@ -231,7 +231,7 @@ where
     }
 
     lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::new(executor)
+    let aggregate = AgentTaskScheduler::for_current_process(executor)?
         .with_run_id(run_id.clone())
         .run(plan.clone());
     let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;

@@ -504,6 +504,27 @@ mod committed_harvest_tests {
 
     static LAB_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+    #[test]
+    fn process_context_rejects_incomplete_lab_transport_before_scheduler_execution() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            r#"{"runner_id":"lab"}"#,
+        );
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+
+        let error = HarvestExecutionContext::from_current_process()
+            .expect_err("a lone source snapshot must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("incomplete Lab snapshot transport"));
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+    }
+
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -712,7 +733,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
         assert!(!workspace.path().join(".git").exists());
-        let context = HarvestExecutionContext::lab_subprocess_from_env();
+        let context = HarvestExecutionContext::from_current_process().expect("Lab context");
         let preflight =
             prepare_committed_harvest(&request, None, &context).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
@@ -922,7 +943,7 @@ mod committed_harvest_tests {
                 artifact_declarations: Vec::new(),
                 metadata: serde_json::Value::Null,
             };
-            let context = HarvestExecutionContext::lab_subprocess_from_env();
+            let context = HarvestExecutionContext::from_current_process().expect("Lab context");
             let first = prepare_committed_harvest(&request, None, &context)
                 .expect("snapshot-git preflight");
             let second = prepare_committed_harvest(&request, None, &context)
@@ -1011,7 +1032,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let context = HarvestExecutionContext::lab_subprocess_from_env();
+        let context = HarvestExecutionContext::from_current_process().expect("Lab context");
         let preflight = prepare_committed_harvest(&request, None, &context)
             .expect("runner-resident snapshot harvest preflight");
 

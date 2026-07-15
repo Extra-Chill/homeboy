@@ -22,7 +22,7 @@ where
     pub fn new(definition: AgentTaskLoopDefinition, executor: E) -> Self {
         Self {
             definition,
-            scheduler: AgentTaskScheduler::new(executor),
+            scheduler: AgentTaskScheduler::new_controller(executor),
         }
     }
 }

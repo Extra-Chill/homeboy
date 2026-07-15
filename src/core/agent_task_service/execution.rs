@@ -100,7 +100,7 @@ where
     }
 
     let aggregate =
-        run_plan_with_scheduler(plan.clone(), record_run_id, executor, derived_cook_baseline);
+        run_plan_with_scheduler(plan.clone(), record_run_id, executor, derived_cook_baseline)?;
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     }
@@ -296,7 +296,7 @@ fn run_prepared_claimed<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None);
+    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None)?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -348,25 +348,16 @@ fn run_plan_with_scheduler<E>(
     run_id: Option<&str>,
     executor: E,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-) -> AgentTaskAggregate
+) -> Result<AgentTaskAggregate>
 where
     E: AgentTaskExecutorAdapter,
 {
-    // Only the Lab child process carries transport provenance. A controller
-    // process always starts with an empty per-run context, even after a Lab
-    // fallback or a preceding fanout cell.
-    let scheduler = if crate::core::lab_routing::is_lab_offload_subprocess() {
-        AgentTaskScheduler::new(executor).with_harvest_context(
-            crate::core::agent_task_scheduler::HarvestExecutionContext::lab_subprocess_from_env(),
-        )
-    } else {
-        AgentTaskScheduler::new(executor)
-    };
+    let scheduler = AgentTaskScheduler::for_current_process(executor)?;
     match run_id {
-        Some(run_id) => scheduler
+        Some(run_id) => Ok(scheduler
             .with_run_id(run_id.to_string())
-            .run_with_derived_cook_baseline(plan, derived_cook_baseline),
-        None => scheduler.run_with_derived_cook_baseline(plan, derived_cook_baseline),
+            .run_with_derived_cook_baseline(plan, derived_cook_baseline)),
+        None => Ok(scheduler.run_with_derived_cook_baseline(plan, derived_cook_baseline)),
     }
 }
 
