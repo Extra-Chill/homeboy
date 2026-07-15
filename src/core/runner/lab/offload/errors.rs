@@ -282,10 +282,10 @@ pub(crate) fn automatic_capability_fallback_or_error(
     reason: String,
     remediation: Vec<String>,
     allow_local_fallback: bool,
-    placement: crate::cli_surface::Placement,
+    placement: homeboy_cli_contract::Placement,
     overhead: &LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
-    if placement == crate::cli_surface::Placement::Lab {
+    if placement == homeboy_cli_contract::Placement::Lab {
         return Err(local_execution_denied_error(
             &reason,
             Some(&selection.runner_id),

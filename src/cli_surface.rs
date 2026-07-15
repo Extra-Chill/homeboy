@@ -1,6 +1,4 @@
-use clap::{
-    ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
-};
+use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -15,23 +13,10 @@ use crate::commands::{
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 
-/// The requested execution location. This is normalized once at the CLI
-/// boundary and is the only placement input used by routing code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[value(rename_all = "lower")]
-pub enum Placement {
-    Auto,
-    Local,
-    Lab,
-    #[value(name = "lab-or-local")]
-    LabOrLocal,
-}
-
-impl Default for Placement {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
+// Placement moved to the internal `homeboy-cli-contract` crate so `core` routing
+// can use it without depending on the full CLI definition. Re-exported here to
+// keep existing `cli_surface::Placement` call sites working.
+pub use homeboy_cli_contract::Placement;
 
 #[derive(Parser)]
 #[command(name = "homeboy")]
