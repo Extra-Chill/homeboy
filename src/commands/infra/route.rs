@@ -99,6 +99,11 @@ pub fn route_after_parse(
         return Ok(Some(exit_code));
     }
 
+    let run_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
+        materialize_agent_task_run_handoff(cli, normalized_args)?
+    } else {
+        None
+    };
     let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_retry_handoff(cli, normalized_args)?
     } else {
@@ -112,9 +117,14 @@ pub fn route_after_parse(
                 homeboy::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired;
         }
     }
-    let normalized_args = retry_handoff
+    let normalized_args = run_handoff
         .as_ref()
         .map(|handoff| handoff.args.as_slice())
+        .or_else(|| {
+            retry_handoff
+                .as_ref()
+                .map(|handoff| handoff.args.as_slice())
+        })
         .unwrap_or(normalized_args);
     let cook_plan = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_cook_plan(cli)?
@@ -122,10 +132,15 @@ pub fn route_after_parse(
         None
     };
     let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
-    let durable_agent_task_plan = retry_handoff
+    let durable_agent_task_plan = run_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
-        .or(cook_plan.as_ref());
+        .or_else(|| {
+            retry_handoff
+                .as_ref()
+                .map(|handoff| &handoff.plan)
+                .or(cook_plan.as_ref())
+        });
     let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
@@ -172,9 +187,14 @@ pub fn route_after_parse(
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             durable_agent_task_plan,
-            source_path: retry_handoff
+            source_path: run_handoff
                 .as_ref()
-                .map(|handoff| handoff.primary_workspace.as_path()),
+                .and_then(|handoff| handoff.primary_workspace.as_deref())
+                .or_else(|| {
+                    retry_handoff
+                        .as_ref()
+                        .map(|handoff| handoff.primary_workspace.as_path())
+                }),
             verified_cook_baseline: None,
             require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
@@ -226,6 +246,9 @@ fn run_split_placement_cook(
     output_file: Option<&str>,
     runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    if cli.placement == homeboy::cli_surface::Placement::Local {
+        return Ok(None);
+    }
     let Some(runner_id) = runner_id else {
         return Ok(None);
     };
@@ -493,6 +516,100 @@ struct AgentTaskRetryHandoff {
     primary_workspace: PathBuf,
 }
 
+struct AgentTaskRunHandoff {
+    args: Vec<String>,
+    plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+    primary_workspace: Option<PathBuf>,
+}
+
+/// A submitted run is portable only after its controller-owned plan has been
+/// serialized into the runner command. A missing local record is runner-owned,
+/// so preserve the original command for the runner to resolve from its store.
+fn materialize_agent_task_run_handoff(
+    cli: &Cli,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<AgentTaskRunHandoff>> {
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command: crate::commands::agent_task::AgentTaskCommand::Run(run),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+    if !agent_task_lifecycle::run_record_exists(&run.run_id)? {
+        return Ok(None);
+    }
+
+    let plan = agent_task_lifecycle::load_plan(&run.run_id)?;
+    let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize agent-task run plan for Lab handoff".to_string()),
+        )
+    })?;
+    let agent_task_index = normalized_args
+        .iter()
+        .position(|arg| arg == "agent-task")
+        .ok_or_else(|| Error::internal_unexpected("agent-task run argv was missing agent-task"))?;
+    let mut args = retry_handoff_prefix(&normalized_args[..agent_task_index]);
+    args.extend([
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        serialized_plan,
+        "--record-run-id".to_string(),
+        run.run_id.clone(),
+    ]);
+    if let Some(timeout_ms) = run.timeout_ms {
+        args.extend(["--timeout-ms".to_string(), timeout_ms.to_string()]);
+    }
+
+    Ok(Some(AgentTaskRunHandoff {
+        args,
+        primary_workspace: plan_primary_workspace(&plan)?,
+        plan,
+    }))
+}
+
+fn plan_primary_workspace(
+    plan: &homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<Option<PathBuf>> {
+    let mut roots = BTreeSet::new();
+    for task in &plan.tasks {
+        let root = task
+            .workspace
+            .root
+            .as_deref()
+            .or_else(|| {
+                task.executor
+                    .config
+                    .get("workspace_root")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                task.metadata
+                    .get("workspace")
+                    .and_then(|workspace| workspace.get("root"))
+                    .and_then(serde_json::Value::as_str)
+            });
+        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+            roots.insert(PathBuf::from(root));
+        }
+    }
+    match roots.len() {
+        0 => Ok(None),
+        1 => Ok(roots.into_iter().next()),
+        _ => Err(Error::validation_invalid_argument(
+            "workspace",
+            "agent-task run through Lab found multiple task workspaces and cannot choose a primary checkout",
+            None,
+            Some(vec![
+                "Run one workspace-scoped plan at a time, or split the tasks into separate runs."
+                    .to_string(),
+            ]),
+        )),
+    }
+}
+
 /// Retries are controller-owned because the source plan lives in the local
 /// durable lifecycle store. Materialize it before Lab dispatch, then run the
 /// replacement plan remotely under the new durable run id.
@@ -507,6 +624,9 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     };
     if !retry.run {
+        return Ok(None);
+    }
+    if !agent_task_lifecycle::run_record_exists(&retry.run_id)? {
         return Ok(None);
     }
 
@@ -2271,6 +2391,107 @@ mod tests {
                 "detached_lab_handoff_preacceptance"
             );
         });
+    }
+
+    #[test]
+    fn controller_owned_run_materializes_plan_for_lab_execution() {
+        crate::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let plan = homeboy::core::agent_tasks::scheduler::AgentTaskPlan::new(
+                "queued-controller-run",
+                vec![serde_json::from_value(serde_json::json!({
+                    "task_id": "task",
+                    "executor": { "backend": "fixture" },
+                    "instructions": "run this queued task",
+                    "workspace": { "root": workspace.path() }
+                }))
+                .expect("task")],
+            );
+            agent_task_lifecycle::submit_plan(&plan, Some("controller-queued"))
+                .expect("submit controller run");
+            let args = [
+                "homeboy",
+                "agent-task",
+                "run",
+                "controller-queued",
+                "--timeout-ms",
+                "1200",
+                "--runner",
+                "homeboy-lab",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&args);
+
+            let handoff = materialize_agent_task_run_handoff(&cli, &args)
+                .expect("materialize run handoff")
+                .expect("controller-owned handoff");
+            let remote_cli = Cli::try_parse_from(&handoff.args).expect("portable run-plan argv");
+            let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::RunPlan(remote),
+            }) = remote_cli.command
+            else {
+                panic!("controller run must execute its materialized plan on Lab");
+            };
+
+            assert_eq!(remote.record_run_id.as_deref(), Some("controller-queued"));
+            assert_eq!(remote.timeout_ms, Some(1200));
+            assert_eq!(
+                serde_json::from_str::<homeboy::core::agent_tasks::scheduler::AgentTaskPlan>(
+                    &remote.plan
+                )
+                .expect("serialized plan"),
+                plan
+            );
+            assert_eq!(handoff.primary_workspace.as_deref(), Some(workspace.path()));
+        });
+    }
+
+    #[test]
+    fn lab_owned_retry_is_not_read_from_the_controller_store() {
+        crate::test_support::with_isolated_home(|_| {
+            let args = [
+                "homeboy",
+                "agent-task",
+                "retry",
+                "lab-owned-failed-run",
+                "--run",
+                "--runner",
+                "homeboy-lab",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let cli = Cli::parse_from(&args);
+
+            assert!(materialize_agent_task_retry_handoff(&cli, &args)
+                .expect("runner-owned retry stays portable")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "fixture@local",
+            "--verify",
+            "true",
+            "--prompt",
+            "keep this local",
+        ]);
+
+        assert!(
+            run_split_placement_cook(&cli, &[], None, Some("homeboy-lab"))
+                .expect("local placement bypasses Lab cook dispatch")
+                .is_none()
+        );
     }
 
     #[test]

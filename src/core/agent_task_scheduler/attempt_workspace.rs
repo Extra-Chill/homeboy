@@ -67,9 +67,7 @@ pub(super) fn prepare_committed_harvest(
             source_provenance: None,
         });
     };
-    let snapshot_signaled = std::env::var_os(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
-        .is_some()
-        || std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).is_some();
+    let snapshot_signaled = lab_snapshot_transport_applies_to_workspace(root);
     let is_repository = git_is_repository(root)?;
     if !snapshot_signaled && !is_repository {
         return Ok(HarvestPreflight {
@@ -173,6 +171,41 @@ pub(super) fn prepare_committed_harvest(
         base_sha: Some(git_output(root, &["rev-parse", "HEAD"])?),
         source_provenance,
     })
+}
+
+/// Ambient Lab metadata may survive in a controller process that subsequently
+/// executes locally. Snapshot verification belongs only to the workspace that
+/// the Lab envelope says was snapshot-transported, not to every Git checkout
+/// running under that process.
+fn lab_snapshot_transport_applies_to_workspace(root: &Path) -> bool {
+    let Ok(raw) = std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV) else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    if !matches!(
+        metadata
+            .get("sync_mode")
+            .and_then(serde_json::Value::as_str),
+        Some("snapshot" | "snapshot-git")
+    ) {
+        return false;
+    }
+    let Some(remote_workspace) = metadata
+        .get("remote_workspace")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+
+    match (
+        root.canonicalize(),
+        Path::new(remote_workspace).canonicalize(),
+    ) {
+        (Ok(root), Ok(remote_workspace)) => root == remote_workspace,
+        _ => root == Path::new(remote_workspace),
+    }
 }
 
 fn snapshot_harvest_error(message: String) -> HarvestError {

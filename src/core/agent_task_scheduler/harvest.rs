@@ -1063,4 +1063,70 @@ mod committed_harvest_tests {
         assert!(preflight.source_provenance.is_none());
         assert!(!workspace.path().join(".git").exists());
     }
+
+    #[test]
+    fn local_git_workspace_ignores_unrelated_lab_snapshot_metadata() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+        git(
+            workspace.path(),
+            &["config", "user.email", "test@homeboy.invalid"],
+        );
+        git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source");
+        git(workspace.path(), &["add", "file.txt"]);
+        git(workspace.path(), &["commit", "--quiet", "-m", "baseline"]);
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::json!({
+                "runner_id": "other-lab",
+                "remote_workspace": "/runner/workspace",
+                "sync_mode": "snapshot"
+            })
+            .to_string(),
+        );
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "local-git-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.path().display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+
+        let preflight = prepare_committed_harvest(&request, None)
+            .expect("local Git harvest preflight ignores unrelated Lab metadata");
+
+        assert_eq!(
+            preflight.base_sha.as_deref(),
+            Some(git(workspace.path(), &["rev-parse", "HEAD"]).as_str())
+        );
+        assert!(preflight.source_provenance.is_none());
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    }
 }
