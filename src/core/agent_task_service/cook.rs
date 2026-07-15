@@ -3,6 +3,7 @@
 //! resolution. Pure move out of the former `agent_task_service.rs` god-file.
 
 use serde_json::Value;
+use sha2::Digest;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use crate::core::agent_task_finalization::{
 use crate::core::agent_task_gate::VerifyGateOptions;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_promotion::{
-    promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    normalize_promotion_patch, promote, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use crate::core::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -460,6 +462,32 @@ fn materialize_follow_up_baseline(
             )
         })?;
     let head = git_output(&source_root, &["rev-parse", "HEAD"])?;
+    let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read promoted patch artifact".to_string()),
+        )
+    })?;
+    let artifact_sha256 = format!("{:x}", sha2::Sha256::digest(&artifact_bytes));
+    if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
+        if expected != artifact_sha256 {
+            return Err(Error::validation_invalid_argument(
+                "promotion.patch_artifact.sha256",
+                "promoted artifact bytes no longer match durable sha256",
+                None,
+                None,
+            ));
+        }
+    }
+    let artifact = std::str::from_utf8(&artifact_bytes).map_err(|error| {
+        Error::validation_invalid_argument(
+            "promotion.patch_artifact",
+            format!("patch bytes are not UTF-8: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let normalized = normalize_promotion_patch(artifact, &promotion.to_worktree)?;
     let index = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -469,7 +497,7 @@ fn materialize_follow_up_baseline(
     let index_path = index.path().display().to_string();
     git_output_with_env(
         &source_root,
-        &["read-tree", "HEAD"],
+        &["read-tree", &head],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
     git_output_with_env(
@@ -477,26 +505,11 @@ fn materialize_follow_up_baseline(
         &["add", "--all"],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
-    let patch = git_output_with_env(
+    let target_tree = git_output_with_env(
         &source_root,
-        &[
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            "HEAD",
-        ],
+        &["write-tree"],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
-    if patch.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "gate-failed promotion target has no candidate changes to baseline",
-            None,
-            None,
-        ));
-    }
     let parent = std::env::temp_dir().join("homeboy-cook-follow-up-baselines");
     std::fs::create_dir_all(&parent).map_err(|error| {
         Error::internal_io(
@@ -517,11 +530,12 @@ fn materialize_follow_up_baseline(
             "source_run_id": source_run_id,
             "source_task_id": promotion.source.task_id,
             "source_patch_artifact_id": promotion.patch_artifact.id,
+            "source_patch_artifact_sha256": artifact_sha256,
             "promotion_target_head": head,
         }),
     };
     let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
-    std::fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
+    std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("write cook baseline patch".to_string()),
@@ -529,7 +543,11 @@ fn materialize_follow_up_baseline(
     })?;
     git_output(
         &baseline.path,
-        &["apply", "--index", &patch_path.display().to_string()],
+        &[
+            "apply",
+            "--whitespace=nowarn",
+            &patch_path.display().to_string(),
+        ],
     )?;
     std::fs::remove_file(&patch_path).map_err(|error| {
         Error::internal_io(
@@ -537,6 +555,7 @@ fn materialize_follow_up_baseline(
             Some("remove cook baseline patch".to_string()),
         )
     })?;
+    git_output(&baseline.path, &["add", "--all"])?;
     git_output(
         &baseline.path,
         &[
@@ -552,6 +571,14 @@ fn materialize_follow_up_baseline(
     )?;
     let commit = git_output(&baseline.path, &["rev-parse", "HEAD"])?;
     let tree = git_output(&baseline.path, &["rev-parse", "HEAD^{tree}"])?;
+    if tree != target_tree {
+        return Err(Error::validation_invalid_argument(
+            "promotion",
+            "promotion target contains extra, missing, or unrelated changes; refusing cook retry baseline",
+            None,
+            None,
+        ));
+    }
     let mut baseline = baseline;
     baseline.provenance["baseline_commit"] = Value::String(commit);
     baseline.provenance["baseline_tree"] = Value::String(tree);
@@ -1157,7 +1184,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
+        let root = &temp.path().join("repo");
+        std::fs::create_dir(root).unwrap();
         for args in [
             vec!["init"],
             vec!["config", "user.name", "Test"],
@@ -1190,11 +1218,38 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(root.join("candidate.sh"), permissions).unwrap();
+        assert!(Command::new("git")
+            .args(["add", "--all"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        let patch = Command::new("git")
+            .args([
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--find-renames",
+                "HEAD",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(patch.status.success());
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, patch.stdout).unwrap();
+        assert!(Command::new("git")
+            .args(["reset"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
         let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
             "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
             "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target"},
-            "patch_artifact":{"id":"candidate","kind":"patch","path":"candidate.patch"}, "changed_files":["candidate.bin", "candidate.sh"],
+            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path}, "changed_files":["candidate.bin", "candidate.sh"],
             "command_evidence":[], "deterministic_gates":[], "gate_results":[],
             "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();

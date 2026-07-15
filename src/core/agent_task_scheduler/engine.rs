@@ -343,6 +343,13 @@ where
                     .clone()
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
+                let source_provenance = harvest_preflight.source_provenance.or_else(|| {
+                    request
+                        .inputs
+                        .pointer("/cook_loop/baseline")
+                        .cloned()
+                        .map(|baseline| serde_json::json!({ "cook_baseline": baseline }))
+                });
                 let attempt_workspace =
                     match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
                         Ok(workspace) => workspace,
@@ -450,7 +457,7 @@ where
                     run_id: self.run_id.clone(),
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
-                    source_provenance: harvest_preflight.source_provenance,
+                    source_provenance,
                     scratch: scratch.clone(),
                     adoption: scheduled.adoption,
                     join_handle: None,
