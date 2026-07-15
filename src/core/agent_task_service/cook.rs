@@ -150,7 +150,7 @@ where
                     Some(&run_id),
                     executor.clone(),
                     None,
-                    Some(options.harvest_context.clone()),
+                    Some(cook_attempt_harvest_context(&options.harvest_context)),
                 )
                 .map(|_| ())
             };
@@ -421,7 +421,7 @@ where
                         Some(&next_run_id),
                         executor.clone(),
                         Some(baseline.capability()),
-                        Some(options.harvest_context.clone()),
+                        Some(cook_attempt_harvest_context(&options.harvest_context)),
                     )?;
                 }
                 remediation_category_usage.add(reservation);
@@ -459,6 +459,12 @@ struct CookFollowUpBaseline {
     source_root: PathBuf,
     path: PathBuf,
     capability: DerivedCookBaselineCapability,
+}
+
+fn cook_attempt_harvest_context(
+    harvest_context: &crate::core::agent_task_scheduler::HarvestExecutionContext,
+) -> crate::core::agent_task_scheduler::HarvestExecutionContext {
+    harvest_context.clone()
 }
 
 /// Process-local authority for one materialized cook retry baseline. It is not
@@ -1166,6 +1172,37 @@ mod tests {
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
     };
+    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        let context = crate::core::agent_task_scheduler::HarvestExecutionContext::default();
+        let first_attempt = cook_attempt_harvest_context(&context);
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            "ambient state must not affect a passed cook context",
+        );
+        let retry_attempt = cook_attempt_harvest_context(&context);
+        match prior {
+            Some(value) => std::env::set_var(
+                crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                value,
+            ),
+            None => std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
+        }
+
+        assert_eq!(format!("{first_attempt:?}"), format!("{retry_attempt:?}"));
+        assert_eq!(
+            format!("{retry_attempt:?}"),
+            "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
+        );
+    }
 
     #[derive(Default)]
     struct CaptureBackend {

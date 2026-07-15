@@ -130,13 +130,82 @@ where
     // A batch is one controller or one Lab child process. Per-cell mixed
     // placement would require independent process boundaries, so every cell
     // shares the immutable context captured by its owning process.
-    let total = plan.cooks.len();
-    let harvest_context = if std::env::var_os("HOMEBOY_RUNNER_HOSTED_EXEC").is_some() {
-        homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()?
+    let harvest_context = batch_harvest_context()?;
+    run_batch_cook_fanout_plan_with_cell_executor(
+        plan,
+        harvest_context,
+        move |cook, plan, context| {
+            let invocation = cook.to_cook_invocation(plan)?;
+            let run_id = invocation.options.initial_run_id.clone();
+            let request = dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
+            let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
+            let mut options = invocation.options;
+            options.initial_run_id = run_id;
+            options.initial_plan = initial_plan;
+            options.harvest_context = context;
+            let result = agent_task_service::run_cook(options, executor.clone())?;
+            Ok(serde_json::json!({
+                "exit_code": result.exit_code,
+                "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
+            }))
+        },
+    )
+}
+
+fn batch_harvest_context() -> Result<homeboy::core::agent_task_scheduler::HarvestExecutionContext> {
+    if std::env::var_os("HOMEBOY_RUNNER_HOSTED_EXEC").is_some() {
+        homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()
     } else {
-        homeboy::core::agent_task_scheduler::HarvestExecutionContext::default()
-    };
-    let workers = total.min(std::thread::available_parallelism().map_or(1, usize::from));
+        Ok(homeboy::core::agent_task_scheduler::HarvestExecutionContext::default())
+    }
+}
+
+fn run_batch_cook_fanout_plan_with_cell_executor<F>(
+    plan: BatchCookFanoutPlan,
+    harvest_context: homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+    cell_executor: F,
+) -> CmdResult<Value>
+where
+    F: Fn(
+            &BatchCookSpec,
+            &BatchCookFanoutPlan,
+            homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+        ) -> Result<Value>
+        + Clone
+        + Send,
+{
+    let workers = plan
+        .cooks
+        .len()
+        .min(std::thread::available_parallelism().map_or(1, usize::from));
+    run_batch_cook_fanout_plan_with_cell_executor_and_workers(
+        plan,
+        harvest_context,
+        workers,
+        cell_executor,
+    )
+}
+
+fn run_batch_cook_fanout_plan_with_cell_executor_and_workers<F>(
+    plan: BatchCookFanoutPlan,
+    harvest_context: homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+    workers: usize,
+    cell_executor: F,
+) -> CmdResult<Value>
+where
+    F: Fn(
+            &BatchCookSpec,
+            &BatchCookFanoutPlan,
+            homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+        ) -> Result<Value>
+        + Clone
+        + Send,
+{
+    // A batch is one controller or one Lab child process. Per-cell mixed
+    // placement would require independent process boundaries, so every cell
+    // shares the immutable context captured by its owning process.
+    let total = plan.cooks.len();
+    let workers = workers.min(total);
     let plan = Arc::new(plan);
     let next = Arc::new(Mutex::new(0usize));
     let (tx, rx) = mpsc::channel();
@@ -145,7 +214,7 @@ where
             let plan = Arc::clone(&plan);
             let next = Arc::clone(&next);
             let tx = tx.clone();
-            let executor = executor.clone();
+            let cell_executor = cell_executor.clone();
             let harvest_context = harvest_context.clone();
             scope.spawn(move || loop {
                 let index = {
@@ -158,22 +227,7 @@ where
                     index
                 };
                 let cook = &plan.cooks[index];
-                let cell = (|| -> Result<Value> {
-                    let invocation = cook.to_cook_invocation(&plan)?;
-                    let run_id = invocation.options.initial_run_id.clone();
-                    let request =
-                        dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
-                    let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
-                    let mut options = invocation.options;
-                    options.initial_run_id = run_id;
-                    options.initial_plan = initial_plan;
-                    options.harvest_context = harvest_context.clone();
-                    let result = agent_task_service::run_cook(options, executor.clone())?;
-                    Ok(serde_json::json!({
-                        "exit_code": result.exit_code,
-                        "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
-                    }))
-                })();
+                let cell = cell_executor(cook, &plan, harvest_context.clone());
                 let _ = tx.send((index, cell));
             });
         }
@@ -1054,6 +1108,228 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use clap::Parser;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Barrier, OnceLock};
+
+    fn test_batch_plan() -> BatchCookFanoutPlan {
+        BatchCookFanoutPlan::from_value(
+            json!({
+                "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                "fanout_id": "test-batch",
+                "cooks": [
+                    {"cook_id": "first", "prompt": "first", "to_worktree": "homeboy@first", "verify": ["true"]},
+                    {"cook_id": "second", "prompt": "second", "to_worktree": "homeboy@second", "verify": ["true"]}
+                ]
+            }),
+            &args(),
+        )
+        .expect("test batch plan")
+    }
+
+    fn run_test_batch<F>(
+        context: homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+        executor: F,
+    ) -> CmdResult<Value>
+    where
+        F: Fn(
+                &BatchCookSpec,
+                &BatchCookFanoutPlan,
+                homeboy::core::agent_task_scheduler::HarvestExecutionContext,
+            ) -> Result<Value>
+            + Clone
+            + Send,
+    {
+        run_batch_cook_fanout_plan_with_cell_executor_and_workers(
+            test_batch_plan(),
+            context,
+            2,
+            executor,
+        )
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+            let prior = values
+                .iter()
+                .map(|(name, value)| {
+                    let previous = std::env::var_os(name);
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                    (*name, previous)
+                })
+                .collect();
+            Self(prior)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn lab_context(label: &str) -> homeboy::core::agent_task_scheduler::HarvestExecutionContext {
+        let snapshot = json!({
+            "runner_id": format!("lab-{label}"), "dirty": false, "sync_mode": "snapshot",
+            "snapshot_hash": label, "synced_at": "2026-07-15T00:00:00Z", "sync_excludes": []
+        });
+        let snapshot = snapshot.to_string();
+        let lab = format!(r#"{{"label":"{label}"}}"#);
+        let env = EnvRestore::set(&[
+            ("HOMEBOY_SOURCE_SNAPSHOT_JSON", Some(&snapshot)),
+            ("HOMEBOY_LAB_OFFLOAD_JSON", Some(&lab)),
+        ]);
+        let context =
+            homeboy::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                .expect("Lab context");
+        drop(env);
+        context
+    }
+
+    #[test]
+    fn cook_batch_runs_two_cells_concurrently_in_plan_order() {
+        let barrier = Arc::new(Barrier::new(2));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let (value, exit_code) = run_test_batch(
+            homeboy::core::agent_task_scheduler::HarvestExecutionContext::default(),
+            {
+                let barrier = Arc::clone(&barrier);
+                let entered = Arc::clone(&entered);
+                move |cook, _, _| {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait();
+                    Ok(json!({"exit_code": 0, "result": {"cell": cook.cook_id}}))
+                }
+            },
+        )
+        .expect("batch executes");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(entered.load(Ordering::SeqCst), 2);
+        assert_eq!(value["cooks"][0]["cook_id"], "first");
+        assert_eq!(value["cooks"][0]["result"]["cell"], "first");
+        assert_eq!(value["cooks"][1]["cook_id"], "second");
+        assert_eq!(value["cooks"][1]["result"]["cell"], "second");
+    }
+
+    #[test]
+    fn cook_batch_isolates_cell_failure() {
+        let executed = Arc::new(Mutex::new(Vec::new()));
+        let (value, exit_code) = run_test_batch(
+            homeboy::core::agent_task_scheduler::HarvestExecutionContext::default(),
+            {
+                let executed = Arc::clone(&executed);
+                move |cook, _, _| {
+                    executed
+                        .lock()
+                        .expect("executed cells")
+                        .push(cook.cook_id.clone());
+                    if cook.cook_id == "first" {
+                        Err(Error::validation_invalid_argument(
+                            "setup",
+                            "cook setup failed",
+                            None,
+                            None,
+                        ))
+                    } else {
+                        Ok(json!({"exit_code": 0, "result": {"status": "succeeded"}}))
+                    }
+                }
+            },
+        )
+        .expect("batch completes despite cell failure");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(executed.lock().expect("executed cells").len(), 2);
+        assert_eq!(value["cooks"][0]["exit_code"], 1);
+        assert!(value["cooks"][0]["result"]["error"]
+            .as_str()
+            .expect("failure message")
+            .contains("cook setup failed"));
+        assert_eq!(value["cooks"][1]["exit_code"], 0);
+        assert_eq!(value["cooks"][1]["result"]["status"], "succeeded");
+    }
+
+    #[test]
+    fn cook_batch_controller_context_ignores_ambient_incomplete_lab_pair() {
+        let _lock = env_lock();
+        let _env = EnvRestore::set(&[
+            ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
+            (
+                "HOMEBOY_SOURCE_SNAPSHOT_JSON",
+                Some("{\"incomplete\":true}"),
+            ),
+            ("HOMEBOY_LAB_OFFLOAD_JSON", None),
+        ]);
+        let context = batch_harvest_context().expect("controller context");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let (value, exit_code) = run_test_batch(context, {
+            let observed = Arc::clone(&observed);
+            move |_, _, context| {
+                observed
+                    .lock()
+                    .expect("contexts")
+                    .push(format!("{context:?}"));
+                Ok(json!({"exit_code": 0, "result": {"status": "succeeded"}}))
+            }
+        })
+        .expect("controller batch executes");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(
+            observed.lock().expect("contexts").as_slice(),
+            [
+                "HarvestExecutionContext { source_snapshot: None, lab_offload: None }",
+                "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
+            ]
+        );
+    }
+
+    #[test]
+    fn cook_batch_context_does_not_leak_between_invocations() {
+        let controller = homeboy::core::agent_task_scheduler::HarvestExecutionContext::default();
+        let lab = lab_context("second-batch");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        for context in [controller, lab] {
+            let observed = Arc::clone(&observed);
+            run_test_batch(context, move |_, _, context| {
+                observed
+                    .lock()
+                    .expect("contexts")
+                    .push(format!("{context:?}"));
+                Ok(json!({"exit_code": 0, "result": {}}))
+            })
+            .expect("batch executes");
+        }
+
+        let observed = observed.lock().expect("contexts");
+        assert_eq!(observed.len(), 4);
+        assert_eq!(observed[0], observed[1]);
+        assert_eq!(
+            observed[0],
+            "HarvestExecutionContext { source_snapshot: None, lab_offload: None }"
+        );
+        assert_eq!(observed[2], observed[3]);
+        assert!(observed[2].contains("lab-second-batch"));
+        assert_ne!(observed[0], observed[2]);
+    }
 
     fn args() -> AgentTaskFanoutInputArgs {
         AgentTaskFanoutInputArgs {
