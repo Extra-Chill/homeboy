@@ -1,9 +1,8 @@
 [workspace]
 # Internal crates split out of the homeboy monolith to gain per-crate
-# incremental compilation and lower peak build memory. These are path-only
-# members, never published to crates.io; the shipped artifact is still the
-# single `homeboy` binary. First extraction (homeboy-redaction) proves the
-# pattern ahead of larger extractions (e.g. runner).
+# incremental compilation and lower peak build memory. They are published as
+# dependencies of the `homeboy` crate; the shipped CLI artifact remains the
+# single `homeboy` binary.
 members = ["crates/*"]
 
 [package]
@@ -36,16 +35,17 @@ name = "bench-audit-self"
 path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
-# Internal workspace crates (path-only, not published)
-homeboy-cli-contract = { path = "crates/homeboy-cli-contract" }
-homeboy-error = { path = "crates/homeboy-error" }
-homeboy-finding = { path = "crates/homeboy-finding" }
-homeboy-output = { path = "crates/homeboy-output" }
-homeboy-paths = { path = "crates/homeboy-paths" }
-homeboy-process = { path = "crates/homeboy-process" }
-homeboy-product-identity = { path = "crates/homeboy-product-identity" }
-homeboy-engine-primitives = { path = "crates/homeboy-engine-primitives" }
-homeboy-redaction = { path = "crates/homeboy-redaction" }
+# Internal workspace crates. Cargo uses the path locally and the version when
+# packaging the publishable homeboy crate for crates.io.
+homeboy-cli-contract = { version = "0.1.0", path = "crates/homeboy-cli-contract" }
+homeboy-error = { version = "0.1.0", path = "crates/homeboy-error" }
+homeboy-finding = { version = "0.1.0", path = "crates/homeboy-finding" }
+homeboy-output = { version = "0.1.0", path = "crates/homeboy-output" }
+homeboy-paths = { version = "0.1.0", path = "crates/homeboy-paths" }
+homeboy-process = { version = "0.1.0", path = "crates/homeboy-process" }
+homeboy-product-identity = { version = "0.1.0", path = "crates/homeboy-product-identity" }
+homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-primitives" }
+homeboy-redaction = { version = "0.1.0", path = "crates/homeboy-redaction" }
 
 # Core library dependencies
 base64 = "0.22"
