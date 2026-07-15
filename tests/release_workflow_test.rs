@@ -6,6 +6,14 @@ fn release_quality_policy_script() -> &'static str {
     include_str!("../.github/release-quality-policy.sh")
 }
 
+fn cargo_manifest() -> &'static str {
+    include_str!("../Cargo.toml")
+}
+
+fn homeboy_lab_contract_manifest() -> &'static str {
+    include_str!("../crates/homeboy-lab-contract/Cargo.toml")
+}
+
 fn release_quality_policy(
     blocking_commands: &str,
     audit_result: &str,
@@ -215,18 +223,26 @@ fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
 }
 
 #[test]
-fn release_prepare_validates_publishable_workspace_before_mutating_release_state() {
+fn release_prepare_packages_internal_workspace_members_before_mutating_release_state() {
     let prepare = job_section(release_workflow(), "prepare");
     let package_preflight = prepare
-        .find("name: Preflight crates.io packages")
-        .expect("prepare must validate crates.io package manifests");
+        .find("name: Preflight internal workspace packages")
+        .expect("prepare must validate internal workspace package manifests");
     let release_action = prepare
         .find("uses: Extra-Chill/homeboy-action@v2")
         .expect("prepare must run the release action");
 
     assert!(
-        prepare.contains("run: cargo package --workspace --allow-dirty --no-verify"),
-        "publish preflight must package every workspace crate without publishing"
+        prepare.contains("run: cargo package --workspace --exclude homeboy --allow-dirty --no-verify"),
+        "package preflight must archive every internal workspace crate without requiring the root package's path dependencies in crates.io"
+    );
+    assert!(
+        cargo_manifest().contains("homeboy-lab-contract = { version = \"0.1.0\", path = \"crates/homeboy-lab-contract\" }"),
+        "the root package must depend on the extracted Lab contract crate through the workspace"
+    );
+    assert!(
+        homeboy_lab_contract_manifest().contains("publish = false"),
+        "the extracted Lab contract crate must remain an internal-only package"
     );
     assert!(
         package_preflight < release_action,
