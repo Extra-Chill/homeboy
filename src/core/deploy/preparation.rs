@@ -349,6 +349,18 @@ impl PreparedPayloadCollection {
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let existing = entry.get_mut();
+                if let Some(payload) = existing.payload.as_ref() {
+                    return match (&payload._release_artifact, release_artifact) {
+                        (Some(existing), Some(candidate)) if **existing == *candidate => Ok(()),
+                        (_, None) => Ok(()),
+                        _ => Err(Error::validation_invalid_argument(
+                            "release_artifact",
+                            "Prepared payload cannot be rebound to a different release artifact",
+                            None,
+                            None,
+                        )),
+                    };
+                }
                 match (&existing.release_artifact, release_artifact) {
                     (None, Some(release_artifact)) => {
                         existing.release_artifact = Some(release_artifact);
@@ -1117,6 +1129,38 @@ mod tests {
             .expect("prepare retained lease");
         assert_eq!(Path::new(payload.artifact.effective_path()), artifact_path);
         assert_eq!(observer.test_strong_count(), 2, "payload retains the lease");
+
+        collection
+            .insert(
+                ComponentPayloadPreparationRequest::new(&component, &deploy_config),
+                Some(observer.clone()),
+            )
+            .expect("equal consumer reuses the verified release artifact");
+        let conflicting_temp = tempfile::tempdir().expect("conflicting temp dir");
+        let conflicting_path = conflicting_temp.path().join("conflicting.zip");
+        std::fs::write(&conflicting_path, "changed").expect("conflicting artifact");
+        let conflicting =
+            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
+                path: conflicting_path,
+                tag: "v1.0.0".to_string(),
+                commit: Some("fedcba9876543210".to_string()),
+                url: "https://example.test/conflicting.zip".to_string(),
+                name: "fixture.zip".to_string(),
+                size: 7,
+                sha256: "different".to_string(),
+            })
+            .expect("conflicting lease");
+        assert!(collection
+            .insert(
+                ComponentPayloadPreparationRequest::new(&component, &deploy_config),
+                Some(conflicting),
+            )
+            .is_err());
+        assert_eq!(
+            observer.test_strong_count(),
+            2,
+            "equal consumers do not retain a redundant lease"
+        );
         drop(collection);
         assert_eq!(
             observer.test_strong_count(),
