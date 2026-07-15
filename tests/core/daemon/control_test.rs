@@ -165,6 +165,157 @@ fn corrupt_lease_reconciliation_terminalizes_queued_durable_agent_task_after_pro
 }
 
 #[test]
+fn version_mismatched_split_view_reconciles_only_after_no_owner_proof() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("runner.exec");
+        record_test_absent_local_child(&store, job.id);
+        let mut status = leaseless_status(1);
+        status.freshness.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+
+        let result = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(status),
+            || {
+                Ok(vec![
+                    "owner lock acquired".to_string(),
+                    "no daemon process".to_string(),
+                ])
+            },
+            || {
+                let snapshot = path.with_extension("split-view.snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || Ok(fake_daemon(4343, "replacement-lease")),
+        )
+        .expect("version-mismatched split view is recoverable after proof");
+
+        assert_eq!(result.affected_job_ids, vec![job.id.to_string()]);
+        assert_eq!(
+            JobStore::open_without_reconciliation(&path)
+                .expect("reopen store")
+                .get(job.id)
+                .expect("job")
+                .status,
+            JobStatus::Failed
+        );
+        let replay = JobStore::open_without_reconciliation(&path)
+            .expect("reopen terminal store")
+            .reconcile_leaseless_orphan_jobs()
+            .expect("identical version-mismatch reconciliation is idempotent");
+        assert_eq!(replay.reconciled_count(), 0);
+    });
+}
+
+#[test]
+fn version_mismatched_split_view_refuses_preserved_remote_claim_before_replacement() {
+    with_isolated_home(|_| {
+        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("store")
+            .with_daemon_lease("stale-lease".to_string());
+        let remote_job = store
+            .submit_remote_runner_job(
+                serde_json::from_value(serde_json::json!({
+                    "runner_id": "remote-runner",
+                    "command": ["true"],
+                }))
+                .expect("remote request"),
+            )
+            .expect("queue remote job");
+        let mut status = leaseless_status(1);
+        status.freshness.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+
+        let error = reconcile_leaseless_orphan_store_with_operations(
+            || Ok(status),
+            || {
+                Ok(vec![
+                    "owner lock acquired".to_string(),
+                    "no daemon process".to_string(),
+                ])
+            },
+            || {
+                let snapshot = path.with_extension("remote-claim.snapshot.json");
+                std::fs::copy(&path, &snapshot).expect("snapshot");
+                let store = JobStore::open_without_reconciliation(&path).expect("recovery store");
+                Ok((snapshot, store.reconcile_leaseless_orphan_jobs()?))
+            },
+            || unreachable!("preserved remote claim must block replacement"),
+        )
+        .expect_err("active broker-owned claim blocks version-mismatch recovery");
+
+        assert!(error.message.contains("broker-owned remote job"));
+        assert!(error.message.contains(&remote_job.id.to_string()));
+        assert_eq!(
+            store.get(remote_job.id).expect("remote job").status,
+            JobStatus::Queued
+        );
+    });
+}
+
+#[test]
+fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_another() {
+    with_isolated_home(|_| {
+        let replacement = fake_daemon(4343, "replacement-lease");
+        let state = fake_daemon_state(replacement.clone());
+        let status = DaemonStatus {
+            running: true,
+            fresh: true,
+            reachable: true,
+            freshness: DaemonFreshnessReport {
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
+                lease_id: Some(replacement.lease_id.clone()),
+                pid: Some(replacement.pid),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            },
+            stale_reason: None,
+            state: Some(state),
+            state_path: "/fake/daemon-state.json".to_string(),
+            state_identity: "fresh-replacement".to_string(),
+            process_candidates: Vec::new(),
+            active_job_recovery_evidence: Vec::new(),
+            termination_evidence: None,
+        };
+        let receipt = super::LeaselessRecoveryReceipt {
+            affected_job_ids: Vec::new(),
+            affected_jobs: Vec::new(),
+            historical_lease_ids: vec!["stale-lease".to_string()],
+            evidence_snapshot_path: "/fake/recovery.snapshot".to_string(),
+            ownership_proof: vec!["owner lock was acquired".to_string()],
+            phase: super::StateLossRecoveryPhase::ReplacementStarted,
+            replacement: Some(replacement.clone()),
+            replacement_startup_token: Some("fake-startup-token".to_string()),
+        };
+        let path =
+            crate::core::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
+        super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
+
+        let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0")
+            .expect("replay lookup")
+            .expect("exact completed recovery replays");
+
+        assert_eq!(replay.replacement, replacement);
+        assert_eq!(replay.affected_job_count, 0);
+        assert!(replay
+            .retry_guidance
+            .contains("no additional daemon was started"));
+    });
+}
+
+#[test]
 fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
     for probe in [
         || {

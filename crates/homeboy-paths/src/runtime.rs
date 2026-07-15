@@ -36,6 +36,11 @@ pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf
         .join(format!("{}.json", sanitize_path_segment(lease_id))))
 }
 
+/// Exact replacement receipt for an approved lease-less recovery.
+pub fn daemon_leaseless_recovery_receipt_file() -> Result<PathBuf> {
+    Ok(daemon_state_dir()?.join("leaseless-recovery.json"))
+}
+
 /// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
 pub fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("runner-sessions"))

@@ -713,10 +713,15 @@ where
     Start: FnOnce() -> Result<super::DaemonStartResult>,
 {
     let status = status()?;
-    if !matches!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
-    ) || status.freshness.active_jobs == 0
+    if status.freshness.active_jobs == 0
+        || !matches!(
+            status.freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::LeaseMissing
+                    | DaemonStaleReasonCode::LeaseCorrupt
+                    | DaemonStaleReasonCode::VersionMismatch
+            )
+        )
     {
         return Err(Error::validation_invalid_argument(
             "job_store",
@@ -739,6 +744,18 @@ where
             Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
         ));
     }
+    if !reconciled.preserved_remote_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "job_store",
+            format!(
+                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
+                reconciled.preserved_remote_job_ids.len(),
+                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
+        ));
+    }
     let affected_job_count = reconciled.reconciled_count();
     let replacement = start()?;
     Ok(DaemonLeaselessOrphanReconciliationResult {
@@ -748,6 +765,168 @@ where
         no_owner_proof,
         retry_guidance: "Inspect retained job events, then retry eligible work through its original command or workflow.".to_string(),
         replacement,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct LeaselessRecoveryReceipt {
+    affected_job_ids: Vec<uuid::Uuid>,
+    affected_jobs: Vec<crate::core::api_jobs::LeaselessOrphanAffectedJob>,
+    historical_lease_ids: Vec<String>,
+    evidence_snapshot_path: String,
+    ownership_proof: Vec<String>,
+    phase: StateLossRecoveryPhase,
+    replacement: Option<DaemonStartResult>,
+    replacement_startup_token: Option<String>,
+}
+
+impl LeaselessRecoveryReceipt {
+    fn into_result(self) -> Result<DaemonLeaselessRecoveryResult> {
+        let replacement = self.replacement.ok_or_else(|| {
+            Error::internal_unexpected("lease-less receipt has no replacement daemon identity")
+        })?;
+        Ok(DaemonLeaselessRecoveryResult {
+            affected_job_count: self.affected_job_ids.len(),
+            affected_job_ids: self.affected_job_ids,
+            affected_jobs: self.affected_jobs,
+            historical_lease_ids: self.historical_lease_ids,
+            evidence_snapshot_path: self.evidence_snapshot_path,
+            ownership_proof: self.ownership_proof,
+            retry_guidance: "Recovery already completed for this exact replacement daemon; no additional daemon was started.".to_string(),
+            replacement,
+        })
+    }
+}
+
+fn replay_leaseless_recovery(
+    status: &super::DaemonStatus,
+    addr: &str,
+) -> Result<Option<DaemonLeaselessRecoveryResult>> {
+    let receipt_path = crate::core::paths::daemon_leaseless_recovery_receipt_file()?;
+    let Some(mut receipt) = read_leaseless_recovery_receipt(&receipt_path)? else {
+        return Ok(None);
+    };
+    if receipt.phase == StateLossRecoveryPhase::Prepared {
+        if status.freshness.active_jobs > 0 {
+            return Ok(None);
+        }
+        receipt.phase = StateLossRecoveryPhase::Reconciled;
+        write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    }
+    if receipt.phase == StateLossRecoveryPhase::Reconciled {
+        receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
+        receipt.replacement_startup_token = Some(uuid::Uuid::new_v4().to_string());
+        write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+        return replay_leaseless_recovery(status, addr);
+    }
+    if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
+        if let Some(state) = status.state.as_ref().filter(|_| status.running) {
+            if receipt.replacement_startup_token.as_deref() != Some(&state.startup_token) {
+                return Err(Error::validation_invalid_argument(
+                    "reconcile_leaseless_orphans",
+                    "lease-less recovery replay found a mismatched live daemon",
+                    None,
+                    None,
+                ));
+            }
+            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+            receipt.replacement = Some(DaemonStartResult {
+                pid: state.pid,
+                address: state.address.clone(),
+                state_path: state.state_path.clone(),
+                lease_id: state.lease_id.clone(),
+            });
+            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+        } else {
+            let token = receipt
+                .replacement_startup_token
+                .as_deref()
+                .ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "lease-less replacement-starting receipt has no startup token",
+                    )
+                })?;
+            let replacement = start_or_return_live_unlocked_with_startup_token(addr, token)?;
+            let started = read_status()?;
+            if !started.running
+                || started
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.startup_token != token)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "reconcile_leaseless_orphans",
+                    "replacement replay did not publish its expected startup token",
+                    None,
+                    None,
+                ));
+            }
+            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+            receipt.replacement = Some(replacement);
+            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+            return Ok(Some(receipt.into_result()?));
+        }
+    }
+    let Some(state) = status.state.as_ref() else {
+        return Ok(None);
+    };
+    if status.freshness.active_jobs != 0 || !status.fresh || !status.running {
+        return Ok(None);
+    }
+    let replacement = receipt.replacement.as_ref().ok_or_else(|| {
+        Error::internal_unexpected("completed lease-less receipt has no replacement")
+    })?;
+    if receipt.phase != StateLossRecoveryPhase::ReplacementStarted
+        || replacement.lease_id != state.lease_id
+        || replacement.pid != state.pid
+        || replacement.address != state.address
+    {
+        return Ok(None);
+    }
+    Ok(Some(receipt.into_result()?))
+}
+
+fn read_leaseless_recovery_receipt(path: &Path) -> Result<Option<LeaselessRecoveryReceipt>> {
+    match std::fs::read(path) {
+        Ok(raw) => serde_json::from_slice(&raw).map(Some).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("read {}", path.display())))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("read {}", path.display())),
+        )),
+    }
+}
+
+fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryReceipt) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        Error::internal_unexpected("lease-less recovery receipt path has no parent")
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let body = serde_json::to_vec_pretty(receipt).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize lease-less recovery receipt".to_string()),
+        )
+    })?;
+    std::fs::write(&temporary, body).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", temporary.display())),
+        )
+    })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("rename {}", path.display())),
+        )
     })
 }
 
@@ -954,9 +1133,11 @@ where
     })
 }
 
-/// Explicitly recover legacy unowned durable jobs when the daemon lease is
-/// missing or unreadable. Process and configured-listener probes are fail-closed
-/// because no trustworthy lease identity exists to adopt.
+/// Explicitly recover durable jobs when no daemon owner can be proven. This
+/// covers missing lease metadata and stale version-mismatched daemons whose
+/// typed `/jobs` view no longer accounts for their durable active jobs.
+/// Process and configured-listener probes are fail-closed because replacement
+/// is safe only after ownership has been ruled out.
 pub fn reconcile_leaseless_orphans(
     confirm_no_daemon_owner: bool,
     addr: &str,
@@ -972,13 +1153,22 @@ pub fn reconcile_leaseless_orphans(
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
-    if !matches!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
-    ) {
+    if let Some(result) = replay_leaseless_recovery(&status, addr)? {
+        return Ok(result);
+    }
+    if status.freshness.active_jobs == 0
+        || !matches!(
+            status.freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::LeaseMissing
+                    | DaemonStaleReasonCode::LeaseCorrupt
+                    | DaemonStaleReasonCode::VersionMismatch
+            )
+        )
+    {
         return Err(Error::validation_invalid_argument(
             "reconcile_leaseless_orphans",
-            "lease-less recovery requires missing or corrupt daemon lease metadata; use exact lease recovery for recorded leases",
+            "recovery requires active jobs with missing, corrupt, or version-mismatched daemon freshness; use exact lease recovery for recorded dead leases",
             None,
             None,
         ));
@@ -996,6 +1186,18 @@ pub fn reconcile_leaseless_orphans(
     let raw_store = read_job_store_bytes(&jobs_path)?;
     let snapshot_path = snapshot_job_store(&jobs_path, &raw_store)?;
     let store = super::JobStore::open_without_reconciliation_from_bytes(&jobs_path, &raw_store)?;
+    let receipt_path = crate::core::paths::daemon_leaseless_recovery_receipt_file()?;
+    let mut receipt = LeaselessRecoveryReceipt {
+        affected_job_ids: Vec::new(),
+        affected_jobs: Vec::new(),
+        historical_lease_ids: Vec::new(),
+        evidence_snapshot_path: snapshot_path.display().to_string(),
+        ownership_proof: ownership_proof.clone(),
+        phase: StateLossRecoveryPhase::Prepared,
+        replacement: None,
+        replacement_startup_token: None,
+    };
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
     let reconciled = store.reconcile_leaseless_orphan_jobs()?;
     if !reconciled.protected_job_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1009,19 +1211,57 @@ pub fn reconcile_leaseless_orphans(
             Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
         ));
     }
+    if !reconciled.preserved_remote_job_ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            format!(
+                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
+                reconciled.preserved_remote_job_ids.len(),
+                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            ),
+            None,
+            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
+        ));
+    }
     let affected_job_count = reconciled.reconciled_count();
     drop(owner_lock);
-    let replacement = start_or_return_live_unlocked(addr)?;
-    Ok(DaemonLeaselessRecoveryResult {
+    receipt = LeaselessRecoveryReceipt {
         affected_job_ids: reconciled.reconciled_job_ids,
-        affected_job_count,
         affected_jobs: reconciled.affected_jobs,
         historical_lease_ids: reconciled.historical_lease_ids,
         evidence_snapshot_path: snapshot_path.display().to_string(),
         ownership_proof,
-        retry_guidance: "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string(),
-        replacement,
-    })
+        phase: StateLossRecoveryPhase::Reconciled,
+        replacement: None,
+        replacement_startup_token: None,
+    };
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    let startup_token = uuid::Uuid::new_v4().to_string();
+    receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
+    receipt.replacement_startup_token = Some(startup_token.clone());
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    let replacement = start_or_return_live_unlocked_with_startup_token(addr, &startup_token)?;
+    let status = read_status()?;
+    if !status.running
+        || status
+            .state
+            .as_ref()
+            .is_none_or(|state| state.startup_token != startup_token)
+    {
+        return Err(Error::validation_invalid_argument(
+            "reconcile_leaseless_orphans",
+            "replacement startup did not publish the expected lease-less recovery startup token",
+            None,
+            None,
+        ));
+    }
+    receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
+    receipt.replacement = Some(replacement);
+    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+    let mut result = receipt.into_result()?;
+    result.affected_job_count = affected_job_count;
+    result.retry_guidance = "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string();
+    Ok(result)
 }
 
 fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {

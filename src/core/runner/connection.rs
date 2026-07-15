@@ -1548,7 +1548,11 @@ mod remote_daemon {
         let leaseless_reconciliation_available = status.active_jobs > 0
             && matches!(
                 status.stale_reason_code,
-                Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
+                Some(
+                    DaemonStaleReasonCode::LeaseMissing
+                        | DaemonStaleReasonCode::LeaseCorrupt
+                        | DaemonStaleReasonCode::VersionMismatch
+                )
             );
         let mut ownership_evidence = if proven_dead {
             Some(format!(
@@ -1557,7 +1561,7 @@ mod remote_daemon {
                 lease_id.as_deref().expect("proven dead lease")
             ))
         } else if leaseless_reconciliation_available {
-            Some("active durable jobs have missing or corrupt daemon lease metadata; explicit reconciliation will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
+            Some("active durable jobs require explicit reconciliation; it will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
         } else {
             Some("remote daemon lease evidence is unavailable; active jobs are protected from implicit replacement".to_string())
         };
@@ -2476,6 +2480,10 @@ mod tests {
         assert!(warning.contains("VersionMismatch"));
         assert!(warning.contains("active jobs were preserved"));
         assert!(warning.contains("refresh-homeboy homeboy-lab --reconnect"));
+        assert_eq!(
+            recovery.adoption_command.as_deref(),
+            Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner")
+        );
     }
 
     #[test]

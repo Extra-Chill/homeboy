@@ -6,6 +6,7 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
     AgentRuntimeToolDiagnosticDeclaration,
 };
+use homeboy::core::daemon::DaemonStaleReasonCode;
 use homeboy::core::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
     RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
@@ -981,7 +982,7 @@ fn reverse_runner_status_hints(
 pub(super) fn runner_status_operator_commands(
     report: &RunnerStatusReport,
 ) -> Vec<RunnerOperatorCommand> {
-    let Some(session) = report.session.as_ref().filter(|_| report.connected) else {
+    let Some(session) = report.session.as_ref() else {
         return Vec::new();
     };
 
@@ -1086,6 +1087,21 @@ pub(super) fn runner_status_operator_commands(
             command: warning.refresh_command.clone(),
             description: "Restart the active runner daemon so the control plane uses the configured job command binary.".to_string(),
         });
+    }
+
+    if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
+        freshness.active_jobs > 0
+            && freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch)
+    }) {
+        if let Some(command) = freshness.adoption_command.as_ref() {
+            commands.push(RunnerOperatorCommand {
+                scope: "daemon_reconcile_split_view",
+                runner_id: report.runner_id.clone(),
+                job_id: None,
+                command: command.clone(),
+                description: "Reconcile the stale daemon split view only after the remote owner-lock, process, and listener probes prove no daemon-owned process remains alive.".to_string(),
+            });
+        }
     }
 
     commands
