@@ -19,6 +19,7 @@
 
 mod constants;
 mod descriptors;
+pub mod export;
 mod lab;
 mod output;
 mod public_variants;
