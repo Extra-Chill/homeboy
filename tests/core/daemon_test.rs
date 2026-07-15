@@ -396,14 +396,17 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
     let status = read_status().expect("status");
     assert!(!status.running);
     assert!(!status.fresh);
+    // A state file that exists but omits the required `lease_id` is now
+    // classified as a corrupt lease (missing field), reported through the
+    // structured code with a descriptive parse reason — not a missing lease.
     assert!(status
         .stale_reason
         .as_deref()
         .unwrap_or_default()
-        .contains("no schema or lease identity"));
+        .contains("invalid daemon lease"));
     assert_eq!(
         status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing)
+        Some(DaemonStaleReasonCode::LeaseCorrupt)
     );
 }
 
@@ -458,16 +461,19 @@ fn status_treats_dead_known_legacy_lease_as_missing_metadata_for_recovery() {
 
     let status = read_status().expect("status");
 
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing)
-    );
-    assert!(status.state.is_none());
-    assert!(status.freshness.lease_id.is_none());
+    // A legacy state that predates the lease schema lacks the required
+    // `lease_id`, so it is now surfaced as a corrupt lease (missing field)
+    // with a descriptive parse reason rather than the old "no schema" text.
     assert!(status
         .stale_reason
         .as_deref()
-        .is_some_and(|reason| reason.contains("no schema")));
+        .is_some_and(|reason| reason.contains("invalid daemon lease")));
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::LeaseCorrupt)
+    );
+    assert!(status.state.is_none());
+    assert!(status.freshness.lease_id.is_none());
     assert!(path.exists());
 }
 
