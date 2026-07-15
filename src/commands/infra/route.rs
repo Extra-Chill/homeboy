@@ -1547,6 +1547,9 @@ mod tests {
 
     #[test]
     fn non_lab_command_continues_local_dispatch() {
+        // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
+        // so hold the env lock to serialize against tests that assert on it.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let cli = Cli::parse_from(["homeboy", "status"]);
 
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
@@ -1673,6 +1676,9 @@ mod tests {
 
     #[test]
     fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
+        // Serialize against LAB_OFFLOAD_METADATA_ENV-asserting tests: this
+        // routes through route_after_parse, which mutates that global.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
             "homeboy",
             "--placement",
