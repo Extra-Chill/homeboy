@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.3] - 2026-07-15
+
+### Changed
+- split command_contract output routing from output type definitions
+- Complete the Lab agent-task control plane
+- split command_contract lab routing out of lab type definitions
+
+### Fixed
+- remove duplicate legacy Lab routing
+- canonicalize same-family workload command labels (#7972)
+- remove duplicate lab routing and Placement impls breaking main build
+- unblock reverse-broker mock daemon and restore lease-id validation
+
 ## [0.286.2] - 2026-07-15
 
 ### Changed
