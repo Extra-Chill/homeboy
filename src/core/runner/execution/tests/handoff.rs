@@ -681,11 +681,11 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             .iter()
             .any(|artifact| artifact.artifact_id == "run_location_index"));
         let json: Value = serde_json::from_str(&output.stdout).expect("handoff JSON");
-        let envelope: crate::command_contract::RunnerHandoffEnvelope =
+        let envelope: crate::core::lab_contract::RunnerHandoffEnvelope =
             serde_json::from_value(json.clone()).expect("typed handoff envelope");
         assert_eq!(
             envelope.schema,
-            crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+            crate::core::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
         );
         assert_eq!(envelope.status, "running");
         assert_eq!(envelope.execution_location, "runner:lab");
@@ -712,7 +712,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         );
         assert_eq!(
             envelope.artifact_manifest.manifest_schema,
-            crate::command_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA
+            crate::core::lab_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA
         );
         assert_eq!(
             envelope.artifact_manifest.path,
@@ -720,7 +720,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         );
         assert_eq!(
             envelope.run_location_index.schema,
-            crate::command_contract::RUN_LOCATION_INDEX_SCHEMA
+            crate::core::lab_contract::RUN_LOCATION_INDEX_SCHEMA
         );
         assert_eq!(envelope.run_location_index.run_id, "agent-task-run-6454");
         assert_eq!(envelope.run_location_index.runner_id, "lab");
@@ -832,7 +832,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
 
 #[test]
 fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
-    let envelope = crate::command_contract::RunnerHandoffEnvelope::detached_lab_offload(
+    let envelope = crate::core::lab_contract::RunnerHandoffEnvelope::detached_lab_offload(
         "lab",
         "job-123",
         "/srv/homeboy/project".to_string(),
@@ -844,7 +844,7 @@ fn runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
 
     assert_eq!(
         json["schema"],
-        crate::command_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
+        crate::core::lab_contract::RUNNER_HANDOFF_ENVELOPE_SCHEMA
     );
     assert_eq!(json["status"], "running");
     assert_eq!(json["execution_location"], "runner:lab");

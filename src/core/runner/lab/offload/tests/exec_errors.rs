@@ -423,7 +423,7 @@ fn lab_placement_refuses_local_execution_without_lab_contract() {
 
 #[test]
 fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
-    let reason = crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
+    let reason = crate::core::lab_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: Some(local_only_lab_command(reason)),
         normalized_args: &[
