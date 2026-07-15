@@ -6,6 +6,7 @@ license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Shared CLI contract types (e.g. execution Placement) used by both the homeboy CLI and core routing"
 repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
 
 [lib]
 name = "homeboy_cli_contract"

@@ -6,6 +6,7 @@ license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Structured bulk-operation result and output aggregation types for homeboy"
 repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
 
 [lib]
 name = "homeboy_output"

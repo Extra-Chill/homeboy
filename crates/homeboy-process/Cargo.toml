@@ -6,6 +6,7 @@ license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Process spawning, signaling, and lifecycle helpers for homeboy"
 repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
 
 [lib]
 name = "homeboy_process"

@@ -1,8 +1,9 @@
 [workspace]
 # Internal crates split out of the homeboy monolith to gain per-crate
-# incremental compilation and lower peak build memory. They are published as
-# dependencies of the `homeboy` crate; the shipped CLI artifact remains the
-# single `homeboy` binary.
+# incremental compilation and lower peak build memory. They are path-only
+# dependencies of the `homeboy` crate and are NOT published to crates.io
+# (each sets `publish = false`); the shipped CLI artifact remains the single
+# `homeboy` binary.
 members = ["crates/*"]
 
 [package]

@@ -6,6 +6,7 @@ license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Low-level execution primitives (shell, command, text, run_dir, template, output parsing, identifiers) for homeboy"
 repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
 
 [lib]
 name = "homeboy_engine_primitives"
