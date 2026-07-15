@@ -15,13 +15,14 @@ set -euo pipefail
 
 case "$1" in
   metadata)
-    printf '{"packages":[{"name":"homeboy-smoke","version":"1.2.3"}]}'
+    printf '{"workspace_members":["homeboy-smoke 1.2.3"],"packages":[{"id":"homeboy-smoke 1.2.3","name":"homeboy-smoke","version":"1.2.3","publish":null}],"resolve":{"nodes":[{"id":"homeboy-smoke 1.2.3","deps":[]}]}}'
     ;;
-  search)
-    printf 'homeboy-smoke = "1.2.2"\n'
+  info)
+    [[ -f "${CARGO_PUBLISHED_MARKER}" ]]
     ;;
   publish)
     printf '%s\n' "$@" >"${CARGO_PUBLISH_ARGS_LOG}"
+    touch "${CARGO_PUBLISHED_MARKER}"
     ;;
   *)
     echo "unexpected cargo command: $*" >&2
@@ -33,11 +34,18 @@ chmod +x "${BIN_DIR}/cargo"
 
 export PATH="${BIN_DIR}:${PATH}"
 export CARGO_PUBLISH_ARGS_LOG="${TMP_DIR}/publish-args.log"
+export CARGO_PUBLISHED_MARKER="${TMP_DIR}/published"
 
 bash "${SCRIPT}" >/dev/null
 
 if ! grep -qx -- '--allow-dirty' "${CARGO_PUBLISH_ARGS_LOG}"; then
   echo "FAIL: cargo publish did not receive --allow-dirty" >&2
+  cat "${CARGO_PUBLISH_ARGS_LOG}" >&2
+  exit 1
+fi
+
+if ! grep -qx -- '--package' "${CARGO_PUBLISH_ARGS_LOG}" || ! grep -qx -- 'homeboy-smoke' "${CARGO_PUBLISH_ARGS_LOG}"; then
+  echo "FAIL: cargo publish did not receive the explicit package identity" >&2
   cat "${CARGO_PUBLISH_ARGS_LOG}" >&2
   exit 1
 fi

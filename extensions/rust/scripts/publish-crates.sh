@@ -143,25 +143,87 @@ publish_homebrew_formulae() {
   return 0
 }
 
-# Get current package info from Cargo.toml
-PACKAGE_NAME=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[0].name // empty')
-CURRENT_VERSION=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[0].version // empty')
+workspace_packages() {
+  cargo metadata --format-version 1 --locked | jq -r '
+    (.workspace_members // [.packages[].id]) as $members
+    | [.packages[]
+       | select(.id as $id | $members | index($id))
+       | select(.publish != [])
+       | { id, name, version }
+      ] as $packages
+    | ($packages | map(.id)) as $publishable_ids
+    | [ $packages[] as $package
+        | {
+            id: $package.id,
+            name: $package.name,
+            version: $package.version,
+            dependencies: [
+              (.resolve.nodes[]? | select(.id == $package.id) | .deps[]?.pkg)
+              | select(. as $dependency | $publishable_ids | index($dependency))
+            ]
+          }
+      ] as $pending
+    | { pending: $pending, published: [] }
+    | until(
+        (.pending | length) == 0;
+        . as $state
+        | ([.pending[]
+            | select((.dependencies - $state.published | length) == 0)
+          ] | sort_by(.name)) as $ready
+        | if ($ready | length) == 0 then
+            error("publishable workspace packages contain a dependency cycle")
+          else
+            .published += ($ready | map(.id))
+            | .pending -= $ready
+          end
+      )
+    | .published[] as $id
+    | $pending[] | select(.id == $id) | [.name, .version] | @tsv
+  '
+}
 
-if [[ -z "$PACKAGE_NAME" || -z "$CURRENT_VERSION" ]]; then
-  echo "Failed to read package info from Cargo.toml" >&2
+package_is_published() {
+  cargo info "$1@$2" --registry crates-io >/dev/null 2>&1
+}
+
+wait_for_registry_visibility() {
+  local package_name="$1" package_version="$2"
+  local attempts="${HOMEBOY_CRATES_IO_VISIBILITY_ATTEMPTS:-12}"
+  local delay="${HOMEBOY_CRATES_IO_VISIBILITY_DELAY_SECONDS:-5}"
+  local attempt
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if package_is_published "${package_name}" "${package_version}"; then
+      echo "${package_name} v${package_version} is available in the crates.io registry."
+      return 0
+    fi
+
+    if [[ "${attempt}" -lt "${attempts}" ]]; then
+      echo "Waiting for ${package_name} v${package_version} to become available in crates.io (${attempt}/${attempts})..."
+      sleep "${delay}"
+    fi
+  done
+
+  echo "${package_name} v${package_version} did not become available in crates.io after ${attempts} checks." >&2
+  return 1
+}
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required for Rust workspace publishing." >&2
   exit 1
 fi
 
-# Check if this version is already published on crates.io
-PUBLISHED_VERSION=$(cargo search "$PACKAGE_NAME" --limit 1 2>/dev/null | grep -oE "^$PACKAGE_NAME = \"[^\"]+\"" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+while IFS=$'\t' read -r package_name package_version; do
+  [[ -z "${package_name}" || -z "${package_version}" ]] && continue
 
-if [[ "$CURRENT_VERSION" == "$PUBLISHED_VERSION" ]]; then
-  echo "Version $CURRENT_VERSION of $PACKAGE_NAME already published to crates.io, skipping..."
-  publish_homebrew_formulae
-  exit 0
-fi
+  if package_is_published "${package_name}" "${package_version}"; then
+    echo "${package_name} v${package_version} is already published to crates.io."
+    continue
+  fi
 
-echo "Publishing $PACKAGE_NAME v$CURRENT_VERSION to crates.io..."
-cargo publish --locked --allow-dirty
+  echo "Publishing ${package_name} v${package_version} to crates.io..."
+  cargo publish --package "${package_name}" --locked --allow-dirty
+  wait_for_registry_visibility "${package_name}" "${package_version}"
+done < <(workspace_packages)
 
 publish_homebrew_formulae
