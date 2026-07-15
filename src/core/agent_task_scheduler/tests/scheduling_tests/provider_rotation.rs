@@ -525,6 +525,68 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn timed_out_attempt_rotates_after_recovering_a_malformed_scratch_index() {
+        struct TimeoutThenSuccessExecutor {
+            calls: AtomicUsize,
+            scratch_index: std::path::PathBuf,
+            scratch_roots: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl AgentTaskExecutorAdapter for TimeoutThenSuccessExecutor {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                self.scratch_roots.lock().expect("scratch roots").push(
+                    request.executor.config["runtime_env"]["TMPDIR"]
+                        .as_str()
+                        .expect("scheduler scratch root")
+                        .to_string(),
+                );
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    fs::write(&self.scratch_index, "{ stale").expect("corrupt stale index");
+                    std::thread::sleep(Duration::from_millis(25));
+                    return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+                }
+                outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+            }
+        }
+
+        let _home = crate::test_support::HomeGuard::new();
+        let run_id = "timeout-rotation-scratch-recovery";
+        let scratch_index = crate::core::paths::homeboy_data()
+            .expect("homeboy data")
+            .join("controller-scratch/test-indexes")
+            .join(run_id)
+            .join("resources.json");
+        let scratch_roots = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = AgentTaskScheduler::new(TimeoutThenSuccessExecutor {
+            calls: AtomicUsize::new(0),
+            scratch_index,
+            scratch_roots: Arc::clone(&scratch_roots),
+        })
+        .with_run_id(run_id);
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let scratch_roots = scratch_roots.lock().expect("scratch roots").clone();
+        assert_eq!(scratch_roots.len(), 2);
+        assert_ne!(
+            scratch_roots[0], scratch_roots[1],
+            "the rotated provider receives a new scratch root"
+        );
+        assert!(aggregate.events.iter().any(|event| {
+            event.message.as_deref() == Some("provider rotation queued: entry 1 of 1")
+        }));
+    }
+
+    #[test]
     fn does_not_rotate_on_task_level_failure_classifications() {
         for classification in [
             AgentTaskFailureClassification::ExecutionFailed,

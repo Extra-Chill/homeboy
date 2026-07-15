@@ -122,7 +122,7 @@ fn allocate_attempt_at_index(
     }
 
     with_index_lock(&index_path, || {
-        let mut index = read_index_at_unlocked(&index_path)?;
+        let mut index = read_or_recover_index_at_unlocked(&index_path)?;
         index.resources.push(ControllerScratchResource {
             path: path.display().to_string(),
             run_id: run_id.to_string(),
@@ -753,6 +753,140 @@ fn read_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
     }
 }
 
+/// A controller using an older non-atomic writer can expose transient partial
+/// bytes even while this process holds the index lock. Retry once before
+/// classifying the durable index as malformed.
+fn read_or_recover_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
+    let raw = read_index_bytes(path)?;
+    let first_error = match serde_json::from_str(&raw) {
+        Ok(index) => return Ok(index),
+        Err(error) => error,
+    };
+    let retried_raw = read_index_bytes(path)?;
+    match serde_json::from_str(&retried_raw) {
+        Ok(index) => Ok(index),
+        Err(retried_error) => {
+            if let Ok(document) = serde_json::from_str::<serde_json::Value>(&retried_raw) {
+                return salvage_compatible_resources(path, document, &retried_error.to_string());
+            }
+            let quarantine_path = preserve_index_bytes(path, "corrupt")?;
+            eprintln!(
+                "Homeboy quarantined syntactically invalid controller scratch index {} to {} after two reads; first parse error: {}; retry parse error: {}; allocating a fresh scratch root",
+                path.display(),
+                quarantine_path.display(),
+                first_error,
+                retried_error
+            );
+            Ok(ControllerScratchIndex {
+                schema: schema(),
+                resources: Vec::new(),
+            })
+        }
+    }
+}
+
+fn read_index_bytes(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(path.display().to_string()),
+        )),
+    }
+}
+
+fn salvage_compatible_resources(
+    path: &Path,
+    document: serde_json::Value,
+    parse_context: &str,
+) -> Result<ControllerScratchIndex> {
+    let Some(document) = document.as_object() else {
+        return quarantine_incompatible_index(
+            path,
+            parse_context,
+            "top-level JSON value is not an object",
+        );
+    };
+    let Some(resources) = document
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return quarantine_incompatible_index(
+            path,
+            parse_context,
+            "top-level resources field is not an array",
+        );
+    };
+    let mut compatible_resources = Vec::with_capacity(resources.len());
+    let mut incompatible_count = 0;
+    for resource in resources {
+        match serde_json::from_value(resource.clone()) {
+            Ok(resource) => compatible_resources.push(resource),
+            Err(_) => incompatible_count += 1,
+        }
+    }
+    let preserved_path = preserve_index_bytes(path, "incompatible")?;
+    eprintln!(
+        "Homeboy salvaged {} compatible controller scratch resources from {} after typed parse failure ({} incompatible resource(s); context: {}); preserved original bytes at {}",
+        compatible_resources.len(),
+        path.display(),
+        incompatible_count,
+        parse_context,
+        preserved_path.display()
+    );
+    Ok(ControllerScratchIndex {
+        schema: document
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(schema),
+        resources: compatible_resources,
+    })
+}
+
+fn quarantine_incompatible_index(
+    path: &Path,
+    parse_context: &str,
+    shape_context: &str,
+) -> Result<ControllerScratchIndex> {
+    let quarantine_path = preserve_index_bytes(path, "incompatible")?;
+    eprintln!(
+        "Homeboy quarantined controller scratch index {} to {} because it is syntactically valid but structurally incompatible ({}; parse context: {}); allocating a fresh scratch root",
+        path.display(),
+        quarantine_path.display(),
+        shape_context,
+        parse_context
+    );
+    Ok(ControllerScratchIndex {
+        schema: schema(),
+        resources: Vec::new(),
+    })
+}
+
+fn preserve_index_bytes(path: &Path, classification: &str) -> Result<PathBuf> {
+    let preserved_path = path.with_file_name(format!(
+        "{}.{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("resources.json"),
+        classification,
+        uuid::Uuid::new_v4()
+    ));
+    fs::rename(path, &preserved_path).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "could not preserve controller scratch index {} at {}: {}",
+                path.display(),
+                preserved_path.display(),
+                error
+            ),
+            Some(path.display().to_string()),
+        )
+    })?;
+    Ok(preserved_path)
+}
+
 #[cfg(test)]
 fn write_index(index: &ControllerScratchIndex) -> Result<()> {
     let index_path = index_path()?;
@@ -905,6 +1039,71 @@ mod tests {
             assert_eq!(resource.owner_pid, std::process::id());
             assert!(resource.reconstructable);
             assert!(!resource.created_at.is_empty());
+        });
+    }
+
+    #[test]
+    fn allocation_quarantines_a_malformed_index_and_registers_a_fresh_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let index_path = index_path().expect("index path");
+            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+            fs::write(&index_path, "{ stale").expect("malformed index");
+
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
+                .expect("allocation recovers malformed index");
+            let index = read_index().expect("replacement index");
+
+            assert_eq!(index.resources.len(), 1);
+            assert_eq!(index.resources[0].lease_id, allocation.lease_id);
+            let quarantined = fs::read_dir(index_path.parent().expect("index parent"))
+                .expect("index directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("resources.json.corrupt-"))
+                .collect::<Vec<_>>();
+            assert_eq!(quarantined.len(), 1);
+        });
+    }
+
+    #[test]
+    fn allocation_salvages_valid_leases_from_a_typed_incompatible_resource() {
+        crate::test_support::with_isolated_home(|_| {
+            let index_path = index_path().expect("index path");
+            fs::create_dir_all(index_path.parent().expect("index parent")).expect("index parent");
+            let valid = resource(Path::new("/scratch/valid"), Path::new("/scratch"));
+            fs::write(
+                &index_path,
+                serde_json::json!({
+                    "schema": CONTROLLER_SCRATCH_SCHEMA,
+                    "resources": [
+                        valid,
+                        { "path": 42 }
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("typed incompatible index");
+
+            let allocation = allocate_attempt("run-1", "plan-1", "task-1", 2)
+                .expect("allocation salvages compatible leases");
+            let index = read_index().expect("replacement index");
+
+            assert_eq!(index.resources.len(), 2);
+            assert!(index
+                .resources
+                .iter()
+                .any(|resource| resource.lease_id == "test-lease"));
+            assert!(index
+                .resources
+                .iter()
+                .any(|resource| resource.lease_id == allocation.lease_id));
+            let preserved = fs::read_dir(index_path.parent().expect("index parent"))
+                .expect("index directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("resources.json.incompatible-"))
+                .collect::<Vec<_>>();
+            assert_eq!(preserved.len(), 1);
         });
     }
 
