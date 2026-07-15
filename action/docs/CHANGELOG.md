@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.14] - 2026-07-15
+
+### Fixed
+- detect scoped Homeboy placement
+
 ## [2.8.13] - 2026-07-13
 
 ### Fixed
