@@ -469,15 +469,6 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
                 record = reconciled;
             }
         }
-    } else if let (Ok(aggregate), Ok(plan)) = (
-        store::read_aggregate(&record.run_id),
-        store::read_plan_path(&record.plan_path),
-    ) {
-        if let Some(reconciled) = store::mutate_record(&record.run_id, |latest| {
-            backfill_terminal_generic_runtime_evidence(latest, &plan, &aggregate)
-        })? {
-            record = reconciled;
-        }
     }
     let before_liveness_reconciliation = record.clone();
     reconcile_runner_job_state(&mut record)?;
@@ -1719,9 +1710,4 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
         true
     })?;
     Ok(record.expect("promotion mutation always changes the record"))
-}
-
-#[cfg(test)]
-pub(crate) fn fail_next_record_write_for_test() {
-    store::fail_next_record_write_for_test();
 }
