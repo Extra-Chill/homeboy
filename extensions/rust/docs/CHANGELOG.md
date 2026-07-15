@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.9] - 2026-07-15
+
+### Fixed
+- retry crates.io publication rate limits
+
 ## [1.23.8] - 2026-07-15
 
 ### Fixed
