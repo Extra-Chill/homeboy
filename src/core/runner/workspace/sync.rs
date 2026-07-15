@@ -112,13 +112,19 @@ pub fn sync_workspace(
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
             let synthetic_checkout = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                Some(materialize_snapshot_git(
+                match materialize_snapshot_git(
                     &runner,
                     &local_path,
                     &remote_path,
                     &excludes,
                     &snapshot,
-                )?)
+                ) {
+                    Ok(identity) => Some(identity),
+                    Err(error) => {
+                        rollback_materialized_workspace(&runner, workspace_root, &remote_path);
+                        return Err(error);
+                    }
+                }
             } else {
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
                 None

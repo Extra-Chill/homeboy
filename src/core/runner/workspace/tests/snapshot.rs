@@ -2,6 +2,7 @@ use super::git;
 
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::core::runner::workspace::snapshot::{
     copy_snapshot_to_directory, snapshot_archive_command, snapshot_install_command,
@@ -22,11 +23,84 @@ fn snapshot_git_readback_failure_fails_materialization_contract() {
     assert!(format!("{error:?}")
         .contains("could not read `rev-parse HEAD` from synthetic snapshot-git checkout"));
 }
+
+#[test]
+fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() {
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    crate::test_support::with_isolated_home(|_| {
+        let source = super::dirty_git_repo();
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let shim_root = tempfile::tempdir().expect("git shim root");
+        let shim = shim_root.path().join("git");
+        fs::write(
+            &shim,
+            "#!/bin/sh\nif [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ] && [ -e \"$2/.git/refs/notes/homeboy-snapshot\" ]; then exit 1; fi\nexec /usr/bin/git \"$@\"\n",
+        )
+        .expect("write git shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-readback-failure","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let original_path = std::env::var_os("PATH").expect("PATH");
+        let mut path_entries = vec![shim_root.path().display().to_string()];
+        path_entries
+            .extend(std::env::split_paths(&original_path).map(|path| path.display().to_string()));
+        std::env::set_var("PATH", path_entries.join(":"));
+        let result = sync_workspace(
+            "lab-readback-failure",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        );
+        std::env::set_var("PATH", original_path);
+
+        let error = result.expect_err("required snapshot-git readback must fail");
+        assert!(format!("{error:?}").contains("synthetic snapshot-git checkout"));
+        let workspaces_root = runner_root.path().join("_lab_workspaces");
+        assert!(
+            !workspaces_root.exists()
+                || fs::read_dir(&workspaces_root)
+                    .expect("read workspaces root")
+                    .next()
+                    .is_none(),
+            "readback failure must remove the materialized remote workspace"
+        );
+        let (listed, exit_code) =
+            list_workspaces("lab-readback-failure", 10).expect("list workspaces");
+        assert_eq!(exit_code, 0);
+        assert!(
+            listed.workspaces.is_empty(),
+            "readback failure must not register a workspace"
+        );
+    });
+}
 use crate::core::runner::workspace::sync::{list_workspaces, sync_workspace};
 use crate::core::runner::workspace::types::{
     RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::core::runner::workspace::util::git_output;
+
+static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
 fn runner_snapshot_includes_override_generated_output_excludes() {
