@@ -59,13 +59,32 @@ pub(crate) fn promote_with_provider(
     })?;
     let (source_kind, outcome) = select_outcome(source_value, options.task_id.as_deref())?;
 
-    if outcome.status != AgentTaskOutcomeStatus::Succeeded {
+    if !matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::CandidateRecoverable
+    ) {
         return Err(Error::validation_invalid_argument(
             "source",
             format!(
-                "promotion requires a succeeded outcome; task {} has status {:?}",
+                "promotion requires a succeeded or recoverable-candidate outcome; task {} has status {:?}",
                 outcome.task_id, outcome.status
             ),
+            None,
+            None,
+        ));
+    }
+
+    if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable
+        && outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| is_actionable_patch_artifact(artifact))
+            .count()
+            != 1
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "recoverable-candidate promotion requires exactly one actionable patch artifact",
             None,
             None,
         ));

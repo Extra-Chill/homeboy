@@ -160,6 +160,94 @@ fn write_empty_patch_source(temp: &tempfile::TempDir) -> (PathBuf, String) {
     (source_path, source)
 }
 
+fn recoverable_patch_source(temp: &tempfile::TempDir, patch_count: usize) -> (PathBuf, String) {
+    let artifacts = (0..patch_count)
+        .map(|index| {
+            let name = format!("candidate-{index}.patch");
+            std::fs::write(temp.path().join(&name), VALID_PATCH).expect("write candidate patch");
+            serde_json::json!({
+                "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": format!("candidate-{index}"),
+                "kind": "patch",
+                "path": name,
+                "size_bytes": VALID_PATCH.len(),
+                "sha256": sha256_hex(VALID_PATCH),
+                "metadata": { "role": "patch" }
+            })
+        })
+        .collect::<Vec<_>>();
+    let source_path = temp.path().join("recoverable-outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task-1",
+        "status": "candidate_recoverable",
+        "artifacts": artifacts
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write recoverable source");
+    (source_path, source)
+}
+
+fn promote_recoverable_patch_count(
+    patch_count: usize,
+) -> (Result<AgentTaskPromotionReport>, usize) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = recoverable_patch_source(&temp, patch_count);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+    let result = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("recoverable-run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            to_worktree: "repo@recoverable".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    );
+    (result, provider.apply_calls.len())
+}
+
+#[test]
+fn promote_recoverable_candidate_rejects_zero_actionable_patches() {
+    let (result, apply_calls) = promote_recoverable_patch_count(0);
+    assert!(result
+        .expect_err("missing candidate rejected")
+        .message
+        .contains("exactly one actionable patch"));
+    assert_eq!(apply_calls, 0);
+}
+
+#[test]
+fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
+    let (result, apply_calls) = promote_recoverable_patch_count(1);
+    assert_eq!(
+        result.expect("single candidate applies").status,
+        AgentTaskPromotionStatus::Applied
+    );
+    assert_eq!(apply_calls, 1);
+}
+
+#[test]
+fn promote_recoverable_candidate_rejects_multiple_actionable_patches() {
+    let (result, apply_calls) = promote_recoverable_patch_count(2);
+    assert!(result
+        .expect_err("ambiguous candidate rejected")
+        .message
+        .contains("exactly one actionable patch"));
+    assert_eq!(apply_calls, 0);
+}
+
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

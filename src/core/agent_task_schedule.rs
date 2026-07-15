@@ -710,6 +710,7 @@ mod aggregate {
     #[serde(rename_all = "snake_case")]
     pub enum AgentTaskAggregateStatus {
         Succeeded,
+        PartialRecoverable,
         PartialFailure,
         Failed,
         Cancelled,
@@ -732,6 +733,8 @@ mod aggregate {
         pub cancelled: usize,
         #[serde(default)]
         pub timed_out: usize,
+        #[serde(default)]
+        pub recoverable_candidates: usize,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -755,6 +758,7 @@ mod aggregate {
         Failed,
         Cancelled,
         TimedOut,
+        CandidateRecoverable,
     }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

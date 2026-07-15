@@ -157,6 +157,38 @@ mod adaptive_concurrency_tests {
 mod concurrency_tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct PanicAfterCommitExecutor {
+        attempts: Arc<AtomicUsize>,
+        attempt_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for PanicAfterCommitExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let root = std::path::PathBuf::from(request.workspace.root.expect("attempt workspace"));
+            *self.attempt_root.lock().expect("attempt root") = Some(root.clone());
+            fs::write(root.join("panic-candidate.txt"), "candidate\n").expect("write candidate");
+            assert!(Command::new("git")
+                .args(["add", "panic-candidate.txt"])
+                .current_dir(&root)
+                .status()
+                .expect("stage candidate")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "-m", "candidate before panic"])
+                .current_dir(&root)
+                .status()
+                .expect("commit candidate")
+                .success());
+            panic!("provider panic after commit");
+        }
+    }
+
     pub(super) fn init_git_workspace(path: &std::path::Path) {
         fs::create_dir(path).expect("workspace directory");
         for args in [
@@ -184,6 +216,81 @@ mod concurrency_tests {
             .status()
             .expect("commit base")
             .success());
+    }
+
+    #[test]
+    fn executor_panic_after_commit_harvests_candidate_without_retry_or_rotation() {
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        init_git_workspace(&source);
+        let executor = PanicAfterCommitExecutor {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            attempt_root: Arc::new(Mutex::new(None)),
+        };
+        let attempts = Arc::clone(&executor.attempts);
+        let attempt_root = Arc::clone(&executor.attempt_root);
+        let scheduler = AgentTaskScheduler::new(executor).with_run_id("panic-candidate");
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(source.display().to_string());
+        plan.options.retry.max_attempts = 3;
+        plan.options.retry.retryable_failure_classifications =
+            vec![AgentTaskFailureClassification::Provider];
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                backend: Some("fallback".to_string()),
+                ..AgentTaskProviderRotationEntry::default()
+            }],
+            ..AgentTaskProviderRotationPolicy::default()
+        });
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::PartialRecoverable
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::CandidateRecoverable
+        );
+        assert!(aggregate.outcomes[0].artifacts.iter().any(|artifact| {
+            artifact.kind == "patch" && artifact.metadata["change_source"] == "local_commits"
+        }));
+        assert!(!aggregate.events.iter().any(|event| {
+            event.message.as_deref().is_some_and(|message| {
+                message == "retry queued" || message.starts_with("provider rotation queued")
+            })
+        }));
+        assert!(!attempt_root
+            .lock()
+            .expect("attempt root")
+            .as_ref()
+            .expect("attempt workspace observed")
+            .exists());
+    }
+
+    #[test]
+    fn deferred_cleanup_action_records_completed_and_failed_results() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (name, result, expected) in [
+            ("completed", Ok(()), "completed"),
+            ("failed", Err("cleanup failed".to_string()), "failed"),
+        ] {
+            let path = temp.path().join(format!("{name}.json"));
+            fs::write(&path, json!({ "status": "pending" }).to_string()).expect("pending action");
+
+            super::super::super::complete_deferred_cleanup_action(&path, result);
+
+            let action: Value = serde_json::from_str(&fs::read_to_string(&path).expect("action"))
+                .expect("action JSON");
+            assert_eq!(action["status"], expected);
+            assert!(action["completed_at"].is_string());
+            if expected == "failed" {
+                assert_eq!(action["diagnostic"], "cleanup failed");
+            }
+        }
     }
 
     #[test]
@@ -292,6 +399,7 @@ mod concurrency_tests {
 
     #[test]
     fn serializes_tasks_that_share_a_mutable_workspace() {
+        let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
@@ -581,6 +689,7 @@ mod concurrency_tests {
 
     #[test]
     fn rejects_preexisting_caller_dirt_before_attempt_checkout_or_provider_dispatch() {
+        let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
@@ -683,6 +792,7 @@ mod concurrency_tests {
 
     #[test]
     fn retry_uses_clean_isolated_workspace_after_permission_denial() {
+        let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -759,6 +869,7 @@ mod concurrency_tests {
 
     #[test]
     fn clean_workspace_without_executor_commits_remains_a_no_patch_success() {
+        let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         init_git_workspace(&workspace);
@@ -877,8 +988,8 @@ mod provider_rotation_tests {
             if call == 0 {
                 let path = root.join("candidate.patch");
                 fs::write(&path, &self.patch).expect("candidate patch");
-                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
-                outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+                let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Timeout);
                 outcome.artifacts.push(AgentTaskArtifact {
                     schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
                     id: "candidate".to_string(),
@@ -1031,7 +1142,7 @@ mod provider_rotation_tests {
     }
 
     #[test]
-    fn rotation_preserves_uncommitted_candidate_and_dispatches_next_provider_from_clean_baseline() {
+    fn recoverable_candidate_does_not_rotate_without_explicit_adoption() {
         let _home = crate::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -1050,7 +1161,7 @@ mod provider_rotation_tests {
 
         assert_eq!(
             aggregate.status,
-            AgentTaskAggregateStatus::Succeeded,
+            AgentTaskAggregateStatus::PartialRecoverable,
             "{aggregate:#?}"
         );
         assert!(
@@ -1058,10 +1169,8 @@ mod provider_rotation_tests {
             "the managed task worktree must remain untouched"
         );
         let roots = observed_roots.lock().expect("observed roots");
-        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.len(), 1);
         assert_ne!(roots[0], workspace);
-        assert_ne!(roots[1], workspace);
-        assert_ne!(roots[0], roots[1]);
         let candidate = aggregate.outcomes[0]
             .artifacts
             .iter()
@@ -1081,7 +1190,7 @@ mod provider_rotation_tests {
             .as_deref()
             .is_some_and(|path| path.contains("agent-task/attempt-patches/run-8081/task-1")));
         assert!(
-            !roots[0].exists() && !roots[1].exists(),
+            !roots[0].exists(),
             "attempt checkouts are retired after their executor threads stop"
         );
     }
@@ -1354,6 +1463,46 @@ mod provider_rotation_tests {
 mod timeout_tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct LatePatchExecutor;
+
+    impl AgentTaskExecutorAdapter for LatePatchExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            std::thread::sleep(Duration::from_millis(1_500));
+            std::fs::write(
+                std::path::Path::new(
+                    request
+                        .workspace
+                        .root
+                        .as_deref()
+                        .expect("attempt workspace"),
+                )
+                .join("late.txt"),
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .expect("late patch");
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("late provider completion".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
     #[test]
     fn normalizes_slow_task_to_timeout() {
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
@@ -1381,7 +1530,7 @@ mod timeout_tests {
     }
 
     #[test]
-    fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
+    fn grace_expiry_does_not_harvest_runtime_artifacts_from_a_live_workspace() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact_root = temp.path().join("task-1-artifacts");
         fs::create_dir_all(&artifact_root).expect("artifact root");
@@ -1431,7 +1580,8 @@ mod timeout_tests {
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(250),
-        ));
+        ))
+        .with_run_id("grace-expiry-cleanup");
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].limits.timeout_ms = Some(1);
         plan.tasks[0].metadata = json!({ "artifact_root": artifact_root });
@@ -1440,39 +1590,96 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status,
-            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+            crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
         );
-        assert_eq!(aggregate.totals.succeeded, 1);
-        assert_eq!(aggregate.totals.timed_out, 0);
+        assert_eq!(aggregate.totals.recoverable_candidates, 0);
+        assert_eq!(aggregate.totals.timed_out, 1);
         assert!(aggregate
             .events
             .iter()
-            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::Succeeded));
+            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::TimedOut));
         let outcome = &aggregate.outcomes[0];
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
         assert!(outcome.artifacts.iter().any(|artifact| {
-            artifact.kind == "patch"
-                && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
+            artifact.kind == "cleanup_action"
+                && artifact.metadata["status"] == "pending"
+                && artifact
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("/artifacts#task=task-1"))
         }));
-        assert!(outcome
-            .artifacts
-            .iter()
-            .any(|artifact| artifact.kind == "transcript"));
         assert!(outcome
             .evidence_refs
             .iter()
-            .any(|evidence| evidence.kind == "agent_result"
-                && evidence.uri == agent_result_path.display().to_string()));
-        assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "completed_runtime_late_provider_race"
-                && diagnostic.data.get("timeout_kind").and_then(Value::as_str)
-                    == Some("scheduler_timeout")
-                && diagnostic
-                    .data
-                    .get("actionable_patch")
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        }));
+            .all(|evidence| evidence.kind != "agent_result"));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.class == "agent_task.deferred_cleanup" }));
+    }
+
+    #[test]
+    fn deferred_worker_finalizes_late_patch_for_lifecycle_reconciliation() {
+        let _home = crate::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        fs::create_dir(&source).expect("source");
+        crate::test_support::run_git_fixture_command(&source, &["init", "-q"]);
+        crate::test_support::run_git_fixture_command(
+            &source,
+            &["config", "user.email", "test@example.com"],
+        );
+        crate::test_support::run_git_fixture_command(
+            &source,
+            &["config", "user.name", "Homeboy Test"],
+        );
+        fs::write(source.join("README.md"), "initial\n").expect("source file");
+        crate::test_support::run_git_fixture_command(&source, &["add", "."]);
+        crate::test_support::run_git_fixture_command(&source, &["commit", "-q", "-m", "initial"]);
+        let scheduler =
+            AgentTaskScheduler::new(LatePatchExecutor).with_run_id("deferred-worker-finalization");
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].limits.timeout_ms = Some(1);
+        plan.tasks[0].workspace.root = Some(source.display().to_string());
+
+        let aggregate = scheduler.run(plan);
+        let action_path = aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "cleanup_action")
+            .and_then(|artifact| artifact.path.clone())
+            .expect("deferred cleanup action");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let action = loop {
+            let action: Value =
+                serde_json::from_str(&fs::read_to_string(&action_path).expect("action"))
+                    .expect("action JSON");
+            if action["status"] == "candidate_recovered" {
+                break action;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not finish cleanup"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let candidate = &action["candidate_artifacts"][0];
+        assert_eq!(
+            candidate["metadata"]["run_id"],
+            "deferred-worker-finalization"
+        );
+        assert_eq!(candidate["metadata"]["task_id"], "task-1");
+        assert_eq!(candidate["metadata"]["producer_attempt"], 1);
+        assert!(candidate["sha256"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 64));
+        assert_eq!(
+            candidate["url"],
+            format!(
+                "homeboy://agent-task/run/deferred-worker-finalization/artifacts#task=task-1&artifact={}",
+                candidate["id"].as_str().expect("candidate id")
+            )
+        );
     }
 
     #[test]
@@ -1548,17 +1755,12 @@ mod timeout_tests {
             Some(AgentTaskFailureClassification::Timeout)
         );
         assert!(outcome.artifacts.iter().any(|artifact| {
-            artifact.kind == "patch"
-                && artifact.path.as_deref() == Some(&patch_path.to_string_lossy())
+            artifact.kind == "cleanup_action" && artifact.metadata["status"] == "pending"
         }));
-        assert!(outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "completed_runtime_late_provider_race"
-                && diagnostic
-                    .data
-                    .get("actionable_patch")
-                    .and_then(Value::as_bool)
-                    == Some(false)
-        }));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.class == "agent_task.deferred_cleanup" }));
     }
 }
 

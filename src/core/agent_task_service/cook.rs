@@ -97,6 +97,7 @@ where
 
     for attempt in 1..=max_attempts {
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
+        agent_task_lifecycle::reconcile_deferred_candidate(&run_id)?;
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan(&run_id)?;
         let Some(source_request) = plan.tasks.first().cloned() else {
@@ -123,6 +124,7 @@ where
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
+                | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
         ) {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
@@ -516,9 +518,15 @@ fn source_spec_path(spec: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::agent_task::{
+        AgentTaskArtifact, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome,
+        AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    };
     use crate::core::agent_task_finalization::{
         AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
     };
+    use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::core::run_lifecycle_record::{
         ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
         RunLifecycleRecord,
@@ -620,6 +628,176 @@ mod tests {
             "operator_notification": {"status": "completed", "message": "complete"},
             "provenance": {"worktree_path": "/repo"}
         })).unwrap()
+    }
+
+    #[derive(Clone)]
+    struct RecoverableCandidateExecutor {
+        patch_path: PathBuf,
+    }
+
+    impl AgentTaskExecutorAdapter for RecoverableCandidateExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                summary: Some("recoverable candidate".to_string()),
+                failure_classification: None,
+                artifacts: vec![AgentTaskArtifact {
+                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: "candidate".to_string(),
+                    kind: "patch".to_string(),
+                    name: Some("candidate.patch".to_string()),
+                    label: None,
+                    role: Some("patch".to_string()),
+                    semantic_key: None,
+                    path: Some(self.patch_path.display().to_string()),
+                    url: None,
+                    mime: Some("text/x-patch".to_string()),
+                    size_bytes: Some(
+                        std::fs::metadata(&self.patch_path)
+                            .expect("patch metadata")
+                            .len(),
+                    ),
+                    sha256: None,
+                    metadata: serde_json::json!({ "role": "patch" }),
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    #[test]
+    fn cook_promotes_partial_recoverable_candidate_through_deterministic_gate() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let patch_path = temp.path().join("candidate.patch");
+            std::fs::write(
+                &patch_path,
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .expect("candidate patch");
+            let target = temp.path().join("promotion-target");
+            std::fs::create_dir(&target).expect("promotion target");
+            crate::test_support::run_git_fixture_command(&target, &["init", "-q"]);
+            crate::test_support::run_git_fixture_command(
+                &target,
+                &["config", "user.email", "test@example.com"],
+            );
+            crate::test_support::run_git_fixture_command(
+                &target,
+                &["config", "user.name", "Homeboy Test"],
+            );
+            std::fs::create_dir(target.join("src")).expect("target source directory");
+            std::fs::write(target.join("src/lib.rs"), "old\n").expect("target source");
+            crate::test_support::run_git_fixture_command(&target, &["add", "."]);
+            crate::test_support::run_git_fixture_command(
+                &target,
+                &["commit", "-q", "-m", "initial"],
+            );
+            let run_id = "cook-recoverable-attempt-1";
+            let request = AgentTaskRequest {
+                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-1".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "recover candidate".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: AgentTaskPolicy::default(),
+                limits: AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                metadata: Value::Null,
+            };
+            run_loaded_plan(
+                AgentTaskPlan::new("cook-recoverable", vec![request]),
+                Some(run_id),
+                RecoverableCandidateExecutor { patch_path },
+            )
+            .expect("recoverable run persisted");
+
+            let options = AgentTaskCookServiceOptions {
+                cook_id: "cook-recoverable".to_string(),
+                initial_run_id: run_id.to_string(),
+                to_worktree: "repo@recoverable".to_string(),
+                source_worktree_path: None,
+                provider_command: None,
+                provider_invocation: Some(CommandInvocation {
+                    argv: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        format!(
+                            "cat >/dev/null; printf '%s' '{{\"workspace_path\":\"{}\"}}'",
+                            target.display()
+                        ),
+                    ],
+                    ..Default::default()
+                }),
+                gates: VerifyGateOptions {
+                    verify: vec!["true".to_string()],
+                    ..VerifyGateOptions::default()
+                },
+                max_attempts: 1,
+                no_finalize: true,
+                base: "main".to_string(),
+                task_base_sha: None,
+                head: None,
+                title: "recoverable candidate".to_string(),
+                commit_message: "test".to_string(),
+                source_refs: Vec::new(),
+                protected_branches: Vec::new(),
+                ai_tool: "OpenCode".to_string(),
+                ai_model: None,
+                ai_used_for: "Test coverage".to_string(),
+            };
+
+            let result = run_cook(
+                options,
+                RecoverableCandidateExecutor {
+                    patch_path: temp.path().join("unused.patch"),
+                },
+            )
+            .expect("cook result");
+
+            assert_eq!(
+                result.value.status, "green_no_finalize",
+                "{:#?}",
+                result.value
+            );
+            assert_ne!(result.value.status, "provider_failure");
+            assert_eq!(result.value.attempts.len(), 1);
+            assert_eq!(result.value.attempts[0].run_state, "PartialRecoverable");
+            assert_eq!(
+                result.value.attempts[0]
+                    .promotion
+                    .as_ref()
+                    .expect("promotion")
+                    .status,
+                AgentTaskPromotionStatus::Applied
+            );
+        });
     }
 
     #[test]

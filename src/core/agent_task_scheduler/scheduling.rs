@@ -637,29 +637,75 @@ impl AgentTaskScheduleSupport {
     {
         let mut index = 0;
         while index < running.len() {
-            let timed_out = running[index]
-                .timeout_ms
-                .map(|timeout_ms| {
-                    running[index].started_at.elapsed() > timeout_with_grace(timeout_ms)
-                })
-                .unwrap_or(false);
-
-            if !timed_out {
+            let Some(timeout_ms) = running[index].timeout_ms else {
+                index += 1;
+                continue;
+            };
+            let elapsed = running[index].started_at.elapsed();
+            if elapsed <= Duration::from_millis(timeout_ms) {
+                index += 1;
+                continue;
+            }
+            if running[index].cancellation_requested_at.is_none() {
+                executor.cancel(&running[index].task_id);
+                running[index].cancellation_requested_at = Some(Instant::now());
+                events.push(event(
+                    &running[index].task_id,
+                    AgentTaskState::Running,
+                    running[index].attempt,
+                    Some(
+                        "deadline expired; cancellation requested and bounded grace started"
+                            .to_string(),
+                    ),
+                ));
+                index += 1;
+                continue;
+            }
+            if elapsed <= timeout_with_grace(timeout_ms) {
                 index += 1;
                 continue;
             }
 
-            let task = running.remove(index);
-            executor.cancel(&task.task_id);
+            let mut task = running.remove(index);
             let mut outcome = Self::timeout_outcome(
                 task.task_id.clone(),
                 task.timeout_ms.unwrap_or_default(),
-                Some(&task.request),
+                None,
                 "scheduler_timeout",
             );
-            if let Err(error) = super::harvest_uncommitted_patch(&mut outcome, &task) {
-                outcome = super::committed_harvest_failure(outcome, error);
+            // The executor still owns this isolated workspace. Reading it here
+            // would race a late provider write, so its thread retains cleanup.
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.deferred_cleanup".to_string(),
+                message: "grace expired; deferred cleanup owns the still-running attempt workspace".to_string(),
+                data: serde_json::json!({ "cleanup": "deferred_cleanup_pending", "grace_ms": timeout_with_grace(task.timeout_ms.unwrap_or_default()).as_millis(), "safe_next_action": "Wait for the recorded cleanup action; non-cooperative execution cannot safely recover mutable workspace changes." }),
+            });
+            if let Some(run_id) = task.run_id.as_deref() {
+                outcome.evidence_refs.push(AgentTaskEvidenceRef {
+                    kind: "deferred_cleanup_action".to_string(),
+                    uri: format!(
+                        "homeboy://agent-task/run/{run_id}/cleanup#task={}",
+                        task.task_id
+                    ),
+                    label: Some("deferred attempt workspace cleanup pending".to_string()),
+                });
             }
+            let mut deferred_action_path = None;
+            match super::deferred_cleanup_action_artifact(&task) {
+                Ok(action) => {
+                    deferred_action_path = action.path.clone().map(std::path::PathBuf::from);
+                    outcome.artifacts.push(action);
+                }
+                Err(error) => outcome.diagnostics.push(AgentTaskDiagnostic {
+                    class: "agent_task.deferred_cleanup_action_failed".to_string(),
+                    message: "could not persist deferred cleanup action".to_string(),
+                    data: serde_json::json!({ "error": format!("{error:?}") }),
+                }),
+            }
+            outcome.metadata = serde_json::json!({
+                "deferred_cleanup_pending": true,
+                "safe_next_action": "Wait for the recorded cleanup action; non-cooperative execution cannot safely recover mutable workspace changes.",
+            });
             events.push(event(
                 &task.task_id,
                 Self::state_for_outcome(&outcome),
@@ -668,8 +714,41 @@ impl AgentTaskScheduleSupport {
             ));
             outcomes.push(outcome);
             quarantined.push(QuarantinedTask {
-                workspace_key: task.workspace_key,
+                workspace_key: task.workspace_key.clone(),
             });
+            if let (Some(join_handle), Some(action_path)) =
+                (task.join_handle.take(), deferred_action_path)
+            {
+                thread::spawn(move || {
+                    let joined = join_handle
+                        .join()
+                        .map_err(|_| "provider worker panicked".to_string());
+                    let mut recovered = Self::timeout_outcome(
+                        task.task_id.clone(),
+                        task.timeout_ms.unwrap_or_default(),
+                        None,
+                        "deferred_cleanup",
+                    );
+                    let harvest = joined.and_then(|_| {
+                        super::harvest_uncommitted_patch(&mut recovered, &task)
+                            .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
+                            .map_err(|error| format!("{error:?}"))
+                    });
+                    if harvest.is_ok() {
+                        super::finalize_candidate_artifacts(
+                            &mut recovered,
+                            &super::CandidateArtifactFinalizationContext::from(&task),
+                        );
+                    }
+                    let cleanup = harvest.and_then(|_| {
+                        task._attempt_workspace
+                            .as_ref()
+                            .map(|workspace| workspace.cleanup())
+                            .unwrap_or(Ok(()))
+                    });
+                    super::complete_deferred_cleanup_recovery(&action_path, &recovered, cleanup);
+                });
+            }
         }
     }
 
@@ -702,12 +781,30 @@ impl AgentTaskScheduleSupport {
                 }
             }
 
-            if outcome.status == AgentTaskOutcomeStatus::Timeout {
+            let recoverable_exit = matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Timeout | AgentTaskOutcomeStatus::Cancelled
+            ) || (outcome.status == AgentTaskOutcomeStatus::ProviderError
+                && outcome
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.class == "agent_task.executor_panic"));
+            if recoverable_exit {
                 Self::reconcile_timeout_artifacts(
                     &mut outcome,
                     &running.request,
                     "provider_timeout",
                 );
+            }
+            if recoverable_exit && outcome.artifacts.iter().any(is_actionable_patch_artifact) {
+                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+                outcome.failure_classification = None;
+                outcome.summary = Some(
+                    "executor exited with a canonical recoverable patch candidate".to_string(),
+                );
+            }
+            if outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable {
+                super::attach_recoverable_candidate_metadata(&mut outcome, running);
             }
         }
         outcome
@@ -1023,10 +1120,10 @@ impl AgentTaskScheduleSupport {
             != Some(false)
             && outcome.artifacts.iter().any(is_actionable_patch_artifact);
         if actionable_patch {
-            outcome.status = AgentTaskOutcomeStatus::Succeeded;
+            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
             outcome.failure_classification = None;
             outcome.summary = Some(
-                "runtime completed with an actionable artifact before timeout finalization"
+                "executor ended after timeout/cancellation with a recoverable patch candidate"
                     .to_string(),
             );
         } else if outcome.status == AgentTaskOutcomeStatus::Succeeded
@@ -1117,11 +1214,16 @@ impl AgentTaskScheduleSupport {
     ) -> bool {
         rotation_index < policy.entries.len()
             && attempt < policy.max_total_attempts()
+            && !outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "agent_task.deferred_cleanup")
             && !matches!(
                 outcome.status,
                 AgentTaskOutcomeStatus::Succeeded
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
+                    | AgentTaskOutcomeStatus::CandidateRecoverable
             )
             && matches!(
                 outcome.failure_classification,
@@ -1267,6 +1369,7 @@ impl AgentTaskScheduleSupport {
                     | AgentTaskOutcomeStatus::NoOp
                     | AgentTaskOutcomeStatus::Cancelled
                     | AgentTaskOutcomeStatus::Timeout
+                    | AgentTaskOutcomeStatus::CandidateRecoverable
             )
     }
 
@@ -1285,6 +1388,7 @@ impl AgentTaskScheduleSupport {
             }
             AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
             AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
+            AgentTaskOutcomeStatus::CandidateRecoverable => AgentTaskState::CandidateRecoverable,
             _ => AgentTaskState::Failed,
         }
     }
@@ -1358,6 +1462,12 @@ impl AgentTaskScheduleSupport {
             return AgentTaskAggregateStatus::Cancelled;
         }
 
+        if outcomes
+            .iter()
+            .any(|outcome| outcome.status == AgentTaskOutcomeStatus::CandidateRecoverable)
+        {
+            return AgentTaskAggregateStatus::PartialRecoverable;
+        }
         let failed = outcomes.iter().any(|outcome| {
             !matches!(
                 outcome.status,
@@ -1403,6 +1513,7 @@ impl AgentTaskScheduleSupport {
                 }
                 AgentTaskOutcomeStatus::Timeout => totals.timed_out += 1,
                 AgentTaskOutcomeStatus::Cancelled => totals.cancelled += 1,
+                AgentTaskOutcomeStatus::CandidateRecoverable => totals.recoverable_candidates += 1,
                 AgentTaskOutcomeStatus::Failed
                     if outcome.failure_classification
                         == Some(AgentTaskFailureClassification::PolicyDenied)

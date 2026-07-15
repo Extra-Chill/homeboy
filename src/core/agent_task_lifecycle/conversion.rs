@@ -236,6 +236,7 @@ pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregate
             AgentTaskState::Failed => totals.failed += 1,
             AgentTaskState::Cancelled => totals.cancelled += 1,
             AgentTaskState::TimedOut => totals.timed_out += 1,
+            AgentTaskState::CandidateRecoverable => totals.recoverable_candidates += 1,
         }
     }
     totals
@@ -483,6 +484,9 @@ pub(crate) fn run_provider_handle(
             | crate::core::agent_task::AgentTaskOutcomeStatus::NoOp => AgentTaskState::Succeeded,
             crate::core::agent_task::AgentTaskOutcomeStatus::Timeout => AgentTaskState::TimedOut,
             crate::core::agent_task::AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
+            crate::core::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable => {
+                AgentTaskState::CandidateRecoverable
+            }
             _ => AgentTaskState::Failed,
         }),
         metadata: handle.metadata,
@@ -496,6 +500,9 @@ pub(crate) fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTa
         }
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure => {
             AgentTaskRunState::PartialFailure
+        }
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable => {
+            AgentTaskRunState::PartialRecoverable
         }
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed => {
             AgentTaskRunState::Failed

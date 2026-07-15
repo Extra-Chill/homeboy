@@ -223,6 +223,7 @@ pub enum AgentTaskRunState {
     Queued,
     Running,
     Succeeded,
+    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -239,6 +240,9 @@ impl From<AgentTaskRunState> for RunExecutionState {
             AgentTaskRunState::Queued => RunExecutionState::Queued,
             AgentTaskRunState::Running => RunExecutionState::Running,
             AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
+            // Generic lifecycle has no recoverable-candidate variant. The
+            // agent-task record remains authoritative and retains it exactly.
+            AgentTaskRunState::PartialRecoverable => RunExecutionState::PartialFailure,
             AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
             AgentTaskRunState::Failed => RunExecutionState::Failed,
             AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,

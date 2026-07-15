@@ -9,6 +9,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
     ) {
@@ -184,6 +185,7 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled

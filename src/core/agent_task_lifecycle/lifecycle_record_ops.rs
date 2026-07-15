@@ -30,6 +30,7 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
     if matches!(
         state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
             | AgentTaskRunState::Cancelled
@@ -126,6 +127,7 @@ pub(crate) fn provider_runtime_state_for_task_state(
         Some(AgentTaskState::Failed) => ProviderRuntimeState::Failed,
         Some(AgentTaskState::Cancelled) => ProviderRuntimeState::Cancelled,
         Some(AgentTaskState::TimedOut) => ProviderRuntimeState::TimedOut,
+        Some(AgentTaskState::CandidateRecoverable) => ProviderRuntimeState::Mixed,
     }
 }
 

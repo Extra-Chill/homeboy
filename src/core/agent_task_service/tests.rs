@@ -2,14 +2,16 @@
 
 use super::*;
 use crate::core::agent_task::{
-    AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskFailureClassification,
-    AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
-    AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor,
+    AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskWorkspaceMode, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
 use crate::core::agent_task_schedule::AgentTaskPlan;
 use crate::core::agent_task_scheduler::{
+    AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskState,
 };
 use crate::core::run_lifecycle_record::RunExecutionState;
@@ -18,6 +20,81 @@ use crate::test_support::with_isolated_home;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn status_reconciles_deferred_candidate_once_and_artifacts_see_the_projection() {
+    with_isolated_home(|_| {
+        let fixture = deferred_cleanup_fixture("candidate_recovered");
+        let record = lifecycle_status(&fixture.run_id).expect("reconciled status");
+        assert_eq!(record.state, AgentTaskRunState::PartialRecoverable);
+        assert_eq!(record.totals.expect("totals").recoverable_candidates, 1);
+        assert_eq!(
+            artifacts(&fixture.run_id)
+                .expect("artifacts")
+                .artifacts
+                .len(),
+            2
+        );
+
+        let aggregate = agent_task_lifecycle::read_aggregate(&fixture.run_id).expect("aggregate");
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::PartialRecoverable
+        );
+        assert_eq!(aggregate.outcomes[0].artifacts.len(), 2);
+        assert!(
+            !agent_task_lifecycle::reconcile_deferred_candidate(&fixture.run_id)
+                .expect("idempotent")
+        );
+        assert_eq!(
+            agent_task_lifecycle::read_aggregate(&fixture.run_id)
+                .expect("aggregate")
+                .outcomes[0]
+                .artifacts
+                .len(),
+            2
+        );
+    });
+}
+
+#[test]
+fn deferred_cleanup_pending_or_no_candidate_keeps_timeout_truthful() {
+    with_isolated_home(|_| {
+        for state in ["pending", "completed_no_candidate"] {
+            let fixture = deferred_cleanup_fixture(state);
+            let record = lifecycle_status(&fixture.run_id).expect("status");
+            assert_eq!(record.state, AgentTaskRunState::Failed, "{state}");
+            assert_eq!(
+                agent_task_lifecycle::read_aggregate(&fixture.run_id)
+                    .expect("aggregate")
+                    .outcomes[0]
+                    .status,
+                AgentTaskOutcomeStatus::Timeout,
+                "{state}"
+            );
+        }
+    });
+}
+
+#[test]
+fn deferred_cleanup_failure_surfaces_its_diagnostic_without_reclassifying_timeout() {
+    with_isolated_home(|_| {
+        let fixture = deferred_cleanup_fixture("failed");
+        let aggregate = agent_task_lifecycle::read_aggregate(&fixture.run_id).expect("aggregate");
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Timeout
+        );
+        let record = lifecycle_status(&fixture.run_id).expect("status");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert!(agent_task_lifecycle::read_aggregate(&fixture.run_id)
+            .expect("aggregate")
+            .outcomes[0]
+            .diagnostics
+            .iter()
+            .any(|entry| entry.class == "agent_task.deferred_cleanup_failed"));
+    });
+}
 
 #[test]
 fn service_run_loaded_plan_persists_durable_lifecycle() {
@@ -203,9 +280,17 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             worktree::CleanupPolicy::PreserveOnFailure
         );
         assert_eq!(observed.workspace.mode, AgentTaskWorkspaceMode::Existing);
-        assert_eq!(
-            observed.workspace.root.as_deref(),
-            Some(record.worktree_path.as_str())
+        let attempt_root = Path::new(
+            observed
+                .workspace
+                .root
+                .as_deref()
+                .expect("attempt workspace"),
+        );
+        assert_ne!(attempt_root, Path::new(&record.worktree_path));
+        assert!(
+            !attempt_root.exists(),
+            "attempt workspace is retired after dispatch"
         );
         assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
         assert!(observed.workspace.kind.is_none());
@@ -674,6 +759,108 @@ fn create_git_repo(path: &Path) {
     std::fs::write(path.join("README.md"), "initial\n").expect("readme");
     crate::test_support::run_git_fixture_command(path, &["add", "."]);
     crate::test_support::run_git_fixture_command(path, &["commit", "-q", "-m", "initial"]);
+}
+
+struct DeferredCleanupFixture {
+    run_id: String,
+    _directory: tempfile::TempDir,
+}
+
+fn deferred_cleanup_fixture(status: &str) -> DeferredCleanupFixture {
+    use sha2::{Digest, Sha256};
+
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let run_id = format!("deferred-{status}");
+    let action_path = directory.path().join("deferred-cleanup.json");
+    let patch_path = directory.path().join("candidate.patch");
+    let patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n";
+    std::fs::write(&patch_path, patch).expect("patch");
+    let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+    let candidate = AgentTaskArtifact {
+        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "candidate".to_string(),
+        kind: "patch".to_string(),
+        name: Some("candidate.patch".to_string()),
+        label: None,
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some(patch_path.display().to_string()),
+        url: Some(format!(
+            "homeboy://agent-task/run/{run_id}/artifacts#task=service-task&artifact=candidate"
+        )),
+        mime: Some("text/x-patch".to_string()),
+        size_bytes: Some(patch.len() as u64),
+        sha256: Some(sha256),
+        metadata: serde_json::json!({ "role": "patch" }),
+    };
+    let mut action = serde_json::json!({
+        "schema": "homeboy/agent-task-deferred-cleanup/v1",
+        "status": status,
+        "run_id": run_id,
+        "task_id": "service-task",
+        "attempt": 1,
+    });
+    if status == "candidate_recovered" {
+        action["candidate_artifacts"] = serde_json::json!([candidate]);
+    }
+    if status == "failed" {
+        action["diagnostic"] = serde_json::json!("worker cleanup could not remove workspace");
+    }
+    std::fs::write(
+        &action_path,
+        serde_json::to_vec(&action).expect("action JSON"),
+    )
+    .expect("action");
+    let cleanup_action = AgentTaskArtifact {
+        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "cleanup".to_string(),
+        kind: "cleanup_action".to_string(),
+        name: None,
+        label: None,
+        role: Some("cleanup_action".to_string()),
+        semantic_key: None,
+        path: Some(action_path.display().to_string()),
+        url: None,
+        mime: Some("application/json".to_string()),
+        size_bytes: None,
+        sha256: None,
+        metadata: serde_json::json!({ "run_id": run_id, "task_id": "service-task", "attempt": 1 }),
+    };
+    let aggregate = AgentTaskAggregate {
+        schema: crate::core::agent_task_scheduler::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: "service-plan".to_string(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            timed_out: 1,
+            ..Default::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "service-task".to_string(),
+            status: AgentTaskOutcomeStatus::Timeout,
+            summary: Some("deadline expired".to_string()),
+            failure_classification: Some(AgentTaskFailureClassification::Timeout),
+            artifacts: vec![cleanup_action],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }],
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: Default::default(),
+    };
+    agent_task_lifecycle::record_completed_run(&test_plan(), &aggregate, Some(&run_id))
+        .expect("persist timeout");
+    DeferredCleanupFixture {
+        run_id,
+        _directory: directory,
+    }
 }
 
 fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
