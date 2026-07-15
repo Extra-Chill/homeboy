@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.4] - 2026-07-15
+
+### Changed
+- relocate output routing from command_contract to commands
+- Release agent-task scratch after evidence harvest
+- move apply_lab_contract_to_descriptor into the output type layer
+- Accept canonical executor evidence during cook publication
+
+### Fixed
+- report real homeboy version in rig-schema error + refresh stale fanout assertions
+- protect active daemon jobs during reconnect
+
 ## [0.286.3] - 2026-07-15
 
 ### Changed
