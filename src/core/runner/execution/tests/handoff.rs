@@ -1119,7 +1119,15 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
     assert!(hints
         .iter()
         .any(|hint| hint.contains(&format!("homeboy runner job logs lab {job_id}"))));
-    assert!(err.message.contains("--placement local"));
+    // The remote job succeeded; this is a transport/reporting failure, so the
+    // guidance steers toward recovering persisted evidence rather than forcing
+    // a local rerun (no `--placement local` remediation).
+    assert!(err
+        .message
+        .contains("Lab transport/reporting failure, not a remote command failure"));
+    assert!(hints
+        .iter()
+        .any(|hint| hint.contains("instead of forcing local execution")));
 }
 
 #[test]

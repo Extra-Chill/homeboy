@@ -1361,14 +1361,15 @@ mod tests {
         let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
 
         assert!(run_id.starts_with("agent-task-"));
+        // `--run-id` is injected right after the `agent-task <action>` prefix,
+        // ahead of the dispatch options.
         assert_eq!(out[0], "homeboy");
         assert_eq!(out[1], "agent-task");
-        assert_eq!(out[2], "agent-task");
-        assert_eq!(out[3], "cook");
-        assert_eq!(out[4], "--run-id");
-        assert_eq!(out[5], run_id);
-        assert_eq!(out[6], "--repo");
-        assert_eq!(out[7], "homeboy");
+        assert_eq!(out[2], "cook");
+        assert_eq!(out[3], "--run-id");
+        assert_eq!(out[4], run_id);
+        assert_eq!(out[5], "--repo");
+        assert_eq!(out[6], "homeboy");
     }
 
     #[test]
