@@ -216,6 +216,7 @@ pub mod cleanup;
 pub mod component;
 pub mod config;
 pub mod contract;
+pub mod contract_output_routing;
 pub mod docs;
 pub mod extension;
 pub mod fleet;

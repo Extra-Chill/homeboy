@@ -6,10 +6,10 @@
 //! output contract type definitions) free of `commands` dependencies.
 
 use crate::cli_surface::Commands;
-use crate::command_contract::spec::CommandSpec;
+use crate::command_contract::CommandSpec;
 use crate::commands::{adapter, file, logs, report, review, runner, runtime, trace};
 
-use super::output::{
+use crate::command_contract::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
     CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
     CommandStdoutMode,
