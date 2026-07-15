@@ -9,6 +9,7 @@ mod path_roots;
 pub(crate) mod permissions;
 mod planning;
 mod policy;
+mod preparation;
 pub(crate) mod provenance;
 pub mod release_download;
 mod safety_and_artifact;
@@ -22,6 +23,7 @@ pub use planning::{
     bucket_release_states, calculate_release_state, calculate_release_state_from_baseline,
     classify_release_state,
 };
+pub(crate) use preparation::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
 pub(crate) use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,

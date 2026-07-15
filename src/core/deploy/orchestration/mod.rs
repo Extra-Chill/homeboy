@@ -17,6 +17,7 @@ use super::planning::{load_project_components, plan_components};
 use super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 use super::version_overrides::fetch_remote_versions_for_project;
+use super::{ComponentPayloadPreparationRequest, PreparedPayloadCollection};
 
 mod modes;
 mod preflight;
@@ -423,10 +424,29 @@ fn prepare_component_deployments(
 ) -> std::result::Result<Vec<PreparedComponentDeploy>, Vec<ComponentDeployResult>> {
     let mut prepared_deployments = Vec::new();
     let mut failures = Vec::new();
+    let mut payloads = PreparedPayloadCollection::default();
 
     for component in components {
         let source_path = component.local_path.clone();
-        let mut component = crate::core::project::apply_component_overrides(component, project);
+        let (preparation_component, mut component) =
+            crate::core::project::component::overrides::resolve_deploy_override_inputs(
+                component, project,
+            );
+        // This collection is intentionally local-only: request creation and
+        // deduplication perform no target interaction or payload execution.
+        if let Err(error) = payloads.insert(
+            ComponentPayloadPreparationRequest::new(&preparation_component, config),
+            release_artifacts.get(&component.id).cloned(),
+        ) {
+            failures.push(ComponentDeployResult::failed(
+                &component,
+                base_path,
+                local_versions.get(&component.id).cloned(),
+                remote_versions.get(&component.id).cloned(),
+                error.to_string(),
+            ));
+            continue;
+        }
         if config.requested_ref.is_some() {
             // Project overrides configure deployment behavior, but an exact-ref
             // checkout is the authoritative source tree for every build stage.

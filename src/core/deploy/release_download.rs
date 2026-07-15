@@ -85,6 +85,16 @@ impl ReleaseArtifactLease {
             _runtime_temp_pin: runtime_temp_pin,
         })))
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_new(artifact: ReleaseArtifact) -> Result<Self> {
+        Self::new(artifact)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
 }
 
 impl Deref for ReleaseArtifactLease {
