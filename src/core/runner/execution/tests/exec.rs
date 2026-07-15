@@ -916,8 +916,12 @@ fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
         )
         .expect("create server");
 
+        // Configure an explicit remote homeboy_path so the extension-parity
+        // preflight (which now refuses a bare `homeboy` on a remote runner) is
+        // satisfied and the test reaches the daemon-connection rejection it is
+        // actually exercising.
         super::super::super::create(
-            r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy"}"#,
+            r#"{"id":"lab-server","kind":"ssh","server_id":"lab-server","workspace_root":"/srv/homeboy","homeboy_path":"/usr/local/bin/homeboy"}"#,
             false,
         )
         .expect("create ssh runner");
