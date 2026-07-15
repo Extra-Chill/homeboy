@@ -592,8 +592,12 @@ impl Error {
         serde_error: impl Into<String>,
         context: impl Into<String>,
         component: Option<String>,
+        active_version: &str,
     ) -> Self {
-        let active = env!("CARGO_PKG_VERSION");
+        // The active version is supplied by the caller: `env!(CARGO_PKG_VERSION)`
+        // evaluated inside this error crate would report the crate's own version
+        // (e.g. 0.1.0), not the running homeboy build the operator needs to see.
+        let active = active_version;
         let serde_error = serde_error.into();
         let message = match &component {
             Some(name) => format!(

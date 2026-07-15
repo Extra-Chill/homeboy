@@ -390,7 +390,9 @@ fn handoff_envelope_from_typed_handoff(handoff: &AgentTaskLabHandoff) -> Value {
         }
     }
     if let Some(aggregate) = handoff.aggregate.as_ref() {
-        if let Ok(value) = serde_json::to_value(aggregate) {
+        if let Ok(value) = serde_json::to_value(
+            &crate::core::agent_task_artifacts::reviewer_facing_aggregate(aggregate),
+        ) {
             envelope.insert("aggregate".to_string(), value);
         }
     }
@@ -1191,6 +1193,136 @@ mod tests {
                 reference.kind == "agent-task-child-run"
                     && reference.uri == "homeboy://agent-task/run/attempt-noop-1"
             }));
+        });
+    }
+
+    #[test]
+    fn typed_run_plan_lifecycle_persists_remapped_provider_model_for_publication() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let plan_path = temp.path().join("plan.json");
+            let plan = AgentTaskPlan::new(
+                "plan-remapped-model",
+                vec![crate::core::agent_task::AgentTaskRequest {
+                    schema: crate::core::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "cook".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: crate::core::agent_task::AgentTaskExecutor {
+                        backend: "opencode".to_string(),
+                        selector: None,
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: Some("openai/gpt-5.6-terra".to_string()),
+                        config: Value::Null,
+                    },
+                    instructions: "apply the change".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: Default::default(),
+                    component_contracts: Vec::new(),
+                    policy: Default::default(),
+                    limits: Default::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            fs::write(
+                &plan_path,
+                serde_json::to_vec(&plan).expect("serialize remapped plan"),
+            )
+            .expect("write remapped plan");
+            let agent_task = RunnerWorkloadAgentTask {
+                run_id: "run-remapped-model".to_string(),
+                plan_ref: Some(format!("@{}", plan_path.display())),
+                resolved_provider_policy: Some(
+                    crate::core::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
+                        backend: "opencode".to_string(),
+                        selector: None,
+                        model: Some("openai/gpt-5.6-terra".to_string()),
+                        rotation: None,
+                        rotation_starts_with_first_entry: true,
+                        retry: Default::default(),
+                        liveness_timeout_ms: None,
+                    },
+                ),
+                dispatch_kind:
+                    crate::command_contract::RunnerWorkloadAgentTaskDispatchKind::RunPlan,
+                lifecycle_mirror_policy:
+                    RunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
+            };
+            let events = vec![JobEvent {
+                sequence: 1,
+                job_id: uuid::Uuid::nil(),
+                kind: JobEventKind::Result,
+                timestamp_ms: 1,
+                message: None,
+                data: Some(serde_json::json!({
+                    "agent_task_lifecycle_event": {
+                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                        "identity": {
+                            "runner_id": "lab-default",
+                            "runner_job_id": "job-remapped-model",
+                            "run_id": "run-remapped-model"
+                        },
+                        "aggregate": serde_json::to_value(AgentTaskAggregate {
+                            schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                            plan_id: plan.plan_id.clone(),
+                            status: crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+                            totals: AgentTaskAggregateTotals {
+                                succeeded: 1,
+                                ..Default::default()
+                            },
+                            outcomes: vec![crate::core::agent_task::AgentTaskOutcome {
+                                schema: crate::core::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                                task_id: "cook".to_string(),
+                                status: crate::core::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                                summary: None,
+                                failure_classification: None,
+                                artifacts: Vec::new(),
+                                typed_artifacts: Vec::new(),
+                                evidence_refs: Vec::new(),
+                                diagnostics: Vec::new(),
+                                outputs: Value::Null,
+                                workflow: None,
+                                follow_up: None,
+                                metadata: serde_json::json!({
+                                    "provider_handle": {
+                                        "task_id": "cook",
+                                        "backend": "opencode",
+                                        "run_id": "provider-run-8263",
+                                        "metadata": {"provider_owned": true}
+                                    }
+                                }),
+                            }],
+                            events: Vec::new(),
+                            artifact_lineage: Vec::new(),
+                            child_runs: Vec::new(),
+                            artifact_bindings: Vec::new(),
+                            queue: Default::default(),
+                        }).expect("serialize aggregate")
+                    }
+                })),
+            }];
+
+            mirror_agent_task_run_plan_lifecycle(
+                &[],
+                Some(&agent_task),
+                None,
+                "not parsed",
+                None,
+                Some(&events),
+            )
+            .expect("remapped Lab aggregate mirrored");
+
+            let record = agent_task_lifecycle::status("run-remapped-model").expect("status");
+            assert_eq!(record.lifecycle.provider_runtime.len(), 1);
+            assert_eq!(
+                record.lifecycle.provider_runtime[0].metadata["model"],
+                "openai/gpt-5.6-terra"
+            );
         });
     }
 

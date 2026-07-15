@@ -770,8 +770,6 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 pub fn adopt_orphaned_lease(
     lease_id: &str,
     confirm_pid_dead: bool,
-    recover_missing_child_identity: bool,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     if !confirm_pid_dead {
@@ -793,16 +791,71 @@ pub fn adopt_orphaned_lease(
             let store = super::JobStore::open_without_reconciliation(
                 crate::core::paths::daemon_jobs_file()?,
             )?;
-            if recover_missing_child_identity {
-                store.reconcile_dead_daemon_lease_jobs_allow_missing_child_identity(lease_id)
-            } else {
-                store.reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
-                    lease_id,
-                    confirmed_no_pid_job_ids,
-                )
-            }
+            store.reconcile_dead_daemon_lease_jobs(lease_id)
         },
         || start_or_return_live_unlocked(addr),
+    )
+}
+
+/// Recover one legacy durable job only after an operator supplies the exact
+/// child PID and Linux start ticks recovered from trustworthy run evidence.
+pub fn recover_missing_child_identity(
+    expected_lease_id: &str,
+    recorded_daemon_pid: u32,
+    recorded_daemon_endpoint: &str,
+    job_id: uuid::Uuid,
+    child_pid: u32,
+    child_starttime_ticks: u64,
+) -> Result<crate::core::api_jobs::Job> {
+    let endpoint = parse_recorded_daemon_endpoint(recorded_daemon_endpoint)?;
+    let _operation_lock = acquire_daemon_operation_lock()?;
+    let status = read_status()?;
+    let state = status.state.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "legacy child recovery requires the persisted daemon lease record",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    if state.lease_id != expected_lease_id
+        || state.pid != recorded_daemon_pid
+        // Compare the persisted spelling as well as parsing the endpoint below.
+        // Accepting a normalized equivalent would weaken the operator's exact
+        // recovery proof against a changed daemon endpoint.
+        || state.address != recorded_daemon_endpoint
+    {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            "recorded daemon lease, PID, or endpoint does not match current daemon state",
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    if pid_is_running(recorded_daemon_pid) {
+        return Err(Error::validation_invalid_argument(
+            "recorded_daemon_pid",
+            "recorded daemon PID is live; refusing legacy job recovery",
+            Some(recorded_daemon_pid.to_string()),
+            None,
+        ));
+    }
+    probe_recorded_daemon_endpoint(endpoint)?;
+    let _owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "lease_id",
+            "daemon owner lock is held; refusing legacy job recovery",
+            Some(expected_lease_id.to_string()),
+            None,
+        )
+    })?;
+    let store =
+        super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
+    store.recover_missing_child_identity_with_linux_evidence(
+        expected_lease_id,
+        job_id,
+        child_pid,
+        child_starttime_ticks,
     )
 }
 
@@ -1051,7 +1104,27 @@ fn snapshot_job_store(path: &Path, raw: &[u8]) -> Result<PathBuf> {
 fn reconcile_dead_daemon_lease_jobs(expected_lease_id: &str) -> Result<()> {
     let store =
         super::JobStore::open_without_reconciliation(crate::core::paths::daemon_jobs_file()?)?;
-    store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
+    let diagnostics = store.reconcile_dead_daemon_lease_jobs(expected_lease_id)?;
+    if diagnostics.protected_count() > 0 {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "deferred dead-lease recovery because {} active child process(es) cannot be reattached: {}",
+                diagnostics.protected_count(),
+                diagnostics
+                    .protected_job_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            Some(expected_lease_id.to_string()),
+            Some(vec![
+                "Homeboy cannot collect an orphan child result; wait for it to exit, then retry exact recovery."
+                    .to_string(),
+            ]),
+        ));
+    }
     Ok(())
 }
 

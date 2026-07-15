@@ -579,6 +579,12 @@ mod committed_harvest_tests {
             artifact_nonce: "test-artifact".to_string(),
             task_base_sha: Some(base),
             source_provenance: None,
+            scratch: crate::core::controller_scratch::ControllerScratchAllocation {
+                path: PathBuf::from("/test/controller-scratch/1"),
+                lease_id: "test-lease-1".to_string(),
+            },
+            adoption: None,
+            join_handle: None,
         };
         let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
@@ -646,6 +652,16 @@ mod committed_harvest_tests {
                 .expect("content hash");
         let lab = serde_json::json!({
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
+            "source_provenance": {
+                "verified_cook_baseline": {
+                    "source_run_id": "promoted-run",
+                    "source_task_id": "snapshot-task",
+                    "promoted_patch_artifact_sha256": "c".repeat(64),
+                    "baseline_commit": "d".repeat(40),
+                    "baseline_tree": "e".repeat(40),
+                    "parent_snapshot_identity": "snapshot:parent"
+                }
+            },
             "source_snapshot": snapshot,
             "workspace_verification": {
                 "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:provider-ready",
@@ -691,7 +707,7 @@ mod committed_harvest_tests {
             artifact_declarations: Vec::new(),
             metadata: serde_json::Value::Null,
         };
-        let preflight = prepare_committed_harvest(&request).expect("snapshot preflight");
+        let preflight = prepare_committed_harvest(&request, None).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
         let source_provenance = preflight.source_provenance.expect("source provenance");
         assert!(workspace.path().join(".git").is_dir());
@@ -761,6 +777,12 @@ mod committed_harvest_tests {
             artifact_nonce: "test".to_string(),
             task_base_sha: Some(baseline),
             source_provenance: Some(source_provenance.clone()),
+            scratch: crate::core::controller_scratch::ControllerScratchAllocation {
+                path: PathBuf::from("/test/controller-scratch/1"),
+                lease_id: "test-lease-1".to_string(),
+            },
+            adoption: None,
+            join_handle: None,
         };
         persist_attempt_patch_artifacts(
             &mut outcome,
@@ -770,9 +792,101 @@ mod committed_harvest_tests {
         .expect("external patch provenance");
         for artifact in &outcome.artifacts {
             assert_eq!(artifact.metadata["source_provenance"], source_provenance);
+            assert_eq!(
+                artifact.metadata["source_provenance"]["verified_cook_baseline"]
+                    ["promoted_patch_artifact_sha256"],
+                "c".repeat(64),
+                "Lab retry artifact retains controller-verified baseline evidence"
+            );
         }
         assert_eq!(outcome.artifacts[0].metadata["kept"], true);
         drop(attempt);
+        std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    }
+
+    #[test]
+    fn lab_resident_snapshot_preflight_does_not_require_controller_source_path() {
+        let _guard = LAB_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("Lab environment lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source");
+        let path = workspace.path().display().to_string();
+        let snapshot = SourceSnapshot {
+            runner_id: "lab".to_string(),
+            local_path: None,
+            remote_path: Some(path.clone()),
+            workspace_root: None,
+            git_branch: Some("main".to_string()),
+            git_sha: Some("b".repeat(40)),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            workspace_snapshot_identity: Some("snapshot:runner-resident".to_string()),
+            snapshot_hash: "sha256:runner-resident".to_string(),
+            synced_at: "2026-01-01T00:00:00Z".to_string(),
+            sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+        };
+        let content_hash =
+            crate::core::runner::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
+                .expect("content hash");
+        let lab = serde_json::json!({
+            "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
+            "source_snapshot": snapshot,
+            "workspace_verification": {
+                "schema": "homeboy/lab-workspace-verification/v2", "identity": "snapshot:runner-resident",
+                "content_hash": content_hash, "sync_excludes": snapshot.sync_excludes,
+                "permission_policy": "unix-executable", "content_hash_algorithm": "homeboy-workspace-content-v2+unix-executable",
+                "source_snapshot": snapshot,
+                "primary_workspace": { "identity": "snapshot:runner-resident", "remote_path": workspace.path().display().to_string() }
+            }
+        });
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&snapshot).expect("snapshot JSON"),
+        );
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::to_string(&lab).expect("Lab JSON"),
+        );
+        let request = AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "runner-resident-snapshot-task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "test".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: serde_json::Value::Null,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace {
+                root: Some(workspace.path().display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+
+        let preflight = prepare_committed_harvest(&request, None)
+            .expect("runner-resident snapshot harvest preflight");
+
+        assert!(preflight.base_sha.is_some());
+        assert_eq!(
+            preflight.source_provenance.expect("source provenance")["workspace_snapshot_identity"],
+            "snapshot:runner-resident"
+        );
         std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
         std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
     }
@@ -815,7 +929,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request).expect("local non-Git no-op");
+        let preflight = prepare_committed_harvest(&request, None).expect("local non-Git no-op");
 
         assert!(preflight.base_sha.is_none());
         assert!(preflight.source_provenance.is_none());

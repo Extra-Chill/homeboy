@@ -223,7 +223,9 @@ pub enum AgentTaskRunState {
     Queued,
     Running,
     Succeeded,
+    /// Backward-compatible projection for older durable records.
     CandidateRecoverable,
+    PartialRecoverable,
     PartialFailure,
     Failed,
     Cancelled,
@@ -241,6 +243,7 @@ impl From<AgentTaskRunState> for RunExecutionState {
             AgentTaskRunState::Running => RunExecutionState::Running,
             AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
             AgentTaskRunState::CandidateRecoverable => RunExecutionState::PartialFailure,
+            AgentTaskRunState::PartialRecoverable => RunExecutionState::PartialFailure,
             AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
             AgentTaskRunState::Failed => RunExecutionState::Failed,
             AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,

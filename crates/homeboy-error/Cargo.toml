@@ -6,6 +6,7 @@ license = "MIT"
 authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Structured error types, error codes, and result alias for homeboy"
 repository = "https://github.com/Extra-Chill/homeboy"
+publish = false
 
 [lib]
 name = "homeboy_error"

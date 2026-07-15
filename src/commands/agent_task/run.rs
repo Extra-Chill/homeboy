@@ -30,8 +30,9 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// path) without hand-digging the nested outcome JSON (#3806). The full nested
 /// payload is preserved unchanged; this only ADDS the surfaced summary.
 fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
-    let mut value = serde_json::to_value(aggregate).unwrap_or(Value::Null);
-    let failure_reasons = super::status::failure_reasons_from_aggregate(aggregate);
+    let aggregate = homeboy::core::agent_task_artifacts::reviewer_facing_aggregate(aggregate);
+    let mut value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
+    let failure_reasons = super::status::failure_reasons_from_aggregate(&aggregate);
     if !failure_reasons.is_empty() {
         if let Value::Object(map) = &mut value {
             map.insert("failure_reasons".to_string(), Value::Array(failure_reasons));

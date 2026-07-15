@@ -619,7 +619,8 @@ mod dynamic_impls {
 // `crate::command_contract::safety_manifest`. Re-export the public
 // entry points here so existing call sites keep importing them from
 // `crate::cli_surface` unchanged while this module leans toward clap shapes.
-pub use crate::command_contract::safety_manifest::{
+mod safety_manifest;
+pub use safety_manifest::{
     command_safety_manifest_audit, command_safety_manifest_from,
     command_safety_manifest_from_dynamic, current_command_safety_manifest,
 };
@@ -657,7 +658,7 @@ mod surface {
             .map(|entry| entry.name.clone())
             .collect();
         let docs_index_commands =
-            documented_command_index_entries(include_str!("../docs/commands/commands-index.md"));
+            documented_command_index_entries(include_str!("../../docs/commands/commands-index.md"));
 
         command_surface_doctor_report(
             source_registry_commands,

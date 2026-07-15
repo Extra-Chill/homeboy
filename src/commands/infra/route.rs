@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::core::agent_task_service::DerivedCookBaselineCapability;
 use crate::core::io::output_file::write_output_file;
 
 pub fn route_after_parse(
@@ -174,6 +175,7 @@ pub fn route_after_parse(
             source_path: retry_handoff
                 .as_ref()
                 .map(|handoff| handoff.primary_workspace.as_path()),
+            verified_cook_baseline: None,
             require_controller_git_bundle: retry_handoff.is_some(),
             job_overrides,
         },
@@ -294,12 +296,26 @@ struct LabCookAttemptDispatcher {
     job_overrides: runners::LabJobOverrides,
 }
 
+fn cook_attempt_source_path<'a>(
+    derived_cook_baseline: Option<&'a DerivedCookBaselineCapability>,
+    controller_source_path: Option<&'a Path>,
+) -> Option<&'a Path> {
+    derived_cook_baseline
+        .map(|capability| capability.canonical_path())
+        .or(controller_source_path)
+}
+
 impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCookAttemptDispatcher {
     fn dispatch_attempt(
         &self,
         plan: homeboy::core::agent_tasks::scheduler::AgentTaskPlan,
         run_id: &str,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
+        // The capability has already bound the promoted artifact and exact
+        // baseline to this retry; only its evidence crosses the Lab boundary.
+        let verified_cook_baseline =
+            derived_cook_baseline.map(DerivedCookBaselineCapability::verified_baseline_provenance);
         let serialized_plan = serde_json::to_string(&plan).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -345,7 +361,14 @@ impl crate::core::agent_task_service::AgentTaskCookAttemptDispatcher for LabCook
                 require_controller_git_bundle: false,
                 local_output_file: None,
                 durable_agent_task_plan: Some(&plan),
-                source_path: self.source_path.as_deref(),
+                // A retry's baseline is controller-owned capability, not plan
+                // data. Stage that exact clean checkout; never substitute the
+                // controller's original workspace during nested Lab dispatch.
+                source_path: cook_attempt_source_path(
+                    derived_cook_baseline,
+                    self.source_path.as_deref(),
+                ),
+                verified_cook_baseline: verified_cook_baseline.as_ref(),
                 job_overrides: self.job_overrides.clone(),
             },
             Some(&self.runner_id),
@@ -1547,6 +1570,9 @@ mod tests {
 
     #[test]
     fn non_lab_command_continues_local_dispatch() {
+        // route_after_parse mutates the process-global LAB_OFFLOAD_METADATA_ENV,
+        // so hold the env lock to serialize against tests that assert on it.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let cli = Cli::parse_from(["homeboy", "status"]);
 
         let outcome = route_after_parse(&cli, &["homeboy".into(), "status".into()], None).unwrap();
@@ -1673,6 +1699,9 @@ mod tests {
 
     #[test]
     fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
+        // Serialize against LAB_OFFLOAD_METADATA_ENV-asserting tests: this
+        // routes through route_after_parse, which mutates that global.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
             "homeboy",
             "--placement",
@@ -2051,6 +2080,35 @@ mod tests {
         for cli in [&cook, &batch, &retry] {
             assert_eq!(lab_route_dispatch_timeout(&cli.command), None);
         }
+    }
+
+    #[test]
+    fn cook_retry_lab_source_is_the_derived_baseline_not_the_controller_workspace() {
+        let baseline = tempfile::tempdir().expect("baseline");
+        let controller = tempfile::tempdir().expect("controller");
+        let capability = crate::core::agent_task_service::test_derived_cook_baseline_capability(
+            baseline.path().to_path_buf(),
+            "baseline-commit".to_string(),
+            "baseline-tree".to_string(),
+            "task",
+            Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
+        );
+
+        assert_eq!(
+            super::cook_attempt_source_path(Some(&capability), Some(controller.path())),
+            Some(capability.canonical_path())
+        );
+        assert_eq!(
+            capability.verified_baseline_provenance(),
+            serde_json::json!({
+                "source_run_id": "test-source-run",
+                "source_task_id": "task",
+                "promoted_patch_artifact_sha256": "test-artifact-sha256",
+                "baseline_commit": "baseline-commit",
+                "baseline_tree": "baseline-tree",
+                "parent_snapshot_identity": "snapshot:parent",
+            })
+        );
     }
 
     #[test]
@@ -3077,14 +3135,16 @@ mod tests {
             .expect_err("fanout submit-batch must not run locally under Lab placement");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("Lab placement refused local execution"));
-        assert!(err.message.contains("automatic Lab offload disabled"));
+        // submit-batch needs an explicit runner under Lab placement: it does
+        // not auto-offload, so `--placement lab` without an eligible runner is
+        // refused rather than silently running locally.
+        assert!(err.message.contains("--placement lab"));
+        assert!(err.message.contains("requires an eligible Lab runner"));
+        assert!(err.message.contains("agent-task fanout submit-batch"));
     }
 
     #[test]
-    fn agent_task_fanout_run_plan_supports_lab_runner_routing() {
+    fn agent_task_fanout_run_plan_coordination_is_controller_local() {
         let normalized = vec![
             "homeboy".to_string(),
             "--runner".to_string(),
@@ -3099,13 +3159,21 @@ mod tests {
         ];
         let cli = Cli::parse_from(&normalized);
 
+        // Fanout coordination is controller-owned so durable batch state,
+        // worktree ownership, and recovery stay local; the coordinator itself
+        // is not Lab-portable, though the independent cooks it generates may use
+        // their own Lab placement (#8045).
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
         assert_eq!(command.hot_label, "agent-task fanout run-plan");
-        assert!(command.is_portable());
-        assert!(command.routing_policy.default_lab_offload);
-        assert!(command.routing_policy.requires_extension_parity);
+        assert!(!command.is_portable());
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
+        assert!(cli
+            .command
+            .lab_runner_unsupported_reason()
+            .is_some_and(|reason| reason.contains("controller-owned")));
     }
 
     #[test]

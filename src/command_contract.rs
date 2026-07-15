@@ -21,10 +21,8 @@ mod constants;
 mod descriptors;
 mod lab;
 mod output;
-mod output_routing;
 mod public_variants;
 mod registry;
-pub mod safety_manifest;
 mod spec;
 
 pub use crate::core::artifact_ref::{

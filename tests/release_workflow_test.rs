@@ -215,6 +215,26 @@ fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
 }
 
 #[test]
+fn release_prepare_validates_publishable_workspace_before_mutating_release_state() {
+    let prepare = job_section(release_workflow(), "prepare");
+    let package_preflight = prepare
+        .find("name: Preflight crates.io packages")
+        .expect("prepare must validate crates.io package manifests");
+    let release_action = prepare
+        .find("uses: Extra-Chill/homeboy-action@v2")
+        .expect("prepare must run the release action");
+
+    assert!(
+        prepare.contains("run: cargo package --workspace --allow-dirty --no-verify"),
+        "publish preflight must package every workspace crate without publishing"
+    );
+    assert!(
+        package_preflight < release_action,
+        "package preflight must run before release preparation can create a tag"
+    );
+}
+
+#[test]
 fn release_prepare_waits_for_command_policy_not_raw_gates() {
     let prepare = job_section(release_workflow(), "prepare");
 

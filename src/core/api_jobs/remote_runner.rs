@@ -385,6 +385,7 @@ impl JobStore {
                     execution_request: Some(request),
                     request: public_request,
                 }),
+                local_child: None,
             },
         );
         drop(inner);

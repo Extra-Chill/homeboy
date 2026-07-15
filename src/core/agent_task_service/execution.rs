@@ -19,6 +19,7 @@ use crate::core::agent_task_secrets::validate_secret_env_with_fallbacks;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::{config, worktree, Error, Result};
 
+use super::cook::DerivedCookBaselineCapability;
 use super::discovery::source_uri;
 
 #[derive(Debug, Clone)]
@@ -61,27 +62,51 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
 }
 
 pub fn run_loaded_plan<E>(
-    mut plan: AgentTaskPlan,
+    plan: AgentTaskPlan,
     record_run_id: Option<&str>,
     executor: E,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
 where
     E: AgentTaskExecutorAdapter,
 {
-    prepare_plan_for_execution(&mut plan, record_run_id)?;
+    run_loaded_plan_with_derived_cook_baseline(plan, record_run_id, executor, None)
+}
 
+pub(crate) fn run_loaded_plan_with_derived_cook_baseline<E>(
+    mut plan: AgentTaskPlan,
+    record_run_id: Option<&str>,
+    executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
+where
+    E: AgentTaskExecutorAdapter,
+{
     if let Some(run_id) = record_run_id {
+        // A runner has its own lifecycle store. Materialize the handed-off plan
+        // before any preparation can invoke runner-scoped lifecycle commands.
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        if let Err(error) = prepare_plan_for_execution(&mut plan, Some(run_id)) {
+            agent_task_lifecycle::record_pre_execution_failure(
+                run_id,
+                &plan,
+                "prepare_plan_for_execution",
+                &error,
+            )?;
+            return Err(error);
+        }
         agent_task_lifecycle::mark_running(run_id)?;
+    } else {
+        prepare_plan_for_execution(&mut plan, None)?;
     }
 
-    let aggregate = run_plan_with_scheduler(plan.clone(), record_run_id, executor);
+    let aggregate =
+        run_plan_with_scheduler(plan.clone(), record_run_id, executor, derived_cook_baseline);
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
     }
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
-        value: aggregate,
+        value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     })
 }
 
@@ -115,7 +140,7 @@ where
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
                 exit_code: aggregate_exit_code(&aggregate),
-                value: aggregate,
+                value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
             });
         }
         return Err(transport_proxy_recovery_error(recovery));
@@ -142,7 +167,7 @@ where
 
     let result = run_claimed(record.run_id, executor)?;
     Ok(AgentTaskRunResult {
-        value: Some(result.value),
+        value: Some(crate::core::agent_task_artifacts::reviewer_facing_aggregate(&result.value)),
         exit_code: result.exit_code,
     })
 }
@@ -158,7 +183,7 @@ where
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recovery.record().run_id) {
             return Ok(AgentTaskRunResult {
                 exit_code: aggregate_exit_code(&aggregate),
-                value: aggregate,
+                value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
             });
         }
         return Err(transport_proxy_recovery_error(recovery));
@@ -175,6 +200,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             | agent_task_lifecycle::AgentTaskRunState::Failed
             | agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -198,7 +224,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
     })?;
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
-        value: aggregate,
+        value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     }))
 }
 
@@ -270,7 +296,7 @@ fn run_prepared_claimed<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor);
+    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None);
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -321,14 +347,17 @@ fn run_plan_with_scheduler<E>(
     plan: AgentTaskPlan,
     run_id: Option<&str>,
     executor: E,
+    derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> AgentTaskAggregate
 where
     E: AgentTaskExecutorAdapter,
 {
     let scheduler = AgentTaskScheduler::new(executor);
     match run_id {
-        Some(run_id) => scheduler.with_run_id(run_id.to_string()).run(plan),
-        None => scheduler.run(plan),
+        Some(run_id) => scheduler
+            .with_run_id(run_id.to_string())
+            .run_with_derived_cook_baseline(plan, derived_cook_baseline),
+        None => scheduler.run_with_derived_cook_baseline(plan, derived_cook_baseline),
     }
 }
 

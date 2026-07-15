@@ -4,6 +4,8 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Instant;
 
+use crate::core::agent_task_service::DerivedCookBaselineCapability;
+
 use super::*;
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
@@ -42,13 +44,34 @@ where
     }
 
     pub fn run(&self, plan: AgentTaskPlan) -> AgentTaskAggregate {
-        self.run_with_cancellation(plan, AgentTaskCancellationToken::default())
+        self.run_with_derived_cook_baseline(plan, None)
+    }
+
+    pub(crate) fn run_with_derived_cook_baseline(
+        &self,
+        plan: AgentTaskPlan,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> AgentTaskAggregate {
+        self.run_with_cancellation_and_derived_cook_baseline(
+            plan,
+            AgentTaskCancellationToken::default(),
+            derived_cook_baseline,
+        )
     }
 
     pub(crate) fn run_with_cancellation(
         &self,
         plan: AgentTaskPlan,
         cancellation: AgentTaskCancellationToken,
+    ) -> AgentTaskAggregate {
+        self.run_with_cancellation_and_derived_cook_baseline(plan, cancellation, None)
+    }
+
+    fn run_with_cancellation_and_derived_cook_baseline(
+        &self,
+        plan: AgentTaskPlan,
+        cancellation: AgentTaskCancellationToken,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
         let max_concurrency = plan.options.max_concurrency.max(1);
@@ -85,6 +108,7 @@ where
                     candidate_artifacts: Vec::new(),
                     retry_attempts: Vec::new(),
                     task_base_sha: None,
+                    adoption: None,
                 }
             })
             .collect();
@@ -323,25 +347,27 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
-                let harvest_preflight = match prepare_committed_harvest(&request) {
-                    Ok(preflight) => preflight,
-                    Err(error) => {
-                        record_harvest_setup_failure(
-                            &task_id,
-                            scheduled.attempt,
-                            error,
-                            &mut completed_by_task,
-                            &mut outcomes,
-                            &mut events,
-                        );
-                        continue;
-                    }
-                };
+                let harvest_preflight =
+                    match prepare_committed_harvest(&request, derived_cook_baseline) {
+                        Ok(preflight) => preflight,
+                        Err(error) => {
+                            record_harvest_setup_failure(
+                                &task_id,
+                                scheduled.attempt,
+                                error,
+                                &mut completed_by_task,
+                                &mut outcomes,
+                                &mut events,
+                            );
+                            continue;
+                        }
+                    };
                 let task_base_sha = scheduled
                     .task_base_sha
                     .clone()
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
+                let source_provenance = harvest_preflight.source_provenance;
                 let attempt_workspace =
                     match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
                         Ok(workspace) => workspace,
@@ -357,9 +383,44 @@ where
                             continue;
                         }
                     };
+                if let Some(adoption) = scheduled.adoption.as_ref() {
+                    if let Err(mut outcome) = validate_and_apply_candidate_adoption(
+                        &request,
+                        adoption,
+                        task_base_sha.as_deref(),
+                    ) {
+                        outcome.task_id = task_id.clone();
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                }
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
+                let run_id = self.run_id.as_deref().unwrap_or(&plan.plan_id);
+                let scratch = match crate::core::controller_scratch::allocate_attempt(
+                    run_id,
+                    &plan.plan_id,
+                    &request.task_id,
+                    scheduled.attempt,
+                ) {
+                    Ok(scratch) => scratch,
+                    Err(error) => {
+                        let outcome =
+                            scratch_allocation_failure(task_id.clone(), error.to_string());
+                        events.push(event(
+                            &task_id,
+                            AgentTaskState::Failed,
+                            scheduled.attempt,
+                            outcome.summary.clone(),
+                        ));
+                        record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                        continue;
+                    }
+                };
+                request
+                    .executor
+                    .set_runtime_tmpdir(scratch.path.to_string_lossy().as_ref());
                 let executor_key = executor_key(&request);
                 let executor = Arc::clone(&self.executor);
                 let plan_id = plan.plan_id.clone();
@@ -414,18 +475,26 @@ where
                     run_id: self.run_id.clone(),
                     artifact_nonce: uuid::Uuid::new_v4().to_string(),
                     task_base_sha,
-                    source_provenance: harvest_preflight.source_provenance,
+                    source_provenance,
+                    scratch: scratch.clone(),
+                    adoption: scheduled.adoption,
+                    join_handle: None,
                 });
 
-                thread::spawn(move || {
+                let join_handle = thread::spawn(move || {
                     let _attempt_workspace = attempt_workspace;
                     let outcome = executor.execute(request, context);
                     let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
                         task_id,
                         attempt,
                         outcome,
+                        scratch,
                     }));
                 });
+                running
+                    .last_mut()
+                    .expect("running task inserted")
+                    .join_handle = Some(join_handle);
             }
 
             AgentTaskScheduleSupport::expire_timed_out_tasks(
@@ -442,10 +511,15 @@ where
 
             let wait_timeout = running
                 .iter()
-                .filter(|task| !task.timeout_cancel_requested)
                 .filter_map(|task| {
-                    task.timeout_ms
-                        .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
+                    task.timeout_ms.map(|ms| {
+                        let deadline = if task.timeout_cancel_requested {
+                            timeout_with_grace(ms)
+                        } else {
+                            std::time::Duration::from_millis(ms)
+                        };
+                        deadline.saturating_sub(task.started_at.elapsed())
+                    })
                 })
                 .min();
             match wait_timeout.map_or_else(
@@ -468,7 +542,17 @@ where
                     let Some(running_task) = running_task else {
                         continue;
                     };
+                    debug_assert_eq!(result.scratch, running_task.scratch);
+                    let mut running_task = running_task;
+                    if let Some(join_handle) = running_task.join_handle.take() {
+                        let _ = join_handle.join();
+                    }
                     let mut outcome = result.outcome;
+                    attach_candidate_adoption_provenance(
+                        &mut outcome,
+                        running_task.adoption.as_ref(),
+                    );
+                    persist_resolved_provider_model(&mut outcome, &running_task.request);
                     if let Err(error) = harvest_uncommitted_patch(&mut outcome, &running_task)
                         .and_then(|_| harvest_committed_patch(&mut outcome, &running_task))
                     {
@@ -477,6 +561,7 @@ where
                         }
                         outcome = committed_harvest_failure(outcome, error);
                     }
+                    finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
                     let mut outcome = outcome;
@@ -529,6 +614,7 @@ where
                         retry_budget_used,
                         &plan.options.retry.retryable_failure_classifications,
                     ) {
+                        release_scratch(&result.scratch, "retry", &outcome);
                         retry_budget_used += 1;
                         let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
                         let mut retry_attempts = running_task.retry_attempts;
@@ -557,6 +643,7 @@ where
                             candidate_artifacts,
                             retry_attempts,
                             task_base_sha: running_task.task_base_sha,
+                            adoption: running_task.adoption,
                         });
                         continue;
                     }
@@ -573,7 +660,8 @@ where
                             max_attempts,
                             execution_budget.max_provider_rotations,
                         ) {
-                            let mut rotation_attempts = running_task.rotation_attempts;
+                            release_scratch(&result.scratch, "provider_rotation", &outcome);
+                            let mut rotation_attempts = running_task.rotation_attempts.clone();
                             rotation_attempts.push(
                                 AgentTaskScheduleSupport::rotation_attempt_record(
                                     &running_task.request,
@@ -583,6 +671,45 @@ where
                                 ),
                             );
                             let entry = &policy.entries[running_task.rotation_index];
+                            let adoption = match entry.adoption.as_ref() {
+                                Some(template) => {
+                                    let mut candidate_artifacts =
+                                        running_task.candidate_artifacts.clone();
+                                    append_unique_artifacts(
+                                        &mut candidate_artifacts,
+                                        outcome
+                                            .artifacts
+                                            .iter()
+                                            .filter(|artifact| {
+                                                is_actionable_patch_artifact(artifact)
+                                            })
+                                            .cloned()
+                                            .collect(),
+                                    );
+                                    match select_candidate_adoption(
+                                        template,
+                                        &candidate_artifacts,
+                                        &running_task,
+                                    ) {
+                                        Ok(adoption) => Some(adoption),
+                                        Err(message) => {
+                                            let mut outcome = outcome;
+                                            outcome.diagnostics.push(AgentTaskDiagnostic {
+                                                class: "agent_task.candidate_adoption".to_string(),
+                                                message,
+                                                data: serde_json::Value::Null,
+                                            });
+                                            record_completed_outcome(
+                                                &mut completed_by_task,
+                                                &mut outcomes,
+                                                outcome,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                None => None,
+                            };
                             let (mut request, candidate_artifacts) = reset_attempt_request(
                                 running_task.request,
                                 running_task.source_workspace_root,
@@ -616,6 +743,7 @@ where
                                 candidate_artifacts,
                                 retry_attempts: running_task.retry_attempts,
                                 task_base_sha: running_task.task_base_sha,
+                                adoption,
                             });
                             continue;
                         }
@@ -650,6 +778,15 @@ where
                         &execution_budget,
                         result.attempt,
                         running_task.rotation_index,
+                    );
+                    release_scratch(
+                        &result.scratch,
+                        if running_task.timeout_cancel_requested {
+                            "scheduler_timeout_completion"
+                        } else {
+                            terminal_reason(&outcome, cancellation.is_cancelled())
+                        },
+                        &outcome,
                     );
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
@@ -691,6 +828,24 @@ where
     }
 }
 
+fn persist_resolved_provider_model(outcome: &mut AgentTaskOutcome, request: &AgentTaskRequest) {
+    let Some(model) = request
+        .executor
+        .model()
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return;
+    };
+    if !outcome.metadata.is_object() {
+        outcome.metadata = serde_json::json!({});
+    }
+    outcome
+        .metadata
+        .as_object_mut()
+        .expect("outcome metadata object")
+        .insert("model".to_string(), serde_json::json!(model));
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ScheduledTask {
     pub(super) request: AgentTaskRequest,
@@ -707,9 +862,10 @@ pub(super) struct ScheduledTask {
     pub(super) retry_attempts: Vec<serde_json::Value>,
     /// Captured before the first provider execution and reused by every sibling.
     pub(super) task_base_sha: Option<String>,
+    pub(super) adoption: Option<AgentTaskCandidateAdoption>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct RunningTask {
     pub(super) task_id: String,
     pub(super) request: AgentTaskRequest,
@@ -743,6 +899,9 @@ pub(super) struct RunningTask {
     pub(super) task_base_sha: Option<String>,
     /// Verified source identity for snapshot-backed candidate artifacts.
     pub(super) source_provenance: Option<serde_json::Value>,
+    pub(super) scratch: crate::core::controller_scratch::ControllerScratchAllocation,
+    pub(super) adoption: Option<AgentTaskCandidateAdoption>,
+    pub(super) join_handle: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +919,94 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+    scratch: crate::core::controller_scratch::ControllerScratchAllocation,
+}
+
+pub(super) fn deferred_cleanup_action_artifact(
+    running: &RunningTask,
+) -> Result<AgentTaskArtifact, HarvestError> {
+    use sha2::{Digest, Sha256};
+
+    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
+    let directory = crate::core::artifacts::root()
+        .map_err(|error| HarvestError::ArtifactDirectory {
+            path: Path::new("<artifact-root>").to_path_buf(),
+            message: error.message,
+        })?
+        .join("agent-task")
+        .join("deferred-cleanup")
+        .join(crate::core::paths::sanitize_path_segment(run_id));
+    std::fs::create_dir_all(&directory).map_err(|error| HarvestError::ArtifactDirectory {
+        path: directory.clone(),
+        message: error.to_string(),
+    })?;
+    let id = format!(
+        "{}-attempt-{}-deferred-cleanup",
+        crate::core::paths::sanitize_path_segment(&running.task_id),
+        running.attempt
+    );
+    let path = directory.join(format!("{id}.json"));
+    let action = serde_json::json!({
+        "schema": "homeboy/agent-task-deferred-cleanup/v1",
+        "status": "pending",
+        "run_id": running.run_id,
+        "task_id": running.task_id,
+        "attempt": running.attempt,
+        "safe_next_action": "Wait for cleanup completion; mutable workspace recovery is intentionally deferred until provider exit.",
+    });
+    let content = serde_json::to_vec_pretty(&action).expect("cleanup action serializes");
+    std::fs::write(&path, &content).map_err(|error| HarvestError::ArtifactWrite {
+        path: path.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(AgentTaskArtifact {
+        schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: id.clone(),
+        kind: "cleanup_action".to_string(),
+        name: Some("deferred-cleanup.json".to_string()),
+        label: Some("deferred attempt workspace cleanup".to_string()),
+        role: Some("cleanup_action".to_string()),
+        semantic_key: None,
+        path: Some(path.display().to_string()),
+        url: None,
+        mime: Some("application/json".to_string()),
+        size_bytes: Some(content.len() as u64),
+        sha256: Some(format!("{:x}", Sha256::digest(&content))),
+        metadata: serde_json::json!({ "run_id": running.run_id, "task_id": running.task_id, "attempt": running.attempt }),
+    })
+}
+
+pub(super) fn complete_deferred_cleanup_recovery(
+    path: &Path,
+    outcome: &AgentTaskOutcome,
+    cleanup: Result<(), String>,
+) {
+    let mut action = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let candidates = outcome
+        .artifacts
+        .iter()
+        .filter(|artifact| is_actionable_patch_artifact(artifact))
+        .cloned()
+        .collect::<Vec<_>>();
+    action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    match cleanup {
+        Err(error) => {
+            action["status"] = serde_json::json!("failed");
+            action["diagnostic"] = serde_json::json!(error.chars().take(512).collect::<String>());
+        }
+        Ok(()) if candidates.is_empty() => {
+            action["status"] = serde_json::json!("completed_no_candidate")
+        }
+        Ok(()) => {
+            action["status"] = serde_json::json!("candidate_recovered");
+            action["candidate_artifacts"] =
+                serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
+        }
+    }
+    let _ = std::fs::write(path, serde_json::to_vec_pretty(&action).unwrap_or_default());
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
@@ -772,6 +1019,56 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
         "artifacts": outcome.artifacts,
         "evidence_refs": outcome.evidence_refs,
     })
+}
+
+pub(super) fn release_scratch(
+    allocation: &crate::core::controller_scratch::ControllerScratchAllocation,
+    reason: &str,
+    outcome: &AgentTaskOutcome,
+) {
+    let evidence = serde_json::json!({
+        "task_id": outcome.task_id,
+        "status": outcome.status,
+        "outcome": outcome,
+    });
+    let _ = crate::core::controller_scratch::release_attempt(allocation, reason, evidence);
+}
+
+fn terminal_reason(outcome: &AgentTaskOutcome, cancelled: bool) -> &'static str {
+    if cancelled || outcome.status == AgentTaskOutcomeStatus::Cancelled {
+        "cancelled"
+    } else if outcome.status == AgentTaskOutcomeStatus::Timeout {
+        "provider_timeout"
+    } else if matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) {
+        "succeeded"
+    } else {
+        "provider_failure"
+    }
+}
+
+fn scratch_allocation_failure(task_id: String, error: String) -> AgentTaskOutcome {
+    AgentTaskOutcome {
+        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        task_id,
+        status: AgentTaskOutcomeStatus::Failed,
+        summary: Some(format!("could not allocate provider scratch root: {error}")),
+        failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+        artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
+        evidence_refs: Vec::new(),
+        diagnostics: vec![AgentTaskDiagnostic {
+            class: "agent_task.controller_scratch_allocation_failed".to_string(),
+            message: error,
+            data: serde_json::Value::Null,
+        }],
+        outputs: serde_json::Value::Null,
+        workflow: None,
+        follow_up: None,
+        metadata: serde_json::Value::Null,
+    }
 }
 
 fn reset_attempt_request(

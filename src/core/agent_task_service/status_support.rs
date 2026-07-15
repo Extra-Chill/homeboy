@@ -232,34 +232,72 @@ fn hydrate_homeboy_evidence_ref(
             (None, _) => json!({ "summary": "plan is not available for this run" }),
         },
         "aggregate" => match (aggregate, parsed.outcome.as_deref().or(task_id)) {
-            (Some(aggregate), Some(task_id)) => aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == task_id)
-                .map(|outcome| json!(outcome))
-                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
-            (Some(aggregate), None) => json!(aggregate),
+            (Some(aggregate), Some(task_id)) => {
+                crate::core::agent_task_artifacts::reviewer_facing_aggregate(aggregate)
+                    .outcomes
+                    .into_iter()
+                    .find(|outcome| outcome.task_id == task_id)
+                    .map(|outcome| json!(outcome))
+                    .unwrap_or_else(|| json!({ "missing_outcome": task_id }))
+            }
+            (Some(aggregate), None) => {
+                json!(crate::core::agent_task_artifacts::reviewer_facing_aggregate(aggregate))
+            }
             (None, _) => json!({ "summary": "aggregate is not available for this run" }),
         },
-        "artifacts" => match (aggregate, task_id.or(parsed.task.as_deref())) {
-            (Some(aggregate), Some(task_id)) => aggregate
+        "artifacts" => {
+            let aggregate = aggregate.ok_or_else(|| {
+                crate::core::Error::validation_invalid_argument(
+                    "evidence_ref",
+                    "outcome artifacts are not available for this run",
+                    Some(uri.to_string()),
+                    None,
+                )
+            })?;
+            let task = task_id.or(parsed.task.as_deref());
+            let Some(artifact_id) = parsed.artifact.as_deref() else {
+                let artifacts = aggregate
+                    .outcomes
+                    .iter()
+                    .filter(|outcome| task.map(|task| outcome.task_id == task).unwrap_or(true))
+                    .flat_map(|outcome| outcome.artifacts.iter())
+                    .map(crate::core::agent_task_artifacts::reviewer_facing_artifact)
+                    .collect::<Vec<_>>();
+                return Ok(HydratedContent {
+                    source: "homeboy".to_string(),
+                    truncated: false,
+                    bytes_read: None,
+                    omitted_bytes: None,
+                    content: json!({ "artifacts": artifacts }),
+                });
+            };
+            let matches = aggregate
                 .outcomes
                 .iter()
-                .find(|outcome| outcome.task_id == task_id)
-                .map(|outcome| {
-                    json!({
-                        "task_id": outcome.task_id,
-                        "status": outcome.status,
-                        "summary": outcome.summary,
-                        "artifacts": outcome.artifacts,
-                        "typed_artifacts": outcome.typed_artifacts,
-                        "evidence_refs": outcome.evidence_refs,
-                        "diagnostics": outcome.diagnostics,
-                    })
+                .filter(|outcome| task.map(|task| outcome.task_id == task).unwrap_or(true))
+                .flat_map(|outcome| {
+                    outcome
+                        .artifacts
+                        .iter()
+                        .map(move |artifact| (outcome, artifact))
                 })
-                .unwrap_or_else(|| json!({ "missing_outcome": task_id })),
-            _ => json!({ "summary": "outcome artifacts are not available for this run" }),
-        },
+                .filter(|(_, artifact)| artifact.id == artifact_id)
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(crate::core::Error::validation_invalid_argument(
+                    "evidence_ref",
+                    "artifact evidence ref did not resolve exactly one artifact",
+                    Some(uri.to_string()),
+                    None,
+                ));
+            }
+            let (outcome, artifact) = matches[0];
+            json!({
+                "task_id": outcome.task_id,
+                "status": outcome.status,
+                "artifact": crate::core::agent_task_artifacts::reviewer_facing_artifact(artifact),
+            })
+        }
         "logs" => serde_json::to_value(super::logs(run_id)?)
             .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
         "status" => serde_json::to_value(super::status(run_id)?)
@@ -357,6 +395,7 @@ struct ParsedAgentTaskUri {
     section: String,
     task: Option<String>,
     outcome: Option<String>,
+    artifact: Option<String>,
 }
 
 fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
@@ -374,28 +413,52 @@ fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
     let mut parts = path.split('/');
     let run_id = parts.next().unwrap_or_default();
     let section = parts.next().unwrap_or_default();
-    if run_id.is_empty() || section.is_empty() {
+    if run_id.is_empty() || section.is_empty() || parts.next().is_some() {
         return Err(crate::core::Error::validation_invalid_argument(
             "evidence_ref",
-            "homeboy agent-task evidence ref must include run id and section",
+            "homeboy agent-task evidence ref must contain exactly a run id and section",
             Some(uri.to_string()),
             None,
         ));
     }
 
+    let run_id =
+        crate::core::execution_contract::decode_uri_component_strict(run_id).ok_or_else(|| {
+            crate::core::Error::validation_invalid_argument(
+                "evidence_ref",
+                "homeboy agent-task evidence ref has malformed run id encoding",
+                Some(uri.to_string()),
+                None,
+            )
+        })?;
     Ok(ParsedAgentTaskUri {
-        run_id: run_id.to_string(),
+        run_id,
         section: section.to_string(),
-        task: fragment_value(fragment, "task"),
-        outcome: fragment_value(fragment, "outcome"),
+        task: fragment_value(fragment, "task", uri)?,
+        outcome: fragment_value(fragment, "outcome", uri)?,
+        artifact: fragment_value(fragment, "artifact", uri)?,
     })
 }
 
-fn fragment_value(fragment: &str, key: &str) -> Option<String> {
-    fragment.split('&').find_map(|part| {
-        let (candidate, value) = part.split_once('=')?;
-        (candidate == key && !value.trim().is_empty()).then(|| value.to_string())
-    })
+fn fragment_value(fragment: &str, key: &str, uri: &str) -> Result<Option<String>> {
+    for part in fragment.split('&') {
+        let Some((candidate, value)) = part.split_once('=') else {
+            continue;
+        };
+        if candidate == key && !value.is_empty() {
+            return crate::core::execution_contract::decode_uri_component_strict(value)
+                .map(Some)
+                .ok_or_else(|| {
+                    crate::core::Error::validation_invalid_argument(
+                        "evidence_ref",
+                        "homeboy agent-task evidence ref has malformed fragment encoding",
+                        Some(uri.to_string()),
+                        None,
+                    )
+                });
+        }
+    }
+    Ok(None)
 }
 
 pub fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<String> {
@@ -494,6 +557,36 @@ fn first_diagnostics(value: &Value) -> Value {
             })
             .unwrap_or_else(|| Value::Array(Vec::new())),
         _ => Value::Array(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_task_evidence_url_requires_supported_run_section_shape() {
+        let parsed = parse_agent_task_homeboy_uri(
+            "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch-1",
+        )
+        .expect("portable artifact ref");
+        assert_eq!(parsed.artifact.as_deref(), Some("patch-1"));
+        let special = parse_agent_task_homeboy_uri(
+            "homeboy://agent-task/run/run%2F1/artifacts#task=task%20%26%20one&artifact=patch%2F%25%3F",
+        )
+        .expect("special-character ref");
+        assert_eq!(special.run_id, "run/1");
+        assert_eq!(special.task.as_deref(), Some("task & one"));
+        assert_eq!(special.artifact.as_deref(), Some("patch/%?"));
+        assert!(parse_agent_task_homeboy_uri(
+            "homeboy://agent-task/run/run-1/artifacts#artifact=%ZZ"
+        )
+        .is_err());
+        assert!(
+            parse_agent_task_homeboy_uri("homeboy://agent-task/run/run-1/artifacts/patch").is_err()
+        );
+        assert!(parse_agent_task_homeboy_uri("homeboy://agent-task/run/run-1").is_err());
+        assert!(parse_agent_task_homeboy_uri("homeboy://agent-task/artifacts/run-1").is_err());
     }
 }
 

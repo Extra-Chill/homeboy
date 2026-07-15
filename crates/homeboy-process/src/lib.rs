@@ -1,6 +1,5 @@
 use homeboy_error::{Error, Result};
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,6 +53,35 @@ pub fn pid_is_running(pid: u32) -> bool {
     }
 }
 
+/// Read Linux `/proc/<pid>/stat` field 22, the kernel tick at which this
+/// process instance started. Pairing it with a PID rejects PID reuse.
+pub fn linux_process_starttime_ticks(pid: u32) -> std::result::Result<Option<u64>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read_to_string(&path) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("read {path}: {error}")),
+        };
+        parse_linux_process_starttime_ticks(&stat)
+            .map(Some)
+            .ok_or_else(|| format!("parse {path} field 22"))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Err("Linux /proc starttime identity is unsupported on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_process_starttime_ticks(stat: &str) -> Option<u64> {
+    let after_command = stat.rsplit_once(") ")?.1;
+    after_command.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Install a Ctrl-C / SIGINT handler that flips `stop` to `true` on the first
 /// signal, giving long-running loops a cooperative shutdown flag. The `context`
 /// label is woven into the error message so callers (reverse runner worker,
@@ -84,6 +112,148 @@ pub fn process_group_is_running(pgid: i32) -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+/// Capture the process group created for an isolated child before exposing it
+/// as running. Unix isolation requires the child to lead its own group.
+pub fn isolated_process_group_id(pid: u32) -> std::result::Result<Option<u32>, String> {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(format!("invalid isolated child PID {pid}"));
+        }
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if pgid < 0 {
+            return Err(format!(
+                "read isolated child process group {pid}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if pgid as u32 != pid {
+            return Err(format!(
+                "child {pid} is not the leader of its isolated process group ({pgid})"
+            ));
+        }
+        Ok(Some(pgid as u32))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Ok(None)
+    }
+}
+
+/// Return whether a recorded isolated process group still has a member. A live
+/// group always blocks recovery because its numeric ID could have been reused.
+pub fn isolated_process_group_is_running(pgid: u32) -> std::result::Result<bool, String> {
+    if pgid == 0 || pgid > i32::MAX as u32 {
+        return Err(format!("invalid isolated process group ID {pgid}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(running) = linux_process_group_has_running_member(pgid as i32) {
+        return Ok(running);
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        return Ok(libc::kill(-(pgid as libc::pid_t), 0) == 0);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+        Err("isolated process-group liveness is unsupported on this platform".to_string())
+    }
+}
+
+/// Terminate the dedicated process group created for a managed child command.
+/// Callers must only pass a PID they just spawned with process-group isolation.
+pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if owner_pid == 0 || owner_pid > i32::MAX as u32 {
+            return Err(Error::validation_invalid_argument(
+                "pid",
+                "isolated process-group leader PID is invalid",
+                Some(owner_pid.to_string()),
+                None,
+            ));
+        }
+        unsafe {
+            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGTERM) != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "terminate isolated process group {owner_pid}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if process_group_is_running(owner_pid as i32) {
+            unsafe {
+                let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = owner_pid;
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "isolated process-group termination is unsupported on this platform",
+            None,
+            None,
+        ))
+    }
+}
+
+/// Construct the Windows-native tree termination command without coupling
+/// callers to a platform-specific shell or product workflow.
+pub fn windows_taskkill_process_tree_step(pid: u32) -> ProcessStep {
+    ProcessStep::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"])
+}
+
+/// Best available process-tree termination for cleanup paths that cannot leave
+/// an unrecorded child behind. Callers still reap and kill the root as a final
+/// fallback when this returns an error.
+pub fn terminate_process_tree_best_effort(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        terminate_process_tree(pid).map(|_| ())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let step = windows_taskkill_process_tree_step(pid);
+        let status = Command::new(&step.program)
+            .args(&step.args)
+            .status()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "terminate process tree {pid} with taskkill: {error}"
+                ))
+            })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(Error::internal_unexpected(format!(
+                "terminate process tree {pid} with taskkill exited {status}"
+            )))
+        }
+    }
+
+    #[cfg(all(not(unix), not(target_os = "windows")))]
+    {
+        let _ = pid;
+        Err(Error::internal_unexpected(
+            "process-tree termination is unsupported on this platform; root-process fallback is required",
+        ))
     }
 }
 
@@ -388,6 +558,14 @@ mod process_tree_tests {
         assert!(!commands.is_empty());
         assert!(commands.iter().any(|cmd| cmd.contains("4242")));
         assert!(commands.iter().any(|cmd| cmd.contains("kill -KILL 4242")));
+    }
+
+    #[test]
+    fn windows_taskkill_process_tree_step_targets_the_root_and_tree() {
+        assert_eq!(
+            windows_taskkill_process_tree_step(4242),
+            ProcessStep::new("taskkill").args(["/PID", "4242", "/T", "/F"])
+        );
     }
 
     /// Reap a test-owned child as soon as it exits, off-thread, so the kernel

@@ -234,7 +234,10 @@ pub(crate) fn totals_for_tasks(tasks: &[AgentTaskRunTask]) -> AgentTaskAggregate
             AgentTaskState::Blocked => totals.blocked += 1,
             AgentTaskState::Skipped => totals.skipped += 1,
             AgentTaskState::Succeeded => totals.succeeded += 1,
-            AgentTaskState::CandidateRecoverable => totals.candidate_recoverable += 1,
+            AgentTaskState::CandidateRecoverable => {
+                totals.candidate_recoverable += 1;
+                totals.recoverable_candidates += 1;
+            }
             AgentTaskState::Failed => totals.failed += 1,
             AgentTaskState::Cancelled => totals.cancelled += 1,
             AgentTaskState::TimedOut => totals.timed_out += 1,
@@ -474,6 +477,18 @@ pub(crate) fn run_provider_handle(
     outcome: &AgentTaskOutcome,
     handle: AgentTaskExecutionHandle,
 ) -> AgentTaskRunProviderHandle {
+    let mut metadata = handle.metadata;
+    if metadata.get("model").and_then(Value::as_str).is_none() {
+        if let Some(model) = outcome.metadata.get("model").and_then(Value::as_str) {
+            if !metadata.is_object() {
+                metadata = json!({});
+            }
+            metadata
+                .as_object_mut()
+                .expect("provider handle metadata object")
+                .insert("model".to_string(), json!(model));
+        }
+    }
     AgentTaskRunProviderHandle {
         kind: handle.kind,
         task_id: handle.task_id,
@@ -490,7 +505,7 @@ pub(crate) fn run_provider_handle(
             crate::core::agent_task::AgentTaskOutcomeStatus::Cancelled => AgentTaskState::Cancelled,
             _ => AgentTaskState::Failed,
         }),
-        metadata: handle.metadata,
+        metadata,
     }
 }
 
@@ -504,6 +519,9 @@ pub(crate) fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTa
         }
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure => {
             AgentTaskRunState::PartialFailure
+        }
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable => {
+            AgentTaskRunState::PartialRecoverable
         }
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed => {
             AgentTaskRunState::Failed
