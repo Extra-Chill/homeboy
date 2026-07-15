@@ -33,7 +33,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
-use super::execution::run_loaded_plan_with_derived_cook_baseline;
+use super::execution::{run_loaded_plan, run_loaded_plan_with_derived_cook_baseline};
 use super::AgentTaskRunResult;
 
 /// Executes one provider attempt while cook retains ownership of promotion,
