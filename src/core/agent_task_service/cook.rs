@@ -541,6 +541,22 @@ fn materialize_follow_up_baseline(
                 None,
             )
         })?;
+    let expected_head = promotion.target.head.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion.target.head",
+            "gate-failed promotion did not record the immutable target HEAD",
+            None,
+            None,
+        )
+    })?;
+    if git_output(&source_root, &["rev-parse", "HEAD"])? != expected_head {
+        return Err(Error::validation_invalid_argument(
+            "promotion.target.head",
+            "promotion target HEAD changed after the gate-failed promotion; refusing cook retry baseline",
+            None,
+            None,
+        ));
+    }
     let parent_snapshot = std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
         .ok()
         .map(|raw| serde_json::from_str::<Value>(&raw))
@@ -548,7 +564,6 @@ fn materialize_follow_up_baseline(
         .map_err(|error| {
             Error::validation_invalid_argument("source_snapshot", error.to_string(), None, None)
         })?;
-    let head = git_output(&source_root, &["rev-parse", "HEAD"])?;
     let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -584,7 +599,7 @@ fn materialize_follow_up_baseline(
     let index_path = index.path().display().to_string();
     git_output_with_env(
         &source_root,
-        &["read-tree", &head],
+        &["read-tree", expected_head],
         &[("GIT_INDEX_FILE", &index_path)],
     )?;
     git_output_with_env(
@@ -608,7 +623,7 @@ fn materialize_follow_up_baseline(
     let path_string = path.display().to_string();
     git_output(
         &source_root,
-        &["worktree", "add", "--detach", &path_string, &head],
+        &["worktree", "add", "--detach", &path_string, expected_head],
     )?;
     let baseline = CookFollowUpBaseline {
         source_root,
@@ -1308,6 +1323,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
+        let target_head = git_output(root, &["rev-parse", "HEAD"]).unwrap();
         std::fs::write(root.join("candidate.bin"), [0_u8, 1, 2, 255]).unwrap();
         std::fs::write(root.join("candidate.sh"), "#!/bin/sh\nexit 0\n").unwrap();
         let mut permissions = std::fs::metadata(root.join("candidate.sh"))
@@ -1345,7 +1361,7 @@ mod tests {
         let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
             "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
             "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
-            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target"},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
             "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path}, "changed_files":["candidate.bin", "candidate.sh"],
             "command_evidence":[], "deterministic_gates":[], "gate_results":[],
             "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
@@ -1378,6 +1394,73 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
+        );
+    }
+
+    #[test]
+    fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "A"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let head_a = git_output(&root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("advanced.txt"), "B\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "B"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, "").unwrap();
+        let report: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+            "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":head_a},
+            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
+            "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+        }))
+        .unwrap();
+
+        let error = match materialize_follow_up_baseline(&report, "first-run") {
+            Ok(_) => panic!("target advancement rejects the stale promotion baseline"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.message.contains("target HEAD changed"),
+            "unexpected error: {}",
+            error.message
         );
     }
 }
