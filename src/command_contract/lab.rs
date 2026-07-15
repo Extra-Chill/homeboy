@@ -31,7 +31,11 @@ fn scope_lab_cli_arguments_at_path(
     path: &[String],
     lab_args: &[clap::Arg],
 ) -> Command {
-    let visible = !path.is_empty();
+    // Only re-expose the Lab placement/runner flags on commands that actually
+    // support Lab offload. A previous refactor collapsed this to
+    // `!path.is_empty()`, which advertised the flags on every subcommand
+    // (including non-portable ones like `contract manifest`).
+    let visible = lab_cli_arguments_are_visible_for_path(path);
     let command = if visible {
         lab_args.iter().fold(command, |command, arg| {
             command.arg(arg.clone().global(false).hide(false))
@@ -44,6 +48,66 @@ fn scope_lab_cli_arguments_at_path(
         subcommand_path.push(subcommand.get_name().to_string());
         scope_lab_cli_arguments_at_path(subcommand, &subcommand_path, lab_args)
     })
+}
+
+/// Command paths that expose the Lab execution placement/runner flags in their
+/// `--help`, mirroring the Lab-portable command surface. Kept explicit so the
+/// help surface is deterministic and reviewable.
+fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {
+    matches!(
+        path.iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice(),
+        ["agent-task", "cook"]
+            | ["agent-task", "run-plan"]
+            | ["agent-task", "run"]
+            | ["agent-task", "run-next"]
+            | ["agent-task", "status"]
+            | ["agent-task", "list"]
+            | ["agent-task", "active"]
+            | ["agent-task", "latest"]
+            | ["agent-task", "logs"]
+            | ["agent-task", "artifacts"]
+            | ["agent-task", "evidence"]
+            | ["agent-task", "review"]
+            | ["agent-task", "retry"]
+            | ["agent-task", "promote"]
+            | ["agent-task", "providers"]
+            | ["agent-task", "fanout", "submit-batch"]
+            | ["agent-task", "fanout", "status"]
+            | ["agent-task", "fanout", "artifacts"]
+            | ["agent-task", "auth", "status"]
+            | ["agent-task", "controller", "from-spec"]
+            | ["agent-task", "controller", "run-from-spec"]
+            | ["agent-task", "controller", "materialize"]
+            | ["agent-task", "controller", "resume"]
+            | ["bench"]
+            | ["bench", "matrix"]
+            | ["fuzz"]
+            | ["fuzz", "run"]
+            | ["fuzz", "run-campaign"]
+            | ["fuzz", "list"]
+            | ["fuzz", "plan"]
+            | ["fuzz", "doctor"]
+            | ["review"]
+            | ["review", "audit"]
+            | ["review", "lint"]
+            | ["review", "test"]
+            | ["trace"]
+            | ["refactor"]
+            | ["rig", "check"]
+            | ["rig", "run"]
+            | ["runtime", "refresh"]
+            | ["worktree", "cleanup"]
+            | ["extension", "update"]
+            | ["extension", "refresh"]
+            | ["extension", "dev-run"]
+            | ["extension", "show"]
+            | ["tunnel", "preview-consumer", "run"]
+            | ["tunnel", "service", "expose"]
+            | ["tunnel", "service", "start"]
+    )
 }
 
 mod handoff;
