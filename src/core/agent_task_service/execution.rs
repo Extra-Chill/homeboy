@@ -94,16 +94,46 @@ where
             )?;
             return Err(error);
         }
+        let harvest_context =
+            match crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    agent_task_lifecycle::record_pre_execution_failure(
+                        run_id,
+                        &plan,
+                        "validate_harvest_transport",
+                        &error,
+                    )?;
+                    return Err(error);
+                }
+            };
         agent_task_lifecycle::mark_running(run_id)?;
+        let aggregate = run_plan_with_scheduler(
+            plan.clone(),
+            record_run_id,
+            executor,
+            derived_cook_baseline,
+            harvest_context,
+        )?;
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
+        return Ok(AgentTaskRunResult {
+            exit_code: aggregate_exit_code(&aggregate),
+            value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
+        });
     } else {
         prepare_plan_for_execution(&mut plan, None)?;
     }
 
-    let aggregate =
-        run_plan_with_scheduler(plan.clone(), record_run_id, executor, derived_cook_baseline)?;
-    if let Some(run_id) = record_run_id {
-        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)?;
-    }
+    let harvest_context =
+        crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process()?;
+    let aggregate = run_plan_with_scheduler(
+        plan.clone(),
+        record_run_id,
+        executor,
+        derived_cook_baseline,
+        harvest_context,
+    )?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
         value: crate::core::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
@@ -151,7 +181,20 @@ where
     }
     prepare_plan_for_execution(&mut plan, Some(&run_id))?;
     agent_task_lifecycle::mark_running(&run_id)?;
-    run_prepared_claimed(run_id, plan, executor)
+    let harvest_context =
+        match crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
+            Ok(context) => context,
+            Err(error) => {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    &run_id,
+                    &plan,
+                    "validate_harvest_transport",
+                    &error,
+                )?;
+                return Err(error);
+            }
+        };
+    run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
 pub fn run_next<E>(executor: E) -> Result<AgentTaskRunResult<Option<AgentTaskAggregate>>>
@@ -285,18 +328,33 @@ where
         )?;
         return Err(error);
     }
-    run_prepared_claimed(run_id, plan, executor)
+    let harvest_context =
+        match crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
+            Ok(context) => context,
+            Err(error) => {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    &run_id,
+                    &plan,
+                    "validate_harvest_transport",
+                    &error,
+                )?;
+                return Err(error);
+            }
+        };
+    run_prepared_claimed(run_id, plan, executor, harvest_context)
 }
 
 fn run_prepared_claimed<E>(
     run_id: String,
     plan: AgentTaskPlan,
     executor: E,
+    harvest_context: crate::core::agent_task_scheduler::HarvestExecutionContext,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>>
 where
     E: AgentTaskExecutorAdapter,
 {
-    let aggregate = run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None)?;
+    let aggregate =
+        run_plan_with_scheduler(plan.clone(), Some(&run_id), executor, None, harvest_context)?;
     agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
     Ok(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -348,11 +406,13 @@ fn run_plan_with_scheduler<E>(
     run_id: Option<&str>,
     executor: E,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    harvest_context: crate::core::agent_task_scheduler::HarvestExecutionContext,
 ) -> Result<AgentTaskAggregate>
 where
     E: AgentTaskExecutorAdapter,
 {
-    let scheduler = AgentTaskScheduler::for_current_process(executor)?;
+    let scheduler =
+        AgentTaskScheduler::new_controller(executor).with_harvest_context(harvest_context);
     match run_id {
         Some(run_id) => Ok(scheduler
             .with_run_id(run_id.to_string())

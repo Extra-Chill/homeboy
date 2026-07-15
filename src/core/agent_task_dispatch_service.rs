@@ -230,8 +230,22 @@ where
         });
     }
 
+    let harvest_context =
+        match crate::core::agent_task_scheduler::HarvestExecutionContext::from_current_process() {
+            Ok(context) => context,
+            Err(error) => {
+                lifecycle::record_pre_execution_failure(
+                    &run_id,
+                    &plan,
+                    "validate_harvest_transport",
+                    &error,
+                )?;
+                return Err(error);
+            }
+        };
     lifecycle::mark_running(&run_id)?;
-    let aggregate = AgentTaskScheduler::for_current_process(executor)?
+    let aggregate = AgentTaskScheduler::new_controller(executor)
+        .with_harvest_context(harvest_context)
         .with_run_id(run_id.clone())
         .run(plan.clone());
     let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::{mpsc, Arc, Mutex};
 
 use homeboy::core::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::core::agent_tasks::batch;
@@ -113,34 +114,90 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
 }
 
 fn run_batch_cook_fanout_plan(plan: BatchCookFanoutPlan) -> CmdResult<Value> {
-    let executor = provider::ExtensionProviderAgentTaskExecutor::discover();
-    let mut results = Vec::new();
-    let mut failed = 0usize;
+    run_batch_cook_fanout_plan_with_executor(
+        plan,
+        provider::ExtensionProviderAgentTaskExecutor::discover(),
+    )
+}
 
-    for cook in &plan.cooks {
-        let invocation = cook.to_cook_invocation(&plan)?;
-        let run_id = invocation.options.initial_run_id.clone();
-        let request = dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
-        let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
-        let mut options = invocation.options;
-        options.initial_run_id = run_id;
-        options.initial_plan = initial_plan;
-        let result = agent_task_service::run_cook(options, executor.clone())?;
-        let value = serde_json::to_value(result.value).unwrap_or(Value::Null);
-        let exit_code = result.exit_code;
-        if exit_code != 0 {
-            failed += 1;
+fn run_batch_cook_fanout_plan_with_executor<E>(
+    plan: BatchCookFanoutPlan,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter + Clone,
+{
+    // A batch is one controller or one Lab child process. Per-cell mixed
+    // placement would require independent process boundaries, so every cell
+    // shares the immutable context captured by its owning process.
+    let total = plan.cooks.len();
+    let workers = total.min(std::thread::available_parallelism().map_or(1, usize::from));
+    let plan = Arc::new(plan);
+    let next = Arc::new(Mutex::new(0usize));
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let plan = Arc::clone(&plan);
+            let next = Arc::clone(&next);
+            let tx = tx.clone();
+            let executor = executor.clone();
+            scope.spawn(move || loop {
+                let index = {
+                    let mut next = next.lock().expect("batch cook work queue");
+                    if *next == plan.cooks.len() {
+                        return;
+                    }
+                    let index = *next;
+                    *next += 1;
+                    index
+                };
+                let cook = &plan.cooks[index];
+                let cell = (|| -> Result<Value> {
+                    let invocation = cook.to_cook_invocation(&plan)?;
+                    let run_id = invocation.options.initial_run_id.clone();
+                    let request =
+                        dispatch_service::resolve_dispatch_request(invocation.dispatch.into())?;
+                    let initial_plan = dispatch_service::build_dispatch_plan(&request)?;
+                    let mut options = invocation.options;
+                    options.initial_run_id = run_id;
+                    options.initial_plan = initial_plan;
+                    let result = agent_task_service::run_cook(options, executor.clone())?;
+                    Ok(serde_json::json!({
+                        "exit_code": result.exit_code,
+                        "result": serde_json::to_value(result.value).unwrap_or(Value::Null),
+                    }))
+                })();
+                let _ = tx.send((index, cell));
+            });
         }
-        results.push(serde_json::json!({
+    });
+    drop(tx);
+
+    let mut results = (0..total).map(|_| None).collect::<Vec<Option<Value>>>();
+    for (index, cell) in rx {
+        let cook = &plan.cooks[index];
+        let cell = match cell {
+            Ok(cell) => cell,
+            Err(error) => serde_json::json!({
+                "exit_code": 1,
+                "result": { "error": error.to_string() },
+            }),
+        };
+        results[index] = Some(serde_json::json!({
             "cook_id": cook.cook_id,
             "run_id": cook.run_id(),
             "worktree": cook.to_worktree,
             "head": cook.head,
             "workspace_materialization": cook.workspace_materialization,
-            "exit_code": exit_code,
-            "result": value,
+            "exit_code": cell["exit_code"],
+            "result": cell["result"],
         }));
     }
+    let results = results.into_iter().flatten().collect::<Vec<_>>();
+    let failed = results
+        .iter()
+        .filter(|result| result["exit_code"].as_i64() != Some(0))
+        .count();
 
     Ok((
         serde_json::json!({

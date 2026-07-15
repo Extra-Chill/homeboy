@@ -46,14 +46,6 @@ where
         }
     }
 
-    /// Build a scheduler at a process execution boundary. Both Lab transport
-    /// values must be present and valid, otherwise execution is rejected
-    /// before provider dispatch or harvest setup.
-    pub(crate) fn for_current_process(executor: E) -> crate::core::Result<Self> {
-        Ok(Self::new_controller(executor)
-            .with_harvest_context(HarvestExecutionContext::from_current_process()?))
-    }
-
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.run_id = Some(run_id.into());
         self
