@@ -612,6 +612,32 @@ mod config {
         }
     }
 
+    /// Controller-compiled provider execution policy carried across a Lab handoff.
+    /// Runner-local configuration may satisfy this policy's capabilities and secrets,
+    /// but must not select a different provider policy.
+    ///
+    /// Lives beside its `AgentTaskProviderRotationPolicy` / `AgentTaskRetryPolicy`
+    /// fields in this leaf module (rather than in `agent_task_dispatch_service`) so
+    /// the lab-contract type layer can depend on it without pulling in the dispatch
+    /// service machinery. `agent_task_dispatch_service` re-exports it for stability.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ResolvedAgentTaskProviderPolicy {
+        pub backend: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub selector: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rotation: Option<AgentTaskProviderRotationPolicy>,
+        /// Whether the resolved rotation's first entry is the initial provider
+        /// attempt, rather than a fallback after the request's executor.
+        #[serde(default)]
+        pub rotation_starts_with_first_entry: bool,
+        pub retry: AgentTaskRetryPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub liveness_timeout_ms: Option<u64>,
+    }
+
     /// One rotation target: executor selector overrides and/or nested provider
     /// config/model, mirroring the dispatch config layer shapes
     /// (`--dispatch-selector` / `--dispatch-provider-config`). Unset fields
