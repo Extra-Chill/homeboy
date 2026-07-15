@@ -707,10 +707,14 @@ mod committed_harvest_tests {
             artifact_declarations: Vec::new(),
             metadata: serde_json::Value::Null,
         };
+        assert!(!workspace.path().join(".git").exists());
         let preflight = prepare_committed_harvest(&request, None).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
         let source_provenance = preflight.source_provenance.expect("source provenance");
         assert!(workspace.path().join(".git").is_dir());
+        let retry_preflight =
+            prepare_committed_harvest(&request, None).expect("snapshot retry preflight");
+        assert_eq!(retry_preflight.base_sha.as_deref(), Some(baseline.as_str()));
         assert_eq!(source_provenance["source_revision"], "a".repeat(40));
         let attempt = prepare_attempt_workspace(&mut request, Some(&baseline))
             .expect("provider-ready attempt")

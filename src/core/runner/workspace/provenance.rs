@@ -9,6 +9,8 @@ use super::snapshot::{workspace_content_hash_for_policy, workspace_content_hash_
 use super::workspace_content_hash_algorithm;
 
 const LAB_SOURCE_SNAPSHOT_SYNC_MODE: &str = "lab_offload";
+const SYNTHETIC_SNAPSHOT_BASELINE_REF: &str = "refs/heads/homeboy-snapshot-baseline";
+const SYNTHETIC_SNAPSHOT_AUTHOR: &str = "Homeboy Snapshot <snapshot@homeboy.invalid> 0 +0000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedLabWorkspaceProvenance {
@@ -17,6 +19,12 @@ pub(crate) struct VerifiedLabWorkspaceProvenance {
     pub runner_id: String,
     pub workspace_identity: String,
     pub snapshot_hash: String,
+    content_hash: String,
+    content_hash_algorithm: String,
+    permission_policy: Option<String>,
+    sync_excludes: Vec<String>,
+    local_source_path: Option<String>,
+    remote_workspace_path: String,
 }
 
 /// Creates a deterministic Git root for a verified Lab snapshot so generic
@@ -74,10 +82,7 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
     )?;
     git(materialized_workspace_path, &["add", "--all"])?;
     let tree = git(materialized_workspace_path, &["write-tree"])?;
-    let message = format!(
-        "homeboy snapshot baseline\n\nsource-revision: {}\nworkspace-identity: {}\nsnapshot-hash: {}",
-        provenance.source_revision, provenance.workspace_identity, provenance.snapshot_hash,
-    );
+    let message = synthetic_snapshot_baseline_message(&provenance);
     let commit = git_with_env(
         materialized_workspace_path,
         &["commit-tree", &tree, "-m", &message],
@@ -92,27 +97,32 @@ pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
     )?;
     git(
         materialized_workspace_path,
-        &[
-            "update-ref",
-            "refs/heads/homeboy-snapshot-baseline",
-            &commit,
-        ],
+        &["update-ref", SYNTHETIC_SNAPSHOT_BASELINE_REF, &commit],
     )?;
     Ok(commit)
 }
 
-/// Verifies that a Lab Git materialization owns exactly the requested root and
-/// remains at the source revision carried by the verified snapshot contract.
+/// Verifies the Git state accepted for a Lab materialization. Snapshot modes
+/// may only use Homeboy's deterministic synthetic baseline.
 pub(crate) fn verify_lab_workspace_git_root(
     workspace: &Path,
     provenance: &VerifiedLabWorkspaceProvenance,
 ) -> std::result::Result<(), String> {
-    if provenance.materialization_mode != "git" {
-        return Err(format!(
-            "snapshot materialization mode `{}` must be gitless",
-            provenance.materialization_mode
-        ));
+    match provenance.materialization_mode.as_str() {
+        "git" => verify_git_materialization_root(workspace, provenance),
+        "snapshot" | "snapshot-git" => {
+            verify_synthetic_snapshot_git_baseline(workspace, provenance)
+        }
+        mode => Err(format!(
+            "unsupported workspace materialization mode `{mode}`"
+        )),
     }
+}
+
+fn verify_git_materialization_root(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<(), String> {
     let root = workspace
         .canonicalize()
         .map_err(|error| format!("could not canonicalize workspace: {error}"))?;
@@ -131,6 +141,77 @@ pub(crate) fn verify_lab_workspace_git_root(
         return Err("Git workspace is not clean".to_string());
     }
     Ok(())
+}
+
+fn verify_synthetic_snapshot_git_baseline(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<(), String> {
+    verify_snapshot_workspace_content(workspace, provenance)?;
+    let root = workspace
+        .canonicalize()
+        .map_err(|error| format!("could not canonicalize workspace: {error}"))?;
+    let git_root = PathBuf::from(git(workspace, &["rev-parse", "--show-toplevel"])?)
+        .canonicalize()
+        .map_err(|error| format!("could not canonicalize Git root: {error}"))?;
+    if root != git_root {
+        return Err("Git top-level does not exactly match the managed workspace root".to_string());
+    }
+    if let Some(path) = nested_git_metadata(workspace)? {
+        return Err(format!(
+            "snapshot workspace contains nested Git metadata at {}",
+            path.display()
+        ));
+    }
+    if git(workspace, &["symbolic-ref", "--quiet", "HEAD"])? != SYNTHETIC_SNAPSHOT_BASELINE_REF {
+        return Err("synthetic snapshot baseline HEAD is not on its deterministic ref".to_string());
+    }
+    let head = git(workspace, &["rev-parse", "HEAD"])?;
+    if git(workspace, &["rev-parse", SYNTHETIC_SNAPSHOT_BASELINE_REF])? != head {
+        return Err("synthetic snapshot baseline ref does not match HEAD".to_string());
+    }
+    if !git(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("synthetic snapshot Git workspace is not clean".to_string());
+    }
+    let tree = git(workspace, &["rev-parse", "HEAD^{tree}"])?;
+    if git(workspace, &["write-tree"])? != tree {
+        return Err(
+            "synthetic snapshot baseline commit tree does not match the workspace".to_string(),
+        );
+    }
+    let parents = git(workspace, &["rev-list", "--parents", "-n", "1", "HEAD"])?;
+    if parents.split_whitespace().count() != 1 {
+        return Err("synthetic snapshot baseline commit must not have parents".to_string());
+    }
+    let expected = synthetic_snapshot_baseline_commit(&tree, provenance);
+    if git(workspace, &["cat-file", "commit", "HEAD"])? != expected {
+        return Err(
+            "synthetic snapshot baseline commit does not match verified provenance".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn synthetic_snapshot_baseline_message(provenance: &VerifiedLabWorkspaceProvenance) -> String {
+    format!(
+        "homeboy snapshot baseline\n\nsource-revision: {}\nworkspace-identity: {}\nsnapshot-hash: {}",
+        provenance.source_revision, provenance.workspace_identity, provenance.snapshot_hash,
+    )
+}
+
+fn synthetic_snapshot_baseline_commit(
+    tree: &str,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> String {
+    format!(
+        "tree {tree}\nauthor {SYNTHETIC_SNAPSHOT_AUTHOR}\ncommitter {SYNTHETIC_SNAPSHOT_AUTHOR}\n\n{}",
+        synthetic_snapshot_baseline_message(provenance)
+    )
 }
 
 /// Verifies a Lab-materialized workspace against its declared provenance.
@@ -330,53 +411,71 @@ pub(crate) fn verify_lab_workspace(
     if workspace_identity != verification_identity {
         return Err("workspace identity does not match workspace verification".to_string());
     }
-    if materialization_mode != "git" {
-        let actual_content_hash = match content_hash_algorithm.as_str() {
-            "homeboy-workspace-content-v1" => {
-                workspace_content_hash_v1(materialized_workspace_path, &snapshot.sync_excludes)
-            }
-            algorithm if algorithm.starts_with("homeboy-workspace-content-v2+") => {
-                workspace_content_hash_for_policy(
-                    materialized_workspace_path,
-                    &snapshot.sync_excludes,
-                    permission_policy.expect("v2 policy validated above"),
-                )
-            }
-            _ => unreachable!("workspace verification algorithm was validated above"),
-        }
-        .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
-        if actual_content_hash != expected_content_hash {
-            let diagnostic = match materialization_mode {
-                "snapshot-git" => format!(
-                    "homeboy runner exec {} --cwd {} -- git status --short",
-                    shell::quote_arg(runner_id),
-                    shell::quote_arg(recorded_remote_path),
-                ),
-                "snapshot" => format!(
-                    "homeboy runner workspace sync --mode snapshot --path {} {}",
-                    shell::quote_arg(
-                        snapshot
-                            .local_path
-                            .as_deref()
-                            .expect("source path validated above")
-                    ),
-                    shell::quote_arg(runner_id),
-                ),
-                _ => unreachable!("materialization mode was validated above"),
-            };
-            return Err(format!(
-                "workspace content hash does not match the controller materialization using {content_hash_algorithm} (expected {expected_content_hash}, got {actual_content_hash}); operator diagnostic: `{diagnostic}`"
-            ));
-        }
-    }
-
-    Ok(VerifiedLabWorkspaceProvenance {
+    let provenance = VerifiedLabWorkspaceProvenance {
         source_revision: source_revision.to_string(),
         materialization_mode: materialization_mode.to_string(),
         runner_id: snapshot.runner_id,
         workspace_identity: workspace_identity.to_string(),
         snapshot_hash: snapshot.snapshot_hash,
-    })
+        content_hash: expected_content_hash.to_string(),
+        content_hash_algorithm,
+        permission_policy: permission_policy.map(str::to_string),
+        sync_excludes: snapshot.sync_excludes,
+        local_source_path: snapshot.local_path,
+        remote_workspace_path: recorded_remote_path.to_string(),
+    };
+    if provenance.materialization_mode != "git" {
+        verify_snapshot_workspace_content(materialized_workspace_path, &provenance)?;
+    }
+    Ok(provenance)
+}
+
+fn verify_snapshot_workspace_content(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<(), String> {
+    let actual_content_hash = match provenance.content_hash_algorithm.as_str() {
+        "homeboy-workspace-content-v1" => {
+            workspace_content_hash_v1(workspace, &provenance.sync_excludes)
+        }
+        algorithm if algorithm.starts_with("homeboy-workspace-content-v2+") => {
+            workspace_content_hash_for_policy(
+                workspace,
+                &provenance.sync_excludes,
+                provenance
+                    .permission_policy
+                    .as_deref()
+                    .expect("v2 policy validated above"),
+            )
+        }
+        _ => unreachable!("workspace verification algorithm was validated above"),
+    }
+    .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
+    if actual_content_hash != provenance.content_hash {
+        let diagnostic = match provenance.materialization_mode.as_str() {
+            "snapshot-git" => format!(
+                "homeboy runner exec {} --cwd {} -- git status --short",
+                shell::quote_arg(&provenance.runner_id),
+                shell::quote_arg(&provenance.remote_workspace_path),
+            ),
+            "snapshot" => format!(
+                "homeboy runner workspace sync --mode snapshot --path {} {}",
+                shell::quote_arg(
+                    provenance
+                        .local_source_path
+                        .as_deref()
+                        .unwrap_or("<unknown-source-path>")
+                ),
+                shell::quote_arg(&provenance.runner_id),
+            ),
+            _ => unreachable!("workspace verification mode was validated above"),
+        };
+        return Err(format!(
+            "workspace content hash does not match the controller materialization using {} (expected {}, got {}); operator diagnostic: `{diagnostic}`",
+            provenance.content_hash_algorithm, provenance.content_hash, actual_content_hash,
+        ));
+    }
+    Ok(())
 }
 
 fn git(cwd: &Path, args: &[&str]) -> std::result::Result<String, String> {
@@ -527,6 +626,35 @@ mod tests {
         lab
     }
 
+    fn materialized_snapshot_workspace() -> (tempfile::TempDir, VerifiedLabWorkspaceProvenance) {
+        materialized_snapshot_workspace_for_mode("snapshot")
+    }
+
+    fn materialized_snapshot_workspace_for_mode(
+        mode: &str,
+    ) -> (tempfile::TempDir, VerifiedLabWorkspaceProvenance) {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let mut lab = lab(workspace.path(), &snapshot);
+        lab["sync_mode"] = serde_json::json!(mode);
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("verified snapshot provenance");
+        materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            lab,
+        )
+        .expect("synthetic baseline");
+        (workspace, provenance)
+    }
+
     #[test]
     fn git_materialization_accepts_checkout_normalization_hash_difference() {
         let workspace = git_workspace();
@@ -669,6 +797,103 @@ mod tests {
             .expect("candidate patch");
         assert!(uncommitted_patch.contains("-candidate"));
         assert!(uncommitted_patch.contains("+uncommitted candidate"));
+    }
+
+    #[test]
+    fn synthetic_snapshot_baseline_rejects_foreign_and_tampered_git_state() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        let snapshot = snapshot(workspace.path());
+        let provenance = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab(workspace.path(), &snapshot),
+        )
+        .expect("verified snapshot provenance");
+        git(workspace.path(), &["init", "--quiet"]).expect("foreign Git root");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance).is_err());
+
+        let (workspace, provenance) = materialized_snapshot_workspace();
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect("deterministic synthetic baseline");
+        let (workspace, provenance) = materialized_snapshot_workspace_for_mode("snapshot-git");
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect("deterministic snapshot-git baseline");
+        git(workspace.path(), &["checkout", "--quiet", "--detach"])
+            .expect("detach synthetic baseline");
+        verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("changed baseline HEAD must fail");
+
+        let (workspace, provenance) = materialized_snapshot_workspace();
+        let tree = git(workspace.path(), &["rev-parse", "HEAD^{tree}"]).expect("baseline tree");
+        let changed = git_with_env(
+            workspace.path(),
+            &["commit-tree", &tree, "-m", "changed baseline message"],
+            &[
+                ("GIT_AUTHOR_NAME", "Homeboy Snapshot"),
+                ("GIT_AUTHOR_EMAIL", "snapshot@homeboy.invalid"),
+                ("GIT_COMMITTER_NAME", "Homeboy Snapshot"),
+                ("GIT_COMMITTER_EMAIL", "snapshot@homeboy.invalid"),
+                ("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z"),
+                ("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
+            ],
+        )
+        .expect("changed message commit");
+        git(
+            workspace.path(),
+            &["update-ref", SYNTHETIC_SNAPSHOT_BASELINE_REF, &changed],
+        )
+        .expect("move baseline ref");
+        git(workspace.path(), &["reset", "--hard", "--quiet"])
+            .expect("checkout changed baseline tree");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("changed baseline message must fail")
+            .contains("does not match verified provenance"));
+
+        let (workspace, provenance) = materialized_snapshot_workspace();
+        std::fs::write(workspace.path().join("file.txt"), "other baseline\n")
+            .expect("change source tree");
+        git(workspace.path(), &["add", "--all"]).expect("stage changed tree");
+        let tree = git(workspace.path(), &["write-tree"]).expect("changed tree");
+        let changed = git_with_env(
+            workspace.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-m",
+                &synthetic_snapshot_baseline_message(&provenance),
+            ],
+            &[
+                ("GIT_AUTHOR_NAME", "Homeboy Snapshot"),
+                ("GIT_AUTHOR_EMAIL", "snapshot@homeboy.invalid"),
+                ("GIT_COMMITTER_NAME", "Homeboy Snapshot"),
+                ("GIT_COMMITTER_EMAIL", "snapshot@homeboy.invalid"),
+                ("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z"),
+                ("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
+            ],
+        )
+        .expect("changed tree commit");
+        git(
+            workspace.path(),
+            &["update-ref", SYNTHETIC_SNAPSHOT_BASELINE_REF, &changed],
+        )
+        .expect("move baseline ref");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("changed baseline tree must fail")
+            .contains("content hash"));
+
+        let (workspace, provenance) = materialized_snapshot_workspace();
+        std::fs::write(workspace.path().join("file.txt"), "changed\n").expect("change file");
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("dirty synthetic workspace must fail")
+            .contains("content hash"));
+
+        let (workspace, mut provenance) = materialized_snapshot_workspace();
+        provenance.snapshot_hash = "sha256:other-source".to_string();
+        assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
+            .expect_err("mismatched snapshot metadata must fail")
+            .contains("does not match verified provenance"));
     }
 
     #[test]
