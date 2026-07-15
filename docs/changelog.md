@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.286.6] - 2026-07-15
+
+### Changed
+- relocate lab routing from command_contract to commands
+- Make daemon operation locks crash-safe
+- give spec.rs a commands-free ops_command_spec macro
+- retain release artifacts with leases
+- use reverse-tunnel session for disconnect session-file cleanup test
+- Backfill canonical executor evidence for terminal runs
+- skip giant-binary hashing in the shared home guard
+- Retain and clean agent-task scratch safely
+- relocate safety_manifest from command_contract into cli_surface
+- Preserve promoted baselines across cook gate retries
+- Persist runner child identity for daemon recovery
+- Preserve provider model through Lab publication
+- serialize agent_task_batch env isolation via the global home guard
+- Add explicit provider candidate adoption
+
+### Fixed
+- verify synthetic snapshot git baselines
+- restore Lab-flag help scoping to portable commands only
+- mark internal workspace crates publish = false
+- materialize nested publication artifacts relative to the manifest source
+
 ## [0.286.5] - 2026-07-15
 
 ### Fixed
