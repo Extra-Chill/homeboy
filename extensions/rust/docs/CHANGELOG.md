@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.8] - 2026-07-15
+
+### Fixed
+- publish Rust workspace crates in dependency order
+
 ## [1.23.7] - 2026-07-12
 
 ### Fixed
