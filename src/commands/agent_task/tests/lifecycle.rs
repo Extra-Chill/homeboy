@@ -993,7 +993,14 @@ fn run_plan_fails_fast_when_required_secret_env_is_missing() {
                 .as_str()
                 .is_some_and(|hint| hint.contains("runner-required secret env contracts"))));
         assert!(!error.to_string().contains("secret-value"));
-        assert!(lifecycle_status("run-plan-missing-secret").is_err());
+        let record = lifecycle_status("run-plan-missing-secret")
+            .expect("pre-execution failure is persisted for recovery");
+        assert_eq!(record.state, AgentTaskRunState::Failed);
+        assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "prepare_plan_for_execution"
+        );
     });
 }
 
