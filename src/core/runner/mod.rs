@@ -109,9 +109,10 @@ pub(crate) use execution::{
     RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use execution::{
-    daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
-    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
-    RunnerExecStructuredSummary,
+    daemon_api_post, exec, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
+    promote_runner_exec_summaries, promoted_output, runner_exec_failure_error,
+    runner_exec_structured_summary, runner_job_cancel, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
 };
 pub(crate) use extension_materialization::extension_source_content_hash;
 pub(crate) use extension_materialization::{
