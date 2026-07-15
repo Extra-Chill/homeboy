@@ -362,7 +362,12 @@ pub(crate) fn verify_lab_workspace(
     {
         return Err("claims git materialization while excluding .git metadata".to_string());
     }
-    if snapshot.dirty {
+    if snapshot.dirty
+        && lab
+            .pointer("/workspace_cleanliness/allow_dirty_lab_workspace")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
         return Err("records a dirty source checkout".to_string());
     }
     if !is_git_revision(source_revision) {

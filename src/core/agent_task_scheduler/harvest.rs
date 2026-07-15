@@ -647,7 +647,7 @@ mod committed_harvest_tests {
     }
 
     #[test]
-    fn lab_snapshot_preflight_materializes_a_provider_ready_attempt_workspace() {
+    fn authorized_dirty_lab_snapshot_preflight_materializes_a_provider_ready_attempt_workspace() {
         let _guard = LAB_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -662,7 +662,7 @@ mod committed_harvest_tests {
             workspace_root: None,
             git_branch: Some("main".to_string()),
             git_sha: Some("a".repeat(40)),
-            dirty: false,
+            dirty: true,
             sync_mode: "lab_offload".to_string(),
             workspace_snapshot_identity: Some("snapshot:provider-ready".to_string()),
             synthetic_checkout_commit: None,
@@ -677,6 +677,13 @@ mod committed_harvest_tests {
                 .expect("content hash");
         let lab = serde_json::json!({
             "runner_id": "lab", "remote_workspace": path, "sync_mode": "snapshot", "status": "offloaded",
+            "workspace_cleanliness": {
+                "schema": "homeboy/lab-workspace-cleanliness/v1",
+                "mode": "snapshot",
+                "remote_workspace": path,
+                "status": "snapshot_unique_workspace",
+                "allow_dirty_lab_workspace": true
+            },
             "source_provenance": {
                 "verified_cook_baseline": {
                     "source_run_id": "promoted-run",
@@ -696,14 +703,6 @@ mod committed_harvest_tests {
                 "primary_workspace": { "identity": "snapshot:provider-ready", "remote_path": workspace.path().display().to_string() }
             }
         });
-        std::env::set_var(
-            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
-            serde_json::to_string(&snapshot).expect("snapshot JSON"),
-        );
-        std::env::set_var(
-            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
-            serde_json::to_string(&lab).expect("Lab JSON"),
-        );
         let mut request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             task_id: "snapshot-task".to_string(),
@@ -733,7 +732,34 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
         assert!(!workspace.path().join(".git").exists());
-        let context = HarvestExecutionContext::from_current_process().expect("Lab context");
+        let mut unauthorized_lab = lab.clone();
+        unauthorized_lab["workspace_cleanliness"]["allow_dirty_lab_workspace"] =
+            serde_json::json!(false);
+        std::env::set_var(
+            crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            serde_json::to_string(&snapshot).expect("snapshot JSON"),
+        );
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::to_string(&unauthorized_lab).expect("unauthorized Lab JSON"),
+        );
+        let unauthorized_context =
+            HarvestExecutionContext::from_current_process().expect("unauthorized Lab context");
+        let error = prepare_committed_harvest(&request, None, &unauthorized_context)
+            .err()
+            .expect("dirty snapshots without explicit Lab authorization must fail before provider execution");
+        assert!(matches!(
+            error,
+            HarvestError::Git { command, message }
+                if command == "verify Lab snapshot harvest provenance"
+                    && message == "records a dirty source checkout"
+        ));
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            serde_json::to_string(&lab).expect("authorized Lab JSON"),
+        );
+        let context =
+            HarvestExecutionContext::from_current_process().expect("authorized Lab context");
         let preflight =
             prepare_committed_harvest(&request, None, &context).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
@@ -751,6 +777,12 @@ mod committed_harvest_tests {
             Some(workspace.path().to_str().unwrap())
         );
         assert!(git_is_repository(Path::new(request.workspace.root.as_deref().unwrap())).unwrap());
+        assert!(git_output(
+            Path::new(request.workspace.root.as_deref().unwrap()),
+            &["status", "--porcelain", "--untracked-files=all"],
+        )
+        .expect("provider attempt status")
+        .is_empty());
         let external_patch = workspace.path().join("external.patch");
         std::fs::write(&external_patch, "external patch").expect("external patch");
         let mut outcome = committed_harvest_preflight_outcome("snapshot-task".to_string());
