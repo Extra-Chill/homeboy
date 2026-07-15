@@ -48,6 +48,93 @@ struct OrchestrationHit {
     weight: u32,
 }
 
+/// Collect function names this file imports from a `core` path, e.g.
+/// `use homeboy::core::observation::{persist_loop_inventory_run, ..}` or
+/// `use crate::core::fuzz::persist_fuzz_run_evidence;`.
+///
+/// A bare call to one of these names is delegation to a core service, not
+/// command-owned orchestration, even though it lacks a `Type::` qualifier. Used
+/// to suppress the marker false positive where a command imports and calls a
+/// core `persist_*`/`execute_*`/`dispatch_*` function directly.
+fn core_delegated_fn_names(content: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    // Match `use <...>core::<...>{ a, b, c };` and `use <...>core::<...>name;`
+    // capturing the imported leaf name(s). We only consider `use` lines that
+    // traverse a `core` path segment.
+    let use_line = Regex::new(r"^\s*(?:pub\s+)?use\s+(.+?);").expect("valid use regex");
+    let ident = Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("valid ident regex");
+    for line in content.lines() {
+        let Some(caps) = use_line.captures(line) else {
+            continue;
+        };
+        let path = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        if !path.contains("core::") && !path.contains("::core::") {
+            continue;
+        }
+        // Collect identifiers inside a `{ ... }` group, or the trailing leaf.
+        if let Some(open) = path.find('{') {
+            let group = &path[open + 1..path.rfind('}').unwrap_or(path.len())];
+            for token in group.split(',') {
+                // Handle `a as b` -> the local name is `b`.
+                let token = token.trim();
+                let local = token.rsplit(" as ").next().unwrap_or(token).trim();
+                if let Some(m) = ident.find(local) {
+                    names.insert(m.as_str().to_string());
+                }
+            }
+        } else if let Some(leaf) = path.rsplit("::").next() {
+            let leaf = leaf.rsplit(" as ").next().unwrap_or(leaf).trim();
+            if let Some(m) = ident.find(leaf) {
+                names.insert(m.as_str().to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Collect every bare (non-`::`-qualified, non-method) snake_case call `name(`
+/// on the line.
+fn bare_call_callees(line: &str) -> Vec<&str> {
+    // A leading `::` (module-qualified) or `.` (method call) means the callee is
+    // not a bare free-function reference; `[^A-Za-z0-9_:.]` excludes both.
+    let call = match Regex::new(r"(?:^|[^A-Za-z0-9_:.])([a-z_][A-Za-z0-9_]*)\s*\(") {
+        Ok(call) => call,
+        Err(_) => return Vec::new(),
+    };
+    call.captures_iter(line)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str()))
+        .collect()
+}
+
+/// Whether `line`'s marker match is a bare call to a `persist_*`/`execute_*`/
+/// `dispatch_*` function that the file imports from a `core` path — i.e.
+/// delegation to a core service rather than command-owned orchestration.
+///
+/// Only function-name markers are affected; raw inline operations like
+/// `fs::write(` are matched on the module path (`fs::`), not a bare snake_case
+/// callee, so they are never suppressed here. Suppression is conservative: it
+/// applies only to calls whose callee is a proven core import, so a bare call to
+/// a command-local (or unknown) function still counts.
+fn is_delegated_marker_call(
+    line: &str,
+    core_delegated_fns: &std::collections::HashSet<String>,
+) -> bool {
+    let marker_calls: Vec<&str> = bare_call_callees(line)
+        .into_iter()
+        .filter(|callee| {
+            callee.starts_with("persist_")
+                || callee.starts_with("execute_")
+                || callee.starts_with("dispatch_")
+        })
+        .collect();
+    if marker_calls.is_empty() {
+        return false;
+    }
+    marker_calls
+        .iter()
+        .all(|callee| core_delegated_fns.contains(*callee))
+}
+
 pub(in crate::core::code_audit) fn run(
     root: &Path,
     config: &ThinCommandAdapterConfig,
@@ -84,7 +171,14 @@ pub(in crate::core::code_audit) fn run(
             continue;
         };
 
-        let hits = scan_orchestration(&content, &groups, &ignore_line_matches, config);
+        let delegated_core_fns = core_delegated_fn_names(&content);
+        let hits = scan_orchestration(
+            &content,
+            &groups,
+            &ignore_line_matches,
+            config,
+            &delegated_core_fns,
+        );
         let total_weight: u32 = hits.iter().map(|hit| hit.weight).sum();
         if total_weight < config.max_orchestration_weight {
             continue;
@@ -171,6 +265,7 @@ fn scan_orchestration(
     groups: &[CompiledMarkerGroup],
     ignore_line_matches: &[Regex],
     config: &ThinCommandAdapterConfig,
+    core_delegated_fns: &std::collections::HashSet<String>,
 ) -> Vec<OrchestrationHit> {
     let mut hits = Vec::new();
 
@@ -186,6 +281,13 @@ fn scan_orchestration(
         }
 
         if trimmed.is_empty() {
+            continue;
+        }
+
+        // `use` import statements are not orchestration — importing a
+        // `persist_*`/`execute_*`/`dispatch_*` symbol (even a core one) is not a
+        // call. Skip them so the import line does not inflate weight.
+        if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
             continue;
         }
 
@@ -222,6 +324,13 @@ fn scan_orchestration(
                 // line matches one (module-qualified delegation is correct
                 // thin-adapter behavior, not a leak).
                 if !group.exempt.is_empty() && group.exempt.iter().any(|re| re.is_match(raw_line)) {
+                    continue;
+                }
+                // Suppress a bare `name(` call to a `persist_*`/`execute_*`/
+                // `dispatch_*` function imported from a `core` path: the command
+                // is delegating to a core service, not owning the orchestration.
+                // Command-local helpers of the same shape still count.
+                if is_delegated_marker_call(raw_line, core_delegated_fns) {
                     continue;
                 }
                 hits.push(OrchestrationHit {

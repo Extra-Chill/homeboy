@@ -300,3 +300,76 @@ fn empty_exempt_when_line_matches_preserves_existing_behavior() {
     let findings = super::run(dir.path(), &name_shaped_config());
     assert_eq!(findings.len(), 1);
 }
+
+fn persist_marker_config() -> ThinCommandAdapterConfig {
+    ThinCommandAdapterConfig {
+        include_path_contains: vec!["src/commands/".to_string()],
+        file_extensions: vec!["rs".to_string()],
+        ignore_line_matches: vec![r"^\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s".to_string()],
+        orchestration_markers: vec![ThinCommandAdapterMarkerGroup {
+            label: "run artifact persistence".to_string(),
+            patterns: vec![r"\bpersist_[A-Za-z0-9_]+\b".to_string()],
+            weight: 1,
+            exempt_when_line_matches: vec![
+                r"[A-Za-z_][A-Za-z0-9_]*::(dispatch|execute|persist)[A-Za-z0-9_]*\s*\(".to_string(),
+            ],
+        }],
+        max_orchestration_weight: 1,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn bare_call_to_core_imported_persist_fn_is_exempt() {
+    let dir = tempfile::tempdir().unwrap();
+    // The command imports a core persist_* function and calls it unqualified.
+    // This is delegation to core, not command-owned orchestration (#8299).
+    write(
+        dir.path(),
+        "src/commands/delegate_persist.rs",
+        "use homeboy::core::observation::persist_loop_inventory_run;\n\
+         pub fn run() {\n    let x = persist_loop_inventory_run(record);\n}\n",
+    );
+    let findings = super::run(dir.path(), &persist_marker_config());
+    assert!(
+        findings.is_empty(),
+        "a bare call to a core-imported persist_* fn must be exempt as delegation"
+    );
+}
+
+#[test]
+fn bare_call_to_local_persist_helper_still_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    // The command defines its own persist_* helper and calls it — it owns that
+    // orchestration, so the call still counts.
+    write(
+        dir.path(),
+        "src/commands/local_persist.rs",
+        "pub fn run() {\n    persist_local_thing(record);\n}\n\
+         fn persist_local_thing(_r: u32) {}\n",
+    );
+    let findings = super::run(dir.path(), &persist_marker_config());
+    assert_eq!(
+        findings.len(),
+        1,
+        "a call to a command-local persist_* helper must still be flagged"
+    );
+}
+
+#[test]
+fn bare_call_to_unknown_persist_fn_still_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    // No core import and no local definition: conservative default is to count,
+    // so we never silently drop a real leak.
+    write(
+        dir.path(),
+        "src/commands/unknown_persist.rs",
+        "pub fn run() {\n    persist_mystery(record);\n}\n",
+    );
+    let findings = super::run(dir.path(), &persist_marker_config());
+    assert_eq!(
+        findings.len(),
+        1,
+        "a bare persist_* call with no core import must still be flagged"
+    );
+}
