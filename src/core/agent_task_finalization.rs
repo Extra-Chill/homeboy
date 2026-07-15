@@ -388,6 +388,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
+    let mut durable_changed_files = Vec::new();
     if !options.manual_finalization {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
         validate_durable_publication_eligibility(&lifecycle)?;
@@ -401,6 +402,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         validate_gate_proof_binding(&gate_proof, &options)?;
+        durable_changed_files = gate_proof.promotion.changed_files.clone();
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -432,14 +434,21 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         .unwrap_or_else(|| backend.current_branch(&options.path))?;
     refuse_protected_head(&head, &options.protected_branches)?;
 
-    let mut changed_files = if options.changed_files.is_empty() {
+    let mut working_changed_files = if options.changed_files.is_empty() {
         backend.changed_files(&options.path)?
     } else {
         options.changed_files.clone()
     };
+    working_changed_files.sort();
+    working_changed_files.dedup();
+    let mut changed_files = if working_changed_files.is_empty() && !options.manual_finalization {
+        durable_changed_files
+    } else {
+        working_changed_files.clone()
+    };
     changed_files.sort();
     changed_files.dedup();
-    let has_uncommitted_changes = !changed_files.is_empty();
+    let has_uncommitted_changes = !working_changed_files.is_empty();
     if changed_files.is_empty() && options.manual_finalization {
         changed_files = backend.changed_files_since(&options.path, &options.base)?;
         changed_files.sort();
@@ -469,6 +478,14 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         backend.commit_all(&options.path, &options.commit_message)?;
         backend.push_branch(&options.path, &head)?;
     } else if !backend.branch_is_published(&options.path, &head)? {
+        if !options.manual_finalization {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "clean recovered candidate must exactly match its remote branch before finalization",
+                None,
+                None,
+            ));
+        }
         backend.push_branch(&options.path, &head)?;
     }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
@@ -1398,6 +1415,28 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn durable_finalization_publishes_clean_synced_recovered_candidate() {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+        let mut backend = MockBackend {
+            lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+            gate_proof: Some(gate_proof),
+            branch_published: true,
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+
+        let report = finalize_pr_with_backend(finalization_options, &mut backend)
+            .expect("clean synced candidate publishes");
+
+        assert_eq!(report.status, "review_ready");
+        assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+        assert!(!backend.committed && !backend.pushed);
+        assert!(backend.created);
     }
 
     #[test]
