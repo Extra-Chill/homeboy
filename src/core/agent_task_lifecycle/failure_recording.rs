@@ -733,6 +733,7 @@ pub(crate) fn apply_aggregate_to_record(
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
     record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
+    persist_provider_handle_models(&mut record.provider_handles, plan);
     record.latest_executor_evidence = latest_executor_evidence(&record.run_id, plan, aggregate);
     update_lifecycle_from_record(record, plan);
     let provider_run_ids: Vec<String> = record
@@ -748,5 +749,38 @@ pub(crate) fn apply_aggregate_to_record(
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
     if let Some(evidence) = latest_executor_evidence_value {
         metadata.insert("latest_executor_evidence".to_string(), evidence);
+    }
+}
+
+fn persist_provider_handle_models(
+    handles: &mut [AgentTaskRunProviderHandle],
+    plan: &AgentTaskPlan,
+) {
+    for handle in handles {
+        if handle
+            .metadata
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.trim().is_empty())
+        {
+            continue;
+        }
+        let Some(model) = plan
+            .tasks
+            .iter()
+            .find(|task| task.task_id == handle.task_id)
+            .and_then(|task| task.executor.model())
+            .filter(|model| !model.trim().is_empty())
+        else {
+            continue;
+        };
+        if !handle.metadata.is_object() {
+            handle.metadata = json!({});
+        }
+        handle
+            .metadata
+            .as_object_mut()
+            .expect("provider handle metadata object")
+            .insert("model".to_string(), json!(model));
     }
 }
