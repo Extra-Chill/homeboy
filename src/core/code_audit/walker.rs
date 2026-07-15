@@ -132,9 +132,14 @@ pub fn is_test_path(relative_path: &str) -> bool {
     let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
 
     // Rust: foo_test.rs, foo_tests.rs, and bare test.rs / tests.rs modules
-    // (conventionally wired as `#[cfg(test)] mod tests;`).
+    // (conventionally wired as `#[cfg(test)] mod tests;`). Also cover shared
+    // test-fixture modules — `*_fixture(s).rs` (e.g. test_fixture.rs) — which are
+    // conventionally `#[cfg(test)] mod` fixtures consumed by sibling `*_tests.rs`
+    // files, not production code.
     if file_name.ends_with("_test.rs")
         || file_name.ends_with("_tests.rs")
+        || file_name.ends_with("_fixture.rs")
+        || file_name.ends_with("_fixtures.rs")
         || file_name == "test.rs"
         || file_name == "tests.rs"
     {
@@ -219,6 +224,10 @@ mod tests {
         // Bare `tests.rs` / `test.rs` modules (conventionally `#[cfg(test)] mod tests;`).
         assert!(is_test_path("src/commands/bench/tests.rs"));
         assert!(is_test_path("src/core/triage/test.rs"));
+        // Shared `*_fixture(s).rs` test-support modules (conventionally
+        // `#[cfg(test)] mod test_fixture;`), consumed by sibling `*_tests.rs`.
+        assert!(is_test_path("src/commands/trace/test_fixture.rs"));
+        assert!(is_test_path("src/core/runner/exec_fixtures.rs"));
     }
 
     #[test]
