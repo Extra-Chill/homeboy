@@ -3,6 +3,10 @@ use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 use base64::Engine;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
 
@@ -655,10 +659,62 @@ fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
     assert!(err
         .message
         .contains("daemon lifecycle operation already in progress"));
+    assert!(err.message.contains("operation.lock"));
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
+    const HOLDER_ENV: &str = "HOMEBOY_TEST_DAEMON_OPERATION_LOCK_HOLDER";
+
+    if std::env::var_os(HOLDER_ENV).is_some() {
+        let ready = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-holder.ready");
+        let release = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-holder.release");
+        let _lock = acquire_daemon_operation_lock().expect("child acquires operation lock");
+        std::fs::write(&ready, "ready").expect("signal operation lock holder");
+        while !release.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Simulate an interrupted lifecycle process: no Rust destructors run.
+        std::process::exit(0);
+    }
+
+    let _home = HomeGuard::new();
+    let ready = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-holder.ready");
+    let release = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-holder.release");
+    let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("core::daemon::daemon_test::daemon_operation_lock_recovers_after_owner_exits_without_drop")
+        .arg("--nocapture")
+        .env(HOLDER_ENV, "1")
+        .spawn()
+        .expect("start operation lock holder");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !ready.exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("operation lock holder did not become ready");
+    }
+
+    let err = acquire_daemon_operation_lock().expect_err("live child excludes lifecycle operation");
     assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("operation.lock")));
+        .message
+        .contains("daemon lifecycle operation already in progress"));
+
+    std::fs::write(&release, "release").expect("release operation lock holder");
+    assert!(child.wait().expect("wait for lock holder").success());
+    acquire_daemon_operation_lock().expect("recover after interrupted lock holder");
 }
 
 #[test]

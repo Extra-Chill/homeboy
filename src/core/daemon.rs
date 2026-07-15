@@ -304,7 +304,10 @@ impl DaemonLeaseIdentity {
 
 #[derive(Debug)]
 pub(super) struct DaemonOperationLock {
-    path: PathBuf,
+    // The open descriptor retains the advisory lock. The lock file itself is
+    // intentionally persistent so process death releases ownership safely.
+    #[allow(dead_code)]
+    file: File,
 }
 
 /// Held by the serving daemon for its entire lifetime. Unlike the short
@@ -2204,30 +2207,21 @@ fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Error::internal_unexpected(format!(
-                "daemon lifecycle operation already in progress; lock file exists at {}",
-                path.display()
-            ))
-            .with_hint(format!(
-                "If no homeboy daemon start/stop command is running, remove {} and retry",
-                path.display()
-            )));
-        }
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("create {}", path.display())),
-            ));
-        }
-    };
-    let body = format!("pid={}\n", std::process::id());
-    file.write_all(body.as_bytes()).map_err(|e| {
-        Error::internal_io(e.to_string(), Some(format!("write {}", path.display())))
-    })?;
-    Ok(DaemonOperationLock { path })
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+        })?;
+    if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
+        return Err(Error::internal_unexpected(format!(
+            "daemon lifecycle operation already in progress; lock is held at {}",
+            path.display()
+        )));
+    }
+    Ok(DaemonOperationLock { file })
 }
 
 pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
@@ -2255,25 +2249,71 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
                 Some("open daemon owner lock".to_string()),
             )
         })?;
-    #[cfg(unix)]
-    unsafe {
-        if libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            libc::LOCK_EX | libc::LOCK_NB,
-        ) != 0
-        {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some("lock daemon owner".to_string()),
-            ));
-        }
+    if try_lock_file_exclusive(&file, "daemon owner")? {
+        Ok(Some(DaemonOwnerLock { file }))
+    } else {
+        Ok(None)
     }
-    #[cfg(not(unix))]
-    let _ = &file;
-    Ok(Some(DaemonOwnerLock { file }))
+}
+
+/// Acquires a non-blocking exclusive advisory lock backed by the OS. Platforms
+/// without an implementation fail closed rather than treating a lock file as
+/// proof of mutual exclusion.
+#[cfg(unix)]
+fn try_lock_file_exclusive(file: &File, operation: &str) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(false);
+    }
+    Err(Error::internal_io(
+        error.to_string(),
+        Some(format!("lock {operation}")),
+    ))
+}
+
+#[cfg(windows)]
+fn try_lock_file_exclusive(file: &File, operation: &str) -> Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    if unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    } != 0
+    {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        return Ok(false);
+    }
+    Err(Error::internal_io(
+        error.to_string(),
+        Some(format!("lock {operation}")),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn try_lock_file_exclusive(_file: &File, operation: &str) -> Result<bool> {
+    Err(Error::internal_unexpected(format!(
+        "{operation} lock is not implemented on this platform"
+    )))
 }
 
 fn acquire_daemon_owner_lock() -> Result<DaemonOwnerLock> {
@@ -2322,12 +2362,6 @@ pub(super) fn acquire_daemon_operation_lock_for_ensure(
             }
             Err(err) => return Err(err),
         }
-    }
-}
-
-impl Drop for DaemonOperationLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }
 
