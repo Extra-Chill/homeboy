@@ -491,7 +491,10 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
     },
     DetectorDescriptor {
         id: "command_status_contracts",
-        findings: &[AuditFinding::CommandStatusContractViolation],
+        findings: &[
+            AuditFinding::CommandStatusContractViolation,
+            AuditFinding::CommandStatusFixtureMissing,
+        ],
         access: DetectorAccess::RootOnly,
         runtime: DetectorRuntime::Generic(GenericDetectorRunner::CommandStatusContracts),
         timing_id: "detector.command_status_contracts",

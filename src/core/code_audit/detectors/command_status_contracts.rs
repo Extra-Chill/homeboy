@@ -52,7 +52,7 @@ pub(in crate::core::code_audit) fn run(
     for scenario in &config.scenarios {
         let fixture = root.join(&scenario.file);
         let Ok(content) = std::fs::read_to_string(&fixture) else {
-            findings.push(finding(
+            findings.push(fixture_missing_finding(
                 &scenario.file,
                 &scenario.id,
                 "scenario fixture is missing or unreadable".to_string(),
@@ -363,6 +363,27 @@ fn finding(file: &str, scenario_id: &str, description: String, suggestion: Strin
     }
 }
 
+/// A declared scenario's golden fixture file is missing or unreadable. This is
+/// test-data hygiene, not a status-contract violation, so it gets its own kind
+/// and a non-"violates contract" description.
+fn fixture_missing_finding(
+    file: &str,
+    scenario_id: &str,
+    description: String,
+    suggestion: String,
+) -> Finding {
+    Finding {
+        convention: "command_status_contracts".to_string(),
+        severity: Severity::Warning,
+        file: file.to_string(),
+        description: format!(
+            "Command status scenario '{scenario_id}' fixture unavailable: {description}"
+        ),
+        suggestion,
+        kind: AuditFinding::CommandStatusFixtureMissing,
+    }
+}
+
 fn json_value_label(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
 }
@@ -572,6 +593,33 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("/success"));
         assert!(findings[0].suggestion.contains("successful empty results"));
+    }
+
+    #[test]
+    fn missing_fixture_reports_distinct_kind_not_contract_violation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No fixture file is written, so the declared scenario's golden fixture
+        // is missing.
+        let config = CommandStatusContractConfig {
+            required_commands: Vec::new(),
+            required_output_error_commands: Vec::new(),
+            scenarios: vec![scenario(
+                "review-artifact-golden",
+                Some("review"),
+                "does-not-exist.json",
+                None,
+                false,
+                [("/success", serde_json::json!(false))],
+            )],
+        };
+
+        let findings = run(dir.path(), &config);
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.kind, AuditFinding::CommandStatusFixtureMissing);
+        assert_ne!(finding.kind, AuditFinding::CommandStatusContractViolation);
+        assert!(finding.description.contains("fixture unavailable"));
+        assert!(!finding.description.contains("violates contract"));
     }
 
     fn scenario<const N: usize>(
