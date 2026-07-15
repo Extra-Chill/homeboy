@@ -105,7 +105,11 @@ enum DaemonCommand {
         startup_token: String,
     },
     /// Stop the background daemon recorded in the state file
-    Stop,
+    Stop {
+        /// Require this exact live daemon lease before stopping
+        #[arg(long)]
+        lease_id: Option<String>,
+    },
     /// Show daemon state and selected local address
     Status,
     /// Render deployable reverse-runner broker service configuration
@@ -221,7 +225,13 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             daemon::supervise(&addr, &startup_token)?;
             Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
         }
-        DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
+        DaemonCommand::Stop { lease_id } => Ok((
+            DaemonOutput::Stop(match lease_id {
+                Some(lease_id) => daemon::stop_for_lease(&lease_id)?,
+                None => daemon::stop()?,
+            }),
+            0,
+        )),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),
         DaemonCommand::BrokerConfig {
             listen_addr,
@@ -358,6 +368,18 @@ mod tests {
         assert!(Cli::try_parse_from([
             "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "00000000-0000-0000-0000-000000000001", "--child-pid", "43", "--child-starttime-ticks", "1",
         ]).is_ok());
+    }
+
+    #[test]
+    fn stop_accepts_an_exact_lease_selector() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "stop",
+            "--lease-id",
+            "lease-live",
+        ])
+        .is_ok());
     }
 
     #[test]
