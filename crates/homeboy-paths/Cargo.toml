@@ -12,6 +12,6 @@ name = "homeboy_paths"
 path = "src/lib.rs"
 
 [dependencies]
-homeboy-error = { path = "../homeboy-error" }
-homeboy-product-identity = { path = "../homeboy-product-identity" }
+homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 shellexpand = "3.1"
