@@ -279,10 +279,7 @@ A skipped release is **not** reported as success: the process exits with code `5
 Publish steps are designed to be idempotent:
 
 - **GitHub releases**: If tag exists, assets are updated via `--clobber`
-- **crates.io**: If version already published, step skips gracefully
-
-GitHub release CI publishes to crates.io when the repository has a `CARGO_REGISTRY_TOKEN`
-secret configured.
+- **Homebrew**: The generated formula is republished from the GitHub Release assets
 
 This allows safe retry after `partial_success` without manual cleanup.
 

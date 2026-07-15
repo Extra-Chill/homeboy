@@ -37,7 +37,7 @@ Homeboy detects how it was installed and uses the appropriate upgrade method:
 | Method | Detection | Upgrade Command |
 |--------|-----------|-----------------|
 | Homebrew | Binary path contains `/Cellar/` or `/homebrew/`, or `brew list homeboy` succeeds | `brew update && brew upgrade homeboy` |
-| Cargo | Binary path contains `/.cargo/bin/` | `cargo install homeboy` |
+| Cargo (legacy) | Binary path contains `/.cargo/bin/` | Downloads the latest GitHub Release binary |
 | Source | Binary path contains `/target/release/` or `/target/debug/` | `git pull && cargo build --release` |
 | Binary | Binary path contains `/bin/homeboy` (covers `~/bin/homeboy` and `/usr/local/bin/homeboy`) | Downloads latest release asset and replaces the current binary |
 
@@ -93,7 +93,7 @@ homeboy upgrade --skip-runners
 
 - `command`: `upgrade.check`
 - `current_version`: Current installed version
-- `latest_version`: Latest available version from crates.io (may be null if network fails)
+- `latest_version`: Latest GitHub Release version (may be null if network fails)
 - `update_available`: Boolean indicating if an update is available
 - `install_method`: Detected installation method (`homebrew`, `cargo`, `source`, or `unknown`)
 
@@ -121,7 +121,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 ## Notes
 
-- Version checking queries the crates.io API. Network failures are handled gracefully.
+- Version checking queries the GitHub Releases API. Network failures are handled gracefully.
 - On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
 
 ## Related

@@ -5,7 +5,7 @@ use crate::{build_identity, extension, git};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
+use super::constants::{GITHUB_RELEASES_API, VERSION};
 use super::execution::{execute_upgrade, resolve_source_workspace};
 use super::runners;
 use super::services;
@@ -20,26 +20,7 @@ pub fn current_build_version() -> String {
     build_identity::current().display
 }
 
-pub(crate) fn fetch_latest_secondary_version() -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("homeboy/{}", VERSION))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
-
-    let response: CratesIoResponse = client
-        .get(CRATES_IO_API)
-        .send()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("query crates.io".to_string())))?
-        .json()
-        .map_err(|e| {
-            Error::internal_json(e.to_string(), Some("parse crates.io response".to_string()))
-        })?;
-
-    Ok(response.crate_info.newest_version)
-}
-
-pub(crate) fn fetch_latest_github_version() -> Result<String> {
+fn fetch_latest_github_version_at(url: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("homeboy/{}", VERSION))
         .timeout(std::time::Duration::from_secs(10))
@@ -47,7 +28,7 @@ pub(crate) fn fetch_latest_github_version() -> Result<String> {
         .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
 
     let response: GitHubRelease = client
-        .get(GITHUB_RELEASES_API)
+        .get(url)
         .send()
         .map_err(|e| Error::internal_io(e.to_string(), Some("query GitHub releases".to_string())))?
         .json()
@@ -67,13 +48,11 @@ pub(crate) fn fetch_latest_github_version() -> Result<String> {
 }
 
 pub fn fetch_latest_version(method: InstallMethod) -> Result<String> {
-    match method {
-        InstallMethod::Secondary => fetch_latest_secondary_version(),
-        InstallMethod::Homebrew
-        | InstallMethod::Source
-        | InstallMethod::Binary
-        | InstallMethod::Unknown => fetch_latest_github_version(),
-    }
+    fetch_latest_github_version_at(latest_version_endpoint(method))
+}
+
+fn latest_version_endpoint(_method: InstallMethod) -> &'static str {
+    GITHUB_RELEASES_API
 }
 
 pub fn detect_install_method() -> InstallMethod {
@@ -802,6 +781,19 @@ mod runner_source_upgrade_tests {
     use super::*;
     use std::process::Command;
     use tempfile::tempdir;
+
+    #[test]
+    fn every_install_method_discovers_versions_from_github_releases() {
+        for method in [
+            InstallMethod::Homebrew,
+            InstallMethod::Secondary,
+            InstallMethod::Source,
+            InstallMethod::Binary,
+            InstallMethod::Unknown,
+        ] {
+            assert_eq!(latest_version_endpoint(method), GITHUB_RELEASES_API);
+        }
+    }
 
     #[test]
     fn detected_source_install_forwards_source_method_to_runners() {

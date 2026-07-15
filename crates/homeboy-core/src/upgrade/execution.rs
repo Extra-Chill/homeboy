@@ -77,9 +77,14 @@ pub(crate) fn execute_upgrade(
             })?
         }
         InstallMethod::Secondary => {
-            let cmd = &defaults.install_methods.secondary.upgrade_command;
+            // Legacy cargo-installed binaries are replaced with the release
+            // asset now that Homeboy's private workspace is not on crates.io.
+            let cmd = &defaults.install_methods.binary.upgrade_command;
             Command::new("sh").args(["-c", cmd]).output().map_err(|e| {
-                Error::internal_io(e.to_string(), Some("run secondary upgrade".to_string()))
+                Error::internal_io(
+                    e.to_string(),
+                    Some("run release binary upgrade".to_string()),
+                )
             })?
         }
         InstallMethod::Source => {
