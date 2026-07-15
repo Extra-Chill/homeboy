@@ -1482,13 +1482,12 @@ mod tests {
             )
             .expect("terminal record");
             crate::core::agent_task_lifecycle::rewrite_record_for_test(&record.run_id, |record| {
-                record.lifecycle.provider_runtime[0].metadata = json!({
-                    "evidence_source": "canonical_executor_outcome"
-                });
+                record.lifecycle.provider_runtime.clear();
             })
             .expect("obsolete record persisted");
             let before = crate::core::agent_task_lifecycle::status(&record.run_id)
                 .expect("obsolete record loads");
+            assert!(before.lifecycle.provider_runtime.is_empty());
 
             let mut backend = MockBackend {
                 hydrate_run_id: Some(record.run_id.clone()),
@@ -1510,6 +1509,8 @@ mod tests {
             );
             assert_eq!(before, after);
             assert!(!backend.committed);
+            assert!(!backend.pushed);
+            assert!(!backend.created);
         });
     }
 
