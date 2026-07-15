@@ -1198,12 +1198,6 @@ mod tests {
         fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
             Ok(vec!["src/lib.rs".to_string()])
         }
-        fn changed_files_since(&mut self, _path: &str, _base: &str) -> Result<Vec<String>> {
-            Ok(Vec::new())
-        }
-        fn branch_is_published(&mut self, _path: &str, _head: &str) -> Result<bool> {
-            Ok(false)
-        }
         fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
             self.committed = true;
             Ok(())

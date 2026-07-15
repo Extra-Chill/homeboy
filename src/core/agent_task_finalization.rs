@@ -239,6 +239,29 @@ pub struct AgentTaskPrRef {
     pub url: String,
 }
 
+/// The complete Git candidate classification, determined before finalization
+/// mutates the worktree or remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTaskPrCandidateState {
+    Dirty {
+        changed_files: Vec<String>,
+    },
+    Committed {
+        changed_files: Vec<String>,
+        push_required: bool,
+    },
+    Equivalent,
+    Invalid {
+        diagnostic: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskPrResolvedBase {
+    pub reference: String,
+    pub sha: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskPrDurableGateProof {
     pub run_id: String,
@@ -255,8 +278,25 @@ pub trait AgentTaskPrFinalizationBackend {
     }
     fn current_branch(&mut self, path: &str) -> Result<String>;
     fn changed_files(&mut self, path: &str) -> Result<Vec<String>>;
-    fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>>;
-    fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool>;
+    fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
+        Ok(AgentTaskPrResolvedBase {
+            reference: base.to_string(),
+            sha: String::new(),
+        })
+    }
+    fn candidate_state(
+        &mut self,
+        path: &str,
+        _base: &AgentTaskPrResolvedBase,
+        _head: &str,
+    ) -> Result<AgentTaskPrCandidateState> {
+        let changed_files = self.changed_files(path)?;
+        Ok(if changed_files.is_empty() {
+            AgentTaskPrCandidateState::Equivalent
+        } else {
+            AgentTaskPrCandidateState::Dirty { changed_files }
+        })
+    }
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;
     fn find_open_pr(
@@ -289,99 +329,7 @@ pub fn finalize_pr(
 }
 
 fn validate_real_candidate_fingerprint(options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-    let record = crate::core::agent_task_lifecycle::status(&options.run_id)?;
-    let promotion: AgentTaskPromotionReport = serde_json::from_value(
-        record
-            .metadata
-            .get("latest_promotion")
-            .cloned()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "run_id",
-                    "normal finalization requires persisted latest_promotion",
-                    None,
-                    None,
-                )
-            })?,
-    )
-    .map_err(|_| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "persisted latest_promotion is invalid",
-            None,
-            None,
-        )
-    })?;
-    let expected: crate::core::agent_task_promotion::AgentTaskPromotionCandidate =
-        serde_json::from_value(
-            promotion
-                .provenance
-                .get("candidate")
-                .cloned()
-                .ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "run_id",
-                        "applied promotion is missing a candidate capability; rerun promotion before normal finalization or use --manual-finalization to record the explicit bypass",
-                        None,
-                        None,
-                    )
-                })?,
-        )
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "run_id",
-                "persisted candidate capability is invalid",
-                None,
-                None,
-            )
-        })?;
-    let crate::core::agent_task_promotion::AgentTaskPromotionCandidate::Git {
-        fingerprint: expected,
-    } = expected
-    else {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "normal GitHub PR finalization requires an exact Git candidate fingerprint; the applied promotion target was not a Git worktree. Rerun promotion into a Git worktree or use --manual-finalization to record the explicit provenance bypass",
-            None,
-            None,
-        ));
-    };
-    let crate::core::agent_task_promotion::AgentTaskPromotionCandidate::Git {
-        fingerprint: actual,
-    } = crate::core::agent_task_promotion::candidate_fingerprint(&options.path)?
-    else {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "finalization path is not a Git worktree; normal GitHub PR finalization requires the promoted Git candidate",
-            Some(options.path.clone()),
-            None,
-        ));
-    };
-    if actual != expected {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "candidate changed after promotion; rerun promotion gates before finalization",
-            None,
-            None,
-        ));
-    }
-    let caller_changed_files = normalize_changed_files(&options.changed_files);
-    if !caller_changed_files.is_empty() && caller_changed_files != actual.changed_files {
-        return Err(Error::validation_invalid_argument(
-            "changed-file",
-            "caller changed files do not match promoted candidate",
-            None,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
-    let mut normalized = changed_files.to_vec();
-    normalized.sort();
-    normalized.dedup();
-    normalized
+    backend::validate_real_candidate_fingerprint(options)
 }
 
 pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
@@ -427,33 +375,46 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     );
     options.review_dossier.validate(&options.review_profile)?;
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
+    let current_branch = backend.current_branch(&options.path)?;
     let head = options
         .head
         .clone()
-        .map(Ok)
-        .unwrap_or_else(|| backend.current_branch(&options.path))?;
+        .unwrap_or_else(|| current_branch.clone());
+    if head != current_branch {
+        return Err(Error::validation_invalid_argument(
+            "head",
+            "requested head does not match the checked-out branch; check out the requested branch before finalizing",
+            Some(head),
+            None,
+        ));
+    }
     refuse_protected_head(&head, &options.protected_branches)?;
 
-    let mut working_changed_files = if options.changed_files.is_empty() {
-        backend.changed_files(&options.path)?
-    } else {
-        options.changed_files.clone()
+    let base = backend.resolve_base(&options.path, &options.base)?;
+    let candidate = backend.candidate_state(&options.path, &base, &head)?;
+    let (mut changed_files, commit_required, push_required) = match candidate {
+        AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
+        AgentTaskPrCandidateState::Committed {
+            changed_files,
+            push_required,
+        } => (changed_files, false, push_required),
+        AgentTaskPrCandidateState::Equivalent => (Vec::new(), false, false),
+        AgentTaskPrCandidateState::Invalid { diagnostic } => {
+            return Err(Error::validation_invalid_argument(
+                "base",
+                &diagnostic,
+                None,
+                None,
+            ));
+        }
     };
-    working_changed_files.sort();
-    working_changed_files.dedup();
-    let mut changed_files = if working_changed_files.is_empty() && !options.manual_finalization {
-        durable_changed_files
-    } else {
-        working_changed_files.clone()
-    };
+    if !options.changed_files.is_empty() {
+        changed_files = options.changed_files.clone();
+    } else if changed_files.is_empty() && !options.manual_finalization {
+        changed_files = durable_changed_files;
+    }
     changed_files.sort();
     changed_files.dedup();
-    let has_uncommitted_changes = !working_changed_files.is_empty();
-    if changed_files.is_empty() && options.manual_finalization {
-        changed_files = backend.changed_files_since(&options.path, &options.base)?;
-        changed_files.sort();
-        changed_files.dedup();
-    }
     let intent = build_pr_publication_intent(&options, &head, &changed_files, proof.clone());
     validate_publication_intent(&intent)?;
 
@@ -468,24 +429,18 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
             changed_files,
             Some(proof),
+            false,
+            false,
         ));
     }
 
     if !options.manual_finalization {
         backend.validate_candidate(&options)?;
     }
-    if has_uncommitted_changes {
+    if commit_required {
         backend.commit_all(&options.path, &options.commit_message)?;
-        backend.push_branch(&options.path, &head)?;
-    } else if !backend.branch_is_published(&options.path, &head)? {
-        if !options.manual_finalization {
-            return Err(Error::validation_invalid_argument(
-                "path",
-                "clean recovered candidate must exactly match its remote branch before finalization",
-                None,
-                None,
-            ));
-        }
+    }
+    if push_required {
         backend.push_branch(&options.path, &head)?;
     }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
@@ -511,6 +466,8 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         Some(pr.url),
         changed_files,
         Some(proof),
+        commit_required,
+        push_required,
     ))
 }
 
@@ -741,6 +698,8 @@ fn report(
     pr_url: Option<String>,
     changed_files: Vec<String>,
     proof: Option<HomeboyProof>,
+    committed: bool,
+    pushed: bool,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
@@ -756,6 +715,8 @@ fn report(
         pr_number,
         pr_url.clone(),
         &changed_files,
+        committed,
+        pushed,
     );
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
@@ -830,6 +791,8 @@ fn finalization_outcome(
     pr_number: Option<u64>,
     pr_url: Option<String>,
     changed_files: &[String],
+    committed: bool,
+    pushed: bool,
 ) -> AgentTaskPrFinalizationOutcome {
     let published = matches!(pr_action, "created" | "updated");
     AgentTaskPrFinalizationOutcome {
@@ -844,8 +807,8 @@ fn finalization_outcome(
         pr_number,
         pr_url,
         changed_files: changed_files.to_vec(),
-        committed: published,
-        pushed: published,
+        committed,
+        pushed,
         published,
     }
 }
@@ -882,10 +845,10 @@ mod tests {
     struct MockBackend {
         branch: String,
         changed_files: Vec<String>,
-        changed_files_since: Vec<String>,
-        branch_published: bool,
+        candidate_state: Option<AgentTaskPrCandidateState>,
         existing_pr: Option<AgentTaskPrRef>,
         create_error: bool,
+        push_error: bool,
         hydrate_error: bool,
         hydrate_run_id: Option<String>,
         lifecycle: Option<RunLifecycleRecord>,
@@ -896,8 +859,6 @@ mod tests {
         created: bool,
         create_calls: u8,
         changed_files_calls: u8,
-        changed_files_since_calls: u8,
-        branch_is_published_calls: u8,
         commit_calls: u8,
         push_calls: u8,
         updated: bool,
@@ -947,7 +908,9 @@ mod tests {
             else {
                 unreachable!("test candidate is Git")
             };
-            let changed_files = normalize_changed_files(&options.changed_files);
+            let mut changed_files = options.changed_files.clone();
+            changed_files.sort();
+            changed_files.dedup();
             if !changed_files.is_empty() && changed_files != fingerprint.changed_files {
                 return Err(Error::validation_invalid_argument(
                     "changed-file",
@@ -971,14 +934,21 @@ mod tests {
             Ok(self.changed_files.clone())
         }
 
-        fn changed_files_since(&mut self, _path: &str, _base: &str) -> Result<Vec<String>> {
-            self.changed_files_since_calls += 1;
-            Ok(self.changed_files_since.clone())
-        }
-
-        fn branch_is_published(&mut self, _path: &str, _head: &str) -> Result<bool> {
-            self.branch_is_published_calls += 1;
-            Ok(self.branch_published)
+        fn candidate_state(
+            &mut self,
+            _path: &str,
+            _base: &AgentTaskPrResolvedBase,
+            _head: &str,
+        ) -> Result<AgentTaskPrCandidateState> {
+            Ok(self.candidate_state.clone().unwrap_or_else(|| {
+                if self.changed_files.is_empty() {
+                    AgentTaskPrCandidateState::Equivalent
+                } else {
+                    AgentTaskPrCandidateState::Dirty {
+                        changed_files: self.changed_files.clone(),
+                    }
+                }
+            }))
         }
 
         fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
@@ -988,6 +958,9 @@ mod tests {
         }
 
         fn push_branch(&mut self, _path: &str, _head: &str) -> Result<()> {
+            if self.push_error {
+                return Err(Error::git_command_failed("git push failed"));
+            }
             self.pushed = true;
             self.push_calls += 1;
             Ok(())
@@ -1053,9 +1026,7 @@ mod tests {
         assert!(backend.committed);
         assert!(backend.pushed);
         assert!(backend.created);
-        assert_eq!(backend.changed_files_calls, 1);
-        assert_eq!(backend.changed_files_since_calls, 0);
-        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.changed_files_calls, 0);
         assert_eq!(backend.commit_calls, 1);
         assert_eq!(backend.push_calls, 1);
         assert!(backend.last_body.contains("## AI assistance"));
@@ -1257,32 +1228,111 @@ mod tests {
         assert!(!backend.committed);
         assert!(!backend.pushed);
         assert!(!backend.created);
-        assert_eq!(backend.changed_files_calls, 1);
-        assert_eq!(backend.changed_files_since_calls, 1);
-        assert_eq!(backend.branch_is_published_calls, 0);
+        assert_eq!(backend.changed_files_calls, 0);
         assert_eq!(backend.commit_calls, 0);
         assert_eq!(backend.push_calls, 0);
     }
 
     #[test]
-    fn manual_finalization_uses_committed_diff_without_recommitting_or_republishing() {
+    fn publishes_clean_committed_candidate_without_committing() {
         let mut backend = MockBackend {
-            changed_files_since: vec!["src/lib.rs".to_string()],
-            branch_published: true,
+            candidate_state: Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["deleted.rs".to_string(), "renamed.rs".to_string()],
+                push_required: true,
+            }),
             ..Default::default()
         };
 
         let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
 
-        assert_eq!(report.status, "review_ready");
-        assert_eq!(report.changed_files, vec!["src/lib.rs"]);
+        assert_eq!(report.pr_action, "created");
+        assert_eq!(report.changed_files, vec!["deleted.rs", "renamed.rs"]);
+        assert!(!backend.committed);
+        assert!(backend.pushed);
         assert!(backend.created);
-        assert_eq!(backend.changed_files_calls, 1);
-        assert_eq!(backend.changed_files_since_calls, 1);
-        assert_eq!(backend.branch_is_published_calls, 1);
-        assert_eq!(backend.commit_calls, 0);
-        assert_eq!(backend.push_calls, 0);
-        assert_eq!(backend.create_calls, 1);
+        assert!(!report.finalization_outcome.committed);
+        assert!(report.finalization_outcome.pushed);
+    }
+
+    #[test]
+    fn already_pushed_clean_committed_candidate_updates_open_pr_once() {
+        let mut backend = MockBackend {
+            candidate_state: Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".to_string()],
+                push_required: false,
+            }),
+            existing_pr: Some(AgentTaskPrRef {
+                number: 77,
+                url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+
+        assert_eq!(report.pr_action, "updated");
+        assert!(!backend.committed);
+        assert!(!backend.pushed);
+        assert!(backend.updated);
+        assert!(!backend.created);
+    }
+
+    #[test]
+    fn synthetic_changed_file_does_not_commit_clean_committed_candidate() {
+        let mut backend = MockBackend {
+            candidate_state: Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".to_string()],
+                push_required: true,
+            }),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.changed_files = vec!["synthetic.rs".to_string()];
+
+        let report =
+            finalize_pr_with_backend(finalization_options, &mut backend).expect("finalized");
+
+        assert_eq!(report.changed_files, vec!["synthetic.rs"]);
+        assert!(!backend.committed);
+        assert!(backend.pushed);
+    }
+
+    #[test]
+    fn invalid_base_or_diverged_candidate_stops_before_publication() {
+        let mut backend = MockBackend {
+            candidate_state: Some(AgentTaskPrCandidateState::Invalid {
+                diagnostic: "HEAD is behind requested base `trunk`; rebase first".to_string(),
+            }),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.base = "trunk".to_string();
+
+        let error =
+            finalize_pr_with_backend(finalization_options, &mut backend).expect_err("blocked");
+
+        assert!(error.message.contains("behind requested base"));
+        assert!(!backend.committed);
+        assert!(!backend.pushed);
+        assert!(!backend.created);
+    }
+
+    #[test]
+    fn push_failure_stops_pr_publication_for_clean_committed_candidate() {
+        let mut backend = MockBackend {
+            candidate_state: Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".to_string()],
+                push_required: true,
+            }),
+            push_error: true,
+            ..Default::default()
+        };
+
+        let error = finalize_pr_with_backend(options(), &mut backend).expect_err("push fails");
+
+        assert!(error.message.contains("git push failed"));
+        assert!(!backend.created);
+        assert!(!backend.updated);
     }
 
     #[test]
@@ -1424,7 +1474,6 @@ mod tests {
         let mut backend = MockBackend {
             lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
             gate_proof: Some(gate_proof),
-            branch_published: true,
             ..Default::default()
         };
         let mut finalization_options = options();
@@ -1811,6 +1860,75 @@ mod tests {
             validate_real_candidate_fingerprint(&options).unwrap();
             options.changed_files = vec!["a".to_string()];
             assert!(validate_real_candidate_fingerprint(&options).is_err());
+        });
+    }
+
+    #[test]
+    fn production_validator_accepts_only_the_exact_promoted_recovery_commit() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = real_git_repo();
+            std::fs::write(repo.path().join("candidate"), "promoted bytes").unwrap();
+            let candidate = crate::core::agent_task_promotion::candidate_fingerprint(
+                repo.path().to_str().unwrap(),
+            )
+            .unwrap();
+            let run_id = "production-recovery-commit";
+            crate::core::agent_task_lifecycle::submit_plan(
+                &crate::core::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new()),
+                Some(run_id),
+            )
+            .unwrap();
+            let mut promotion = successful_gate_proof().promotion;
+            promotion.source.run_id = Some(run_id.to_string());
+            promotion.target.path = Some(repo.path().display().to_string());
+            promotion.provenance = json!({ "candidate": candidate });
+            crate::core::agent_task_lifecycle::record_promotion(
+                run_id,
+                serde_json::to_value(promotion).unwrap(),
+            )
+            .unwrap();
+
+            assert!(Command::new("git")
+                .args(["add", "candidate"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "-m", "recover promoted candidate"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+            let mut options =
+                real_git_finalization_options(repo.path(), vec!["candidate".to_string()]);
+            options.run_id = run_id.to_string();
+            validate_real_candidate_fingerprint(&options).expect("exact recovery commit accepted");
+
+            let mut missing = options.clone();
+            missing.changed_files.clear();
+            let error =
+                validate_real_candidate_fingerprint(&missing).expect_err("missing paths rejected");
+            assert!(error.message.contains("changed files must exactly match"));
+            let mut synthetic = options.clone();
+            synthetic.changed_files = vec!["candidate".to_string(), "synthetic".to_string()];
+            let error =
+                validate_real_candidate_fingerprint(&synthetic).expect_err("extra paths rejected");
+            assert!(error.message.contains("changed files must exactly match"));
+
+            std::fs::write(repo.path().join("drift"), "drift").unwrap();
+            Command::new("git")
+                .args(["add", "drift"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-m", "drift"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap();
+            let error = validate_real_candidate_fingerprint(&options).expect_err("drift rejected");
+            assert!(error.message.contains("parent and tree exactly match"));
         });
     }
 
