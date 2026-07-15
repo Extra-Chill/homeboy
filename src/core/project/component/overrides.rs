@@ -15,37 +15,7 @@ pub fn apply_component_overrides(
     component: &crate::core::component::Component,
     project: &Project,
 ) -> crate::core::component::Component {
-    let fleet_overrides = resolve_fleet_overrides(project, &component.id);
-    let project_overrides = project.component_overrides.get(&component.id);
-    let project_cli_fallback = crate::core::project::project_cli_path(project);
-
-    if fleet_overrides.is_none() && project_overrides.is_none() && project_cli_fallback.is_none() {
-        return component.clone();
-    }
-
-    let mut merged = component.clone();
-
-    // Apply fleet-level overrides first (lowest precedence in the cascade)
-    if let Some(overrides) = &fleet_overrides {
-        overrides.apply_to_component(&mut merged);
-    }
-
-    // Apply project-level component overrides on top (highest precedence
-    // among explicit overrides)
-    if let Some(overrides) = project_overrides {
-        overrides.apply_to_component(&mut merged);
-    }
-
-    // cli_path-only fallback: project-scoped CLI path fills in the gap when no
-    // explicit override at any layer set it. This is intentionally last so any
-    // explicit override above wins.
-    if merged.cli_path.is_none() {
-        if let Some(cli_path) = project_cli_fallback {
-            merged.cli_path = Some(cli_path);
-        }
-    }
-
-    merged
+    resolve_deploy_override_inputs(component, project).1
 }
 
 /// Resolve project override layers without allowing target binding fields to
