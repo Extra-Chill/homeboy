@@ -146,6 +146,16 @@ pub(super) fn exec_via_daemon(
         &cwd,
         &command,
     )?;
+    if let Some(run_id) = run_id.as_deref() {
+        // The daemon has durably accepted this child. Bind it before waiting so
+        // a lost controller still leaves cancellation and reconciliation with a
+        // concrete runner job identity.
+        crate::core::agent_task_lifecycle::record_runner_job_identity(
+            run_id,
+            &runner.id,
+            &job.id.to_string(),
+        )?;
+    }
     let persisted_run_id = mirror_evidence
         .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
         .flatten();

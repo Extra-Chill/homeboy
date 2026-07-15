@@ -1105,6 +1105,10 @@ fn liveness_summary(record: &Value) -> Value {
         .get("stale_running")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let runner_job_id = metadata
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .filter(|job_id| !job_id.trim().is_empty());
 
     json!({
         "status": if stale { "stale" } else { "active" },
@@ -1112,8 +1116,9 @@ fn liveness_summary(record: &Value) -> Value {
         "runner_job_status": metadata.get("runner_job_status"),
         "runner_job_last_seen_at": metadata.get("runner_job_last_seen_at"),
         "provider_boundary": {
-            "status": if provider_handle_count == 0 { "absent" } else { "recorded" },
+            "status": if provider_handle_count > 0 || runner_job_id.is_some() { "recorded" } else { "absent" },
             "provider_handle_count": provider_handle_count,
+            "runner_job_id": runner_job_id,
         },
         "stale_reason": metadata.get("stale_running_reason"),
         "next_action": if stale {
@@ -1720,6 +1725,28 @@ mod tests {
         assert_eq!(
             stale["liveness"]["next_action"],
             "homeboy agent-task active --reconcile"
+        );
+
+        let accepted_handoff = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-run-bound",
+                "state": "running",
+                "tasks": [],
+                "provider_handles": [],
+                "metadata": {
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "accepted-daemon-job"
+                }
+            }),
+            "agent-task-run-bound",
+        );
+        assert_eq!(
+            accepted_handoff["liveness"]["provider_boundary"]["status"],
+            "recorded"
+        );
+        assert_eq!(
+            accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
+            "accepted-daemon-job"
         );
     }
 

@@ -563,6 +563,17 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 #[test]
 fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
     crate::test_support::with_isolated_home(|_| {
+        let run_id = "cook-8332-attempt-1";
+        crate::core::agent_task_lifecycle::record_lab_offload_phase(
+            run_id,
+            "lab",
+            "dispatching",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("persist controller proxy before daemon acceptance");
         let workspace = tempfile::tempdir().expect("workspace");
         let started = workspace.path().join("started");
         let release = workspace.path().join("release");
@@ -595,7 +606,7 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             None,
             Vec::new(),
             None,
-            None,
+            Some(run_id.to_string()),
             true,
             false,
             false,
@@ -609,6 +620,10 @@ fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
             "detached handoff waited for the blocked workload"
         );
         let job_id = output.job_id.expect("durably accepted daemon job");
+        let controller_record = crate::core::agent_task_lifecycle::status(run_id)
+            .expect("controller record remains observable after accepted handoff");
+        assert_eq!(controller_record.runner_id(), Some("lab"));
+        assert_eq!(controller_record.runner_job_id(), Some(job_id.as_str()));
         wait_for_path(&started, "blocked workload start");
         let client = Client::builder().no_proxy().build().expect("daemon client");
         let job = fetch_daemon_job(&client, &daemon_url, &job_id).expect("running daemon job");
