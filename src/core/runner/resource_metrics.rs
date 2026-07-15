@@ -162,7 +162,9 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
                 .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
                 .unwrap_or_default();
             return Err(Error::internal_io(
-                format!("failed to persist spawned runner child identity: {error}{cleanup_context}"),
+                format!(
+                    "failed to persist spawned runner child identity: {error}{cleanup_context}"
+                ),
                 Some("persist runner child identity".to_string()),
             ));
         }
@@ -757,6 +759,7 @@ mod tests {
             &mut command,
             || false,
             None,
+            false,
             None,
             Some(Arc::new(move |child_pid| {
                 callback_pid.store(child_pid, Ordering::SeqCst);
@@ -804,6 +807,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .expect("command completes");
 
@@ -825,6 +829,7 @@ mod tests {
             || false,
             None,
             true,
+            None,
             None,
             None,
         )
@@ -857,6 +862,7 @@ mod tests {
             || false,
             Some(progress_sink),
             true,
+            None,
             None,
             None,
         )
