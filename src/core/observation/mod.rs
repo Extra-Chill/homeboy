@@ -5,6 +5,7 @@
 //! generated artifacts. This module only provides the storage substrate.
 
 mod budget_findings;
+pub mod bundle;
 pub mod context;
 pub mod disk_budget;
 pub mod evidence_report;
@@ -23,6 +24,11 @@ pub use lifecycle::{
     running_status_note, ActiveObservation, ACTIVE_RUN_ID_ENV,
 };
 
+pub use bundle::{
+    build_bundle, bundle_artifact_uri, extract_directory_artifact_archive, portable_artifact_label,
+    read_bundle_dir, write_bundle_dir, ObservationBundle, ObservationBundleArtifactBytes,
+    ObservationBundleManifest, BUNDLE_FORMAT, BUNDLE_VERSION,
+};
 pub use loop_inventory_run::persist_loop_inventory_run;
 
 pub use crate::core::notification_route::NotificationRoute;
