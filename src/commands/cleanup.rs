@@ -423,7 +423,12 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
-        let output = homeboy::core::controller_scratch::cleanup(apply)?;
+        let output = homeboy::core::controller_scratch::cleanup(
+            homeboy::core::controller_scratch::ControllerScratchCleanupOptions {
+                apply,
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            },
+        )?;
         categories.push(category_from_output(
             CONTROLLER_SCRATCH_METADATA,
             apply,
