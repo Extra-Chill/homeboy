@@ -42,3 +42,27 @@ macro_rules! ops_command_descriptor {
     (api, $consumer:ident) => { $consumer!((api, Api, crate::commands::api::ApiArgs, CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) }, crate::commands::api::run)) };
     (upgrade, $consumer:ident) => { $consumer!((upgrade, Upgrade, crate::commands::upgrade::UpgradeArgs, command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)), crate::commands::upgrade::run)) };
 }
+
+/// Commands-free spec table for the ops command family.
+///
+/// This mirrors the `$spec` field of [`ops_command_descriptor`] but omits the
+/// `crate::commands` Args type and handler binding, so it can be expanded inside
+/// `command_contract` (e.g. `spec.rs`) without depending on the `commands`
+/// module. The full descriptor macro (with Args + handler) is expanded only on
+/// the CLI side.
+#[macro_export]
+macro_rules! ops_command_spec {
+    (ssh) => { command_spec("ssh", CommandJsonFamily::Ops) };
+    (server) => { CommandSpec { subcommand_safety: SERVER_SUBCOMMAND_SAFETY, ..command_spec("server", CommandJsonFamily::Ops) } };
+    (db) => { command_spec("db", CommandJsonFamily::Ops) };
+    (file) => { CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) } };
+    (logs) => { command_spec("logs", CommandJsonFamily::Ops) };
+    (triage) => { command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)) };
+    (deploy) => { command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)) };
+    (daemon) => { command_spec("daemon", CommandJsonFamily::Ops) };
+    (status) => { command_spec("status", CommandJsonFamily::Ops) };
+    (git) => { command_spec("git", CommandJsonFamily::Ops) };
+    (self_cmd) => { command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") };
+    (api) => { CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) } };
+    (upgrade) => { command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)) };
+}

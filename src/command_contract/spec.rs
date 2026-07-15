@@ -597,12 +597,6 @@ const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
 )];
 
-macro_rules! registered_ops_spec {
-    (($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path)) => {
-        $spec
-    };
-}
-
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         output_notes: "unified active/recent activity read model in the standard JSON envelope",
@@ -623,8 +617,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         subcommand_safety: PROJECT_SUBCOMMAND_SAFETY,
         ..command_spec("project", CommandJsonFamily::Workspace)
     },
-    crate::ops_command_descriptor!(ssh, registered_ops_spec),
-    crate::ops_command_descriptor!(server, registered_ops_spec),
+    crate::ops_command_spec!(ssh),
+    crate::ops_command_spec!(server),
     command_spec_with_representative_argv(
         &["homeboy", "bench"],
         lab_command_spec_with_summary(
@@ -660,19 +654,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         )
     },
     command_spec("observe", CommandJsonFamily::Quality),
-    crate::ops_command_descriptor!(db, registered_ops_spec),
+    crate::ops_command_spec!(db),
     CommandSpec {
         subcommand_safety: DEPS_SUBCOMMAND_SAFETY,
         ..command_spec("deps", CommandJsonFamily::Ops)
     },
-    crate::ops_command_descriptor!(file, registered_ops_spec),
+    crate::ops_command_spec!(file),
     CommandSpec {
         subcommand_safety: FLEET_SUBCOMMAND_SAFETY,
         ..command_spec("fleet", CommandJsonFamily::Ops)
     },
-    crate::ops_command_descriptor!(logs, registered_ops_spec),
-    crate::ops_command_descriptor!(triage, registered_ops_spec),
-    crate::ops_command_descriptor!(deploy, registered_ops_spec),
+    crate::ops_command_spec!(logs),
+    crate::ops_command_spec!(triage),
+    crate::ops_command_spec!(deploy),
     CommandSpec {
         subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY,
         ..command_spec("component", CommandJsonFamily::Workspace)
@@ -686,7 +680,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface",
     ),
-    crate::ops_command_descriptor!(daemon, registered_ops_spec),
+    crate::ops_command_spec!(daemon),
     command_spec_with_representative_argv(
         &["homeboy", "extension", "refresh", "."],
         lab_command_spec_with_summary(
@@ -696,7 +690,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             EXTENSION_LAB_SUPPORT,
         ),
     ),
-    crate::ops_command_descriptor!(status, registered_ops_spec),
+    crate::ops_command_spec!(status),
     command_spec_with_output_notes_and_safety(
         "cleanup",
         CommandJsonFamily::Workspace,
@@ -709,7 +703,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
         },
     ),
-    crate::ops_command_descriptor!(git, registered_ops_spec),
+    crate::ops_command_spec!(git),
     command_spec_with_output_notes_and_safety(
         "release",
         CommandJsonFamily::Workspace,
@@ -805,10 +799,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         CommandJsonFamily::Workspace,
         "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
     ),
-    crate::ops_command_descriptor!(self_cmd, registered_ops_spec),
+    crate::ops_command_spec!(self_cmd),
     command_spec("stack", CommandJsonFamily::Workspace),
-    crate::ops_command_descriptor!(api, registered_ops_spec),
-    crate::ops_command_descriptor!(upgrade, registered_ops_spec),
+    crate::ops_command_spec!(api),
+    crate::ops_command_spec!(upgrade),
 ];
 
 pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
