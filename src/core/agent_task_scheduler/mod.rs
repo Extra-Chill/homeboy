@@ -40,6 +40,7 @@ use crate::core::agent_task_timeout_artifacts::{
     append_unique_artifacts, append_unique_evidence_refs, is_actionable_patch_artifact,
     is_empty_patch_artifact, merge_timeout_outcome, TimeoutArtifactDiscovery,
 };
+pub(crate) use attempt_workspace::HarvestExecutionContext;
 use attempt_workspace::{
     prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
 };

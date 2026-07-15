@@ -26,8 +26,8 @@
 
 pub use super::runner::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
-    broker_submit_token_for_runner, broker_token_from_env, capture_lab_offload_subprocess_metadata,
-    connect, connect_with_leaseless_orphan_reconciliation, connect_with_orphan_adoption,
+    broker_submit_token_for_runner, broker_token_from_env, connect,
+    connect_with_leaseless_orphan_reconciliation, connect_with_orphan_adoption,
     connect_with_recovery, reverse_broker_artifact, reverse_broker_reconcile, BrokerAuthGrant,
     BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV,
     BROKER_TOKEN_HEADER,
@@ -160,8 +160,7 @@ pub mod capabilities {
 /// Lab offload entry points and contracts.
 pub mod lab_offload {
     pub use super::super::runner::{
-        capture_lab_offload_subprocess_metadata, execute_lab_offload,
-        lab_offload_changed_since_ref, lab_offload_metadata,
+        execute_lab_offload, lab_offload_changed_since_ref, lab_offload_metadata,
         lab_offload_metadata_with_workspace_mapping, preflight_lab_offload_changed_since,
         prepare_git_lab_offload_changed_since, LabJobOverrides, LabOffloadCommand,
         LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,

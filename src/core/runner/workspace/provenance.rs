@@ -30,24 +30,6 @@ pub(crate) struct VerifiedLabWorkspaceProvenance {
     synthetic_checkout_tree: Option<String>,
 }
 
-/// Creates a deterministic Git root for a verified Lab snapshot so generic
-/// candidate harvesting can use the same commit and diff paths as Git syncs.
-pub(crate) fn materialize_verified_lab_snapshot_git_baseline_from_env(
-    expected_remote_component_path: &str,
-    materialized_workspace_path: &Path,
-) -> std::result::Result<String, String> {
-    let snapshot: SourceSnapshot = env_json(SOURCE_SNAPSHOT_METADATA_ENV)
-        .ok_or_else(|| "is missing source snapshot transport metadata".to_string())?;
-    let lab: serde_json::Value = env_json(LAB_OFFLOAD_METADATA_ENV)
-        .ok_or_else(|| "is missing Lab dispatch transport metadata".to_string())?;
-    materialize_verified_lab_snapshot_git_baseline(
-        expected_remote_component_path,
-        materialized_workspace_path,
-        snapshot,
-        lab,
-    )
-}
-
 pub(crate) fn materialize_verified_lab_snapshot_git_baseline(
     expected_remote_component_path: &str,
     materialized_workspace_path: &Path,

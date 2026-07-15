@@ -25,6 +25,7 @@ pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
 pub struct AgentTaskScheduler<E> {
     executor: Arc<E>,
     run_id: Option<String>,
+    harvest_context: HarvestExecutionContext,
 }
 
 impl<E> AgentTaskScheduler<E>
@@ -35,11 +36,17 @@ where
         Self {
             executor: Arc::new(executor),
             run_id: None,
+            harvest_context: HarvestExecutionContext::default(),
         }
     }
 
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub(crate) fn with_harvest_context(mut self, context: HarvestExecutionContext) -> Self {
+        self.harvest_context = context;
         self
     }
 
@@ -356,21 +363,24 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
-                let harvest_preflight =
-                    match prepare_committed_harvest(&request, derived_cook_baseline) {
-                        Ok(preflight) => preflight,
-                        Err(error) => {
-                            record_harvest_setup_failure(
-                                &task_id,
-                                scheduled.attempt,
-                                error,
-                                &mut completed_by_task,
-                                &mut outcomes,
-                                &mut events,
-                            );
-                            continue;
-                        }
-                    };
+                let harvest_preflight = match prepare_committed_harvest(
+                    &request,
+                    derived_cook_baseline,
+                    &self.harvest_context,
+                ) {
+                    Ok(preflight) => preflight,
+                    Err(error) => {
+                        record_harvest_setup_failure(
+                            &task_id,
+                            scheduled.attempt,
+                            error,
+                            &mut completed_by_task,
+                            &mut outcomes,
+                            &mut events,
+                        );
+                        continue;
+                    }
+                };
                 let task_base_sha = scheduled
                     .task_base_sha
                     .clone()

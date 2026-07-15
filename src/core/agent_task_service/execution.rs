@@ -352,7 +352,16 @@ fn run_plan_with_scheduler<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    let scheduler = AgentTaskScheduler::new(executor);
+    // Only the Lab child process carries transport provenance. A controller
+    // process always starts with an empty per-run context, even after a Lab
+    // fallback or a preceding fanout cell.
+    let scheduler = if crate::core::lab_routing::is_lab_offload_subprocess() {
+        AgentTaskScheduler::new(executor).with_harvest_context(
+            crate::core::agent_task_scheduler::HarvestExecutionContext::lab_subprocess_from_env(),
+        )
+    } else {
+        AgentTaskScheduler::new(executor)
+    };
     match run_id {
         Some(run_id) => scheduler
             .with_run_id(run_id.to_string())

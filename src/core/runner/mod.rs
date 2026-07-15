@@ -68,9 +68,9 @@ mod worker;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
-pub(crate) use workspace::materialize_verified_lab_snapshot_git_baseline_from_env;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
+pub(crate) use workspace::{materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace};
 pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
 
 pub use apply::{
@@ -141,8 +141,7 @@ pub use offload_changed_since::{
     prepare_git_lab_offload_changed_since,
 };
 pub use offload_metadata::{
-    capture_lab_offload_subprocess_metadata, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping,
+    lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
     lab_offload_metadata_with_workspace_mapping_and_runner_workload,
 };
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
@@ -163,8 +162,6 @@ pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::reap_run_workspace;
-#[cfg(test)]
-pub(crate) use workspace::verify_lab_workspace;
 pub use workspace::{
     list_workspaces, plan_workspace_pull, prune_workspaces, pull_workspace, sync_workspace,
     workspace_snapshots, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,

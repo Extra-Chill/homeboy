@@ -233,9 +233,6 @@ fn lab_offload_outcome_to_route_outcome(
                     }),
                 ),
             );
-            if let Some(metadata) = metadata {
-                runners::capture_lab_offload_subprocess_metadata(metadata);
-            }
             for message in messages {
                 eprintln!("{message}");
             }

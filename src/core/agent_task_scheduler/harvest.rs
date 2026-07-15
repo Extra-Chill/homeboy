@@ -712,12 +712,14 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
         assert!(!workspace.path().join(".git").exists());
-        let preflight = prepare_committed_harvest(&request, None).expect("snapshot preflight");
+        let context = HarvestExecutionContext::lab_subprocess_from_env();
+        let preflight =
+            prepare_committed_harvest(&request, None, &context).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
         let source_provenance = preflight.source_provenance.expect("source provenance");
         assert!(workspace.path().join(".git").is_dir());
         let retry_preflight =
-            prepare_committed_harvest(&request, None).expect("snapshot retry preflight");
+            prepare_committed_harvest(&request, None, &context).expect("snapshot retry preflight");
         assert_eq!(retry_preflight.base_sha.as_deref(), Some(baseline.as_str()));
         assert_eq!(source_provenance["source_revision"], "a".repeat(40));
         let attempt = prepare_attempt_workspace(&mut request, Some(&baseline))
@@ -920,9 +922,11 @@ mod committed_harvest_tests {
                 artifact_declarations: Vec::new(),
                 metadata: serde_json::Value::Null,
             };
-            let first = prepare_committed_harvest(&request, None).expect("snapshot-git preflight");
-            let second =
-                prepare_committed_harvest(&request, None).expect("snapshot-git retry preflight");
+            let context = HarvestExecutionContext::lab_subprocess_from_env();
+            let first = prepare_committed_harvest(&request, None, &context)
+                .expect("snapshot-git preflight");
+            let second = prepare_committed_harvest(&request, None, &context)
+                .expect("snapshot-git retry preflight");
             assert_eq!(first.base_sha, second.base_sha);
             assert_eq!(first.base_sha, snapshot.synthetic_checkout_commit);
             std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
@@ -1007,7 +1011,8 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request, None)
+        let context = HarvestExecutionContext::lab_subprocess_from_env();
+        let preflight = prepare_committed_harvest(&request, None, &context)
             .expect("runner-resident snapshot harvest preflight");
 
         assert!(preflight.base_sha.is_some());
@@ -1020,13 +1025,16 @@ mod committed_harvest_tests {
     }
 
     #[test]
-    fn local_non_git_workspace_skips_harvest_preflight_without_lab_transport() {
+    fn controller_context_ignores_ambient_lab_signal_without_leaking_it_to_local_cells() {
         let _guard = LAB_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("Lab environment lock");
         std::env::remove_var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
-        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        std::env::set_var(
+            crate::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            r#"{"status":"run_local"}"#,
+        );
         let workspace = tempfile::tempdir().expect("workspace");
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -1057,11 +1065,15 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request, None).expect("local non-Git no-op");
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
+                .expect("local controller cell ignores ambient Lab metadata");
 
         assert!(preflight.base_sha.is_none());
         assert!(preflight.source_provenance.is_none());
         assert!(!workspace.path().join(".git").exists());
+        assert!(std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV).is_ok());
+        std::env::remove_var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV);
     }
 
     #[test]

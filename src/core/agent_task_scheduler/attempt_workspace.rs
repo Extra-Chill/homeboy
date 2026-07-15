@@ -10,6 +10,45 @@ use sha2::{Digest, Sha256};
 use super::harvest::git_is_repository;
 use super::*;
 
+/// Immutable provenance for one scheduler execution. Controller-local callers
+/// use an empty context; only a Lab subprocess captures its paired transport.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HarvestExecutionContext {
+    source_snapshot: Option<crate::core::source_snapshot::SourceSnapshot>,
+    lab_offload: Option<serde_json::Value>,
+}
+
+impl HarvestExecutionContext {
+    pub(crate) fn lab_subprocess_from_env() -> Self {
+        Self {
+            source_snapshot: std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok()),
+            lab_offload: std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok()),
+        }
+    }
+
+    fn snapshot_signaled(&self) -> bool {
+        self.source_snapshot.is_some() || self.lab_offload.is_some()
+    }
+
+    fn source_snapshot(
+        &self,
+    ) -> Result<crate::core::source_snapshot::SourceSnapshot, HarvestError> {
+        self.source_snapshot.clone().ok_or_else(|| {
+            snapshot_harvest_error("is missing source snapshot transport metadata".to_string())
+        })
+    }
+
+    fn lab_offload(&self) -> Result<serde_json::Value, HarvestError> {
+        self.lab_offload.clone().ok_or_else(|| {
+            snapshot_harvest_error("is missing Lab dispatch transport metadata".to_string())
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct AttemptWorkspace {
     source_root: PathBuf,
@@ -60,6 +99,7 @@ pub(super) struct HarvestPreflight {
 pub(super) fn prepare_committed_harvest(
     request: &AgentTaskRequest,
     derived_cook_baseline: Option<&crate::core::agent_task_service::DerivedCookBaselineCapability>,
+    context: &HarvestExecutionContext,
 ) -> Result<HarvestPreflight, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(Path::new) else {
         return Ok(HarvestPreflight {
@@ -67,7 +107,7 @@ pub(super) fn prepare_committed_harvest(
             source_provenance: None,
         });
     };
-    let snapshot_signaled = lab_snapshot_transport_applies_to_workspace(root);
+    let snapshot_signaled = context.snapshot_signaled();
     let is_repository = git_is_repository(root)?;
     if !snapshot_signaled && !is_repository {
         return Ok(HarvestPreflight {
@@ -76,15 +116,19 @@ pub(super) fn prepare_committed_harvest(
         });
     }
     let source_provenance = if let Some(capability) = derived_cook_baseline {
-        validate_derived_cook_baseline(root, request, capability)?;
+        validate_derived_cook_baseline(root, request, capability, context)?;
         Some(serde_json::json!({
             "verified_cook_baseline": capability.verified_baseline_provenance(),
             "parent_snapshot": capability.parent_snapshot(),
         }))
     } else if snapshot_signaled {
-        let provenance =
-            crate::core::runner::verify_lab_workspace_from_env(&root.display().to_string(), root)
-                .map_err(snapshot_harvest_error)?;
+        let provenance = crate::core::runner::verify_lab_workspace(
+            &root.display().to_string(),
+            root,
+            context.source_snapshot()?,
+            context.lab_offload()?,
+        )
+        .map_err(snapshot_harvest_error)?;
         if is_repository {
             crate::core::runner::verify_lab_workspace_git_root(root, &provenance)
                 .map_err(snapshot_harvest_error)?;
@@ -118,17 +162,12 @@ pub(super) fn prepare_committed_harvest(
         });
         // This is descriptive controller evidence only. Verification above
         // remains the authority for the remote Lab snapshot.
-        if let Some(verified_baseline) =
-            std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|metadata| {
-                    metadata
-                        .get("source_provenance")
-                        .and_then(|provenance| provenance.get("verified_cook_baseline"))
-                        .cloned()
-                })
-        {
+        if let Some(verified_baseline) = context.lab_offload.as_ref().and_then(|metadata| {
+            metadata
+                .get("source_provenance")
+                .and_then(|provenance| provenance.get("verified_cook_baseline"))
+                .cloned()
+        }) {
             source_provenance["verified_cook_baseline"] = verified_baseline;
         }
         Some(source_provenance)
@@ -136,9 +175,11 @@ pub(super) fn prepare_committed_harvest(
         None
     };
     if !is_repository {
-        crate::core::runner::materialize_verified_lab_snapshot_git_baseline_from_env(
+        crate::core::runner::materialize_verified_lab_snapshot_git_baseline(
             &root.display().to_string(),
             root,
+            context.source_snapshot()?,
+            context.lab_offload()?,
         )
         .map_err(|message| HarvestError::Git {
             command: "materialize verified Lab snapshot Git baseline".to_string(),
@@ -173,41 +214,6 @@ pub(super) fn prepare_committed_harvest(
     })
 }
 
-/// Ambient Lab metadata may survive in a controller process that subsequently
-/// executes locally. Snapshot verification belongs only to the workspace that
-/// the Lab envelope says was snapshot-transported, not to every Git checkout
-/// running under that process.
-fn lab_snapshot_transport_applies_to_workspace(root: &Path) -> bool {
-    let Ok(raw) = std::env::var(crate::core::observation::LAB_OFFLOAD_METADATA_ENV) else {
-        return false;
-    };
-    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    if !matches!(
-        metadata
-            .get("sync_mode")
-            .and_then(serde_json::Value::as_str),
-        Some("snapshot" | "snapshot-git")
-    ) {
-        return false;
-    }
-    let Some(remote_workspace) = metadata
-        .get("remote_workspace")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-
-    match (
-        root.canonicalize(),
-        Path::new(remote_workspace).canonicalize(),
-    ) {
-        (Ok(root), Ok(remote_workspace)) => root == remote_workspace,
-        _ => root == Path::new(remote_workspace),
-    }
-}
-
 fn snapshot_harvest_error(message: String) -> HarvestError {
     HarvestError::Git {
         command: "verify Lab snapshot harvest provenance".to_string(),
@@ -219,6 +225,7 @@ fn validate_derived_cook_baseline(
     root: &Path,
     request: &AgentTaskRequest,
     capability: &crate::core::agent_task_service::DerivedCookBaselineCapability,
+    context: &HarvestExecutionContext,
 ) -> Result<(), HarvestError> {
     let canonical_root = root.canonicalize().map_err(|error| {
         snapshot_harvest_error(format!("canonicalize derived baseline root: {error}"))
@@ -242,19 +249,14 @@ fn validate_derived_cook_baseline(
         ));
     }
     if let Some(parent_snapshot) = capability.parent_snapshot() {
-        let ambient: serde_json::Value =
-            std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
-                .ok_or_else(|| {
-                    snapshot_harvest_error("missing ambient parent snapshot".to_string())
-                })?;
+        let ambient = serde_json::to_value(context.source_snapshot()?)
+            .map_err(|error| snapshot_harvest_error(error.to_string()))?;
         if parent_snapshot != &ambient {
             return Err(snapshot_harvest_error(
                 "derived baseline parent snapshot does not match ambient snapshot".to_string(),
             ));
         }
-    } else if std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).is_some() {
+    } else if context.source_snapshot.is_some() {
         return Err(snapshot_harvest_error(
             "derived baseline is missing its Lab parent snapshot".to_string(),
         ));
