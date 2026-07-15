@@ -34,27 +34,25 @@ and `linked_durable_run_id` plus `linked_durable_run_state` (`terminal`,
 blocking evidence. Status is read-only: it never reconciles or changes durable
 jobs.
 
-For an exact PID-dead lease, confirm every reported PID-less blocker after
-independently proving its child is gone:
+For a legacy job without persisted child identity, use the exact-evidence
+recovery command. It validates the persisted daemon lease, recorded daemon PID,
+recorded endpoint, job ID, child PID, and Linux child starttime ticks before it
+can mutate the one selected job:
 
 ```sh
-homeboy daemon adopt-orphan --lease-id <dead-lease> --confirm-pid-dead \
-  --confirm-untracked-child-dead <job-id> \
-  --confirm-untracked-child-dead <job-id>
+homeboy daemon recover-missing-child-identity \
+  --lease-id <expected-lease> \
+  --recorded-daemon-pid <recorded-daemon-pid> \
+  --recorded-daemon-endpoint <recorded-daemon-endpoint> \
+  --job-id <job-id> \
+  --child-pid <child-pid> \
+  --child-starttime-ticks <child-starttime-ticks>
 ```
 
-Each confirmation must name one unresolved active job owned by that exact lease
-with no recorded child identity. The operation records the
-`operator_confirmed_untracked_child_dead_after_dead_daemon_lease` audit event.
-The complete lease is classified before one persistence write: linked terminal
-runs reconcile authoritatively, while linked active or unresolved runs, live
-children, missing confirmations, and invalid confirmations block mutation.
-It retains the owner lock, lease confirmation, PID revalidation, and live-child
-protections.
-
-`--recover-missing-child-identity` remains as weaker legacy compatibility: it
-applies to every eligible PID-less job on the adopted lease. Prefer exact
-`--confirm-untracked-child-dead <job-id>` confirmations.
+The released `adopt-orphan --recover-missing-child-identity` and
+`--confirm-untracked-child-dead <job-id>` flags remain accepted migration
+aliases. They must be supplied together when used, return the exact command and
+all required evidence fields above, and never mutate jobs.
 
 ## VPS Reverse Runner Broker
 

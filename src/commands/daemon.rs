@@ -7,6 +7,7 @@ use homeboy::core::daemon::{
     self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
     ServiceIdentity,
 };
+use homeboy::core::Error;
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
 use super::CmdResult;
@@ -38,6 +39,12 @@ enum DaemonCommand {
         /// Confirm the recorded PID was inspected and is dead
         #[arg(long)]
         confirm_pid_dead: bool,
+        /// Accepted migration alias for legacy child recovery. It never mutates jobs.
+        #[arg(long)]
+        recover_missing_child_identity: bool,
+        /// Accepted migration alias for one legacy untracked child. It never mutates jobs.
+        #[arg(long = "confirm-untracked-child-dead")]
+        confirm_untracked_child_dead: Vec<Uuid>,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
@@ -175,10 +182,28 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
             0,
         )),
-        DaemonCommand::AdoptOrphan { lease_id, confirm_pid_dead, addr } => Ok((
-            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, &addr)?),
-            0,
-        )),
+        DaemonCommand::AdoptOrphan {
+            lease_id,
+            confirm_pid_dead,
+            recover_missing_child_identity,
+            confirm_untracked_child_dead,
+            addr,
+        } => {
+            if recover_missing_child_identity || !confirm_untracked_child_dead.is_empty() {
+                return Err(legacy_child_recovery_migration_error(
+                    recover_missing_child_identity,
+                    &confirm_untracked_child_dead,
+                ));
+            }
+            Ok((
+                DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
+                    &lease_id,
+                    confirm_pid_dead,
+                    &addr,
+                )?),
+                0,
+            ))
+        }
         DaemonCommand::RecoverMissingChildIdentity { lease_id, recorded_daemon_pid, recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks } => Ok((
             DaemonOutput::RecoverMissingChildIdentity(daemon::recover_missing_child_identity(&lease_id, recorded_daemon_pid, &recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks)?),
             0,
@@ -218,6 +243,28 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
         )),
         DaemonCommand::ArtifactGet(args) => artifact_get(args),
     }
+}
+
+fn legacy_child_recovery_migration_error(
+    recover_missing_child_identity: bool,
+    confirm_untracked_child_dead: &[Uuid],
+) -> Error {
+    let pairing = if recover_missing_child_identity && !confirm_untracked_child_dead.is_empty() {
+        "The released legacy flags were supplied together."
+    } else {
+        "The released legacy flags must be supplied together, but either form is now migration-only."
+    };
+    Error::validation_invalid_argument(
+        "recover_missing_child_identity",
+        format!(
+            "{pairing} Homeboy will not bulk-terminalize legacy jobs; recover each job with exact persisted evidence instead"
+        ),
+        None,
+        Some(vec![
+            "Use `homeboy daemon recover-missing-child-identity --lease-id <expected-lease> --recorded-daemon-pid <recorded-daemon-pid> --recorded-daemon-endpoint <recorded-daemon-endpoint> --job-id <job-id> --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>`.".to_string(),
+            "Required exact evidence: expected lease, recorded daemon PID, recorded daemon endpoint, job ID, child PID, and child starttime ticks.".to_string(),
+        ]),
+    )
 }
 
 fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
@@ -311,6 +358,71 @@ mod tests {
         assert!(Cli::try_parse_from([
             "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "00000000-0000-0000-0000-000000000001", "--child-pid", "43", "--child-starttime-ticks", "1",
         ]).is_ok());
+    }
+
+    #[test]
+    fn legacy_adoption_flags_parse_but_return_exact_non_mutating_migration() {
+        with_isolated_home(|_| {
+            let jobs_path = homeboy::core::paths::daemon_jobs_file().expect("jobs path");
+            let store = homeboy::core::api_jobs::JobStore::open_without_reconciliation(&jobs_path)
+                .expect("store");
+            let job = store.create("runner.exec");
+            store.start(job.id).expect("start job");
+            let before = std::fs::read(&jobs_path).expect("store bytes");
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "daemon",
+                "adopt-orphan",
+                "--lease-id",
+                "lease-dead",
+                "--confirm-pid-dead",
+                "--recover-missing-child-identity",
+                "--confirm-untracked-child-dead",
+                &job.id.to_string(),
+            ])
+            .expect("released aliases still parse");
+            let Commands::Daemon(args) = cli.command else {
+                panic!("expected daemon command");
+            };
+
+            let error = run(args, &crate::commands::GlobalArgs {})
+                .expect_err("legacy aliases must not mutate");
+            assert!(error.message.contains("will not bulk-terminalize"));
+            let rendered = format!("{error:?}");
+            for field in [
+                "recover-missing-child-identity",
+                "expected-lease",
+                "recorded-daemon-pid",
+                "recorded-daemon-endpoint",
+                "job-id",
+                "child-pid",
+                "child-starttime-ticks",
+            ] {
+                assert!(rendered.contains(field), "missing remediation field {field}");
+            }
+            assert_eq!(std::fs::read(&jobs_path).expect("store bytes"), before);
+        });
+    }
+
+    #[test]
+    fn unpaired_legacy_adoption_alias_returns_the_same_migration_contract() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "daemon",
+            "adopt-orphan",
+            "--lease-id",
+            "lease-dead",
+            "--recover-missing-child-identity",
+        ])
+        .expect("one released alias still parses");
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+
+        let error = run(args, &crate::commands::GlobalArgs {})
+            .expect_err("unpaired legacy alias is migration-only");
+        assert!(error.message.contains("must be supplied together"));
+        assert!(format!("{error:?}").contains("recover-missing-child-identity"));
     }
 
     #[test]
