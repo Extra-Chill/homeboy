@@ -87,7 +87,7 @@ file operations through the `local_files` adapter:
 
 ### Template System
 
-**Location:** `src/core/engine/template.rs`
+**Location:** `crates/homeboy-engine-primitives/src/template.rs` (re-exported as `crate::core::engine::template`)
 
 Variable substitution in templates:
 - Both `{var}` and `{{var}}` syntax supported
@@ -352,7 +352,7 @@ typed contracts.
 
 ## Error Handling
 
-**Location:** `src/core/error/mod.rs`
+**Location:** `crates/homeboy-error/src/lib.rs` (re-exported as `crate::core::error`)
 
 Centralized error system:
 - Error categories (validation, io, extension, etc.)

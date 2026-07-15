@@ -20,7 +20,7 @@ stable while moving behavior to a reusable core primitive.
 
 ## Output parse primitive (core)
 
-`src/core/engine/output_parse.rs`
+`crates/homeboy-engine-primitives/src/output_parse.rs` (re-exported as `crate::core::engine::output_parse`)
 
 Generic parser with declarative rule spec:
 

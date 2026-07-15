@@ -8,7 +8,7 @@ in focused command-cleanup PRs.
 
 Homeboy keeps the CLI layer thin:
 
-- `src/cli_surface.rs` owns clap command shape, hidden compatibility aliases, and command-surface introspection.
+- `src/cli_surface/` owns clap command shape, hidden compatibility aliases, and command-surface introspection.
 - `src/command_contract/` owns command registry metadata, output families, and Lab portability contracts.
 - `src/commands/` maps parsed arguments to responses and delegates durable behavior.
 - `src/core/` owns reusable services, persistence, runner dispatch, artifact lifecycles, release/test/audit workflows, and extension contracts.
@@ -52,7 +52,7 @@ docs cleanup PR.
 
 | Compatibility surface | Current owner | Current shape | Retirement criteria |
 | --- | --- | --- | --- |
-| Legacy placement aliases | `src/cli_surface.rs` | Rejected parser inputs with targeted migration errors. | None: product policy is zero legacy placement support. |
+| Legacy placement aliases | `src/cli_surface/` | Rejected parser inputs with targeted migration errors. | None: product policy is zero legacy placement support. |
 | Legacy component fields such as `build_command` | `src/commands/component.rs`, `src/core/extension/build/mod.rs`, `src/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Hidden JSON self-check flags | `src/commands/lint.rs`, `src/commands/test.rs`, `src/commands/review/mod.rs` | Hidden `--self-checks-json`-style command inputs used by internal checks. | Replace with explicit core/test harness contracts, then remove hidden flags once self-check callers are migrated. |
 | Legacy CLI aliases rejected by argument normalization | `src/commands/utils/args.rs` | Rejection tests protect known old aliases from silently routing. | Keep rejection coverage until the aliases are old enough to delete from compatibility messaging. |
