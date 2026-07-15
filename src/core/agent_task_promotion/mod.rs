@@ -22,6 +22,7 @@ pub use fingerprint::{
 };
 pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub use promote::promote;
+pub use promote::resume_promoted_patch;
 pub use types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandCapture,
     AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionOptions,

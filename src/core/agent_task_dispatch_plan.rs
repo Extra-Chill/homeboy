@@ -22,7 +22,7 @@ use crate::core::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskRetryPolicy,
 };
 use crate::core::agent_task_secrets::validate_secret_env;
-use crate::core::{config, defaults, worktree, Error, Result};
+use crate::core::{config, defaults, worktree, worktree_providers, Error, Result};
 
 use super::agent_task_dispatch_service::AgentTaskDispatchRequest;
 
@@ -399,28 +399,47 @@ fn resolve_dispatch_workspace(
         return Ok(Some(DispatchWorkspaceTarget::path(path, "workspace-path")));
     }
 
-    let record = worktree::resolve(workspace).map_err(|_| {
+    if let Some(record) = worktree::resolve_if_present(workspace)? {
+        let root = std::path::PathBuf::from(&record.worktree_path);
+        if !root.is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "workspace",
+                format!(
+                    "Homeboy worktree '{}' points at a missing directory {}; recreate or remove the stale record",
+                    record.id,
+                    root.display()
+                ),
+                Some(workspace.clone()),
+                None,
+            ));
+        }
+        return Ok(Some(DispatchWorkspaceTarget::record(record)));
+    }
+
+    let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
         Error::validation_invalid_argument(
             "workspace",
             format!(
-                "agent-task cook workspace '{}' is neither an existing directory nor a Homeboy worktree record",
-                workspace
+                "agent-task cook workspace '{}' is neither an existing directory nor a resolvable managed worktree handle: {}",
+                workspace, error.message
             ),
             Some(workspace.clone()),
             Some(vec![
                 "Pass --cwd <path> for an explicit checkout".to_string(),
                 "Pass --workspace <path> for an existing workspace path".to_string(),
                 "Create or list Homeboy task worktrees with `homeboy worktree create` and `homeboy worktree list`".to_string(),
+                "Configure a worktree provider that can resolve the managed handle.".to_string(),
             ]),
         )
     })?;
-    let root = std::path::PathBuf::from(&record.worktree_path);
+    let root = std::path::PathBuf::from(&resolution.worktree.path);
     if !root.is_dir() {
         return Err(Error::validation_invalid_argument(
             "workspace",
             format!(
-                "Homeboy worktree '{}' points at a missing directory {}; recreate or remove the stale record",
-                record.id,
+                "managed worktree '{}' resolved by provider '{}' points at a missing directory {}",
+                workspace,
+                resolution.provider_id,
                 root.display()
             ),
             Some(workspace.clone()),
@@ -428,7 +447,7 @@ fn resolve_dispatch_workspace(
         ));
     }
 
-    Ok(Some(DispatchWorkspaceTarget::record(record)))
+    Ok(Some(DispatchWorkspaceTarget::provider(resolution)))
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +499,30 @@ impl DispatchWorkspaceTarget {
                 "root": record.worktree_path,
                 "source_checkout": record.source_checkout,
                 "task_url": record.task_url,
+            }),
+        }
+    }
+
+    fn provider(resolution: worktree_providers::WorktreeProviderResolution) -> Self {
+        let root = std::path::PathBuf::from(&resolution.worktree.path);
+        Self {
+            root: root.clone(),
+            slug: Some(resolution.worktree.handle.clone()),
+            kind: Some("worktree-provider".to_string()),
+            component_id: None,
+            branch: Some(resolution.worktree.branch.clone()),
+            base_ref: None,
+            metadata: serde_json::json!({
+                "kind": "worktree-provider",
+                "provider_id": resolution.provider_id,
+                "handle": resolution.worktree.handle,
+                "root": root.display().to_string(),
+                "branch": resolution.worktree.branch,
+                "safety": {
+                    "dirty": resolution.worktree.safety.dirty,
+                    "unpushed": resolution.worktree.safety.unpushed,
+                    "primary": resolution.worktree.safety.primary,
+                },
             }),
         }
     }
