@@ -3,8 +3,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
-    ServiceIdentity,
+    self, BrokerConfig, BrokerConfigOptions, DaemonLeaselessRecoveryResult,
+    DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus,
+    DaemonStopResult, ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
@@ -168,18 +169,49 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(&lease_id, confirm_pid_dead, recover_missing_child_identity, &confirm_untracked_child_dead, &addr)?),
             0,
         )),
-        DaemonCommand::ReconcileLeaselessOrphans { confirm_no_daemon_owner, addr } => Ok((
-            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(confirm_no_daemon_owner, &addr)?),
+        DaemonCommand::ReconcileLeaselessOrphans {
+            confirm_no_daemon_owner,
+            addr,
+        } => Ok((
+            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
+                confirm_no_daemon_owner,
+                &addr,
+            )?),
             0,
         )),
-        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, addr } => Ok((
-            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
+        DaemonCommand::RecoverMissingLeaseState {
+            lease_id,
+            recorded_pid,
+            recorded_endpoint,
+            confirm_pid_dead,
+            confirm_control_plane_lost,
+            addr,
+        } => Ok((
+            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(
+                &lease_id,
+                recorded_pid,
+                &recorded_endpoint,
+                confirm_pid_dead,
+                confirm_control_plane_lost,
+                &addr,
+            )?),
             0,
         )),
         DaemonCommand::Serve { addr } => serve(&addr),
-        DaemonCommand::Supervise { addr, startup_token } => {
+        DaemonCommand::Supervise {
+            addr,
+            startup_token,
+        } => {
             daemon::supervise(&addr, &startup_token)?;
-            Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
+            Ok((
+                DaemonOutput::Serve(DaemonStartResult {
+                    pid: std::process::id(),
+                    address: addr,
+                    state_path: String::new(),
+                    lease_id: String::new(),
+                }),
+                0,
+            ))
         }
         DaemonCommand::Stop => Ok((DaemonOutput::Stop(daemon::stop()?), 0)),
         DaemonCommand::Status => Ok((DaemonOutput::Status(daemon::read_status()?), 0)),

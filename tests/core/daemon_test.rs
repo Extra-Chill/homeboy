@@ -36,6 +36,55 @@ fn write_daemon_state_for_test(state: &DaemonState) {
     std::fs::write(&path, serde_json::to_string(state).expect("state json")).expect("write state");
 }
 
+#[test]
+fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    state.lease_id = "evidence-lease".to_string();
+    write_daemon_state_for_test(&state);
+    let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease(state.lease_id.clone());
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+    let before = std::fs::read(&path).expect("store bytes");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+    assert_eq!(status.active_job_recovery_evidence.len(), 1);
+    let evidence = &status.active_job_recovery_evidence[0];
+    assert_eq!(evidence.job_id, job.id);
+    assert_eq!(evidence.operation, "runner.exec");
+    assert_eq!(
+        evidence.disposition,
+        crate::core::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+    );
+}
+
+#[test]
+fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
+    let _home = HomeGuard::new();
+    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+    state.lease_id = "live-evidence-lease".to_string();
+    write_daemon_state_for_test(&state);
+    let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+    let store = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease(state.lease_id);
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+
+    let status = read_status().expect("status");
+
+    assert_eq!(status.active_job_recovery_evidence.len(), 1);
+    assert_eq!(
+        status.active_job_recovery_evidence[0].disposition,
+        crate::core::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+    );
+}
+
 fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
     let path = state_path().expect("state path");
     let content = serde_json::json!({
