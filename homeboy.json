@@ -710,7 +710,7 @@
         "dead_code::src/core/upgrade/runners/orchestration.rs::UnreferencedExport",
         "dead_code::src/core/upgrade/runners/path_alignment.rs::UnreferencedExport",
         "dead_code::src/core/upgrade/runners/source_checkout.rs::UnreferencedExport",
-        "duplication::src/cli_surface.rs::DuplicateFunction",
+        "duplication::src/cli_surface/mod.rs::DuplicateFunction",
         "duplication::src/commands/audit_baseline.rs::DuplicateFunction",
         "duplication::src/commands/runner/doctor/probes.rs::DuplicateFunction",
         "duplication::src/core/artifact_manifest.rs::DuplicateFunction",
