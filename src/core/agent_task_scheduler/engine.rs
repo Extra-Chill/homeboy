@@ -4,6 +4,8 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Instant;
 
+use crate::core::agent_task_service::DerivedCookBaselineCapability;
+
 use super::*;
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
@@ -42,13 +44,34 @@ where
     }
 
     pub fn run(&self, plan: AgentTaskPlan) -> AgentTaskAggregate {
-        self.run_with_cancellation(plan, AgentTaskCancellationToken::default())
+        self.run_with_derived_cook_baseline(plan, None)
+    }
+
+    pub(crate) fn run_with_derived_cook_baseline(
+        &self,
+        plan: AgentTaskPlan,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> AgentTaskAggregate {
+        self.run_with_cancellation_and_derived_cook_baseline(
+            plan,
+            AgentTaskCancellationToken::default(),
+            derived_cook_baseline,
+        )
     }
 
     pub(crate) fn run_with_cancellation(
         &self,
         plan: AgentTaskPlan,
         cancellation: AgentTaskCancellationToken,
+    ) -> AgentTaskAggregate {
+        self.run_with_cancellation_and_derived_cook_baseline(plan, cancellation, None)
+    }
+
+    fn run_with_cancellation_and_derived_cook_baseline(
+        &self,
+        plan: AgentTaskPlan,
+        cancellation: AgentTaskCancellationToken,
+        derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
         let max_concurrency = plan.options.max_concurrency.max(1);
@@ -324,7 +347,10 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
-                let harvest_preflight = match prepare_committed_harvest(&request) {
+                let harvest_preflight = match prepare_committed_harvest(
+                    &request,
+                    derived_cook_baseline,
+                ) {
                     Ok(preflight) => preflight,
                     Err(error) => {
                         record_harvest_setup_failure(
@@ -343,13 +369,7 @@ where
                     .clone()
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
-                let source_provenance = harvest_preflight.source_provenance.or_else(|| {
-                    request
-                        .inputs
-                        .pointer("/cook_loop/baseline")
-                        .cloned()
-                        .map(|baseline| serde_json::json!({ "cook_baseline": baseline }))
-                });
+                let source_provenance = harvest_preflight.source_provenance;
                 let attempt_workspace =
                     match prepare_attempt_workspace(&mut request, task_base_sha.as_deref()) {
                         Ok(workspace) => workspace,

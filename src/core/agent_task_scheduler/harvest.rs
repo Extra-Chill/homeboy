@@ -697,7 +697,8 @@ mod committed_harvest_tests {
             artifact_declarations: Vec::new(),
             metadata: serde_json::Value::Null,
         };
-        let preflight = prepare_committed_harvest(&request).expect("snapshot preflight");
+        let preflight =
+            prepare_committed_harvest(&request, None).expect("snapshot preflight");
         let baseline = preflight.base_sha.expect("synthetic baseline");
         let source_provenance = preflight.source_provenance.expect("source provenance");
         assert!(workspace.path().join(".git").is_dir());
@@ -913,7 +914,8 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request).expect("local non-Git no-op");
+        let preflight =
+            prepare_committed_harvest(&request, None).expect("local non-Git no-op");
 
         assert!(preflight.base_sha.is_none());
         assert!(preflight.source_provenance.is_none());

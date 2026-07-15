@@ -33,7 +33,7 @@ use crate::core::agent_task_scheduler::{
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
-use super::execution::run_loaded_plan;
+use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
 /// Executes one provider attempt while cook retains ownership of promotion,
@@ -384,17 +384,24 @@ where
                     }
                 };
                 follow_up_request.workspace.root = Some(baseline.path.display().to_string());
-                follow_up_request.inputs["cook_loop"]["baseline"] = baseline.provenance.clone();
-                let mut follow_up_plan = AgentTaskPlan::new(
+                // Requests retain artifact facts for review, never authorization.
+                follow_up_request.inputs["cook_loop"]["artifact_provenance"] =
+                    baseline.artifact_provenance();
+                let follow_up_plan = AgentTaskPlan::new(
                     format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
                 );
                 follow_up_plan.options = plan.options.clone();
                 follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
                 follow_up_plan.options.retry.max_attempts = 1;
+                run_loaded_plan_with_derived_cook_baseline(
+                    follow_up_plan,
+                    Some(&next_run_id),
+                    executor.clone(),
+                    Some(baseline.capability()),
+                )?;
                 remediation_category_usage.add(reservation);
                 run_id = next_run_id;
-                next_plan = Some(follow_up_plan);
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 return Ok(cook_report(
@@ -427,7 +434,80 @@ where
 struct CookFollowUpBaseline {
     source_root: PathBuf,
     path: PathBuf,
-    provenance: Value,
+    capability: DerivedCookBaselineCapability,
+}
+
+/// Process-local authority for one materialized cook retry baseline. It is not
+/// serializable and never enters a request, environment, or durable record.
+pub(crate) struct DerivedCookBaselineCapability {
+    canonical_path: PathBuf,
+    commit: String,
+    tree: String,
+    artifact_sha256: String,
+    source_run_id: String,
+    source_task_id: String,
+    parent_snapshot: Option<Value>,
+}
+
+impl DerivedCookBaselineCapability {
+    pub(crate) fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+
+    pub(crate) fn commit(&self) -> &str {
+        &self.commit
+    }
+
+    pub(crate) fn tree(&self) -> &str {
+        &self.tree
+    }
+
+    pub(crate) fn source_task_id(&self) -> &str {
+        &self.source_task_id
+    }
+
+    pub(crate) fn parent_snapshot(&self) -> Option<&Value> {
+        self.parent_snapshot.as_ref()
+    }
+
+    pub(crate) fn artifact_provenance(&self) -> Value {
+        serde_json::json!({
+            "source_run_id": self.source_run_id,
+            "source_task_id": self.source_task_id,
+            "source_patch_artifact_sha256": self.artifact_sha256,
+        })
+    }
+}
+
+impl CookFollowUpBaseline {
+    fn capability(&self) -> &DerivedCookBaselineCapability {
+        &self.capability
+    }
+
+    fn artifact_provenance(&self) -> Value {
+        self.capability.artifact_provenance()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_derived_cook_baseline_capability(
+    path: PathBuf,
+    commit: String,
+    tree: String,
+    task_id: &str,
+    parent_snapshot: Option<Value>,
+) -> DerivedCookBaselineCapability {
+    DerivedCookBaselineCapability {
+        canonical_path: path
+            .canonicalize()
+            .expect("test baseline path canonicalizes"),
+        commit,
+        tree,
+        artifact_sha256: "test-artifact-sha256".to_string(),
+        source_run_id: "test-source-run".to_string(),
+        source_task_id: task_id.to_string(),
+        parent_snapshot,
+    }
 }
 
 impl Drop for CookFollowUpBaseline {
@@ -533,15 +613,17 @@ fn materialize_follow_up_baseline(
     let baseline = CookFollowUpBaseline {
         source_root,
         path: path.clone(),
-        provenance: serde_json::json!({
-            "source_run_id": source_run_id,
-            "source_task_id": promotion.source.task_id,
-            "source_patch_artifact_id": promotion.patch_artifact.id,
-            "source_patch_artifact_sha256": artifact_sha256,
-            "promotion_target_head": head,
-            "derived_workspace_path": path,
-            "parent_snapshot": parent_snapshot,
-        }),
+        // The capability is completed only after the committed baseline's
+        // identity has been verified below.
+        capability: DerivedCookBaselineCapability {
+            canonical_path: path,
+            commit: String::new(),
+            tree: String::new(),
+            artifact_sha256,
+            source_run_id: source_run_id.to_string(),
+            source_task_id: promotion.source.task_id.clone(),
+            parent_snapshot,
+        },
     };
     let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
     std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
@@ -589,8 +671,14 @@ fn materialize_follow_up_baseline(
         ));
     }
     let mut baseline = baseline;
-    baseline.provenance["baseline_commit"] = Value::String(commit);
-    baseline.provenance["baseline_tree"] = Value::String(tree);
+    baseline.capability.canonical_path = baseline.path.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("canonicalize cook retry baseline".to_string()),
+        )
+    })?;
+    baseline.capability.commit = commit;
+    baseline.capability.tree = tree;
     Ok(baseline)
 }
 
@@ -1281,7 +1369,15 @@ mod tests {
                 & 0o111
                 != 0
         );
-        assert!(baseline.provenance["baseline_commit"].is_string());
-        assert!(baseline.provenance["baseline_tree"].is_string());
+        assert!(!baseline.capability.commit().is_empty());
+        assert!(!baseline.capability.tree().is_empty());
+        assert_eq!(
+            baseline.artifact_provenance()["source_patch_artifact_sha256"],
+            sha2::Sha256::digest(std::fs::read(&patch_path).unwrap())
+                .to_vec()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
     }
 }

@@ -59,6 +59,7 @@ pub(super) struct HarvestPreflight {
 
 pub(super) fn prepare_committed_harvest(
     request: &AgentTaskRequest,
+    derived_cook_baseline: Option<&crate::core::agent_task_service::DerivedCookBaselineCapability>,
 ) -> Result<HarvestPreflight, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(Path::new) else {
         return Ok(HarvestPreflight {
@@ -76,22 +77,12 @@ pub(super) fn prepare_committed_harvest(
             source_provenance: None,
         });
     }
-    let derived_baseline = request.inputs.pointer("/cook_loop/baseline");
-    let source_provenance = if let Some(baseline) = derived_baseline {
-        validate_derived_cook_baseline(root, baseline)?;
-        let ambient: serde_json::Value =
-            std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
-                .ok_or_else(|| {
-                    snapshot_harvest_error("missing ambient parent snapshot".to_string())
-                })?;
-        if baseline.get("parent_snapshot") != Some(&ambient) {
-            return Err(snapshot_harvest_error(
-                "derived baseline parent snapshot does not match ambient snapshot".to_string(),
-            ));
-        }
-        Some(serde_json::json!({ "parent_snapshot": ambient, "cook_baseline": baseline }))
+    let source_provenance = if let Some(capability) = derived_cook_baseline {
+        validate_derived_cook_baseline(root, request, capability)?;
+        Some(serde_json::json!({
+            "cook_baseline": capability.artifact_provenance(),
+            "parent_snapshot": capability.parent_snapshot(),
+        }))
     } else if snapshot_signaled {
         let provenance =
             crate::core::runner::verify_lab_workspace_from_env(&root.display().to_string(), root)
@@ -177,19 +168,15 @@ fn snapshot_harvest_error(message: String) -> HarvestError {
 
 fn validate_derived_cook_baseline(
     root: &Path,
-    baseline: &serde_json::Value,
+    request: &AgentTaskRequest,
+    capability: &crate::core::agent_task_service::DerivedCookBaselineCapability,
 ) -> Result<(), HarvestError> {
-    let path = baseline
-        .get("derived_workspace_path")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            snapshot_harvest_error("derived baseline has no workspace path".to_string())
-        })?;
-    if root.display().to_string() != path
-        || !root.starts_with(std::env::temp_dir().join("homeboy-cook-follow-up-baselines"))
-    {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        snapshot_harvest_error(format!("canonicalize derived baseline root: {error}"))
+    })?;
+    if canonical_root != capability.canonical_path() || request.task_id != capability.source_task_id() {
         return Err(snapshot_harvest_error(
-            "derived baseline workspace path is not Homeboy-owned".to_string(),
+            "derived baseline capability does not bind this workspace and task".to_string(),
         ));
     }
     let status = git_output(root, &["status", "--porcelain", "--untracked-files=all"])?;
@@ -198,17 +185,27 @@ fn validate_derived_cook_baseline(
     }
     let head = git_output(root, &["rev-parse", "HEAD"])?;
     let tree = git_output(root, &["rev-parse", "HEAD^{tree}"])?;
-    if baseline
-        .get("baseline_commit")
-        .and_then(serde_json::Value::as_str)
-        != Some(head.as_str())
-        || baseline
-            .get("baseline_tree")
-            .and_then(serde_json::Value::as_str)
-            != Some(tree.as_str())
-    {
+    if head != capability.commit() || tree != capability.tree() {
         return Err(snapshot_harvest_error(
             "derived baseline HEAD/tree does not match its internal contract".to_string(),
+        ));
+    }
+    if let Some(parent_snapshot) = capability.parent_snapshot() {
+        let ambient: serde_json::Value =
+            std::env::var(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .ok_or_else(|| {
+                    snapshot_harvest_error("missing ambient parent snapshot".to_string())
+                })?;
+        if parent_snapshot != &ambient {
+            return Err(snapshot_harvest_error(
+                "derived baseline parent snapshot does not match ambient snapshot".to_string(),
+            ));
+        }
+    } else if std::env::var_os(crate::core::observation::SOURCE_SNAPSHOT_METADATA_ENV).is_some() {
+        return Err(snapshot_harvest_error(
+            "derived baseline is missing its Lab parent snapshot".to_string(),
         ));
     }
     Ok(())
