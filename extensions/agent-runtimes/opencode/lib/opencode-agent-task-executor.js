@@ -49,6 +49,7 @@ const OPENCODE_CAPABILITIES = [
 	'provider_owned_session',
 	'provider_owned_cancellation',
 	'nested_orchestrator',
+	'run_scoped_scratch',
 ];
 
 const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';

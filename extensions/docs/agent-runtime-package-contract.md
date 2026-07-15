@@ -232,6 +232,17 @@ must add that key to `redacted_metadata_keys`, preferably with
 
 ## Capability Declarations
 
+### Run-scoped scratch
+
+Runtimes that advertise the `run_scoped_scratch` capability consume the controller-provided
+attempt scratch root through `executor.config.runtime_env.TMPDIR`. The runtime passes that value
+to its provider process without replacing it with an ambient shared temporary directory.
+
+Homeboy owns scratch allocation, run and attempt ownership metadata, active leases, evidence
+promotion ordering, retention, and cleanup preview/apply reporting. A runtime does not create,
+delete, lease, or retain the root: that would duplicate controller lifecycle state and could
+remove an active attempt's scratch.
+
 Capabilities are selection and orchestration promises. Declare a capability only
 when the provider can satisfy it for every request accepted by that provider.
 

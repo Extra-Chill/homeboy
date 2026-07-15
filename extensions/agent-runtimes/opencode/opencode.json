@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "opencode",
   "name": "OpenCode",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
   "contract_producers": [
     {
@@ -102,7 +102,8 @@
         "provider_owned_auth",
         "provider_owned_session",
         "provider_owned_cancellation",
-        "nested_orchestrator"
+        "nested_orchestrator",
+        "run_scoped_scratch"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout",

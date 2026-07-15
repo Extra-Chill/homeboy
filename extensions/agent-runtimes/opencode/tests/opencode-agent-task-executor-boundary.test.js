@@ -58,6 +58,7 @@ assert.deepEqual(provider.role_aliases, OPENCODE_ROLE_ALIASES);
 assert.equal(provider.redacted_metadata_keys.includes('opencode_auth'), true);
 assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
+assert.equal(provider.capabilities.includes('run_scoped_scratch'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'opencode.json'), 'utf8'));
@@ -202,6 +203,50 @@ process.exit(0);
 		},
 	}, { env: fixtureEnv });
 	assert.equal(modelResult.status, 'succeeded');
+
+	const scratchAttempts = [
+		{ id: 'run-2250-attempt-1', status: 0 },
+		{ id: 'run-2250-attempt-2', status: 17 },
+	];
+	for (const attempt of scratchAttempts) {
+		const scratchRoot = path.join(root, 'scratch', attempt.id);
+		fs.mkdirSync(scratchRoot, { recursive: true });
+		const scratchCliPath = path.join(root, `mock-opencode-scratch-${attempt.status}.cjs`);
+		fs.writeFileSync(scratchCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+assert.equal(process.env.TMPDIR, ${JSON.stringify(scratchRoot)});
+assert.equal(process.env.UNRELATED_RUNTIME_ENV, 'preserved-for-provider');
+fs.writeFileSync(path.join(process.env.TMPDIR, 'provider-scratch.txt'), process.env.TMPDIR);
+process.exit(${attempt.status});
+`);
+		const scratchResult = await executeOpenCodeAgentTask({
+			...request,
+			task_id: attempt.id,
+			executor: {
+				...request.executor,
+				config: {
+					...request.executor.config,
+					command_args: [scratchCliPath],
+					runtime_env: {
+						TMPDIR: scratchRoot,
+						UNRELATED_RUNTIME_ENV: 'preserved-for-provider',
+					},
+				},
+			},
+		}, { env: fixtureEnv });
+		assert.equal(scratchResult.status, attempt.status === 0 ? 'succeeded' : 'failed');
+		assert.equal(fs.readFileSync(path.join(scratchRoot, 'provider-scratch.txt'), 'utf8'), scratchRoot);
+	}
+	assert.equal(
+		fs.existsSync(path.join(root, 'scratch', 'run-2250-attempt-1', 'provider-scratch.txt')),
+		true
+	);
+	assert.equal(
+		fs.existsSync(path.join(root, 'scratch', 'run-2250-attempt-2', 'provider-scratch.txt')),
+		true
+	);
 
 	const missingArtifactResult = await executeOpenCodeAgentTask({
 		...request,
