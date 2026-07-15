@@ -4,10 +4,9 @@
  * External dependencies
  */
 const path = require('node:path');
-const { existsSync, readdirSync } = require('node:fs');
+const { existsSync, readFileSync, readdirSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
-const { execFileSync } = require('node:child_process');
 
 /**
  * Internal dependencies
@@ -80,16 +79,16 @@ function coreModuleCandidates(options = {}) {
 		}
 	}
 
-	// Last-resort discovery: ask the Homeboy component registry directly.
+	// Last-resort discovery: read Homeboy's non-evaluating component registry
+	// pointer directly. Do not use `homeboy component show` here: component
+	// inspection may evaluate this extension's ready_check and re-enter the
+	// loader recursively.
 	// This covers hosts where the wp-codebox checkout lives outside any
 	// workspaceRoots() guess (e.g. a Data Machine Code workspace root that
 	// differs from the wordpress extension's own parent directory) but is
-	// still registered with Homeboy via `homeboy component create`/`show`.
-	// Mirrors the same fallback already used by
-	// scripts/lib/validation-dependencies.sh (`homeboy component show`).
+	// still registered with Homeboy via `homeboy component create`.
 	// Only attempted when workspaceRoots() sibling-checkout discovery found
-	// nothing, since this shells out to the `homeboy` binary and shouldn't
-	// add latency to the already-working discovery paths.
+	// nothing, so registry metadata cannot override an already-working path.
 	if (candidates.length === candidateCountBeforeWorkspaceRoots) {
 		for (const repoPath of homeboyComponentRepoCandidates(options)) {
 			for (const entry of options.runtimeCoreEntries || DEFAULT_RUNTIME_CORE_ENTRIES) {
@@ -208,19 +207,17 @@ function homeboyComponentRepoCandidates(options = {}) {
 }
 
 function homeboyComponentLocalPath(componentId, options = {}) {
-	const homeboyBin = options.homeboyBin || process.env.HOMEBOY_BIN || 'homeboy';
+	if (!/^[A-Za-z0-9_-]+$/.test(componentId)) {
+		return null;
+	}
+
+	const registryDir = options.homeboyComponentRegistryDir || path.resolve(homedir(), '.config/homeboy/components');
 	try {
-		const stdout = execFileSync(homeboyBin, ['component', 'show', componentId], {
-			encoding: 'utf8',
-			stdio: ['ignore', 'pipe', 'ignore'],
-			timeout: 10000,
-		});
-		const parsed = JSON.parse(stdout);
-		const localPath = parsed?.data?.entity?.local_path;
+		const registration = JSON.parse(readFileSync(path.resolve(registryDir, `${componentId}.json`), 'utf8'));
+		const localPath = registration?.local_path;
 		return typeof localPath === 'string' && localPath.trim() ? localPath.trim() : null;
 	} catch {
-		// `homeboy` unavailable, component not registered, or output
-		// unparseable — this is a best-effort fallback, so fail silently
+		// Missing or invalid registry metadata is a best-effort fallback, so fail silently
 		// and let the caller continue to the next discovery mechanism.
 		return null;
 	}
