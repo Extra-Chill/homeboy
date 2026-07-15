@@ -111,10 +111,7 @@ fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {
 }
 
 mod handoff;
-mod placement;
 mod support;
-#[cfg(test)]
-mod tests;
 mod types;
 mod workload;
 
@@ -122,8 +119,3 @@ pub use handoff::*;
 pub use support::*;
 pub use types::*;
 pub use workload::*;
-
-#[cfg(test)]
-pub(crate) use placement::{
-    AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON, AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
-};

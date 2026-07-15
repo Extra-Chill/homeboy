@@ -4,7 +4,7 @@ use clap::Parser;
 
 use crate::cli_surface::{Cli, Commands};
 
-use super::{LabCommandPortability, LabSourcePathMode, LabWorkspaceModePolicy};
+use crate::command_contract::{LabCommandPortability, LabSourcePathMode, LabWorkspaceModePolicy};
 
 fn parsed_command(args: &[&str]) -> Commands {
     Cli::try_parse_from(args)
@@ -75,7 +75,9 @@ fn agent_task_cook_coordinator_stays_controller_local() {
 
     assert_eq!(
         contract.portability,
-        LabCommandPortability::LocalOnly(super::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON)
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
+        )
     );
     assert!(!contract.routing_policy.default_lab_offload);
 }
@@ -99,7 +101,9 @@ fn agent_task_cook_no_finalize_is_still_controller_local() {
 
     assert_eq!(
         contract.portability,
-        LabCommandPortability::LocalOnly(super::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON)
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
+        )
     );
 }
 
@@ -116,7 +120,9 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
     let coordinator_contract = coordinator.lab_contract().expect("fanout contract");
     assert_eq!(
         coordinator_contract.portability,
-        LabCommandPortability::LocalOnly(super::AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON)
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON
+        )
     );
 
     let child = parsed_command(&[
@@ -135,7 +141,9 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
             .lab_contract()
             .expect("child cook contract")
             .portability,
-        LabCommandPortability::LocalOnly(super::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON)
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
+        )
     );
 }
 
@@ -161,7 +169,7 @@ fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
 
     assert_eq!(
         contract.hot_label,
-        super::super::spec::AGENT_TASK_PROMOTE_LAB_LABEL
+        crate::command_contract::AGENT_TASK_PROMOTE_LAB_LABEL
     );
     assert_eq!(contract.portability, LabCommandPortability::Portable);
     assert_eq!(
@@ -206,7 +214,9 @@ fn rig_source_management_explains_lab_setup_boundary() {
         );
         assert_eq!(
             contract.portability,
-            LabCommandPortability::LocalOnly(super::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON)
+            LabCommandPortability::LocalOnly(
+                crate::command_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON
+            )
         );
     }
 }

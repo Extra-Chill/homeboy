@@ -64,9 +64,12 @@ pub use lab::{
     RUN_LOCATION_INDEX_SCHEMA,
 };
 pub(crate) use lab::{
-    LAB_NO_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES, LAB_TUNNEL_SECRET_ENV_SOURCES,
-    RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON, RIG_UP_LAB_UNSUPPORTED_REASON,
+    LAB_AGENT_TASK_SECRET_ENV_SOURCES, LAB_NO_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES,
+    LAB_TUNNEL_SECRET_ENV_SOURCES, RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON,
+    RIG_UP_LAB_UNSUPPORTED_REASON,
 };
+// Lab-label constants needed by the relocated lab routing in
+// commands::contract_lab_routing (the spec module itself stays private).
 pub use output::{
     CommandDescriptor, CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind,
     CommandOutputDescriptor, CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
@@ -81,6 +84,14 @@ pub use spec::{
     registered_command_json_family, runtime_extension_command_doc_slugs, support_command_doc_slugs,
     CommandDocKind, CommandDocSpec, CommandLabSupportSummary, CommandPathSafetySpec,
     CommandSafetySpec, CommandSpec, COMMAND_DOC_REGISTRY, COMMAND_SPECS,
+};
+pub(crate) use spec::{
+    AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
+    AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
+    AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+    AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL, AGENT_TASK_PROMOTE_LAB_LABEL,
+    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
+    RUNTIME_REFRESH_LAB_LABEL,
 };
 pub(crate) use spec::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
