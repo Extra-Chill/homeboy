@@ -373,22 +373,6 @@ fn provider_requires_cwd_git_checkout_for_dispatch(
         || configured_backend.is_some_and(|backend| !backend.trim().is_empty())
 }
 
-pub(crate) fn apply_lab_contract_to_descriptor(
-    descriptor: &mut CommandDescriptor,
-    contract: Option<LabCommandContract>,
-) {
-    descriptor.supports_lab_runner = contract
-        .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable));
-    descriptor.lab_runner_unsupported_reason =
-        contract.and_then(|contract| match contract.portability {
-            LabCommandPortability::Portable => None,
-            LabCommandPortability::LocalOnly(reason) => Some(reason),
-        });
-    descriptor.lab_offload_captures_mutation_patch =
-        contract.is_some_and(|contract| contract.capture_mutation_patch);
-    descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
-}
-
 pub(crate) fn agent_task_lab_extension_ids(
     args: &agent_task::AgentTaskArgs,
 ) -> crate::core::Result<Vec<String>> {
