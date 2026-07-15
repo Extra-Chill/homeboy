@@ -74,6 +74,13 @@ where
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> AgentTaskAggregate {
         let mut plan = plan.canonicalize();
+        // A scheduler without a durable run record still needs a private
+        // controller-scratch namespace. Plan IDs are semantic labels and can
+        // legitimately repeat across independent in-process executions.
+        let scratch_run_id = self
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("ephemeral-{}", uuid::Uuid::new_v4()));
         let max_concurrency = plan.options.max_concurrency.max(1);
         let total_tasks = plan.tasks.len();
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
@@ -119,7 +126,9 @@ where
         let mut events = Vec::new();
         let mut cancellation_notified = false;
         let execution_budget = plan.options.execution_budget.clone();
-        let max_attempts = execution_budget.max_provider_executions;
+        // Legacy retry policy remains an operator-facing cap; the execution
+        // budget adds a shared hard ceiling across retries and rotations.
+        let retry_max_attempts = plan.options.retry.max_attempts;
         let (tx, rx) = mpsc::channel();
         let cancellation_tx = tx.clone();
         cancellation.on_cancel(Arc::new(move || {
@@ -397,9 +406,12 @@ where
                 if let Some(root) = request.workspace.root.as_deref() {
                     request.executor.remap_workspace_root(root);
                 }
-                let run_id = self.run_id.as_deref().unwrap_or(&plan.plan_id);
-                let scratch = match crate::core::controller_scratch::allocate_attempt(
-                    run_id,
+                #[cfg(test)]
+                let scratch_allocation = crate::core::controller_scratch::allocate_test_attempt;
+                #[cfg(not(test))]
+                let scratch_allocation = crate::core::controller_scratch::allocate_attempt;
+                let scratch = match scratch_allocation(
+                    &scratch_run_id,
                     &plan.plan_id,
                     &request.task_id,
                     scheduled.attempt,
@@ -609,7 +621,8 @@ where
                         &outcome,
                         result.attempt,
                         execution_budget.max_same_provider_retries,
-                        max_attempts,
+                        execution_budget.max_provider_executions,
+                        retry_max_attempts,
                         retry_budget_total,
                         retry_budget_used,
                         &plan.options.retry.retryable_failure_classifications,
@@ -657,7 +670,7 @@ where
                             policy,
                             running_task.rotation_index,
                             result.attempt,
-                            max_attempts,
+                            execution_budget.max_provider_executions,
                             execution_budget.max_provider_rotations,
                         ) {
                             release_scratch(&result.scratch, "provider_rotation", &outcome);

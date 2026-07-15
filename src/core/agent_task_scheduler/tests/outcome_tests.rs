@@ -304,6 +304,8 @@ fn incomplete_empty_executor_result_is_retryable_provider_failure() {
     let scheduler = AgentTaskScheduler::new(executor);
     let mut plan = plan_with_tasks(1);
     plan.options.retry.max_attempts = 2;
+    plan.options.execution_budget.max_provider_executions = 2;
+    plan.options.execution_budget.max_same_provider_retries = 1;
     plan.options.retry.retryable_failure_classifications =
         vec![AgentTaskFailureClassification::Provider];
 
