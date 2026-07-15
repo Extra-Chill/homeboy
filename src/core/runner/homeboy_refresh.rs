@@ -355,7 +355,7 @@ pub fn refresh_homeboy_binary(
         })?;
         Ok(SshBootstrapPromotion {
             identity,
-            source_sha: source_sha_from_output(&exec_output.stdout).unwrap_or_default(),
+            source_sha: source_sha_from_output(&exec_output.stdout),
             updated_fields,
         })
     };
@@ -438,8 +438,7 @@ pub fn refresh_homeboy_binary(
                     "daemon"
                 },
                 requested_ref: plan.git_ref.clone(),
-                resolved_source_sha: (!bootstrap.source_sha.is_empty())
-                    .then_some(bootstrap.source_sha),
+                resolved_source_sha: bootstrap.source_sha,
                 binary_commit: identity
                     .get("data")
                     .unwrap_or(&identity)
@@ -525,7 +524,7 @@ fn refresh_execution_options(
 #[derive(Debug, Clone)]
 struct SshBootstrapPromotion {
     identity: Value,
-    source_sha: String,
+    source_sha: Option<String>,
     updated_fields: Vec<String>,
 }
 
@@ -546,8 +545,7 @@ where
     verify_materialized_identity(plan, &stdout, &identity).map_err(|message| {
         Error::validation_invalid_argument("identity", message, Some(plan.runner_id.clone()), None)
     })?;
-    let source_sha =
-        source_sha_from_output(&stdout).expect("verified materialized identity has SHA");
+    let source_sha = source_sha_from_output(&stdout);
     let updated_fields = promote(&plan.binary_path)?;
     Ok(SshBootstrapPromotion {
         identity,
@@ -2196,7 +2194,47 @@ mod tests {
                 },
             )
             .expect("verified bootstrap promotes");
-            assert_eq!(result.source_sha, "abc123");
+            assert_eq!(result.source_sha.as_deref(), Some("abc123"));
+            assert_eq!(result.identity["data"]["git_commit"], "abc123");
+            assert_eq!(
+                crate::core::runner::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/verified/homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let mut plan = ssh_bootstrap_plan();
+            plan.mode = "select".to_string();
+            plan.source = None;
+            plan.git_ref = None;
+            plan.target_dir = None;
+            let result = ssh_bootstrap_promote_with(
+                &plan,
+                || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
+                |path| {
+                    crate::core::config::with_config_lock(|| {
+                        let patch = refreshed_runner_patch("lab-local", path)?;
+                        match merge(Some("lab-local"), &patch.to_string(), &[])? {
+                            MergeOutput::Single(result) => Ok(result.updated_fields),
+                            MergeOutput::Bulk(_) => Ok(Vec::new()),
+                        }
+                    })
+                },
+            )
+            .expect("selected binary promotes");
+            assert_eq!(result.source_sha, None);
             assert_eq!(result.identity["data"]["git_commit"], "abc123");
             assert_eq!(
                 crate::core::runner::load("lab-local")
