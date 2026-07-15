@@ -123,6 +123,21 @@ pub fn is_runner_hosted_exec() -> bool {
         .is_some_and(|value| value == "1")
 }
 
+/// True when Homeboy is executing inside a GitHub Actions CI job.
+///
+/// CI runners are ephemeral, single-purpose, and non-interactive by design.
+/// The resource-policy warm-machine refusal exists to protect a shared
+/// developer/controller host from added load and to steer work onto Lab; inside
+/// CI there is no shared host to protect, no human to "rerun later", and no Lab
+/// runner to route to. Refusing there turns the guard itself into the outage
+/// (the PR check goes red on good code), so callers use this to bypass or
+/// downgrade the non-interactive refusal in CI.
+pub fn is_ci_execution() -> bool {
+    std::env::var("GITHUB_ACTIONS")
+        .ok()
+        .is_some_and(|value| value == "true")
+}
+
 /// True for the complete environment prepared by a managed remote runner exec.
 ///
 /// Environment variables are not cryptographic provenance: a process with

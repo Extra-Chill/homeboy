@@ -12,8 +12,9 @@ use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
 pub use crate::core::resource_policy_context::reset_captured_context_for_test;
 pub use crate::core::resource_policy_context::{
     capture_context, captured_context, clear_managed_runner_placement_context,
-    clear_runner_hosted_exec, is_managed_runner_placement_context, is_runner_hosted_exec,
-    ResourcePolicyContext, ResourcePolicyHostSnapshot, ResourcePolicyRunnerSelection,
+    clear_runner_hosted_exec, is_ci_execution, is_managed_runner_placement_context,
+    is_runner_hosted_exec, ResourcePolicyContext, ResourcePolicyHostSnapshot,
+    ResourcePolicyRunnerSelection,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +206,11 @@ pub fn non_interactive_preflight_error(
     local_hot_rerun_command: Option<String>,
     default_runner: Option<&str>,
 ) -> Option<crate::core::Error> {
-    if local_override || interactive || is_runner_hosted_exec() {
+    // GitHub Actions runners are ephemeral, single-purpose, and always
+    // non-interactive: the warm-machine refusal would fail otherwise-good PR
+    // checks with no human to rerun and no Lab runner to route to. Never refuse
+    // inside CI (#7735).
+    if local_override || interactive || is_runner_hosted_exec() || is_ci_execution() {
         return None;
     }
     if default_runner.is_some() && warning.message.contains("--runner") {
@@ -268,15 +273,24 @@ fn append_local_placement(rerun: &mut Vec<String>, args: &[String]) {
 }
 
 fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>) -> String {
-    if warning.message.contains("--runner <id>") {
-        return "No eligible Homeboy Lab runner was found. Connect a runner or pass --runner <id> to offload this portable command; use the local-hot rerun command only as a last resort.".to_string();
-    }
+    // A portable command's warning names either a concrete default runner
+    // ("Lab runner `<id>`") or, when none is configured, states Lab offload is
+    // unavailable. Local-only commands say neither. Branch on those facts rather
+    // than inferring Lab availability from placeholder substrings.
     if let Some(runner_id) = default_runner {
-        if warning.message.contains("--runner") {
+        if warning.message.contains(&format!("`{runner_id}`")) {
             return format!(
                 "Homeboy found Lab runner `{runner_id}`; rerun with --runner {runner_id} or let automatic Lab routing handle this portable command."
             );
         }
+    }
+    if warning
+        .message
+        .contains("Lab offload is not currently available")
+    {
+        // Portable command, but no Lab runner is configured on this host (#7749):
+        // do not point the operator at nonexistent Lab infrastructure.
+        return "No Homeboy Lab runner is configured on this host, so Lab offload is not available. Defer verification to CI, connect a runner with `homeboy runner connect`, or use the local-hot rerun command only if local execution is explicitly authorized.".to_string();
     }
     if warning.message.contains("--runner") {
         "Pass --runner <id> when Lab offload supports this mode.".to_string()
@@ -301,7 +315,7 @@ fn warning_message(
             );
         }
         return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to route this portable command through Lab offload, or use --placement local to run locally without this warning.",
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; connect a runner (`homeboy runner connect`) to enable it, defer verification to CI, or use --placement local to run locally without this warning.",
             command.label
         );
     }
@@ -419,7 +433,9 @@ mod tests {
         assert_eq!(warning.command, "bench");
         assert_eq!(warning.recommendation, ResourceRecommendation::Hot);
         assert!(warning.message.contains("--placement local"));
-        assert!(warning.message.contains("--runner <id>"));
+        assert!(warning
+            .message
+            .contains("No Homeboy Lab runner is configured on this host"));
         assert!(warning.message.contains("Load average is 9.0"));
 
         assert!(evaluate(
@@ -551,7 +567,9 @@ mod tests {
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(error.message.contains("Refusing to start `audit`"));
         assert!(error.message.contains("non-interactive shell"));
-        assert!(error.message.contains("--runner <id>"));
+        assert!(error
+            .message
+            .contains("No Homeboy Lab runner is configured on this host"));
         assert!(error.details.get("rerun_command").is_none());
     }
 
@@ -646,7 +664,12 @@ mod tests {
         );
         assert!(error
             .message
-            .contains("No eligible Homeboy Lab runner was found"));
+            .contains("No Homeboy Lab runner is configured on this host"));
+        // #7749: the refusal must not point the operator at Lab infrastructure
+        // that does not exist on this host.
+        assert!(!error
+            .message
+            .contains("Connect a default Homeboy Lab runner"));
     }
 
     #[test]
@@ -802,6 +825,68 @@ mod tests {
         assert_eq!(value["runner_selection"]["reason"], "default_lab_runner");
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
+    }
+
+    #[test]
+    fn ci_execution_does_not_fail_non_interactive_preflight() {
+        // #7735: inside GitHub Actions the warm-machine refusal must not fire.
+        // The runner is ephemeral and non-interactive by design; refusing there
+        // fails otherwise-good PR checks.
+        let _lock = env_lock();
+        let _hosted = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::set("GITHUB_ACTIONS", "true");
+        let warning = evaluate(
+            lab_supported_hot("review test"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_none());
+    }
+
+    #[test]
+    fn non_ci_shell_still_refuses_when_warm() {
+        // Guard against the CI bypass leaking into ordinary non-interactive
+        // shells (e.g. cron, agent runners) where the refusal is still correct.
+        let _lock = env_lock();
+        let _hosted = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
+        let warning = evaluate(
+            lab_supported_hot("review test"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_some());
+    }
+
+    #[test]
+    fn portable_warning_without_runner_does_not_advertise_lab() {
+        // #7749: on a host with no Lab runner configured, the warning must not
+        // recommend connecting/using a Lab runner as if one were available.
+        let warning = evaluate(
+            lab_supported_hot("review test"),
+            &resources(ResourceRecommendation::Hot),
+        )
+        .expect("hot machines warn");
+
+        assert!(warning
+            .message
+            .contains("No Homeboy Lab runner is configured on this host"));
+        assert!(warning
+            .message
+            .contains("Lab offload is not currently available"));
+        assert!(!warning
+            .message
+            .contains("Connect a default Homeboy Lab runner"));
+        // A genuinely configured runner should still be named.
+        let with_runner = evaluate_with_runner_hint(
+            lab_supported_hot("review test"),
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+        assert!(with_runner.message.contains("Lab runner `homeboy-lab`"));
     }
 
     struct EnvVarGuard {
