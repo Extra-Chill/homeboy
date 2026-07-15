@@ -11,8 +11,28 @@
 //! [`crate::command_contract::lab`], which post-processes the descriptor
 //! returned from [`Commands::descriptor`].
 
-use super::lab::apply_lab_contract_to_descriptor;
+use super::lab::{LabCommandContract, LabCommandPortability};
 use super::spec::CommandSpec;
+
+/// Populate the Lab-offload fields on a [`CommandDescriptor`] from a resolved
+/// [`LabCommandContract`]. Pure data transformation over contract/descriptor
+/// types (no CLI dependency), so it lives with the descriptor definitions
+/// rather than the CLI-coupled routing in `lab/placement.rs`.
+fn apply_lab_contract_to_descriptor(
+    descriptor: &mut CommandDescriptor,
+    contract: Option<LabCommandContract>,
+) {
+    descriptor.supports_lab_runner = contract
+        .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable));
+    descriptor.lab_runner_unsupported_reason =
+        contract.and_then(|contract| match contract.portability {
+            LabCommandPortability::Portable => None,
+            LabCommandPortability::LocalOnly(reason) => Some(reason),
+        });
+    descriptor.lab_offload_captures_mutation_patch =
+        contract.is_some_and(|contract| contract.capture_mutation_patch);
+    descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResponseMode {
