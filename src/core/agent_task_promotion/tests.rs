@@ -197,7 +197,7 @@ fn promotion_options(to_worktree: &str) -> AgentTaskPromotionOptions {
 }
 
 #[test]
-fn configured_command_provider_constructs_native_promotion_adapter_with_provenance() {
+fn configured_command_provider_is_resolved_lazily_with_provenance() {
     let workspace = tempfile::tempdir().expect("workspace");
     git(workspace.path(), &["init", "-b", "cook-target"]);
     let provider = tempfile::NamedTempFile::new().expect("provider command");
@@ -256,8 +256,21 @@ fn configured_command_provider_constructs_native_promotion_adapter_with_provenan
         &config,
         Some(PathBuf::from("/fixture/homeboy")),
         None,
-    )
-    .expect("configured provider resolves");
+    );
+    let mut provider = provider;
+    assert!(provider.invocation().is_none());
+    assert!(provider.provenance().is_none());
+
+    let error = provider
+        .apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: "fixture@cook-target".to_string(),
+            patch: Some(VALID_PATCH.to_string()),
+            patch_path: "changes.patch".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            dry_run: false,
+        })
+        .expect_err("fixture executable is not an adapter");
 
     assert_eq!(
         provider.invocation().expect("invocation").argv,
@@ -270,9 +283,14 @@ fn configured_command_provider_constructs_native_promotion_adapter_with_provenan
         ]
     );
     assert_eq!(provider.provenance().expect("provenance")["id"], "fixture");
+    assert_eq!(error.details["worktree_provider"]["id"], "fixture");
     assert_eq!(
-        provider.provenance().expect("provenance")["handle"],
+        error.details["worktree_provider"]["handle"],
         "fixture@cook-target"
+    );
+    assert_eq!(
+        error.details["worktree_provider"]["path"],
+        workspace.path().display().to_string()
     );
 }
 
@@ -342,9 +360,18 @@ fn lookup_only_configured_provider_cannot_construct_a_promotion_adapter() {
         &config,
         Some(PathBuf::from("/fixture/homeboy")),
         None,
-    )
-    .err()
-    .expect("lookup-only provider must not authorize promotion");
+    );
+    let mut error = error;
+    let error = error
+        .apply_patch(AgentTaskPromotionApplyRequest {
+            schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+            to_workspace: "fixture@cook-target".to_string(),
+            patch: Some(VALID_PATCH.to_string()),
+            patch_path: "changes.patch".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+            dry_run: false,
+        })
+        .expect_err("lookup-only provider must not authorize promotion");
 
     assert!(error
         .message
@@ -365,8 +392,7 @@ fn explicit_promotion_provider_sources_precede_configured_resolution() {
         &HomeboyConfig::default(),
         Some(PathBuf::from("/fixture/homeboy")),
         Some("environment-provider".to_string()),
-    )
-    .expect("explicit argv does not resolve configured providers");
+    );
 
     assert_eq!(
         provider.invocation().expect("invocation").argv,
@@ -379,8 +405,7 @@ fn explicit_promotion_provider_sources_precede_configured_resolution() {
         &HomeboyConfig::default(),
         Some(PathBuf::from("/fixture/homeboy")),
         Some("environment-provider".to_string()),
-    )
-    .expect("explicit command does not resolve configured providers");
+    );
     assert_eq!(
         provider.invocation().expect("invocation").argv,
         vec!["command-provider".to_string()]
@@ -392,8 +417,7 @@ fn explicit_promotion_provider_sources_precede_configured_resolution() {
         &HomeboyConfig::default(),
         Some(PathBuf::from("/fixture/homeboy")),
         Some("environment-provider".to_string()),
-    )
-    .expect("environment command does not resolve configured providers");
+    );
     assert_eq!(
         provider.invocation().expect("invocation").argv,
         vec!["environment-provider".to_string()]
@@ -482,48 +506,48 @@ fn validate_patch_rejects_empty_patch() {
 
 #[test]
 fn promote_reports_no_changes_for_empty_patch_metadata() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch_path = temp.path().join("patch.diff");
-    std::fs::write(&patch_path, "").expect("write empty patch");
-    let source_path = temp.path().join("outcome.json");
-    let outcome = AgentTaskOutcome {
-        schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-        task_id: "task-1".to_string(),
-        status: AgentTaskOutcomeStatus::Succeeded,
-        summary: None,
-        failure_classification: None,
-        artifacts: vec![AgentTaskArtifact {
-            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "patch".to_string(),
-            kind: "patch".to_string(),
-            name: Some("patch.diff".to_string()),
-            label: None,
-            role: None,
-            semantic_key: None,
-            path: Some("patch.diff".to_string()),
-            url: None,
-            mime: Some("text/x-patch".to_string()),
-            size_bytes: Some(0),
-            sha256: Some(
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
-            ),
-            metadata: serde_json::json!({ "role": "patch" }),
-        }],
-        typed_artifacts: Vec::new(),
-        evidence_refs: Vec::new(),
-        diagnostics: Vec::new(),
-        outputs: Value::Null,
-        workflow: None,
-        follow_up: None,
-        metadata: Value::Null,
-    };
-    let source = serde_json::to_string(&outcome).expect("serialize outcome");
-    std::fs::write(&source_path, &source).expect("write source");
+    crate::test_support::with_isolated_home(|_| {
+        let prior_promotion_command = std::env::var_os("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
+        std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch_path = temp.path().join("patch.diff");
+        std::fs::write(&patch_path, "").expect("write empty patch");
+        let source_path = temp.path().join("outcome.json");
+        let outcome = AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: None,
+            failure_classification: None,
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "patch".to_string(),
+                kind: "patch".to_string(),
+                name: Some("patch.diff".to_string()),
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: Some("patch.diff".to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(0),
+                sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                ),
+                metadata: serde_json::json!({ "role": "patch" }),
+            }],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        };
+        let source = serde_json::to_string(&outcome).expect("serialize outcome");
+        std::fs::write(&source_path, &source).expect("write source");
 
-    let mut provider = FakePromotionWorkspaceProvider::default();
-
-    let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        let report = promote(AgentTaskPromotionOptions {
             source,
             source_run_id: Some("run-empty".to_string()),
             source_path: Some(source_path),
@@ -541,15 +565,16 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
             },
             provider_command: None,
             provider_invocation: None,
-        },
-        &mut provider,
-    )
-    .expect("empty patch reports no changes");
+        })
+        .expect("empty patch reports no changes");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
-    assert!(report.changed_files.is_empty());
-    assert!(provider.apply_calls.is_empty());
-    assert!(provider.verify_calls.is_empty());
+        assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+        assert!(report.changed_files.is_empty());
+        match prior_promotion_command {
+            Some(command) => std::env::set_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND", command),
+            None => std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND"),
+        }
+    });
 }
 
 #[test]

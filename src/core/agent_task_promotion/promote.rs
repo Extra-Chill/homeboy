@@ -29,7 +29,7 @@ use super::types::{
 };
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
-    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options)?;
+    let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
     let mut report = promote_with_provider(options, &mut provider)?;
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
