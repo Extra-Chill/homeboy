@@ -863,7 +863,7 @@ mod committed_harvest_tests {
             metadata: serde_json::Value::Null,
         };
 
-        let preflight = prepare_committed_harvest(&request)
+        let preflight = prepare_committed_harvest(&request, None)
             .expect("runner-resident snapshot harvest preflight");
 
         assert!(preflight.base_sha.is_some());
