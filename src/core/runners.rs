@@ -41,10 +41,12 @@ pub use super::runner::{
     mirrored_runner_job_identity, plan_homeboy_binary_refresh, plan_managed_runner_source_sync,
     plan_managed_runner_source_syncs, plan_workspace_pull, preflight_lab_offload_changed_since,
     preflight_remote_argv_path_translation, prepare_git_lab_offload_changed_since,
-    prepare_lab_runner_capability, prune_workspaces, pull_workspace, refresh_homeboy_binary,
-    refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
-    resolve_default_lab_runner, run_reverse_worker, runner_artifact_store_token, runner_dev_sync,
-    runner_exec_failure_error, runner_homeboy_path_for_command, runner_job_cancel,
+    prepare_lab_runner_capability, promote_runner_exec_artifact_dirs,
+    promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
+    prune_workspaces, pull_workspace, refresh_homeboy_binary, refresh_mirrored_daemon_evidence,
+    reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
+    runner_artifact_store_token, runner_dev_sync, runner_exec_failure_error,
+    runner_exec_structured_summary, runner_homeboy_path_for_command, runner_job_cancel,
     runner_job_log_snapshot, status, statuses, sync_workspace, workspace_snapshots,
     HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput,
     HomeboyBinaryRefreshPlan, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome,
@@ -110,7 +112,9 @@ pub mod connection {
 /// Exec entry points and option/output contracts.
 pub mod execution {
     pub use super::super::runner::{
-        exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+        exec, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
+        promote_runner_exec_summaries, promoted_output, runner_exec_failure_error,
+        runner_exec_structured_summary, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
         RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
         RunnerResourceMetrics,
     };

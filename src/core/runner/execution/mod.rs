@@ -49,6 +49,7 @@ pub(crate) fn is_internal_control_env(name: &str) -> bool {
     name == RUNNER_PLACEMENT_RESOLVED_ENV
 }
 
+mod artifact_promotion;
 mod broker;
 mod daemon;
 mod daemon_api;
@@ -103,6 +104,10 @@ pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 
 // Public surface re-exported by the parent `runner` module. These mirror the
 // pre-split `pub` items so external callers keep referencing them unchanged.
+pub use artifact_promotion::{
+    promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
+    promote_runner_exec_summaries, promoted_output, runner_exec_structured_summary,
+};
 pub use daemon_api::daemon_api_post;
 pub use failure::runner_exec_failure_error;
 pub use handoff::runner_job_cancel;
