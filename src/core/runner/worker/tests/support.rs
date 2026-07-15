@@ -99,43 +99,41 @@ pub(super) fn spawn_cancelling_after_claim_broker(
 
 pub(super) fn spawn_cancelling_on_second_snapshot_broker(
     store: JobStore,
-    max_requests: usize,
+    _max_requests: usize,
     seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> (String, MockBrokerHandle) {
     let snapshots = Arc::new(std::sync::Mutex::new(0_u8));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
     let addr = listener.local_addr().expect("addr");
     let broker_url = format!("http://{addr}");
-    let handle = std::thread::spawn(move || {
-        for _ in 0..max_requests {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let request = read_request(&mut stream);
-            if request.path == "/__shutdown" {
-                break;
-            }
-            if let Some(seen_paths) = &seen_paths {
-                seen_paths
-                    .lock()
-                    .expect("record request path")
-                    .push(request.path.clone());
-            }
-            let response = if let Some(job_id) = request.path.strip_prefix("/jobs/") {
-                let job_id = uuid::Uuid::parse_str(job_id).expect("job id");
-                let mut snapshots = snapshots.lock().expect("snapshot count");
-                *snapshots += 1;
-                if *snapshots == 2 {
-                    store.cancel(job_id, "user requested").expect("cancel job");
-                }
-                let job = store.get(job_id).expect("job");
-                serde_json::json!({
-                    "success": true,
-                    "data": { "body": { "job": job } }
-                })
-            } else {
-                handle_request(&store, &request)
-            };
-            write_response(&mut stream, response);
+    let handle = std::thread::spawn(move || loop {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let request = read_request(&mut stream);
+        if request.path == "/__shutdown" {
+            break;
         }
+        if let Some(seen_paths) = &seen_paths {
+            seen_paths
+                .lock()
+                .expect("record request path")
+                .push(request.path.clone());
+        }
+        let response = if let Some(job_id) = request.path.strip_prefix("/jobs/") {
+            let job_id = uuid::Uuid::parse_str(job_id).expect("job id");
+            let mut snapshots = snapshots.lock().expect("snapshot count");
+            *snapshots += 1;
+            if *snapshots == 2 {
+                store.cancel(job_id, "user requested").expect("cancel job");
+            }
+            let job = store.get(job_id).expect("job");
+            serde_json::json!({
+                "success": true,
+                "data": { "body": { "job": job } }
+            })
+        } else {
+            handle_request(&store, &request)
+        };
+        write_response(&mut stream, response);
     });
     (broker_url.clone(), MockBrokerHandle { broker_url, handle })
 }
