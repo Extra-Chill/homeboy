@@ -512,10 +512,12 @@ pub(crate) fn materialize_snapshot_git(
 /// sync. Surfaced as run evidence so write-capable agent-task dispatches can
 /// trace the dirty controller-side worktree back to the synthetic commit that
 /// carries the snapshot into the runner workspace.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SyntheticCheckoutIdentity {
     /// Commit SHA of the synthetic checkout created in the runner workspace.
-    pub(crate) synthetic_commit: Option<String>,
+    pub(crate) synthetic_commit: String,
+    pub(crate) synthetic_ref: String,
+    pub(crate) synthetic_tree: String,
 }
 
 fn initialize_synthetic_git_checkout(
@@ -557,32 +559,40 @@ fn initialize_synthetic_git_checkout(
         }
     }
 
-    // Read the synthetic commit back so the synced workspace can record the
-    // checkout identity as run evidence (acceptance criterion: run evidence
-    // records the source commit, dirty snapshot identity, and synthetic
-    // checkout identity). Best-effort: a read-back failure must not fail the
-    // sync, since the checkout itself already succeeded above. The source
-    // commit is recorded separately via the local worktree git state.
-    let synthetic_commit = synthetic_checkout_head(runner, remote_path);
+    // The readback is the provenance contract for later harvest verification.
+    // A sync without it must fail rather than return an unverifiable workspace.
+    let synthetic_commit = synthetic_checkout_value(runner, remote_path, "rev-parse HEAD")?;
+    let synthetic_ref = synthetic_checkout_value(runner, remote_path, "symbolic-ref --quiet HEAD")?;
+    let synthetic_tree = synthetic_checkout_value(runner, remote_path, "rev-parse HEAD^{tree}")?;
 
-    Ok(SyntheticCheckoutIdentity { synthetic_commit })
+    Ok(SyntheticCheckoutIdentity {
+        synthetic_commit,
+        synthetic_ref,
+        synthetic_tree,
+    })
 }
 
-/// Best-effort read of the synthetic checkout's HEAD commit SHA from the
-/// materialized runner workspace. Returns `None` when the runner is remote and
-/// unreachable, or the read otherwise fails — provenance is advisory evidence,
-/// not a correctness gate.
-fn synthetic_checkout_head(runner: &Runner, remote_path: &str) -> Option<String> {
-    match runner.kind {
-        RunnerKind::Local => git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok(),
+pub(super) fn synthetic_checkout_value(
+    runner: &Runner,
+    remote_path: &str,
+    command: &str,
+) -> Result<String> {
+    let value = match runner.kind {
+        RunnerKind::Local => run_shell_capture(&format!(
+            "git -C {} {command}",
+            shell::quote_arg(remote_path)
+        )),
         RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner).ok()?;
+            let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                git_output(Path::new(remote_path), &["rev-parse", "HEAD"]).ok()
+                run_shell_capture(&format!(
+                    "git -C {} {command}",
+                    shell::quote_arg(remote_path)
+                ))
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let remote_command = format!(
-                    "git -C {remote_path} rev-parse HEAD",
+                    "git -C {remote_path} {command}",
                     remote_path = shell::quote_arg(remote_path),
                 );
                 let ssh_command = format!(
@@ -594,7 +604,17 @@ fn synthetic_checkout_head(runner: &Runner, remote_path: &str) -> Option<String>
                 run_shell_capture(&ssh_command)
             }
         }
-    }
+    };
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Error::internal_io(
+                format!(
+                "could not read `{command}` from synthetic snapshot-git checkout at `{remote_path}`"
+            ),
+                Some("capture synthetic snapshot-git checkout provenance".to_string()),
+            )
+        })
 }
 
 fn synthetic_git_checkout_command(
@@ -617,7 +637,7 @@ fn synthetic_git_checkout_command(
         .unwrap_or_default();
 
     format!(
-        "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A && git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
+        "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
         message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
         note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}")),
     )

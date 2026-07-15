@@ -467,6 +467,8 @@ mod tests {
                     source_ref: None,
                     source_dirty: None,
                     synthetic_checkout_commit: None,
+                    synthetic_checkout_ref: None,
+                    synthetic_checkout_tree: None,
                 },
                 workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                     runner_id: "homeboy-lab".to_string(),
@@ -576,6 +578,8 @@ mod tests {
                         source_ref: None,
                         source_dirty: None,
                         synthetic_checkout_commit: None,
+                        synthetic_checkout_ref: None,
+                        synthetic_checkout_tree: None,
                     },
                     workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                         runner_id: "homeboy-lab".to_string(),

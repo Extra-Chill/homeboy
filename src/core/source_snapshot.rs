@@ -90,6 +90,12 @@ pub struct SourceSnapshot {
     pub sync_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_checkout_tree: Option<String>,
     pub snapshot_hash: String,
     pub synced_at: String,
     pub sync_excludes: Vec<String>,
@@ -137,6 +143,9 @@ impl SourceSnapshot {
             dirty,
             sync_mode: sync_mode.to_string(),
             workspace_snapshot_identity: None,
+            synthetic_checkout_commit: None,
+            synthetic_checkout_ref: None,
+            synthetic_checkout_tree: None,
             snapshot_hash,
             synced_at: chrono::Utc::now().to_rfc3339(),
             sync_excludes: policy.sync_excludes.clone(),
@@ -179,6 +188,9 @@ impl SourceSnapshot {
             dirty: false,
             sync_mode: PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.to_string(),
             workspace_snapshot_identity: None,
+            synthetic_checkout_commit: None,
+            synthetic_checkout_ref: None,
+            synthetic_checkout_tree: None,
             snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
             synced_at: chrono::Utc::now().to_rfc3339(),
             sync_excludes: policy.sync_excludes.clone(),

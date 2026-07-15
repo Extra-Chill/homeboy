@@ -311,6 +311,12 @@ fn prepare_lab_offload_workspace_stage_inner(
             .retain(|exclude| exclude != ".git" && exclude != ".git/**");
     }
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+    source_snapshot.synthetic_checkout_commit =
+        synced.current_workspace.synthetic_checkout_commit.clone();
+    source_snapshot.synthetic_checkout_ref =
+        synced.current_workspace.synthetic_checkout_ref.clone();
+    source_snapshot.synthetic_checkout_tree =
+        synced.current_workspace.synthetic_checkout_tree.clone();
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     if contract.routing_policy.requires_extension_parity {
         plan = with_step(
@@ -2441,6 +2447,8 @@ mod tests {
                 source_ref: None,
                 source_dirty: None,
                 synthetic_checkout_commit: None,
+                synthetic_checkout_ref: None,
+                synthetic_checkout_tree: None,
             },
             workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                 runner_id: "lab".to_string(),
