@@ -14,7 +14,7 @@ use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
 use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components, plan_components};
-use super::release_download::{ReleaseArtifact, ReleaseArtifactStore};
+use super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 use super::version_overrides::fetch_remote_versions_for_project;
 
@@ -112,7 +112,7 @@ pub(super) fn deploy_components(
     // Release assets are immutable remote inputs. Resolve and verify them before
     // touching any configured checkout, then reuse the same run-scoped bytes for
     // every target/project that requests this component.
-    let mut resolved_release_artifacts: HashMap<String, ReleaseArtifact> = HashMap::new();
+    let mut resolved_release_artifacts: HashMap<String, ReleaseArtifactLease> = HashMap::new();
     for component in &components {
         if let ReleaseArtifactPlan::Reuse { tag, .. } =
             release_artifact_plan(component, config, false, false)
@@ -419,7 +419,7 @@ fn prepare_component_deployments(
     base_path: &str,
     local_versions: &HashMap<String, String>,
     remote_versions: &HashMap<String, String>,
-    release_artifacts: &HashMap<String, ReleaseArtifact>,
+    release_artifacts: &HashMap<String, ReleaseArtifactLease>,
 ) -> std::result::Result<Vec<PreparedComponentDeploy>, Vec<ComponentDeployResult>> {
     let mut prepared_deployments = Vec::new();
     let mut failures = Vec::new();

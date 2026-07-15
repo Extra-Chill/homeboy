@@ -78,7 +78,7 @@ pub(crate) fn resolve_planned_release_artifact(
     component: &Component,
     tag: &str,
     store: &mut release_download::ReleaseArtifactStore,
-) -> std::result::Result<release_download::ReleaseArtifact, String> {
+) -> std::result::Result<release_download::ReleaseArtifactLease, String> {
     let remote_url = component
         .remote_url
         .as_deref()

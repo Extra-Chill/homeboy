@@ -9,7 +9,7 @@ use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
 use super::super::provenance::capture_build_provenance;
-use super::super::release_download::ReleaseArtifact;
+use super::super::release_download::ReleaseArtifactLease;
 use super::super::types::{
     BuildProvenance, BuildSource, ComponentDeployResult, DeployArtifactSource, DeployConfig,
 };
@@ -39,7 +39,7 @@ pub(crate) fn prepare_component_deploy(
     project: &Project,
     local_version: Option<String>,
     remote_version: Option<String>,
-    release_artifact: Option<ReleaseArtifact>,
+    release_artifact: Option<ReleaseArtifactLease>,
 ) -> std::result::Result<PreparedComponentDeploy, ComponentDeployResult> {
     let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
     let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
@@ -78,7 +78,7 @@ pub(crate) fn prepare_component_deploy(
     } else {
         match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
                 ReleaseArtifactPlan::Reuse { tag, .. } => match release_artifact {
-                    Some(artifact) => Some(artifact.path),
+                    Some(artifact) => Some(artifact.path.clone()),
                     None => return Err(failed_component_deploy_result(
                         component, base_path, local_version, remote_version, None,
                         format!("artifact source release_asset failed for '{}' tag {tag}: verified run-scoped artifact is unavailable. Refusing to fall back to local_build", component.id),
