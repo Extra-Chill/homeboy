@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -6,8 +7,12 @@ use sha2::{Digest, Sha256};
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 
-use super::release_download::ReleaseArtifactLease;
-use super::{DeployConfig, PreparedDeployArtifact};
+use super::execution::{
+    release_artifact_plan, resolve_planned_release_artifact, ReleaseArtifactPlan,
+};
+use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
+use super::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
+use super::{sha256_file, DeployConfig, PreparedDeployArtifact};
 
 /// Immutable, target-independent inputs used to prepare a component payload.
 ///
@@ -31,6 +36,7 @@ pub(crate) struct ComponentPayloadPreparationSource {
     pub scopes: Option<crate::core::component::ScopeConfig>,
     pub artifact_inputs: Vec<crate::core::component::ArtifactInput>,
     pub scripts: Option<crate::core::component::ComponentScriptsConfig>,
+    pub version_targets: Option<Vec<crate::core::component::VersionTarget>>,
     pub env: std::collections::BTreeMap<String, String>,
     pub remote_url: Option<String>,
     pub github: crate::core::component::GithubConfig,
@@ -50,6 +56,7 @@ impl ComponentPayloadPreparationRequest {
                 scopes: component.scopes.clone(),
                 artifact_inputs: component.artifact_inputs.clone(),
                 scripts: component.scripts.clone(),
+                version_targets: component.version_targets.clone(),
                 env: component.env.clone(),
                 remote_url: component.remote_url.clone(),
                 github: component.github.clone(),
@@ -80,6 +87,26 @@ impl ComponentPayloadPreparationRequest {
         component.insert("github".to_string(), redact_github(github));
         component.insert("remote_url".to_string(), redact_remote_url(remote_url));
         canonical_json(evidence)
+    }
+
+    fn component(&self) -> Component {
+        Component {
+            id: self.component.id.clone(),
+            local_path: self.component.local_path.clone(),
+            build_artifact: self.component.build_artifact.clone(),
+            build_command: self.component.build_command.clone(),
+            extensions: self.component.extensions.clone(),
+            capability_extensions: self.component.capability_extensions.clone(),
+            scopes: self.component.scopes.clone(),
+            artifact_inputs: self.component.artifact_inputs.clone(),
+            scripts: self.component.scripts.clone(),
+            version_targets: self.component.version_targets.clone(),
+            env: self.component.env.clone(),
+            remote_url: self.component.remote_url.clone(),
+            github: self.component.github.clone(),
+            release: self.component.release.clone(),
+            ..Component::default()
+        }
     }
 
     #[allow(dead_code)]
@@ -213,16 +240,95 @@ impl From<&DeployConfig> for PreparationConfig {
     }
 }
 
-/// Request-indexed payload ownership. Inserting an equal request retains the
-/// original resource lease until the collection itself is dropped.
+/// Immutable local payload prepared without project or target inputs.
+///
+/// Orchestration invokes this after resolving project and SSH context, but before
+/// any target mutation such as transfer, install, hooks, or smoke checks.
+pub(crate) struct PreparedComponentPayload {
+    pub artifact: PreparedDeployArtifact,
+    pub source_commit: String,
+    pub exact_ref: Option<ExactRefIdentity>,
+    _release_artifact: Option<ReleaseArtifactLease>,
+    _exact_ref_checkout: Option<ExactRefCheckout>,
+    payload_artifact: PreparedArtifactCleanup,
+}
+
+/// Owns only the temporary copy made by preparation. The configured component
+/// artifact is caller-owned and must survive both successful and failed deploys.
+struct PreparedArtifactCleanup(Option<PathBuf>);
+
+impl Drop for PreparedArtifactCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// Cleans only source output that did not exist when this preparation began.
+/// It remains armed through every post-build validation and copy operation.
+struct GeneratedSourceArtifactCleanup {
+    artifact: PathBuf,
+    artifact_existed: bool,
+    artifact_parent: Option<PathBuf>,
+    artifact_parent_existed: bool,
+    build_dir: PathBuf,
+    build_dir_existed: bool,
+    armed: bool,
+}
+
+impl GeneratedSourceArtifactCleanup {
+    fn new(component: &Component) -> Result<Self> {
+        let artifact = artifact_path(component)?;
+        let build_dir = Path::new(&component.local_path)
+            .join(crate::core::defaults::deploy_generated_build_dir());
+        let artifact_parent = artifact.parent().map(Path::to_path_buf);
+        Ok(Self {
+            artifact_existed: artifact.exists(),
+            artifact_parent_existed: artifact_parent.as_ref().is_some_and(|path| path.exists()),
+            artifact_parent,
+            build_dir_existed: build_dir.exists(),
+            artifact,
+            build_dir,
+            armed: true,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GeneratedSourceArtifactCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if !self.artifact_existed {
+            let _ = std::fs::remove_file(&self.artifact);
+            if !self.artifact_parent_existed {
+                if let Some(parent) = self.artifact_parent.as_ref() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+        if !self.build_dir_existed {
+            let _ = std::fs::remove_dir_all(&self.build_dir);
+        }
+    }
+}
+
+/// Request-indexed payload ownership. Equal requests share one prepared payload
+/// and its RAII resources until this collection is dropped.
 #[derive(Default)]
 pub(crate) struct PreparedPayloadCollection {
     entries: HashMap<String, PreparedPayloadEntry>,
 }
 
 struct PreparedPayloadEntry {
-    _request: ComponentPayloadPreparationRequest,
-    _release_artifact: Option<ReleaseArtifactLease>,
+    request: ComponentPayloadPreparationRequest,
+    payload: Option<PreparedComponentPayload>,
+    release_artifact: Option<ReleaseArtifactLease>,
 }
 
 impl PreparedPayloadCollection {
@@ -235,16 +341,17 @@ impl PreparedPayloadCollection {
         match self.entries.entry(identity) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(PreparedPayloadEntry {
-                    _request: request,
-                    _release_artifact: release_artifact,
+                    request,
+                    payload: None,
+                    release_artifact,
                 });
                 Ok(())
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let existing = entry.get_mut();
-                match (&existing._release_artifact, release_artifact) {
+                match (&existing.release_artifact, release_artifact) {
                     (None, Some(release_artifact)) => {
-                        existing._release_artifact = Some(release_artifact);
+                        existing.release_artifact = Some(release_artifact);
                         Ok(())
                     }
                     (Some(existing), Some(candidate)) if **existing != *candidate => {
@@ -261,9 +368,278 @@ impl PreparedPayloadCollection {
         }
     }
 
+    /// Prepare a component once and return its immutable artifact identity. This
+    /// boundary intentionally has no project or remote target inputs.
+    pub fn prepare(
+        &mut self,
+        request: ComponentPayloadPreparationRequest,
+        release_artifacts: &mut ReleaseArtifactStore,
+    ) -> Result<&PreparedComponentPayload> {
+        let identity = request.identity();
+        if let Some(existing) = self.entries.get_mut(&identity) {
+            if existing.payload.is_none() {
+                let release_artifact = existing.release_artifact.take();
+                existing.payload = Some(prepare_payload(
+                    &existing.request,
+                    release_artifacts,
+                    release_artifact,
+                )?);
+            }
+        } else {
+            let payload = prepare_payload(&request, release_artifacts, None)?;
+            self.entries.insert(
+                identity.clone(),
+                PreparedPayloadEntry {
+                    request,
+                    payload: Some(payload),
+                    release_artifact: None,
+                },
+            );
+        }
+        Ok(self.entries[&identity]
+            .payload
+            .as_ref()
+            .expect("prepared payload is populated exactly once"))
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+fn prepare_payload(
+    request: &ComponentPayloadPreparationRequest,
+    release_artifacts: &mut ReleaseArtifactStore,
+    retained_release_artifact: Option<ReleaseArtifactLease>,
+) -> Result<PreparedComponentPayload> {
+    if let Some(artifact) = request.config.prepared_artifact.clone() {
+        artifact.validate(
+            &request.component.id,
+            request.config.expected_version.as_deref(),
+        )?;
+        return Ok(PreparedComponentPayload {
+            source_commit: artifact.source_commit.clone(),
+            artifact,
+            exact_ref: None,
+            _release_artifact: None,
+            _exact_ref_checkout: None,
+            payload_artifact: PreparedArtifactCleanup(None),
+        });
+    }
+
+    let component = request.component();
+    let checkout = request
+        .config
+        .requested_ref
+        .as_deref()
+        .map(|reference| ExactRefCheckout::materialize(&component, reference))
+        .transpose()?;
+    if let Some(checkout) = checkout.as_ref() {
+        checkout.verify()?;
+        checkout.hydrate_dependencies(request.config.skip_deps_hydration)?;
+    }
+    let component = checkout
+        .as_ref()
+        .map(|checkout| checkout.component.clone())
+        .unwrap_or(component);
+    let exact_ref = checkout.as_ref().map(|checkout| checkout.identity.clone());
+
+    let release_artifact = match release_artifact_plan(
+        &component,
+        &DeployConfig::from_preparation(request),
+        false,
+        false,
+    ) {
+        ReleaseArtifactPlan::Reuse { tag, .. } => Some(match retained_release_artifact {
+            Some(artifact) => artifact,
+            None => resolve_planned_release_artifact(&component, &tag, release_artifacts).map_err(
+                |message| {
+                    Error::validation_invalid_argument("releaseArtifact", message, None, None)
+                },
+            )?,
+        }),
+        ReleaseArtifactPlan::LocalBuild { .. } => None,
+    };
+    let mut generated_source_artifact = None;
+    if release_artifact.is_none() && !request.config.skip_build {
+        let cleanup = GeneratedSourceArtifactCleanup::new(&component)?;
+        let (build_exit_code, build_error) = crate::core::build::build_component(&component);
+        if let Some(message) = build_error {
+            return Err(Error::validation_invalid_argument(
+                "build",
+                format!(
+                    "Build failed (exit code {}): {message}",
+                    build_exit_code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
+                ),
+                None,
+                None,
+            ));
+        }
+        generated_source_artifact = Some(cleanup);
+    }
+    let path = release_artifact
+        .as_ref()
+        .map(|artifact| artifact.path.clone())
+        .unwrap_or(artifact_path(&component)?);
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        Error::internal_io(
+            format!("Prepared artifact is unavailable: {error}"),
+            Some(path.display().to_string()),
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(Error::validation_invalid_argument(
+            "artifact",
+            "Prepared artifact must be a non-empty file",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    let digest = sha256_file(&path)?;
+    if let Some(release_artifact) = release_artifact.as_ref() {
+        if metadata.len() != release_artifact.size || digest != release_artifact.sha256 {
+            return Err(Error::validation_invalid_argument(
+                "releaseArtifact",
+                "Retained release artifact does not match its verified size or SHA-256",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+    }
+    let version =
+        crate::core::release::version::get_component_version(&component).unwrap_or_default();
+    if request
+        .config
+        .expected_version
+        .as_deref()
+        .is_some_and(|expected| expected != version)
+    {
+        return Err(Error::validation_invalid_argument(
+            "version",
+            "Prepared artifact source version does not match expected version",
+            None,
+            None,
+        ));
+    }
+    let source_commit = exact_ref
+        .as_ref()
+        .map(|identity| identity.resolved_sha.clone())
+        .or_else(|| {
+            crate::core::engine::command::run_in_optional(
+                &component.local_path,
+                "git",
+                &["rev-parse", "HEAD"],
+            )
+        })
+        .unwrap_or_default();
+    let (durable_path, payload_artifact) = if release_artifact.is_some() {
+        (path.clone(), PreparedArtifactCleanup(None))
+    } else {
+        copy_prepared_artifact(&path)?
+    };
+    let artifact = PreparedDeployArtifact {
+        component_id: component.id.clone(),
+        path: durable_path.display().to_string(),
+        durable_path: durable_path.display().to_string(),
+        size_bytes: metadata.len(),
+        sha256: digest,
+        version: version.clone(),
+        tag: exact_ref
+            .as_ref()
+            .map(|identity| identity.requested_ref.clone())
+            .unwrap_or_else(|| format!("v{version}")),
+        source_commit: source_commit.clone(),
+    };
+    artifact.validate(&component.id, request.config.expected_version.as_deref())?;
+    if let Some(cleanup) = generated_source_artifact.as_mut() {
+        cleanup.disarm();
+    }
+    Ok(PreparedComponentPayload {
+        artifact,
+        source_commit,
+        exact_ref,
+        _release_artifact: release_artifact,
+        _exact_ref_checkout: checkout,
+        payload_artifact,
+    })
+}
+
+fn copy_prepared_artifact(source: &Path) -> Result<(PathBuf, PreparedArtifactCleanup)> {
+    let directory = std::env::temp_dir()
+        .join("homeboy-deploy-payload")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to create prepared artifact directory: {error}"),
+            Some(directory.display().to_string()),
+        )
+    })?;
+    let cleanup = PreparedArtifactCleanup(Some(directory.clone()));
+    let filename = source.file_name().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact",
+            "Prepared artifact path has no file name",
+            Some(source.display().to_string()),
+            None,
+        )
+    })?;
+    let destination = directory.join(filename);
+    std::fs::copy(source, &destination).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to copy prepared artifact: {error}"),
+            Some(source.display().to_string()),
+        )
+    })?;
+    Ok((destination, cleanup))
+}
+
+fn artifact_path(component: &Component) -> Result<PathBuf> {
+    component
+        .build_artifact
+        .as_ref()
+        .map(|artifact| {
+            let path = Path::new(artifact);
+            Ok(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                Path::new(&component.local_path).join(path)
+            })
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "build_artifact",
+                "Component has no build artifact to prepare",
+                None,
+                None,
+            )
+        })
+}
+
+impl DeployConfig {
+    fn from_preparation(request: &ComponentPayloadPreparationRequest) -> Self {
+        Self {
+            component_ids: vec![request.component.id.clone()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: request.config.skip_build,
+            keep_deps: request.config.keep_deps,
+            skip_deps_hydration: request.config.skip_deps_hydration,
+            expected_version: request.config.expected_version.clone(),
+            no_pull: request.config.no_pull,
+            allow_stale_source: request.config.allow_stale_source,
+            allow_downgrade: false,
+            head: request.config.head,
+            requested_ref: request.config.requested_ref.clone(),
+            tagged: request.config.tagged,
+            prepared_artifact: None,
+            resume_run_id: None,
+        }
     }
 }
 
@@ -642,5 +1018,269 @@ mod tests {
         )
         .expect("conflicting lease");
         assert!(collection.insert(request, Some(conflicting)).is_err());
+    }
+
+    #[test]
+    fn equal_inserted_request_builds_once_and_cleans_only_its_payload_copy() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_artifact = temp.path().join("build/fixture.zip");
+        let build_count = temp.path().join("build-count");
+        let mut component = component();
+        component.local_path = temp.path().display().to_string();
+        component.build_artifact = Some("build/fixture.zip".to_string());
+        component.scripts = Some(crate::core::component::ComponentScriptsConfig {
+            build: vec![format!(
+                "mkdir -p build && printf payload > build/fixture.zip && printf build >> {}",
+                build_count.display()
+            )],
+            ..Default::default()
+        });
+        let request = ComponentPayloadPreparationRequest::new(&component, &config());
+        let mut collection = PreparedPayloadCollection::default();
+        collection
+            .insert(request.clone(), None)
+            .expect("insert request");
+
+        let payload_path = collection
+            .prepare(request.clone(), &mut ReleaseArtifactStore::default())
+            .expect("prepare inserted request")
+            .artifact
+            .effective_path()
+            .to_string();
+        collection
+            .prepare(request, &mut ReleaseArtifactStore::default())
+            .expect("reuse prepared payload");
+
+        assert_eq!(
+            std::fs::read_to_string(&build_count).expect("build count"),
+            "build"
+        );
+        assert!(
+            source_artifact.exists(),
+            "source artifact remains caller-owned"
+        );
+        assert_ne!(Path::new(&payload_path), source_artifact);
+        assert!(
+            Path::new(&payload_path).exists(),
+            "payload copy is retained"
+        );
+
+        drop(collection);
+        assert!(
+            source_artifact.exists(),
+            "dropping payload never removes source artifact"
+        );
+        assert!(
+            !Path::new(&payload_path).exists(),
+            "dropping payload removes its owned copy"
+        );
+    }
+
+    #[test]
+    fn inserted_release_lease_is_consumed_by_equal_preparation_request() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_path = temp.path().join("fixture.zip");
+        std::fs::write(&artifact_path, "payload").expect("artifact");
+        std::fs::write(temp.path().join("package.json"), r#"{"version":"1.0.0"}"#)
+            .expect("package manifest");
+        let lease =
+            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
+                path: artifact_path.clone(),
+                tag: "v1.0.0".to_string(),
+                commit: Some("0123456789abcdef".to_string()),
+                url: "https://example.test/fixture.zip".to_string(),
+                name: "fixture.zip".to_string(),
+                size: 7,
+                sha256: sha256_file(&artifact_path).expect("sha"),
+            })
+            .expect("lease");
+        let observer = lease.clone();
+        let mut component = component();
+        component.local_path = temp.path().display().to_string();
+        component.build_artifact = Some("fixture.zip".to_string());
+        component.remote_url = Some("https://github.com/example/fixture".to_string());
+        component.version_targets = Some(vec![crate::core::component::VersionTarget {
+            file: "package.json".to_string(),
+            pattern: Some(r#""version"\s*:\s*"([^"]+)""#.to_string()),
+            artifact_path: None,
+        }]);
+        let mut deploy_config = config();
+        deploy_config.expected_version = Some("1.0.0".to_string());
+        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
+        let mut collection = PreparedPayloadCollection::default();
+        collection
+            .insert(request.clone(), Some(lease))
+            .expect("insert lease");
+
+        let payload = collection
+            .prepare(request, &mut ReleaseArtifactStore::default())
+            .expect("prepare retained lease");
+        assert_eq!(Path::new(payload.artifact.effective_path()), artifact_path);
+        assert_eq!(observer.test_strong_count(), 2, "payload retains the lease");
+        drop(collection);
+        assert_eq!(
+            observer.test_strong_count(),
+            1,
+            "payload releases its lease"
+        );
+    }
+
+    #[test]
+    fn retained_release_mismatch_creates_no_payload_or_local_build_effect() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_path = temp.path().join("fixture.zip");
+        let build_counter = temp.path().join("build-count");
+        std::fs::write(&artifact_path, "payload").expect("artifact");
+        let lease =
+            ReleaseArtifactLease::test_new(super::super::release_download::ReleaseArtifact {
+                path: artifact_path,
+                tag: "v1.0.0".to_string(),
+                commit: None,
+                url: "https://example.test/fixture.zip".to_string(),
+                name: "fixture.zip".to_string(),
+                size: 7,
+                sha256: "wrong".to_string(),
+            })
+            .expect("lease");
+        let mut component = component();
+        component.local_path = temp.path().display().to_string();
+        component.build_artifact = Some("fixture.zip".to_string());
+        component.remote_url = Some("https://github.com/example/fixture".to_string());
+        component.scripts = Some(crate::core::component::ComponentScriptsConfig {
+            build: vec![format!("printf build > {}", build_counter.display())],
+            ..Default::default()
+        });
+        let mut deploy_config = config();
+        deploy_config.expected_version = Some("1.0.0".to_string());
+        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
+        let mut collection = PreparedPayloadCollection::default();
+        collection
+            .insert(request.clone(), Some(lease))
+            .expect("insert lease");
+
+        let error = match collection.prepare(request, &mut ReleaseArtifactStore::default()) {
+            Ok(_) => panic!("mismatched retained release must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("does not match"));
+        assert_eq!(collection.len(), 1, "request is retained without a payload");
+        assert!(
+            !build_counter.exists(),
+            "release mismatch must not build or target"
+        );
+    }
+
+    #[test]
+    fn failed_post_build_validation_removes_only_new_source_output() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("build/fixture.zip");
+        let mut component = component();
+        component.local_path = temp.path().display().to_string();
+        component.build_artifact = Some("build/fixture.zip".to_string());
+        component.scripts = Some(crate::core::component::ComponentScriptsConfig {
+            build: vec!["mkdir -p build && printf payload > build/fixture.zip".to_string()],
+            ..Default::default()
+        });
+        let mut deploy_config = config();
+        deploy_config.expected_version = Some("9.9.9".to_string());
+        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
+
+        let error = match PreparedPayloadCollection::default()
+            .prepare(request, &mut ReleaseArtifactStore::default())
+        {
+            Ok(_) => panic!("version validation must fail after build"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("source version"));
+        assert!(
+            !artifact.exists(),
+            "new source artifact is cleaned after validation failure"
+        );
+    }
+
+    #[test]
+    fn exact_ref_preparation_builds_detached_bytes_and_cleans_owned_resources() {
+        fn git(path: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+            String::from_utf8(output.stdout)
+                .expect("git output")
+                .trim()
+                .to_string()
+        }
+
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(repo.path().join("payload.txt"), "accepted\n").expect("accepted payload");
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-q", "-m", "accepted"]);
+        git(repo.path(), &["branch", "accepted"]);
+        let accepted_sha = git(repo.path(), &["rev-parse", "accepted"]);
+        std::fs::write(repo.path().join("payload.txt"), "configured\n")
+            .expect("configured payload");
+        git(repo.path(), &["commit", "-am", "configured", "-q"]);
+        let configured_head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let mut component = component();
+        component.local_path = repo.path().display().to_string();
+        component.build_artifact = Some("build/fixture.zip".to_string());
+        component.scripts = Some(crate::core::component::ComponentScriptsConfig {
+            build: vec![
+                "mkdir -p build && git show HEAD:payload.txt > build/fixture.zip".to_string(),
+            ],
+            ..Default::default()
+        });
+        let mut deploy_config = config();
+        deploy_config.requested_ref = Some("accepted".to_string());
+        deploy_config.skip_deps_hydration = true;
+        let request = ComponentPayloadPreparationRequest::new(&component, &deploy_config);
+        let mut collection = PreparedPayloadCollection::default();
+        let payload_path = collection
+            .prepare(request, &mut ReleaseArtifactStore::default())
+            .expect("prepare exact ref")
+            .artifact
+            .effective_path()
+            .to_string();
+
+        assert_eq!(
+            std::fs::read_to_string(&payload_path).expect("payload bytes"),
+            "accepted\n"
+        );
+        assert_eq!(
+            collection
+                .entries
+                .values()
+                .next()
+                .unwrap()
+                .payload
+                .as_ref()
+                .unwrap()
+                .source_commit,
+            accepted_sha
+        );
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), configured_head);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("payload.txt")).expect("configured content"),
+            "configured\n"
+        );
+        drop(collection);
+        assert!(
+            !Path::new(&payload_path).exists(),
+            "payload copy is cleaned"
+        );
+        assert_eq!(
+            git(repo.path(), &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
     }
 }
