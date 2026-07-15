@@ -28,26 +28,13 @@ use crate::core::{Error, Result};
 
 pub const DISPATCH_RESULT_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
 
-/// Controller-compiled provider execution policy carried across a Lab handoff.
-/// Runner-local configuration may satisfy this policy's capabilities and secrets,
-/// but must not select a different provider policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResolvedAgentTaskProviderPolicy {
-    pub backend: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selector: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rotation: Option<AgentTaskProviderRotationPolicy>,
-    /// Whether the resolved rotation's first entry is the initial provider
-    /// attempt, rather than a fallback after the request's executor.
-    #[serde(default)]
-    pub rotation_starts_with_first_entry: bool,
-    pub retry: AgentTaskRetryPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness_timeout_ms: Option<u64>,
-}
+// `ResolvedAgentTaskProviderPolicy` is a plain data struct that lives in the
+// leaf `agent_task_schedule` module (beside its `AgentTaskProviderRotationPolicy`
+// / `AgentTaskRetryPolicy` fields) so the lab-contract type layer can depend on
+// it without pulling in this service's dispatch machinery. Re-exported here to
+// keep existing `agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy`
+// call sites stable.
+pub use crate::core::agent_task_schedule::ResolvedAgentTaskProviderPolicy;
 
 /// Where the effective agent-task backend selection came from. Surfaced before
 /// dispatch so operators can see whether the backend was an explicit override or
