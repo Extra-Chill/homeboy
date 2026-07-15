@@ -977,7 +977,7 @@ fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> 
     })
 }
 
-fn release_scratch(
+pub(super) fn release_scratch(
     allocation: &crate::core::controller_scratch::ControllerScratchAllocation,
     reason: &str,
     outcome: &AgentTaskOutcome,

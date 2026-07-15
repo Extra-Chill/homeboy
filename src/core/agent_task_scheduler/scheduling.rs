@@ -754,6 +754,11 @@ impl AgentTaskScheduleSupport {
                         );
                         super::finalize_candidate_artifacts(&mut recovered, &task);
                     }
+                    super::engine::release_scratch(
+                        &task.scratch,
+                        "scheduler_timeout_completion",
+                        &recovered,
+                    );
                     let cleanup = harvest.and_then(|_| {
                         task._attempt_workspace
                             .as_ref()

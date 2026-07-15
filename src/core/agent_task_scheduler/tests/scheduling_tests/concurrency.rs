@@ -467,21 +467,7 @@ pub(super) mod concurrency_tests {
             .nth(6)
             .expect("controller scratch root")
             .join("resources.json");
-        let scratch: Value = serde_json::from_str::<Value>(
-            &fs::read_to_string(scratch_index).expect("scratch index"),
-        )
-        .expect("scratch index JSON")["resources"]
-            .as_array()
-            .expect("scratch resources")
-            .iter()
-            .find(|resource| resource["path"] == scratch_root.display().to_string())
-            .cloned()
-            .expect("released scratch resource");
         assert!(scratch_active_while_running.load(Ordering::SeqCst));
-        assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
-        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
-            .as_array()
-            .is_some_and(|artifacts| !artifacts.is_empty()));
         let cleanup_action = aggregate
             .outcomes
             .iter()
@@ -518,6 +504,20 @@ pub(super) mod concurrency_tests {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
+        let scratch: Value = serde_json::from_str::<Value>(
+            &fs::read_to_string(scratch_index).expect("scratch index"),
+        )
+        .expect("scratch index JSON")["resources"]
+            .as_array()
+            .expect("scratch resources")
+            .iter()
+            .find(|resource| resource["path"] == scratch_root.display().to_string())
+            .cloned()
+            .expect("released scratch resource");
+        assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
+        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
+            .as_array()
+            .is_some_and(|artifacts| !artifacts.is_empty()));
         let events = events.lock().expect("events");
 
         assert!(events.iter().any(|event| event == "task-3-started"));
