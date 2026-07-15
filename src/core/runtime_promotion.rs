@@ -2,9 +2,11 @@
 //! binaries. The directory-create guard follows the established rig lease lock
 //! convention, while the JSON record makes a blocked writer actionable.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::core::build_identity;
@@ -15,6 +17,7 @@ const LEASE_DIR: &str = "promotion.lock";
 const LEASE_FILE: &str = "lease.json";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
+const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromotionLeaseRecord {
@@ -24,6 +27,18 @@ pub struct RuntimePromotionLeaseRecord {
     pub target: String,
     pub generation: String,
     pub started_at: String,
+    /// A random capability is required when the transaction crosses a process
+    /// boundary. The promotion directory is already local-user state.
+    #[serde(default)]
+    pub capability: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubprocessLeaseCapability {
+    owner_pid: u32,
+    target: String,
+    generation: String,
+    capability: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +55,9 @@ pub struct RuntimePromotionLease {
     path: PathBuf,
     primary: bool,
     generation: String,
+    target: String,
+    owner_pid: u32,
+    capability: String,
 }
 
 /// Pins the generation required by a cook until its lifecycle finalizes.
@@ -57,7 +75,16 @@ pub struct RuntimePromotionTakeover {
 impl Drop for RuntimePromotionLease {
     fn drop(&mut self) {
         if self.primary {
-            let _ = fs::remove_dir_all(&self.path);
+            // Never remove a lease that an explicit takeover or another owner
+            // has replaced since this guard was acquired.
+            if read_record(&self.path).is_ok_and(|record| {
+                record.pid == self.owner_pid
+                    && record.target == self.target
+                    && record.generation == self.generation
+                    && record.capability == self.capability
+            }) {
+                let _ = fs::remove_dir_all(&self.path);
+            }
         }
     }
 }
@@ -68,8 +95,9 @@ impl Drop for RuntimeGenerationPinGuard {
     }
 }
 
-/// Acquire the global writer lease. A nested call from the same process is
-/// allowed so a refresh can reconnect its daemon without opening a race.
+/// Acquire the global writer lease. A nested call must retain the same target
+/// and generation. A child process must present the capability explicitly
+/// attached by [`RuntimePromotionLease::authorize_subprocess`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
     let target = target.into();
     let root = paths::runtime_promotion_dir()?;
@@ -77,6 +105,7 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
     let path = root.join(LEASE_DIR);
     let pid = std::process::id();
     let generation = current_generation();
+    let subprocess_capability = subprocess_capability_from_env();
 
     if let Some(pin) = active_pin(&root)? {
         return Err(Error::validation_invalid_argument(
@@ -92,30 +121,53 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
         ));
     }
 
-    match fs::create_dir(&path) {
-        Ok(()) => write_record(
-            &path,
-            &RuntimePromotionLeaseRecord {
-                schema: "homeboy/runtime-promotion-lease/v1".to_string(),
-                pid,
-                operation: operation.to_string(),
+    match create_lease_dir(&path) {
+        Ok(()) => {
+            let capability = uuid::Uuid::new_v4().to_string();
+            write_record(
+                &path,
+                &RuntimePromotionLeaseRecord {
+                    schema: "homeboy/runtime-promotion-lease/v2".to_string(),
+                    pid,
+                    operation: operation.to_string(),
+                    target: target.clone(),
+                    generation: generation.clone(),
+                    started_at: now(),
+                    capability: capability.clone(),
+                },
+            )?;
+            Ok(RuntimePromotionLease {
+                path,
+                primary: true,
+                generation,
                 target,
-                generation: generation.clone(),
-                started_at: now(),
-            },
-        )
-        .map(|_| RuntimePromotionLease {
-            path,
-            primary: true,
-            generation,
-        }),
+                owner_pid: pid,
+                capability,
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let held = read_record(&path)?;
-            if held.pid == pid {
+            let same_transaction = held.target == target && held.generation == generation;
+            if held.pid == pid && same_transaction {
                 return Ok(RuntimePromotionLease {
                     path,
                     primary: false,
                     generation,
+                    target,
+                    owner_pid: held.pid,
+                    capability: held.capability,
+                });
+            }
+            if subprocess_capability.as_ref().is_some_and(|capability| {
+                authorizes_subprocess(&held, &target, &generation, capability)
+            }) {
+                return Ok(RuntimePromotionLease {
+                    path,
+                    primary: false,
+                    generation,
+                    target,
+                    owner_pid: held.pid,
+                    capability: held.capability,
                 });
             }
             if reclaimable(&held) {
@@ -131,6 +183,21 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
 }
 
 impl RuntimePromotionLease {
+    /// Explicitly authorize one Homeboy subprocess to join this transaction.
+    /// Callers must use this immediately before spawning the participating
+    /// Homeboy command rather than relying on unrelated runtime environment.
+    pub fn authorize_subprocess(&self, command: &mut Command) {
+        let capability = SubprocessLeaseCapability {
+            owner_pid: self.owner_pid,
+            target: self.target.clone(),
+            generation: self.generation.clone(),
+            capability: self.capability.clone(),
+        };
+        let payload = serde_json::to_vec(&capability)
+            .expect("runtime promotion subprocess capability serializes");
+        command.env(SUBPROCESS_LEASE_ENV, URL_SAFE_NO_PAD.encode(payload));
+    }
+
     /// Refuse to continue a multi-step mutation after another runtime generation
     /// became visible. This prevents parser/behavior contract mixing.
     pub fn assert_generation(&self) -> Result<()> {
@@ -206,12 +273,47 @@ fn write_record(path: &Path, record: &RuntimePromotionLeaseRecord) -> Result<()>
     fs::write(path.join(LEASE_FILE), payload).map_err(io("write runtime promotion lease"))
 }
 
+fn create_lease_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
+}
+
 fn read_record(path: &Path) -> Result<RuntimePromotionLeaseRecord> {
     let content =
         fs::read_to_string(path.join(LEASE_FILE)).map_err(io("read runtime promotion lease"))?;
     serde_json::from_str(&content).map_err(|e| {
         Error::validation_invalid_json(e, Some("parse runtime promotion lease".to_string()), None)
     })
+}
+
+fn subprocess_capability_from_env() -> Option<SubprocessLeaseCapability> {
+    let encoded = std::env::var(SUBPROCESS_LEASE_ENV).ok()?;
+    let payload = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    serde_json::from_slice(&payload).ok()
+}
+
+fn authorizes_subprocess(
+    held: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+    capability: &SubprocessLeaseCapability,
+) -> bool {
+    !held.capability.is_empty()
+        && capability.owner_pid == held.pid
+        && capability.target == held.target
+        && capability.generation == held.generation
+        && capability.capability == held.capability
+        && target == held.target
+        && generation == held.generation
 }
 
 fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error {
@@ -302,6 +404,7 @@ mod tests {
             target: "main".to_string(),
             generation: "old".to_string(),
             started_at: now(),
+            capability: "capability".to_string(),
         };
         assert!(reclaimable(&dead));
     }
@@ -314,11 +417,137 @@ mod tests {
             target: "lab".to_string(),
             generation: "old".to_string(),
             started_at: now(),
+            capability: "capability".to_string(),
         };
         let error = blocked_error(&held, false);
         assert!(error.message.contains("pid 42"));
         assert!(error.message.contains("runner refresh"));
         assert!(error.message.contains("lab"));
         assert!(format!("{:?}", error).contains("self status"));
+    }
+
+    fn lease_record() -> RuntimePromotionLeaseRecord {
+        RuntimePromotionLeaseRecord {
+            schema: "homeboy/runtime-promotion-lease/v2".to_string(),
+            pid: 42,
+            operation: "runner refresh".to_string(),
+            target: "lab".to_string(),
+            generation: "generation-a".to_string(),
+            started_at: now(),
+            capability: "unforgeable-capability".to_string(),
+        }
+    }
+
+    fn capability(record: &RuntimePromotionLeaseRecord) -> SubprocessLeaseCapability {
+        SubprocessLeaseCapability {
+            owner_pid: record.pid,
+            target: record.target.clone(),
+            generation: record.generation.clone(),
+            capability: record.capability.clone(),
+        }
+    }
+
+    #[test]
+    fn authorized_child_reenters_only_its_parent_transaction() {
+        crate::test_support::with_isolated_home(|_| {
+            let lease = acquire("parent", "lab").expect("parent acquires lease");
+            let executable = std::env::current_exe().expect("resolve test executable");
+            let mut child = Command::new(executable);
+            child.args([
+                "--ignored",
+                "--exact",
+                "core::runtime_promotion::tests::authorized_child_process_acquires_lease",
+            ]);
+            lease.authorize_subprocess(&mut child);
+            assert!(child.status().expect("run authorized child").success());
+        });
+    }
+
+    #[test]
+    #[ignore = "invoked by authorized_child_reenters_only_its_parent_transaction"]
+    fn authorized_child_process_acquires_lease() {
+        acquire("child", "lab").expect("authorized child reenters parent lease");
+    }
+
+    #[test]
+    fn unrelated_process_without_capability_is_denied() {
+        let held = lease_record();
+        assert!(!authorizes_subprocess(
+            &held,
+            "lab",
+            "generation-a",
+            &SubprocessLeaseCapability {
+                owner_pid: 99,
+                target: "lab".to_string(),
+                generation: "generation-a".to_string(),
+                capability: "unforgeable-capability".to_string(),
+            }
+        ));
+        crate::test_support::with_isolated_home(|_| {
+            let _lease = acquire("parent", "lab").expect("parent acquires lease");
+            let executable = std::env::current_exe().expect("resolve test executable");
+            let status = Command::new(executable)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "core::runtime_promotion::tests::unrelated_child_process_is_denied",
+                ])
+                .env_remove(SUBPROCESS_LEASE_ENV)
+                .status()
+                .expect("run unrelated child");
+            assert!(status.success());
+        });
+    }
+
+    #[test]
+    #[ignore = "invoked by unrelated_process_without_capability_is_denied"]
+    fn unrelated_child_process_is_denied() {
+        assert!(acquire("child", "lab").is_err());
+    }
+
+    #[test]
+    fn subprocess_capability_rejects_wrong_token_target_and_generation() {
+        let held = lease_record();
+        let mut wrong_token = capability(&held);
+        wrong_token.capability = "wrong".to_string();
+        assert!(!authorizes_subprocess(
+            &held,
+            "lab",
+            "generation-a",
+            &wrong_token
+        ));
+        assert!(!authorizes_subprocess(
+            &held,
+            "other",
+            "generation-a",
+            &capability(&held)
+        ));
+        assert!(!authorizes_subprocess(
+            &held,
+            "lab",
+            "generation-b",
+            &capability(&held)
+        ));
+    }
+
+    #[test]
+    fn primary_cleanup_keeps_a_replaced_lease() {
+        let temporary = tempfile::tempdir().expect("temporary lease directory");
+        let path = temporary.path().join(LEASE_DIR);
+        fs::create_dir(&path).expect("create lease directory");
+        let mut record = lease_record();
+        write_record(&path, &record).expect("write initial lease");
+        let lease = RuntimePromotionLease {
+            path: path.clone(),
+            primary: true,
+            generation: record.generation.clone(),
+            target: record.target.clone(),
+            owner_pid: record.pid,
+            capability: record.capability.clone(),
+        };
+        record.capability = "replacement-capability".to_string();
+        write_record(&path, &record).expect("replace lease record");
+        drop(lease);
+        assert!(path.exists(), "a former owner cannot remove a replacement");
     }
 }
