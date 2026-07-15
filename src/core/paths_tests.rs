@@ -185,8 +185,11 @@ fn normalize_local_path_collapses_dot_and_parent_segments() {
 
 #[test]
 fn local_path_containment_is_component_aware() {
-    assert!(local_path_is_contained("/repo", "/repo/src/lib.rs"));
-    assert!(local_path_is_contained("/repo", "/repo/src/../Cargo.toml"));
+    assert!(local_path_is_contained("/repo", "/repo/dir/file.txt"));
+    assert!(local_path_is_contained(
+        "/repo",
+        "/repo/dir/../manifest.txt"
+    ));
     assert!(!local_path_is_contained("/repo", "/repo-other/file"));
     assert!(!local_path_is_contained("/repo", "/repo/../etc/passwd"));
 }
@@ -194,8 +197,8 @@ fn local_path_containment_is_component_aware() {
 #[test]
 fn resolve_contained_local_path_resolves_relative_paths_under_root() {
     assert_eq!(
-        resolve_contained_local_path("/repo", "src/../Cargo.toml", "cwd").unwrap(),
-        PathBuf::from("/repo/Cargo.toml")
+        resolve_contained_local_path("/repo", "dir/../manifest.txt", "cwd").unwrap(),
+        PathBuf::from("/repo/manifest.txt")
     );
 }
 
