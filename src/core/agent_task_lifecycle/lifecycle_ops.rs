@@ -31,13 +31,13 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
     let _lock = DeferredCandidateLock::lock(file)?;
 
     let mut record = store::read_record(&run_id)?;
-    let plan = store::read_plan_path(&record.plan_path)?;
     let mut aggregate = match store::read_aggregate(&run_id) {
         Ok(aggregate) => aggregate,
         // The worker may finish before the aggregate is committed. A later
         // read retries from durable state rather than inventing a projection.
         Err(_) => return Ok(false),
     };
+    let plan = store::read_plan_path(&record.plan_path)?;
     let mut changed = false;
 
     for outcome in &mut aggregate.outcomes {
@@ -469,6 +469,15 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
                 record = reconciled;
             }
         }
+    } else if let (Ok(aggregate), Ok(plan)) = (
+        store::read_aggregate(&record.run_id),
+        store::read_plan_path(&record.plan_path),
+    ) {
+        if let Some(reconciled) = store::mutate_record(&record.run_id, |latest| {
+            backfill_terminal_generic_runtime_evidence(latest, &plan, &aggregate)
+        })? {
+            record = reconciled;
+        }
     }
     let before_liveness_reconciliation = record.clone();
     reconcile_runner_job_state(&mut record)?;
@@ -898,6 +907,7 @@ fn is_terminal_run_state(state: AgentTaskRunState) -> bool {
     matches!(
         state,
         AgentTaskRunState::Succeeded
+            | AgentTaskRunState::CandidateRecoverable
             | AgentTaskRunState::PartialRecoverable
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
@@ -1691,20 +1701,27 @@ fn resolve_run_id(run_id: &str) -> Result<String> {
 }
 
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    record.updated_at = Some(now_timestamp());
-    let metadata = record.ensure_metadata_object();
-    let promotions = metadata
-        .entry("promotions".to_string())
-        .or_insert_with(|| json!([]));
-    if !promotions.is_array() {
-        *promotions = json!([]);
-    }
-    promotions
-        .as_array_mut()
-        .expect("promotions array")
-        .push(promotion.clone());
-    metadata.insert("latest_promotion".to_string(), promotion);
-    store::write_record(&record)?;
-    Ok(record)
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        record.updated_at = Some(now_timestamp());
+        let metadata = record.ensure_metadata_object();
+        let promotions = metadata
+            .entry("promotions".to_string())
+            .or_insert_with(|| json!([]));
+        if !promotions.is_array() {
+            *promotions = json!([]);
+        }
+        promotions
+            .as_array_mut()
+            .expect("promotions array")
+            .push(promotion.clone());
+        metadata.insert("latest_promotion".to_string(), promotion);
+        true
+    })?;
+    Ok(record.expect("promotion mutation always changes the record"))
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_record_write_for_test() {
+    store::fail_next_record_write_for_test();
 }
