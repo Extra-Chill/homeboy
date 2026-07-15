@@ -75,7 +75,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         });
     };
 
-    if let crate::command_contract::LabCommandPortability::LocalOnly(reason) = contract.portability
+    if let crate::core::lab_contract::LabCommandPortability::LocalOnly(reason) =
+        contract.portability
     {
         if let Some(runner_id) = request.explicit_runner {
             let message = format!(
@@ -96,7 +97,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     // while warm/hot controllers may use an eligible default Lab runner.
     if !contract.routing_policy.default_lab_offload
         && request.placement == homeboy_cli_contract::Placement::Auto
-        && contract.source_path_mode != crate::command_contract::LabSourcePathMode::RunnerResident
+        && contract.source_path_mode != crate::core::lab_contract::LabSourcePathMode::RunnerResident
         && crate::core::resource_policy_context::captured_context()
             .is_some_and(|context| context.severity != "ok")
     {

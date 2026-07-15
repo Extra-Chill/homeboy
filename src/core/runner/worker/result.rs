@@ -13,7 +13,7 @@ use super::types::{ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub(super) fn remote_runner_result_from_exec_output(
     exec_output: super::super::execution::RunnerExecOutput,
     exit_code: i32,
-    runner_workload: Option<crate::command_contract::RunnerWorkload>,
+    runner_workload: Option<crate::core::lab_contract::RunnerWorkload>,
 ) -> RemoteRunnerJobResult {
     let patch = exec_output.patch.clone();
     let mutation_artifacts = exec_output.mutation_artifacts.clone();

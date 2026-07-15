@@ -11,11 +11,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
+use crate::core::lab_contract::RunnerWorkload;
 use crate::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use crate::core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,

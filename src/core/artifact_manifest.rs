@@ -33,11 +33,11 @@ const fn str_eq(a: &str, b: &str) -> bool {
 }
 const _: () = {
     assert!(str_eq(
-        crate::command_contract::RUNNER_ARTIFACT_MANIFEST_FILE,
+        crate::core::lab_contract::RUNNER_ARTIFACT_MANIFEST_FILE,
         ARTIFACT_MANIFEST_FILE
     ));
     assert!(str_eq(
-        crate::command_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+        crate::core::lab_contract::RUNNER_ARTIFACT_MANIFEST_SCHEMA,
         ARTIFACT_MANIFEST_SCHEMA
     ));
 };

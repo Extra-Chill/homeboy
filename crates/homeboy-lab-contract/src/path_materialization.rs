@@ -248,7 +248,7 @@ impl From<&PathMaterializationEntry> for PathMaterializationProjection {
 }
 
 impl PathMaterializationPathRemap {
-    pub(crate) fn from_entry(entry: &PathMaterializationEntry) -> Option<Self> {
+    pub fn from_entry(entry: &PathMaterializationEntry) -> Option<Self> {
         let local_path = entry.local_path.as_deref()?.trim();
         let remote_path = entry.remote_path.trim();
         if local_path.is_empty() || remote_path.is_empty() {

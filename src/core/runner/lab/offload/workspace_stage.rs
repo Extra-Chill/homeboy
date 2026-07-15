@@ -541,7 +541,7 @@ fn preflight_agent_task_secret_env_before_workspace_stage(
 ) -> Result<()> {
     if !contract
         .secret_env_sources
-        .contains(&crate::command_contract::LabSecretEnvSource::AgentTask)
+        .contains(&crate::core::lab_contract::LabSecretEnvSource::AgentTask)
     {
         return Ok(());
     }
@@ -724,7 +724,7 @@ struct RunnerCommandPlan {
 
 impl RunnerCommandPlan {
     fn for_offload(
-        workload: Option<&crate::command_contract::LabRigWorkloadArguments>,
+        workload: Option<&crate::core::lab_contract::LabRigWorkloadArguments>,
         route_required_extensions: &[String],
         primary_source_path: &Path,
     ) -> Result<Self> {
@@ -737,8 +737,8 @@ impl RunnerCommandPlan {
             required_extensions.extend(workload.extension_overrides.iter().cloned());
             command_extensions.extend(workload.extension_overrides.iter().cloned());
             let command = match workload.kind {
-                crate::command_contract::LabRigWorkloadKind::Bench => rig::RigWorkloadKind::Bench,
-                crate::command_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
+                crate::core::lab_contract::LabRigWorkloadKind::Bench => rig::RigWorkloadKind::Bench,
+                crate::core::lab_contract::LabRigWorkloadKind::Fuzz => rig::RigWorkloadKind::Fuzz,
             };
             for rig_id in &workload.rig_ids {
                 let Some(spec) = load_primary_rig_spec(primary_source_path, rig_id)? else {
@@ -878,11 +878,11 @@ mod tests {
     use std::process::Command;
 
     fn rig_workload(
-        kind: crate::command_contract::LabRigWorkloadKind,
+        kind: crate::core::lab_contract::LabRigWorkloadKind,
         rig_id: &str,
         component: Option<&str>,
-    ) -> crate::command_contract::LabRigWorkloadArguments {
-        crate::command_contract::LabRigWorkloadArguments {
+    ) -> crate::core::lab_contract::LabRigWorkloadArguments {
+        crate::core::lab_contract::LabRigWorkloadArguments {
             kind,
             rig_ids: vec![rig_id.to_string()],
             component: component.map(str::to_string),
@@ -1230,7 +1230,7 @@ mod tests {
                 remote: "/runner/workspaces/static-site-importer".to_string(),
             }];
             let workload = rig_workload(
-                crate::command_contract::LabRigWorkloadKind::Bench,
+                crate::core::lab_contract::LabRigWorkloadKind::Bench,
                 "static-site-importer-fixture-matrix",
                 Some("static-site-importer"),
             );
@@ -1314,7 +1314,7 @@ mod tests {
                 "jetpack-api-route-inventory".to_string(),
             ];
             let workload = rig_workload(
-                crate::command_contract::LabRigWorkloadKind::Fuzz,
+                crate::core::lab_contract::LabRigWorkloadKind::Fuzz,
                 "jetpack-api-route-inventory",
                 None,
             );
@@ -1396,7 +1396,7 @@ mod tests {
                 "rest-api-read".to_string(),
             ];
             let workload = rig_workload(
-                crate::command_contract::LabRigWorkloadKind::Fuzz,
+                crate::core::lab_contract::LabRigWorkloadKind::Fuzz,
                 "jetpack-api-route-inventory",
                 None,
             );
@@ -1619,8 +1619,8 @@ mod tests {
 
     #[test]
     fn runner_command_plan_preserves_explicit_override_without_a_rig() {
-        let workload = crate::command_contract::LabRigWorkloadArguments {
-            kind: crate::command_contract::LabRigWorkloadKind::Fuzz,
+        let workload = crate::core::lab_contract::LabRigWorkloadArguments {
+            kind: crate::core::lab_contract::LabRigWorkloadKind::Fuzz,
             rig_ids: Vec::new(),
             component: None,
             extension_overrides: vec!["explicit".to_string(), "explicit".to_string()],
@@ -1786,7 +1786,7 @@ mod tests {
             ];
 
             let workload = rig_workload(
-                crate::command_contract::LabRigWorkloadKind::Bench,
+                crate::core::lab_contract::LabRigWorkloadKind::Bench,
                 "static-site-importer-fixture-matrix",
                 Some("static-site-importer"),
             );
@@ -1912,9 +1912,9 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract {
+            command: crate::core::lab_contract::LabCommandContract {
                 workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                ..crate::command_contract::LabCommandContract::portable(
+                ..crate::core::lab_contract::LabCommandContract::portable(
                     "agent-task.run",
                     None,
                     false,
@@ -1980,9 +1980,9 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract {
+            command: crate::core::lab_contract::LabCommandContract {
                 workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                ..crate::command_contract::LabCommandContract::portable(
+                ..crate::core::lab_contract::LabCommandContract::portable(
                     "agent-task promote",
                     Some("--to-worktree"),
                     false,
@@ -2031,10 +2031,10 @@ mod tests {
 
     fn test_lab_contract_with_agent_task_secrets() -> LabOffloadCommand {
         LabOffloadCommand {
-            command: crate::command_contract::LabCommandContract {
+            command: crate::core::lab_contract::LabCommandContract {
                 workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                secret_env_sources: &[crate::command_contract::LabSecretEnvSource::AgentTask],
-                ..crate::command_contract::LabCommandContract::portable(
+                secret_env_sources: &[crate::core::lab_contract::LabSecretEnvSource::AgentTask],
+                ..crate::core::lab_contract::LabCommandContract::portable(
                     "agent-task.run",
                     None,
                     false,
@@ -2160,9 +2160,9 @@ mod tests {
                 job_overrides: LabJobOverrides::default(),
             };
             let contract = LabOffloadCommand {
-                command: crate::command_contract::LabCommandContract {
+                command: crate::core::lab_contract::LabCommandContract {
                     workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                    ..crate::command_contract::LabCommandContract::portable(
+                    ..crate::core::lab_contract::LabCommandContract::portable(
                         "audit",
                         None,
                         false,
@@ -2313,7 +2313,7 @@ mod tests {
                 job_overrides: LabJobOverrides::default(),
             };
             let mut contract = LabOffloadCommand {
-                command: crate::command_contract::LabCommandContract::portable(
+                command: crate::core::lab_contract::LabCommandContract::portable(
                     "agent-task",
                     None,
                     true,

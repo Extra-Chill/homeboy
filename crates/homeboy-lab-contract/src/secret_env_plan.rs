@@ -2,10 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::env_materialization_plan::{
-    EnvMaterializationPlan, EnvSecretRef, EnvSourceEnvBinding,
-};
-use crate::core::redaction::RedactionPolicy;
+use crate::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef, EnvSourceEnvBinding};
+use homeboy_redaction::RedactionPolicy;
 
 pub const SECRET_ENV_PLAN_SCHEMA: &str = "homeboy/secret-env-plan/v1";
 pub const SECRET_ENV_PLAN_MATERIALIZATION_SCHEMA: &str =
@@ -692,7 +690,7 @@ impl SecretEnvPlan {
         removed
     }
 
-    pub(crate) fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {
+    pub fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {
         let mut requirements = self
             .requirements
             .iter()
@@ -889,7 +887,7 @@ fn upsert_requirement(
 }
 
 impl SecretEnvRequirement {
-    pub(crate) fn source_env_candidates(&self) -> Vec<String> {
+    pub fn source_env_candidates(&self) -> Vec<String> {
         if self.source_env_names.is_empty() {
             vec![self.name.clone()]
         } else {

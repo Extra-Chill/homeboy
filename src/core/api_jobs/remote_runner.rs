@@ -7,10 +7,10 @@ use uuid::Uuid;
 use super::persistence::{job_not_found, timestamp_ms};
 use super::store::{JobStore, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
-use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::env_materialization_plan::EnvMaterializationPlan;
 use crate::core::error::{Error, Result};
+use crate::core::lab_contract::RunnerWorkload;
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
 use crate::core::runner_execution_envelope::{
     PathMaterializationPlan, RunnerExecutionDispatch, RunnerExecutionEnvelope,

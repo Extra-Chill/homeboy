@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{Job, JobStatus, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata};
 use crate::core::error::{Error, Result};
+use crate::core::lab_contract::RunnerWorkload;
 use crate::core::redaction::redact_argv;
 use crate::core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;

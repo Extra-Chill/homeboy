@@ -16,7 +16,7 @@ pub mod agent_task;
 pub mod agent_task_aggregate;
 pub(crate) mod agent_task_artifacts;
 pub mod agent_task_batch;
-pub mod agent_task_config;
+pub use homeboy_lab_contract::agent_task_config;
 pub(crate) mod agent_task_config_materialization;
 pub mod agent_task_contract;
 pub mod agent_task_controller_service;
@@ -81,7 +81,7 @@ pub mod deploy;
 pub mod deps;
 pub mod deterministic_loop;
 pub mod engine;
-pub mod env_materialization_plan;
+pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
 // `crate::core::error::*` call sites keep working unchanged.
 pub use homeboy_error as error;
@@ -111,14 +111,14 @@ pub mod lifecycle;
 pub mod loop_lifecycle;
 pub(crate) mod markdown;
 pub mod matrix_artifact_summary;
-pub mod notification_route;
+pub use homeboy_lab_contract::notification_route;
 pub mod notify;
 pub mod observation;
 // output moved to the internal `homeboy-output` crate. Re-exported so existing
 // `crate::core::output::*` call sites keep working unchanged.
 pub use homeboy_output as output;
 pub(crate) mod ownership;
-pub mod path_materialization;
+pub use homeboy_lab_contract::path_materialization;
 pub mod performance_hotspots;
 pub mod phase_timing;
 pub mod plan;
@@ -159,7 +159,18 @@ pub mod runner_execution_envelope;
 pub mod runtime_package;
 pub mod runtime_promotion;
 pub mod scope;
-pub mod secret_env_plan;
+pub use homeboy_lab_contract::secret_env_plan;
+
+/// Flattened re-export of the lab-contract crate's Lab types (workload, handoff,
+/// typed identifiers, labels). Core consumers import these from here rather than
+/// from `command_contract`, so no core module depends upward on the CLI layer —
+/// this is what breaks the former `core <-> command_contract` cycle.
+pub mod lab_contract {
+    pub use homeboy_lab_contract::lab::handoff::*;
+    pub use homeboy_lab_contract::lab::labels::*;
+    pub use homeboy_lab_contract::lab::types::*;
+    pub use homeboy_lab_contract::lab::workload::*;
+}
 pub mod self_status;
 pub mod server;
 pub mod setup;

@@ -1,8 +1,8 @@
-use crate::command_contract::{
-    AgentTaskDispatchIdentity, RunnerWorkload, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-};
 use crate::core::agent_tasks::scheduler::AgentTaskAggregate;
 use crate::core::api_jobs::{JobEvent, JobEventKind};
+use crate::core::lab_contract::{
+    AgentTaskDispatchIdentity, RunnerWorkload, RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+};
 use crate::core::{Error, Result};
 
 pub(crate) const AGENT_TASK_RUN_PLAN_LIFECYCLE_EVENT_SCHEMA: &str =

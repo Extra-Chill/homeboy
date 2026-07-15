@@ -1,6 +1,6 @@
 //! Runner workload schema carried by Lab offload requests.
 
-use super::super::spec::{
+use super::labels::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
     REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
     RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
@@ -16,7 +16,7 @@ pub struct RunnerWorkload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_task: Option<RunnerWorkloadAgentTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notification_route: Option<crate::core::notification_route::NotificationRoute>,
+    pub notification_route: Option<crate::notification_route::NotificationRoute>,
     pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
     pub required_capabilities: Vec<RunnerWorkloadCapability>,
     pub required_secrets: RunnerWorkloadSecrets,
@@ -47,8 +47,7 @@ pub struct RunnerWorkloadAgentTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_provider_policy:
-        Option<crate::core::agent_task_schedule::ResolvedAgentTaskProviderPolicy>,
+    pub resolved_provider_policy: Option<crate::agent_task_config::ResolvedAgentTaskProviderPolicy>,
     pub dispatch_kind: RunnerWorkloadAgentTaskDispatchKind,
     pub lifecycle_mirror_policy: RunnerWorkloadAgentTaskLifecycleMirrorPolicy,
 }
@@ -95,7 +94,7 @@ pub struct RunnerWorkloadCapability {
 pub struct RunnerWorkloadSecrets {
     pub categories: Vec<String>,
     #[serde(default)]
-    pub secret_env_plan: crate::core::secret_env_plan::SecretEnvPlan,
+    pub secret_env_plan: crate::secret_env_plan::SecretEnvPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -144,7 +143,7 @@ pub struct RunnerWorkloadArtifactRef {
 }
 
 impl RunnerWorkloadCommandFamily {
-    pub(crate) fn from_command_label(label: &str) -> Self {
+    pub fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
             label

@@ -1,18 +1,17 @@
 //! Lab portability contract types and construction policy.
 
-use super::RunnerWorkloadCapability;
+use super::workload::RunnerWorkloadCapability;
 
 pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
 pub const LAB_NO_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[];
-pub(crate) const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
-pub(crate) const LAB_AGENT_TASK_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
+pub const LAB_NO_EXTRA_CAPABILITIES: &[&str] = &[];
+pub const LAB_AGENT_TASK_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
     &[LabSecretEnvSource::AgentTask];
-pub(crate) const LAB_TRACE_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Trace];
-pub(crate) const LAB_TUNNEL_SECRET_ENV_SOURCES: &[LabSecretEnvSource] =
-    &[LabSecretEnvSource::Tunnel];
-pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
-pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, `rig sync`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
+pub const LAB_TRACE_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Trace];
+pub const LAB_TUNNEL_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Tunnel];
+pub const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
+pub const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, `rig sync`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
 
 /// Routing-policy flags owned by the Lab command contract and retained through
 /// route planning, offload, and runner dispatch.
@@ -132,10 +131,7 @@ impl LabCommandContract {
         matches!(self.portability, LabCommandPortability::Portable)
     }
 
-    pub(crate) fn into_route_contract(
-        self,
-        required_extensions: Vec<String>,
-    ) -> LabCommandRouteContract {
+    pub fn into_route_contract(self, required_extensions: Vec<String>) -> LabCommandRouteContract {
         let required_capabilities = self
             .extra_required_capabilities
             .iter()
@@ -152,7 +148,7 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn portable(
+    pub fn portable(
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
@@ -177,7 +173,7 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn portable_workload(
+    pub fn portable_workload(
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
@@ -198,7 +194,7 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn explicit_runner(
+    pub fn explicit_runner(
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
         requires_extension_parity: bool,
@@ -219,11 +215,11 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn explicit_runner_simple(hot_label: &'static str) -> Self {
+    pub fn explicit_runner_simple(hot_label: &'static str) -> Self {
         Self::explicit_runner(hot_label, None, false, LAB_NO_EXTRA_CAPABILITIES)
     }
 
-    pub(crate) fn runner_resident(hot_label: &'static str) -> Self {
+    pub fn runner_resident(hot_label: &'static str) -> Self {
         Self {
             source_path_mode: LabSourcePathMode::RunnerResident,
             workspace_mode_policy: LabWorkspaceModePolicy::RunnerResident,
@@ -231,7 +227,7 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn runner_resident_read_polling(hot_label: &'static str) -> Self {
+    pub fn runner_resident_read_polling(hot_label: &'static str) -> Self {
         let base = Self::runner_resident(hot_label);
         Self {
             routing_policy: LabRoutingPolicy {
@@ -242,7 +238,7 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) fn local_only(hot_label: &'static str, reason: &'static str) -> Self {
+    pub fn local_only(hot_label: &'static str, reason: &'static str) -> Self {
         Self {
             hot_label,
             portability: LabCommandPortability::LocalOnly(reason),
@@ -262,20 +258,17 @@ impl LabCommandContract {
         }
     }
 
-    pub(crate) const fn release_gate(mut self) -> Self {
+    pub const fn release_gate(mut self) -> Self {
         self.routing_policy.release_gate = true;
         self
     }
 
-    pub(crate) const fn with_hot_label(mut self, hot_label: &'static str) -> Self {
+    pub const fn with_hot_label(mut self, hot_label: &'static str) -> Self {
         self.hot_label = hot_label;
         self
     }
 
-    pub(crate) const fn with_secret_env_sources(
-        mut self,
-        sources: &'static [LabSecretEnvSource],
-    ) -> Self {
+    pub const fn with_secret_env_sources(mut self, sources: &'static [LabSecretEnvSource]) -> Self {
         self.secret_env_sources = sources;
         self
     }

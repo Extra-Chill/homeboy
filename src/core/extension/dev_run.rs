@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::command_contract::{
-    RunnerExecutionProjection, RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment,
+use crate::core::error::{Error, Result};
+use crate::core::lab_contract::{
+    RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment,
     RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
     RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
     RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
 };
-use crate::core::error::{Error, Result};
 use crate::core::resource_lifecycle_index::ResourceCleanupPolicy;
 use crate::core::runner::RunnerWorkspaceLease;
+use crate::core::runner_execution_envelope::RunnerExecutionProjection;
 use crate::core::runners::{
     self, RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
@@ -660,10 +661,10 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::command_contract::RunnerExecutionRecord;
     use crate::core::runner::{
         ByteFileCounts, RunnerLifecycleOwner, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease,
     };
+    use crate::core::runner_execution_envelope::RunnerExecutionRecord;
     use tempfile::TempDir;
 
     #[test]

@@ -261,22 +261,6 @@ impl fmt::Display for AgentTaskAggregateReport {
     }
 }
 
-impl AgentTaskOutcomeStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::NoOp => "no_op",
-            Self::UnableToRemediate => "unable_to_remediate",
-            Self::ProviderError => "provider_error",
-            Self::Timeout => "timeout",
-            Self::CandidateRecoverable => "candidate_recoverable",
-            Self::Failed => "failed",
-            Self::FollowUpIssue => "follow_up_issue",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
 impl AgentTaskReconciliationDecision {
     pub fn as_str(self) -> &'static str {
         match self {

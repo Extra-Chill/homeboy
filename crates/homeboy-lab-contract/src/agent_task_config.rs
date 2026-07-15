@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::agent_task::{AgentTaskFailureClassification, AgentTaskOutcomeStatus};
+use crate::agent_task_outcome::{AgentTaskFailureClassification, AgentTaskOutcomeStatus};
 
 fn default_max_concurrency() -> usize {
     1

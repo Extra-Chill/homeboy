@@ -85,19 +85,16 @@ pub(crate) const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout
 pub(crate) const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
 pub(crate) const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
-pub(crate) const LINT_LAB_LABEL: &str = "lint";
-pub(crate) const TEST_LAB_LABEL: &str = "test";
-pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
-pub(crate) const REVIEW_LAB_LABEL: &str = "review";
-pub(crate) const BENCH_LAB_LABEL: &str = "bench";
-pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
-pub(crate) const FUZZ_DOCTOR_LAB_LABEL: &str = "fuzz doctor";
-pub(crate) const TRACE_LAB_LABEL: &str = "trace";
-pub(crate) const REFACTOR_LAB_LABEL: &str = "refactor";
-pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
-pub(crate) const RIG_RUN_LAB_LABEL: &str = "rig run";
+// The lab-runnable command labels below are the ones `RunnerWorkload`
+// classification matches on; they live in the homeboy-lab-contract crate and are
+// re-exported here so existing `spec::*_LAB_LABEL` call sites are unchanged.
+pub(crate) use homeboy_lab_contract::lab::labels::{
+    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
+    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
+    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+};
+
 pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_LABEL: &str = "rig source management";
-pub(crate) const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
 pub(crate) const EXTENSION_DEV_RUN_LAB_LABEL: &str = "extension dev-run";
 pub(crate) const EXTENSION_REFRESH_LAB_LABEL: &str = "extension refresh";
 pub(crate) const EXTENSION_UPDATE_LAB_LABEL: &str = "extension update";
