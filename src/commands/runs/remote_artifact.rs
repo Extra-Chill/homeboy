@@ -1,12 +1,10 @@
-use std::env;
 use std::fs;
-use std::net::TcpListener;
-use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
-use homeboy::core::engine::shell;
+use homeboy::core::observation::artifact_preview;
+use homeboy::core::observation::runner_artifact_attach::{
+    self, RunnerAttachArtifactType, RunnerAttachSource,
+};
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
 };
@@ -73,7 +71,7 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
     let runner = runner::load(&args.runner)?;
     validate_runner_artifact_path(&runner, &args.path)?;
 
-    let source = copy_runner_artifact_source(&runner, &args.path)?;
+    let source = runner_artifact_attach::copy_runner_artifact_source(&runner, &args.path)?;
     let metadata = runner_attach_metadata(&runner, &args.path, &source);
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
@@ -90,16 +88,7 @@ pub fn attach(args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
         &artifact.id,
         metadata_with_resource_lifecycle(artifact.metadata_json.clone(), &artifact, &args.runner),
     )?;
-    if source.temporary {
-        match source.artifact_type {
-            RunnerAttachArtifactType::File => {
-                let _ = fs::remove_file(&source.path);
-            }
-            RunnerAttachArtifactType::Directory => {
-                let _ = fs::remove_dir_all(&source.path);
-            }
-        }
-    }
+    runner_artifact_attach::cleanup_runner_attach_source(&source);
 
     Ok((
         RunsOutput::ArtifactAttach(RunsArtifactAttachOutput {
@@ -174,30 +163,12 @@ pub fn preview(args: RunsArtifactPreviewArgs) -> CmdResult<RunsOutput> {
         ));
     }
 
-    let port = args.port.map(Ok).unwrap_or_else(available_port)?;
+    let port = args
+        .port
+        .map(Ok)
+        .unwrap_or_else(artifact_preview::available_port)?;
     let base_url = format!("http://127.0.0.1:{port}/");
-    let port_arg = port.to_string();
-    let directory_arg = artifact_path.display().to_string();
-    let child = Command::new("python3")
-        .args([
-            "-m",
-            "http.server",
-            &port_arg,
-            "--bind",
-            "127.0.0.1",
-            "--directory",
-            &directory_arg,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("start python3 static artifact preview server".to_string()),
-            )
-        })?;
+    let child = artifact_preview::start_static_artifact_server(&artifact_path, port, "preview")?;
     let process_id = child.id();
     drop(child);
 
@@ -258,76 +229,40 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
         ));
     }
 
-    fs::create_dir_all(&args.output_dir).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "create artifact capture output directory {}",
-                args.output_dir.display()
-            )),
-        )
-    })?;
-
-    let port = args.port.map(Ok).unwrap_or_else(available_port)?;
-    let base_url = format!("http://127.0.0.1:{port}/");
-    let mut child = start_static_artifact_server(&artifact_path, port)?;
-    let _ = wait_for_static_server(&base_url);
-    let browser = resolve_capture_provider();
     let viewport = RunsArtifactCaptureViewport {
         width: args.viewport_width,
         height: args.viewport_height,
     };
-    let mut pages = Vec::new();
+    let (base_url, provider, captured) = artifact_preview::capture_artifact_entrypoints(
+        &artifact_path,
+        &args.output_dir,
+        &args.entrypoints,
+        artifact_preview::CaptureViewport {
+            width: args.viewport_width,
+            height: args.viewport_height,
+        },
+        args.port,
+    )?;
 
-    for entrypoint in &args.entrypoints {
-        let page_start = Instant::now();
-        let screenshot_path = args
-            .output_dir
-            .join(format!("{}.png", screenshot_basename(entrypoint)));
-        let page_url_result = entrypoint_url(&base_url, entrypoint);
-        let local_path_result = resolve_artifact_entrypoint(&artifact_path, entrypoint);
-        let mut status = "captured".to_string();
-        let mut error = None;
-
-        let page_url = match page_url_result {
-            Ok(page_url) => page_url,
-            Err(err) => {
-                status = "failed".to_string();
-                error = Some(err.to_string());
-                base_url.clone()
-            }
-        };
-
-        if let Err(err) = local_path_result {
-            status = "failed".to_string();
-            error = Some(err.to_string());
-        } else if error.is_none() {
-            if let Some(browser_error) = browser.error.as_ref() {
-                status = "failed".to_string();
-                error = Some(browser_error.clone());
-            } else if let Err(err) =
-                capture_screenshot(&browser, &page_url, &screenshot_path, &viewport)
-            {
-                status = "failed".to_string();
-                error = Some(err.to_string());
-            }
-        }
-
-        pages.push(RunsArtifactCapturePage {
-            entrypoint: entrypoint.clone(),
-            page_url,
-            screenshot_path: screenshot_path.display().to_string(),
+    let pages = captured
+        .into_iter()
+        .map(|page| RunsArtifactCapturePage {
+            entrypoint: page.entrypoint,
+            page_url: page.page_url,
+            screenshot_path: page.screenshot_path.display().to_string(),
             viewport: viewport.clone(),
-            status,
-            timing_ms: page_start.elapsed().as_millis(),
-            error,
-        });
-    }
-
-    let _ = child.kill();
-    let _ = child.wait();
+            status: page.status,
+            timing_ms: page.timing_ms,
+            error: page.error,
+        })
+        .collect::<Vec<_>>();
 
     let manifest_path = args.output_dir.join("capture-manifest.json");
+    let browser = RunsArtifactCaptureBrowser {
+        command: provider.command,
+        available: provider.available,
+        error: provider.error,
+    };
     let output = RunsArtifactCaptureOutput {
         command: "runs.artifact.capture",
         run_id: args.run_id,
@@ -340,21 +275,7 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
         browser,
         pages,
     };
-    let manifest = serde_json::to_vec_pretty(&output).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("serialize capture manifest".to_string()),
-        )
-    })?;
-    fs::write(&manifest_path, manifest).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "write capture manifest {}",
-                manifest_path.display()
-            )),
-        )
-    })?;
+    artifact_preview::write_capture_manifest(&manifest_path, &output)?;
     let exit_code = if output.pages.iter().all(|page| page.status == "captured") {
         0
     } else {
@@ -362,193 +283,6 @@ pub fn capture(args: RunsArtifactCaptureArgs) -> CmdResult<RunsOutput> {
     };
 
     Ok((RunsOutput::ArtifactCapture(output), exit_code))
-}
-
-fn start_static_artifact_server(
-    artifact_path: &Path,
-    port: u16,
-) -> homeboy::core::Result<std::process::Child> {
-    let port_arg = port.to_string();
-    let directory_arg = artifact_path.display().to_string();
-    Command::new("python3")
-        .args([
-            "-m",
-            "http.server",
-            &port_arg,
-            "--bind",
-            "127.0.0.1",
-            "--directory",
-            &directory_arg,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("start python3 static artifact capture server".to_string()),
-            )
-        })
-}
-
-fn wait_for_static_server(base_url: &str) -> bool {
-    for _ in 0..20 {
-        if reqwest::blocking::get(base_url)
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-fn resolve_capture_provider() -> RunsArtifactCaptureBrowser {
-    match env::var("HOMEBOY_ARTIFACT_CAPTURE_COMMAND") {
-        Ok(command) if !command.trim().is_empty() => RunsArtifactCaptureBrowser {
-            command,
-            available: true,
-            error: None,
-        },
-        _ => RunsArtifactCaptureBrowser {
-            command: "HOMEBOY_ARTIFACT_CAPTURE_COMMAND".to_string(),
-            available: false,
-            error: Some(
-                "no browser capture provider configured; set HOMEBOY_ARTIFACT_CAPTURE_COMMAND to a command that writes HOMEBOY_ARTIFACT_CAPTURE_OUTPUT"
-                    .to_string(),
-            ),
-        },
-    }
-}
-
-fn capture_screenshot(
-    provider: &RunsArtifactCaptureBrowser,
-    page_url: &str,
-    screenshot_path: &Path,
-    viewport: &RunsArtifactCaptureViewport,
-) -> homeboy::core::Result<()> {
-    let output = Command::new("sh")
-        .args(["-c", &provider.command])
-        .env("HOMEBOY_ARTIFACT_CAPTURE_URL", page_url)
-        .env("HOMEBOY_ARTIFACT_CAPTURE_OUTPUT", screenshot_path)
-        .env(
-            "HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_WIDTH",
-            viewport.width.to_string(),
-        )
-        .env(
-            "HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_HEIGHT",
-            viewport.height.to_string(),
-        )
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("run artifact capture provider".to_string()),
-            )
-        })?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(Error::validation_invalid_argument(
-        "HOMEBOY_ARTIFACT_CAPTURE_COMMAND",
-        format!(
-            "artifact capture provider failed with status {}{}",
-            output.status,
-            if stderr.is_empty() {
-                "".to_string()
-            } else {
-                format!(": {stderr}")
-            }
-        ),
-        Some(provider.command.clone()),
-        Some(vec![
-            "Provider commands receive HOMEBOY_ARTIFACT_CAPTURE_URL, HOMEBOY_ARTIFACT_CAPTURE_OUTPUT, HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_WIDTH, and HOMEBOY_ARTIFACT_CAPTURE_VIEWPORT_HEIGHT.".to_string(),
-        ]),
-    ))
-}
-
-fn entrypoint_url(base_url: &str, entrypoint: &str) -> homeboy::core::Result<String> {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.join(entrypoint).ok())
-        .map(|url| url.to_string())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "entrypoint",
-                "entrypoint could not be resolved against the local artifact preview URL",
-                Some(entrypoint.to_string()),
-                None,
-            )
-        })
-}
-
-fn resolve_artifact_entrypoint(
-    artifact_path: &Path,
-    entrypoint: &str,
-) -> homeboy::core::Result<PathBuf> {
-    let entrypoint_path = Path::new(entrypoint);
-    if entrypoint_path.is_absolute()
-        || entrypoint_path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(Error::validation_invalid_argument(
-            "entrypoint",
-            "entrypoint must be a relative path inside the directory artifact",
-            Some(entrypoint.to_string()),
-            None,
-        ));
-    }
-    let resolved = artifact_path.join(entrypoint_path);
-    if !resolved.is_file() {
-        return Err(Error::validation_invalid_argument(
-            "entrypoint",
-            format!("entrypoint file does not exist at {}", resolved.display()),
-            Some(entrypoint.to_string()),
-            None,
-        ));
-    }
-    Ok(resolved)
-}
-
-fn screenshot_basename(entrypoint: &str) -> String {
-    let mut basename = entrypoint
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string();
-    if basename.is_empty() {
-        basename = "entrypoint".to_string();
-    }
-    basename
-}
-
-fn available_port() -> homeboy::core::Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|err| {
-        Error::internal_io(err.to_string(), Some("reserve preview port".to_string()))
-    })?;
-    let port = listener.local_addr().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("read preview port".to_string()))
-    })?;
-    Ok(port.port())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunnerAttachArtifactType {
-    File,
-    Directory,
-}
-
-struct RunnerAttachSource {
-    path: PathBuf,
-    artifact_type: RunnerAttachArtifactType,
-    temporary: bool,
 }
 
 fn runner_attach_metadata(
@@ -657,121 +391,6 @@ fn allowed_runner_artifact_roots(runner: &Runner) -> homeboy::core::Result<Vec<S
     Ok(roots)
 }
 
-fn copy_runner_artifact_source(
-    runner: &Runner,
-    path: &str,
-) -> homeboy::core::Result<RunnerAttachSource> {
-    match runner.kind {
-        RunnerKind::Local => {
-            let source = PathBuf::from(path);
-            let metadata = fs::metadata(&source).map_err(|err| {
-                Error::internal_io(err.to_string(), Some(format!("read artifact {path}")))
-            })?;
-            let artifact_type = if metadata.is_file() {
-                RunnerAttachArtifactType::File
-            } else if metadata.is_dir() {
-                RunnerAttachArtifactType::Directory
-            } else {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    "runner artifact attach supports files and directories",
-                    Some(path.to_string()),
-                    None,
-                ));
-            };
-            Ok(RunnerAttachSource {
-                path: source,
-                artifact_type,
-                temporary: false,
-            })
-        }
-        RunnerKind::Ssh => {
-            let server_id = runner.server_id.as_deref().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "runner",
-                    "SSH runner is missing server_id",
-                    Some(runner.id.clone()),
-                    None,
-                )
-            })?;
-            let temp_path = attach_download_path(&runner.id, path)?;
-            if let Some(parent) = temp_path.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    Error::internal_io(
-                        err.to_string(),
-                        Some(format!("create {}", parent.display())),
-                    )
-                })?;
-            }
-            let server = server::load(server_id)?;
-            let client = server::SshClient::from_server(&server, server_id)?;
-            let artifact_type = remote_runner_artifact_type(&client, path)?;
-            if artifact_type == RunnerAttachArtifactType::Directory {
-                let output = server::transfer::transfer(&server::transfer::TransferConfig {
-                    source: format!("{server_id}:{path}"),
-                    destination: temp_path.display().to_string(),
-                    recursive: true,
-                    compress: true,
-                    dry_run: false,
-                    exclude: Vec::new(),
-                })?;
-                if output.1 != 0 || !output.0.success {
-                    return Err(Error::validation_invalid_argument(
-                        "path",
-                        format!(
-                            "failed to download runner artifact directory: {}",
-                            output.0.error.unwrap_or_else(|| "scp failed".to_string())
-                        ),
-                        Some(path.to_string()),
-                        None,
-                    ));
-                }
-                return Ok(RunnerAttachSource {
-                    path: temp_path,
-                    artifact_type,
-                    temporary: true,
-                });
-            }
-            let output = client.download_file(path, &temp_path.display().to_string());
-            if !output.success {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    format!(
-                        "failed to download runner artifact: {}",
-                        output.stderr.trim()
-                    ),
-                    Some(path.to_string()),
-                    None,
-                ));
-            }
-            Ok(RunnerAttachSource {
-                path: temp_path,
-                artifact_type,
-                temporary: true,
-            })
-        }
-    }
-}
-
-fn remote_runner_artifact_type(
-    client: &server::SshClient,
-    path: &str,
-) -> homeboy::core::Result<RunnerAttachArtifactType> {
-    let quoted = shell::quote_path(path);
-    if client.execute(&format!("test -d {quoted}")).success {
-        return Ok(RunnerAttachArtifactType::Directory);
-    }
-    if client.execute(&format!("test -f {quoted}")).success {
-        return Ok(RunnerAttachArtifactType::File);
-    }
-    Err(Error::validation_invalid_argument(
-        "path",
-        "runner artifact path is not a file or directory",
-        Some(path.to_string()),
-        None,
-    ))
-}
-
 fn directory_contains_html(path: &Path) -> bool {
     directory_contains_html_inner(path, 0)
 }
@@ -797,18 +416,6 @@ fn directory_contains_html_inner(path: &Path, seen: usize) -> bool {
         }
     }
     false
-}
-
-fn attach_download_path(runner_id: &str, path: &str) -> homeboy::core::Result<PathBuf> {
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("artifact");
-    Ok(homeboy::core::artifact_root()?
-        .join("runner-attach")
-        .join(runner_id)
-        .join(format!("{}-{file_name}", uuid::Uuid::new_v4())))
 }
 
 pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<RunsOutput> {
@@ -1331,21 +938,6 @@ mod tests {
                 .unwrap()
                 .contains("no browser capture provider configured"));
         });
-    }
-
-    #[test]
-    fn capture_entrypoint_helpers_are_path_safe_and_stable() {
-        let root = tempfile::tempdir().expect("tempdir");
-        fs::create_dir_all(root.path().join("nested")).expect("nested");
-        fs::write(root.path().join("nested/index.html"), b"<html></html>").expect("html");
-
-        assert!(resolve_artifact_entrypoint(root.path(), "nested/index.html").is_ok());
-        assert!(resolve_artifact_entrypoint(root.path(), "../outside.html").is_err());
-        assert!(resolve_artifact_entrypoint(root.path(), "/tmp/outside.html").is_err());
-        assert_eq!(
-            screenshot_basename("fse-pilot-build-theme/index.html"),
-            "fse_pilot_build_theme_index_html"
-        );
     }
 
     #[test]
