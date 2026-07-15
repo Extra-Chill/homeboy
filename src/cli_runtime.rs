@@ -124,6 +124,16 @@ impl CliRuntime {
                 _ => None,
             })
         });
+        // Register the Lab-runner hint provider so core::runner can compose
+        // `--runner`/`--placement` unsupported errors from the command-spec table
+        // without depending on `command_contract`.
+        crate::core::runner::set_lab_runner_hint_provider(|| {
+            let summary = crate::command_contract::lab_runner_support_summary();
+            crate::core::runner::LabRunnerHint {
+                hint: summary.hint,
+                unsupported_message: summary.unsupported_message,
+            }
+        });
 
         if is_top_level_version_request(&args) {
             println!("{}", upgrade::current_build_version());

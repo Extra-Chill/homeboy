@@ -44,13 +44,13 @@ pub use types::{
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::lab_contract::RunnerWorkload;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
+use crate::core::runner::resolve_lab_runner_hint;
 use crate::core::runner_execution_envelope::PathMaterializationPlan;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
