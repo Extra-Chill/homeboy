@@ -347,23 +347,21 @@ where
                     continue;
                 }
                 let task_id = request.task_id.clone();
-                let harvest_preflight = match prepare_committed_harvest(
-                    &request,
-                    derived_cook_baseline,
-                ) {
-                    Ok(preflight) => preflight,
-                    Err(error) => {
-                        record_harvest_setup_failure(
-                            &task_id,
-                            scheduled.attempt,
-                            error,
-                            &mut completed_by_task,
-                            &mut outcomes,
-                            &mut events,
-                        );
-                        continue;
-                    }
-                };
+                let harvest_preflight =
+                    match prepare_committed_harvest(&request, derived_cook_baseline) {
+                        Ok(preflight) => preflight,
+                        Err(error) => {
+                            record_harvest_setup_failure(
+                                &task_id,
+                                scheduled.attempt,
+                                error,
+                                &mut completed_by_task,
+                                &mut outcomes,
+                                &mut events,
+                            );
+                            continue;
+                        }
+                    };
                 let task_base_sha = scheduled
                     .task_base_sha
                     .clone()

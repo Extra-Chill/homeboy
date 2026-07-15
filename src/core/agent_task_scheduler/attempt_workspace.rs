@@ -174,7 +174,9 @@ fn validate_derived_cook_baseline(
     let canonical_root = root.canonicalize().map_err(|error| {
         snapshot_harvest_error(format!("canonicalize derived baseline root: {error}"))
     })?;
-    if canonical_root != capability.canonical_path() || request.task_id != capability.source_task_id() {
+    if canonical_root != capability.canonical_path()
+        || request.task_id != capability.source_task_id()
+    {
         return Err(snapshot_harvest_error(
             "derived baseline capability does not bind this workspace and task".to_string(),
         ));
