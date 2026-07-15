@@ -563,6 +563,17 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
     })
 }
 
+/// True when `path` is a production or test source file the component cares
+/// about — i.e. it matches the drift source patterns, the drift test patterns,
+/// or is a recognized test path. Used to decide whether an empty changed-scope
+/// test selection is a false-green (source changed, no tests) versus a
+/// legitimate documentation/config-only no-test scope. (#8340)
+pub fn is_source_relevant_change(opts: &DriftOptions, path: &str) -> bool {
+    matches_any_pattern(path, &opts.source_patterns)
+        || matches_any_pattern(path, &opts.test_patterns)
+        || crate::core::code_audit::walker::is_test_path(path)
+}
+
 /// Collect test files in the repo using extension-declared glob patterns.
 fn collect_test_files(root: &Path, test_patterns: &[String]) -> Vec<PathBuf> {
     use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
