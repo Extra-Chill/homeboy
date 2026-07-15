@@ -5,13 +5,11 @@ use super::{
 use crate::core::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use crate::core::error::{Error, Result};
 use crate::core::git::{
-    commit_at, get_head_commit, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at,
-    remote_branch_commit, resolve_default_remote, run_git, CommitOptions, PrCreateOptions,
-    PrEditOptions, PrFindOptions, PrState, PushOptions,
+    commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, CommitOptions,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
 };
 use crate::core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
-use std::path::Path;
 
 pub struct RealAgentTaskPrFinalizationBackend;
 
@@ -148,16 +146,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             changed_files,
             push_required: remote_head.as_deref() != Some(local_head.trim()),
         })
-    }
-
-    fn changed_files_since(&mut self, path: &str, base: &str) -> Result<Vec<String>> {
-        changed_files_since_remote_branch(path, base)
-    }
-
-    fn branch_is_published(&mut self, path: &str, head: &str) -> Result<bool> {
-        let local_commit = get_head_commit(path)?;
-        Ok(remote_branch_commit(path, head)?
-            .is_some_and(|remote_commit| remote_commit == local_commit))
     }
 
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
@@ -510,30 +498,6 @@ mod remote_base_tests {
         assert_eq!(resolved.sha, remote_head.trim());
         assert_eq!(resolved.reference, "refs/homeboy/finalization/base/main");
     }
-}
-
-fn changed_files_since_remote_branch(path: &str, base: &str) -> Result<Vec<String>> {
-    let root = Path::new(path);
-    run_git(
-        root,
-        &["check-ref-format", "--branch", base],
-        "validate PR base branch",
-    )?;
-    let remote = resolve_default_remote(root);
-    let base_ref = format!("refs/heads/{base}");
-    run_git(
-        root,
-        &["fetch", "--no-tags", &remote, &base_ref],
-        "fetch PR base branch",
-    )?;
-    Ok(run_git(
-        root,
-        &["diff", "--name-only", "FETCH_HEAD...HEAD"],
-        "discover changes from PR base branch",
-    )?
-    .lines()
-    .map(str::to_string)
-    .collect())
 }
 
 pub(super) fn validate_real_candidate_fingerprint(
