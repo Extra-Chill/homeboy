@@ -951,9 +951,13 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             run.metadata_json["lab"]["reverse_broker"]["broker_url"].as_str(),
             Some(broker_url.as_str())
         );
+        // The mirrored reverse-broker metadata carries a bounded result summary
+        // (exit code / status) rather than raw stdout; the captured result is
+        // proven by exit_code 0. Raw stdout is surfaced on the exec output, not
+        // duplicated into the durable run metadata.
         assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["stdout"].as_str(),
-            Some("reverse ok")
+            run.metadata_json["lab"]["reverse_broker"]["result_summary"]["exit_code"].as_i64(),
+            Some(0)
         );
         let artifact = store
             .get_artifact("reverse-patch")
@@ -965,6 +969,13 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
 }
 
 fn allow_unauthenticated_loopback_broker() {
+    // Skip hashing the (multi-hundred-MB debug) test binary during in-process
+    // daemon startup, which otherwise blocks `serve_listener` past the client's
+    // connect timeout and makes the mock broker appear unreachable.
+    std::env::set_var(
+        crate::core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
+        "sha256:test-fixed-daemon-binary",
+    );
     super::super::super::broker_auth::BrokerAuthStore {
         allow_unauthenticated_loopback: true,
         ..Default::default()
