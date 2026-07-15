@@ -700,6 +700,7 @@ dependencies = [
  "homeboy-error",
  "homeboy-finding",
  "homeboy-output",
+ "homeboy-paths",
  "homeboy-process",
  "homeboy-product-identity",
  "homeboy-redaction",
@@ -764,6 +765,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "homeboy-paths"
+version = "0.1.0"
+dependencies = [
+ "homeboy-error",
+ "homeboy-product-identity",
+ "shellexpand",
 ]
 
 [[package]]

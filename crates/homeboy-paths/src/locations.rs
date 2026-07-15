@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::core::error::Result;
+use homeboy_error::Result;
 
 use super::homeboy;
 
