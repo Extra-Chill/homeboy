@@ -534,6 +534,106 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 }
 
 #[test]
+fn direct_daemon_detached_handoff_returns_while_the_workload_remains_running() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let started = workspace.path().join("started");
+        let release = workspace.path().join("release");
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("listener address");
+        std::thread::spawn(move || {
+            let _ = crate::core::daemon::serve_listener(listener);
+        });
+        let daemon_url = format!("http://{addr}");
+        let started_at = std::time::Instant::now();
+
+        let (output, exit_code) = exec_via_daemon(
+            &ssh_runner(),
+            &daemon_url,
+            workspace.path().display().to_string(),
+            None,
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf started > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.01; done".to_string(),
+                "sh".to_string(),
+                started.display().to_string(),
+                release.display().to_string(),
+            ],
+            Default::default(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            true,
+            false,
+            false,
+            None,
+        )
+        .expect("detached direct-daemon handoff");
+
+        assert_eq!(exit_code, 0);
+        assert!(
+            started_at.elapsed() < Duration::from_secs(1),
+            "detached handoff waited for the blocked workload"
+        );
+        let job_id = output.job_id.expect("durably accepted daemon job");
+        wait_for_path(&started, "blocked workload start");
+        let client = Client::builder().no_proxy().build().expect("daemon client");
+        let job = fetch_daemon_job(&client, &daemon_url, &job_id).expect("running daemon job");
+        assert!(
+            matches!(job.status, JobStatus::Queued | JobStatus::Running),
+            "detached handoff returned only after workload completion"
+        );
+
+        std::fs::write(&release, "release").expect("release workload");
+        wait_for_terminal_daemon_job(&client, &daemon_url, &job_id);
+    });
+}
+
+struct ReleaseBlockedWorkload(std::path::PathBuf);
+
+impl Drop for ReleaseBlockedWorkload {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, "release");
+    }
+}
+
+fn wait_for_path(path: &std::path::Path, description: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {description}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_terminal_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let job = fetch_daemon_job(client, daemon_url, job_id).expect("daemon job");
+        if matches!(
+            job.status,
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+        ) {
+            assert_eq!(job.status, JobStatus::Succeeded);
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for daemon job completion"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
     crate::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
