@@ -84,6 +84,10 @@ pub struct AgentTaskPublicationTarget {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Immutable base commit used to verify this candidate. The named base
+    /// branch may advance after verification and before PR publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +279,12 @@ pub trait AgentTaskPrFinalizationBackend {
         } else {
             AgentTaskPrCandidateState::Dirty { changed_files }
         })
+    }
+    /// Best-effort publication evidence. This must not turn a successfully
+    /// pushed candidate into a failed finalization when remote observation is
+    /// temporarily unavailable.
+    fn observe_base(&mut self, _path: &str, _base: &str) -> Option<String> {
+        None
     }
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;

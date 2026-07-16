@@ -148,6 +148,10 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         })
     }
 
+    fn observe_base(&mut self, path: &str, base: &str) -> Option<String> {
+        remote_branch_head(path, base).ok().flatten()
+    }
+
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
         let output = commit_at(None, Some(message), CommitOptions::default(), Some(path))?;
         if !output.success {

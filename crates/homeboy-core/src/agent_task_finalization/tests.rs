@@ -40,6 +40,11 @@ struct MockBackend {
     push_calls: u8,
     updated: bool,
     last_body: String,
+    resolved_base: Option<AgentTaskPrResolvedBase>,
+    candidate_base: Option<AgentTaskPrResolvedBase>,
+    advance_base_during_verification: bool,
+    base_advanced: bool,
+    observed_base: Option<String>,
 }
 
 impl AgentTaskPrFinalizationBackend for MockBackend {
@@ -58,6 +63,13 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(self.lifecycle.clone().unwrap_or_default())
     }
     fn hydrate_gate_proof(&mut self, _run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
+        if self.advance_base_during_verification {
+            assert!(
+                self.resolved_base.is_some(),
+                "base is pinned before verification"
+            );
+            self.base_advanced = true;
+        }
         self.gate_proof.clone().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "run_id",
@@ -113,9 +125,10 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn candidate_state(
         &mut self,
         _path: &str,
-        _base: &AgentTaskPrResolvedBase,
+        base: &AgentTaskPrResolvedBase,
         _head: &str,
     ) -> Result<AgentTaskPrCandidateState> {
+        self.candidate_base = Some(base.clone());
         Ok(self.candidate_state.clone().unwrap_or_else(|| {
             if self.changed_files.is_empty() {
                 AgentTaskPrCandidateState::Equivalent
@@ -125,6 +138,19 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 }
             }
         }))
+    }
+
+    fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
+        let resolved = AgentTaskPrResolvedBase {
+            reference: format!("refs/homeboy/finalization/base/{base}"),
+            sha: "verified-base-sha".to_string(),
+        };
+        self.resolved_base = Some(resolved.clone());
+        Ok(resolved)
+    }
+
+    fn observe_base(&mut self, _path: &str, _base: &str) -> Option<String> {
+        self.observed_base.clone()
     }
 
     fn commit_all(&mut self, _path: &str, _message: &str) -> Result<()> {
@@ -255,6 +281,44 @@ fn creates_new_pr_after_green_gates() {
     assert!(report.finalization_outcome.committed);
     assert!(report.finalization_outcome.pushed);
     assert!(report.finalization_outcome.published);
+}
+
+#[test]
+fn pins_base_before_verification_when_the_remote_base_advances() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+        gate_proof: Some(successful_gate_proof()),
+        advance_base_during_verification: true,
+        observed_base: Some("advanced-base-sha".to_string()),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("base movement after verification snapshot does not block publication");
+
+    assert!(backend.base_advanced);
+    assert_eq!(
+        backend
+            .candidate_base
+            .as_ref()
+            .map(|base| base.sha.as_str()),
+        Some("verified-base-sha")
+    );
+    assert_eq!(
+        report.publication_intent.target.base_sha.as_deref(),
+        Some("verified-base-sha")
+    );
+    assert!(backend
+        .last_body
+        .contains("Verified base main: verified-base-sha"));
+    assert!(backend.last_body.contains(
+        "Base main advanced after verification: verified verified-base-sha; publication observed advanced-base-sha"
+    ));
+    assert!(backend.pushed);
+    assert!(backend.created);
 }
 
 #[test]

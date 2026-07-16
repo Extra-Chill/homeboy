@@ -3,7 +3,8 @@ use serde_json::json;
 
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
-    enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
+    enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewEvidence,
+    AgentTaskReviewProfile,
 };
 use crate::error::{Error, Result};
 use crate::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
@@ -39,6 +40,24 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
+    let current_branch = backend.current_branch(&options.path)?;
+    let head = options
+        .head
+        .clone()
+        .unwrap_or_else(|| current_branch.clone());
+    if head != current_branch {
+        return Err(Error::validation_invalid_argument(
+            "head",
+            "requested head does not match the checked-out branch; check out the requested branch before finalizing",
+            Some(head),
+            None,
+        ));
+    }
+    refuse_protected_head(&head, &options.protected_branches)?;
+
+    // This ref is intentionally resolved before consuming gate evidence. It is
+    // the immutable verification baseline for this publication attempt.
+    let base = backend.resolve_base(&options.path, &options.base)?;
     let mut durable_changed_files = Vec::new();
     if !options.manual_finalization {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
@@ -76,24 +95,21 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         &options.evidence.verification.ci_expected,
         options.evidence.lifecycle.as_ref(),
     );
+    options
+        .review_dossier
+        .evidence
+        .push(AgentTaskReviewEvidence {
+            summary: format!("Verified base {}: {}", options.base, base.sha),
+            url: None,
+        });
+    options.review_dossier.evidence.sort_by(|left, right| {
+        left.summary
+            .cmp(&right.summary)
+            .then(left.url.cmp(&right.url))
+    });
+    options.review_dossier.evidence.dedup();
     options.review_dossier.validate(&options.review_profile)?;
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
-    let current_branch = backend.current_branch(&options.path)?;
-    let head = options
-        .head
-        .clone()
-        .unwrap_or_else(|| current_branch.clone());
-    if head != current_branch {
-        return Err(Error::validation_invalid_argument(
-            "head",
-            "requested head does not match the checked-out branch; check out the requested branch before finalizing",
-            Some(head),
-            None,
-        ));
-    }
-    refuse_protected_head(&head, &options.protected_branches)?;
-
-    let base = backend.resolve_base(&options.path, &options.base)?;
     let candidate = backend.candidate_state(&options.path, &base, &head)?;
     let (mut changed_files, commit_required, push_required) = match candidate {
         AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
@@ -118,7 +134,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     changed_files.sort();
     changed_files.dedup();
-    let intent = build_pr_publication_intent(&options, &head, &changed_files, proof.clone());
+    let intent = build_pr_publication_intent(&options, &base, &head, &changed_files, proof.clone());
     validate_publication_intent(&intent)?;
 
     if changed_files.is_empty() {
@@ -145,6 +161,26 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     if push_required {
         backend.push_branch(&options.path, &head)?;
+    }
+    if let Some(observed_base) = backend.observe_base(&options.path, &options.base) {
+        if observed_base != base.sha {
+            options
+                .review_dossier
+                .evidence
+                .push(AgentTaskReviewEvidence {
+                    summary: format!(
+                        "Base {} advanced after verification: verified {}; publication observed {}",
+                        options.base, base.sha, observed_base
+                    ),
+                    url: None,
+                });
+            options.review_dossier.evidence.sort_by(|left, right| {
+                left.summary
+                    .cmp(&right.summary)
+                    .then(left.url.cmp(&right.url))
+            });
+            options.review_dossier.evidence.dedup();
+        }
     }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
@@ -348,6 +384,7 @@ pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Resul
 
 fn build_pr_publication_intent(
     options: &AgentTaskPrFinalizationOptions,
+    base: &AgentTaskPrResolvedBase,
     head: &str,
     changed_files: &[String],
     proof: HomeboyProof,
@@ -361,6 +398,7 @@ fn build_pr_publication_intent(
             adapter: Some("github_pull_request".to_string()),
             path: Some(options.path.clone()),
             base: Some(options.base.clone()),
+            base_sha: Some(base.sha.clone()),
             head: Some(head.to_string()),
             url: None,
         },
