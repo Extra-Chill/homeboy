@@ -520,20 +520,16 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             );
         }
     }
-    if is_terminal_run_state(record.state)
-        && record
-            .metadata
-            .get("artifact_projection")
-            .and_then(Value::as_object)
-            .and_then(|value| value.get("status"))
-            .and_then(Value::as_str)
-            != Some("complete")
-    {
+    if is_terminal_run_state(record.state) {
         if let Ok(aggregate) = store::read_aggregate(&record.run_id) {
-            crate::agent_task_lifecycle::record_terminal_artifact_projection(
-                &mut record,
-                &aggregate,
-            )?;
+            if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified(
+                &record, &aggregate,
+            )? {
+                crate::agent_task_lifecycle::record_terminal_artifact_projection(
+                    &mut record,
+                    &aggregate,
+                )?;
+            }
         }
     }
     // Read-side reconciliation only writes the durable continuation signal.
