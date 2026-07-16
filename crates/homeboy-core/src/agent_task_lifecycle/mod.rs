@@ -48,9 +48,7 @@ pub use health::*;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use records::*;
-pub use runner_continuation::{
-    register_runner_continuation_provider, RunnerContinuationProvider,
-};
+pub use runner_continuation::{register_runner_continuation_provider, RunnerContinuationProvider};
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;

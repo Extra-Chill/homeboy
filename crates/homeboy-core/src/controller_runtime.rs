@@ -943,17 +943,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn identity_mismatch_resolves_the_verified_pinned_executable() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
         let pinned = temporary.path().join("homeboy-origin");
-        fs::write(&pinned, b"origin").expect("write pinned executable");
+        let digest = fake_controller(&pinned, "homeboy 1.0.0+origin", "origin");
         make_executable_read_only(&pinned).expect("seal executable");
         let metadata = json!({
             "controller_runtime": {
                 "originating": {
                     "build_identity": "homeboy 1.0.0+origin",
                     "pinned_executable": pinned,
-                    "sha256": executable_digest(&pinned).expect("hash executable"),
+                    "sha256": digest,
                 }
             }
         });
