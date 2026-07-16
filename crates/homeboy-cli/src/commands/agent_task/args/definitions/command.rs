@@ -43,6 +43,7 @@ pub enum AgentTaskCommand {
     Status(StatusArgs),
     List(ListArgs),
     Active(ActiveArgs),
+    ReconcileRecords(ReconcileRecordsArgs),
     Latest(LatestArgs),
     Logs(StatusArgs),
     Artifacts(StatusArgs),
@@ -81,6 +82,11 @@ pub struct ActiveArgs {
     #[arg(long = "reconcile")]
     pub reconcile: bool,
     #[arg(long = "dry-run", requires = "reconcile")]
+    pub dry_run: bool,
+}
+#[derive(Args, Debug)]
+pub struct ReconcileRecordsArgs {
+    #[arg(long = "dry-run")]
     pub dry_run: bool,
 }
 #[derive(Args, Debug)]

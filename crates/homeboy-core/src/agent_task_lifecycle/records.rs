@@ -9,6 +9,66 @@ pub(crate) mod schemas {
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
 }
 
+pub const AGENT_TASK_RECORD_HEALTH_SCHEMA: &str = "homeboy/agent-task-record-health/v1";
+pub const AGENT_TASK_RECORD_RECONCILIATION_SCHEMA: &str =
+    "homeboy/agent-task-record-reconciliation/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskRecordHealthReason {
+    MissingMetadata,
+    MalformedMetadata,
+    LegacySchema,
+    ConflictingProjections,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskRecordHealthItem {
+    pub run_id: String,
+    pub reason: AgentTaskRecordHealthReason,
+    pub quarantined: bool,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskRecordHealthSummary {
+    pub schema: String,
+    pub healthy: usize,
+    pub malformed: usize,
+    pub legacy: usize,
+    pub conflicting: usize,
+    pub quarantined: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<AgentTaskRecordHealthItem>,
+}
+
+impl AgentTaskRecordHealthSummary {
+    pub(crate) fn healthy() -> Self {
+        Self {
+            schema: AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskRecordReconciliationItem {
+    pub run_id: String,
+    pub reason: AgentTaskRecordHealthReason,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskRecordReconciliationReport {
+    pub schema: String,
+    pub dry_run: bool,
+    pub considered: usize,
+    pub migrated: usize,
+    pub quarantined: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<AgentTaskRecordReconciliationItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunRecord {
     pub schema: String,

@@ -242,24 +242,33 @@ pub(super) fn record_lacks_typed_metadata(run_id: &str) -> Result<bool> {
 }
 
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
+    Ok(read_records_with_health()?.0)
+}
+
+pub(super) fn read_records_with_health(
+) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
+    let mut health = super::AgentTaskRecordHealthSummary::healthy();
+    let mut records = Vec::new();
+    for run in observation_runs()? {
+        match super::health::diagnose_run(&run) {
+            Ok(record) => {
+                health.healthy += 1;
+                records.push(record);
+            }
+            Err(item) => super::health::record_health_item(&mut health, item),
+        }
+    }
+    Ok((records, health))
+}
+
+pub(super) fn observation_runs() -> Result<Vec<RunRecord>> {
     let store = ObservationStore::open_initialized()?;
     let filter = RunListFilter {
         kind: Some("agent-task".to_string()),
         limit: Some(1000),
         ..Default::default()
     };
-    let mut records = Vec::new();
-    for run in store.list_runs(filter)? {
-        match record_from_run(&run) {
-            Ok(record) => records.push(record),
-            Err(error) => eprintln!(
-                "Warning: skipping malformed agent-task run record {}: {}",
-                run.id, error.message
-            ),
-        }
-    }
-
-    Ok(records)
+    store.list_runs(filter)
 }
 
 fn observation_metadata(
@@ -291,7 +300,7 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
     existing
 }
 
-fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     let value = run.metadata_json.get("agent_task_run").ok_or_else(|| {
         Error::new(
             ErrorCode::InternalJsonError,
@@ -379,7 +388,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T> {
         .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
 }
 
-fn run_dir(run_id: &str) -> Result<PathBuf> {
+pub(super) fn run_dir(run_id: &str) -> Result<PathBuf> {
     Ok(paths::homeboy_data()?
         .join("agent-task-runs")
         .join(sanitize_run_id(run_id)))

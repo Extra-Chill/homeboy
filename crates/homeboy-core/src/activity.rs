@@ -125,6 +125,8 @@ pub struct ActivityReport {
     pub command: &'static str,
     pub counts: ActivityCounts,
     pub items: Vec<ActivityItem>,
+    #[serde(default)]
+    pub agent_task_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
 }
@@ -139,7 +141,9 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
     agent_tasks::collect(&mut collector, limit)?;
     daemon_jobs::collect(&mut collector)?;
     runner_sessions::collect(&mut collector);
-    Ok(report_from_items(collector.items(scope, limit), "activity"))
+    let mut report = report_from_items(collector.items(scope, limit), "activity");
+    report.agent_task_record_health = agent_task_lifecycle::record_health_summary()?;
+    Ok(report)
 }
 
 pub fn show_activity(id: &str) -> Result<ActivityReport> {
@@ -154,7 +158,9 @@ pub fn show_activity(id: &str) -> Result<ActivityReport> {
             ]),
         ));
     };
-    Ok(report_from_items(vec![item.clone()], "activity.show"))
+    let mut result = report_from_items(vec![item.clone()], "activity.show");
+    result.agent_task_record_health = report.agent_task_record_health;
+    Ok(result)
 }
 
 pub fn resolve_activity(id: &str) -> Result<ActivityItem> {
@@ -197,6 +203,7 @@ fn report_from_items(items: Vec<ActivityItem>, command: &'static str) -> Activit
         command,
         counts,
         items,
+        agent_task_record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary::healthy(),
         next_actions,
     }
 }

@@ -50,6 +50,9 @@ pub struct AgentTaskDiscoveryReport {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     pub runs: Vec<AgentTaskDiscoveryRun>,
+    /// Bounded health evidence for malformed, legacy, conflicting, or
+    /// quarantined lifecycle rows omitted from the typed run projection.
+    pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     /// Liveness buckets for the `active` filter so operators can separate
     /// genuinely-active runs from stale/suspect/unreconciled records at a
     /// glance. Only populated for the `active` filter; `None` elsewhere.
@@ -217,7 +220,7 @@ pub fn discover_runs_with_options(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let mut records = agent_task_lifecycle::list_records()?;
+    let (mut records, record_health) = agent_task_lifecycle::list_records_with_health()?;
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
         records.retain(|record| {
@@ -264,6 +267,7 @@ pub fn discover_runs_with_options(
         limit: effective_limit,
         truncated,
         runs,
+        record_health,
         liveness_summary,
         lab_discovery: AgentTaskLabDiscoveryHint::default(),
     })

@@ -372,6 +372,9 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert_eq!(report.filter, "all");
         assert_eq!(report.count, 1);
         assert_eq!(report.total, 1);
+        assert_eq!(report.record_health.malformed, 0);
+        assert_eq!(report.record_health.legacy, 0);
+        assert_eq!(report.record_health.conflicting, 0);
         assert!(!report.truncated);
         assert!(report.limit.is_none());
         assert!(report

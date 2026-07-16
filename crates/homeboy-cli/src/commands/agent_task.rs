@@ -36,8 +36,8 @@ pub use args::{
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
     GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
-    ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs,
-    VerifyGateArgs,
+    ReconcileRecordsArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs, RunPlanArgs,
+    StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -62,6 +62,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 status::list_active(active_args.into())
             }
         }
+        AgentTaskCommand::ReconcileRecords(args) => status::reconcile_records(args.dry_run),
         AgentTaskCommand::Latest(latest_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::Latest,
             latest_args.into(),
