@@ -4,9 +4,9 @@
 //! call `format_after_write()` after writing files. This runs the project's
 //! extension-owned formatter to ensure generated code matches project style.
 //!
-//! Unlike `validate_write`, formatting failure is non-fatal — it logs a warning
-//! but never rolls back. Generated code that compiles but isn't formatted is
-//! better than no code at all.
+//! Formatting failure is non-fatal — it logs a warning but never rolls back.
+//! Generated code that compiles but isn't formatted is better than no code at
+//! all.
 //!
 //! The format command is resolved via extension manifest `scripts.format`.
 
