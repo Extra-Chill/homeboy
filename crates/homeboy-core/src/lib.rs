@@ -227,8 +227,6 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 #[allow(dead_code)]
 pub mod test_support;
-#[cfg(test)]
-mod tunnel_tests;
 pub mod update_check_cache;
 pub mod upgrade;
 pub mod validation_progress;

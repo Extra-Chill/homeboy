@@ -1,5 +1,4 @@
 use super::preview_ingress::*;
-use super::tunnel::native_preview_token_sha256;
 use crate::test_support;
 use base64::Engine;
 use serde_json::json;
@@ -7,6 +6,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
+
+// The tunnel crate owns `native_preview_token_sha256`, but core cannot depend on
+// homeboy-tunnel (it depends on core — that would cycle). These preview_ingress
+// tests only need the same SHA-256 hex the tunnel helper produces, so compute it
+// locally to keep the assertion self-contained.
+fn native_preview_token_sha256(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    format!("{digest:x}")
+}
 
 #[test]
 fn route_registers_host_to_upstream_origin() {

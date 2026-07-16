@@ -23,9 +23,9 @@ pub use lifecycle::{local_url, start, status, stop};
 pub use preview::validate_native_preview_claim;
 pub use types::*;
 
-// Re-exported for sibling `tunnel_tests` integration coverage under `core`,
-// which pulls these in via `use super::tunnel::*`. The glob consumer is not
-// seen by the unused-imports lint, so the allow keeps a clean non-test build.
+// Re-exported for the `tunnel_tests` integration suite, which pulls these in
+// via `use crate::*`. The glob consumer is not seen by the unused-imports lint,
+// so the allow keeps a clean non-test build.
 #[allow(unused_imports)]
 pub(crate) use preview::{preview_artifact_for, preview_policy_allows};
 
@@ -37,6 +37,9 @@ homeboy_core::entity_crud!(ServiceTunnel; list_ids, merge);
 pub fn register() {
     homeboy_core::config::register_config_entity::<ServiceTunnel>();
 }
+
+#[cfg(test)]
+mod tunnel_tests;
 
 #[cfg(test)]
 mod register_tests {

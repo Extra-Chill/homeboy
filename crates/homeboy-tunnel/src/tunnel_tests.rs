@@ -1,12 +1,12 @@
-use super::tunnel::*;
-use crate::paths;
-use crate::server::Server;
-use crate::test_support;
+use crate::*;
+use homeboy_core::paths;
+use homeboy_core::server::Server;
+use homeboy_core::test_support;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 fn create_server() {
-    crate::server::save(&Server {
+    homeboy_core::server::save(&Server {
         id: "private-host".to_string(),
         aliases: Vec::new(),
         host: "private.example.test".to_string(),
@@ -198,7 +198,7 @@ fn validation_rejects_auth_mode_without_env_var() {
         })
         .expect_err("missing auth env should fail");
 
-        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
         assert!(err.message.contains("auth.env_var"));
     });
 }
@@ -335,7 +335,7 @@ fn start_cleans_runtime_state_when_readiness_fails() {
         })
         .expect_err("readiness should fail");
 
-        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
         let state_path =
             paths::service_tunnel_runtime_state_file("failing-preview").expect("state path");
         assert!(!state_path.exists());
@@ -529,7 +529,7 @@ fn preview_start_fails_when_listener_process_exits_after_readiness() {
         })
         .expect_err("exited listener must not start successfully");
 
-        assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
         assert!(err.message.contains("exited after becoming ready"));
         let refreshed = status("flapping-preview").expect("status refresh");
         assert!(!refreshed.running);
@@ -907,7 +907,7 @@ fn native_preview_claim_rejects_wrong_token_without_leaking_expected_token() {
 
     let err = validate_native_preview_claim(&tunnel, request).expect_err("wrong token fails");
 
-    assert_eq!(err.code, crate::ErrorCode::ValidationInvalidArgument);
+    assert_eq!(err.code, homeboy_core::ErrorCode::ValidationInvalidArgument);
     assert!(err.message.contains("not recognized"));
     assert!(!err.message.contains("secret-token"));
     assert!(!err.details.to_string().contains("secret-token"));
