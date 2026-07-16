@@ -43,7 +43,9 @@ use connection_daemon::{daemon_http_runtime_loaded_paths, daemon_http_runtime_st
 
 #[path = "connection_stop_transport_recovery.rs"]
 mod stop_transport_recovery;
-pub(crate) use stop_transport_recovery::disconnect_with_force;
+pub(crate) use stop_transport_recovery::{
+    disconnect_with_force, disconnect_with_session, recorded_session,
+};
 
 use super::daemon_http_get::daemon_get;
 
@@ -3409,6 +3411,93 @@ esac
         stop_transport_recovery::disconnect_remote_daemon(&session, false)
             .expect("guarded lifecycle stop accepted");
         server.join().expect("server");
+    }
+
+    #[test]
+    fn refresh_disconnect_refuses_remote_lease_drift_after_promotion_started() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            let recorded = direct_ssh_session("lease-original");
+            let mut replacement = direct_ssh_session("lease-replacement");
+            replacement.local_url = Some("http://127.0.0.1:9".to_string());
+            write_session(&replacement).expect("record replacement session");
+
+            let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
+                .expect_err("refresh must not stop through a different tunnel");
+
+            assert!(error.message.contains("remote daemon ownership changed"));
+            assert_eq!(
+                read_session("homeboy-lab")
+                    .expect("read session")
+                    .expect("session")
+                    .remote_daemon_lease_id
+                    .as_deref(),
+                Some("lease-replacement")
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_disconnect_accepts_local_tunnel_rotation_and_uses_the_current_tunnel() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("address");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("request through rotated tunnel");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read request");
+                let request = String::from_utf8(request[..length].to_vec()).expect("request text");
+                assert!(request.starts_with("POST /lifecycle/stop HTTP/1.1"));
+                assert!(request.contains("\"lease_id\":\"lease-stable\""));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .expect("response");
+            });
+            let recorded = direct_ssh_session("lease-stable");
+            let mut rotated = recorded.clone();
+            rotated.local_port = Some(address.port());
+            rotated.local_url = Some(format!("http://{address}"));
+            rotated.tunnel_pid = None;
+            rotated.connected_at = "2026-07-15T23:00:00Z".to_string();
+            rotated.homeboy_build_identity = Some("homeboy test+rotated".to_string());
+            write_session(&rotated).expect("record rotated tunnel");
+
+            disconnect_with_session("homeboy-lab", Some(&recorded), false)
+                .expect("stable remote daemon can be stopped through the current tunnel");
+            server.join().expect("server");
+            assert!(read_session("homeboy-lab").expect("read session").is_none());
+        });
+    }
+
+    #[test]
+    fn refresh_disconnect_refuses_remote_address_or_pid_drift() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            let recorded = direct_ssh_session("lease-stable");
+
+            for (field, mut replacement) in
+                [("address", recorded.clone()), ("pid", recorded.clone())]
+            {
+                match field {
+                    "address" => {
+                        replacement.remote_daemon_address = Some("127.0.0.1:49154".to_string())
+                    }
+                    "pid" => replacement.remote_daemon_pid = Some(4243),
+                    _ => unreachable!(),
+                }
+                write_session(&replacement).expect("record remote drift");
+
+                let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
+                    .expect_err("remote ownership drift is refused");
+                assert!(error.message.contains("remote daemon ownership changed"));
+            }
+        });
     }
 
     #[test]
