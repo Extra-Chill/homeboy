@@ -343,6 +343,13 @@ mod tests {
             fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
                 Ok(Value::Null)
             }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+                unreachable!()
+            }
             fn refresh_mirrored_daemon_evidence(
                 &self,
                 run_id: &str,
