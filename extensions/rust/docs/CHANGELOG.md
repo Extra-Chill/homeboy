@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.23.10] - 2026-07-16
+
+### Fixed
+- run full-scope tests across the whole workspace
+
 ## [1.23.9] - 2026-07-15
 
 ### Fixed
