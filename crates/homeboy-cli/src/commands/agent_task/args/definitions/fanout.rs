@@ -104,7 +104,7 @@ pub struct AgentTaskFanoutBatchStatusArgs {
     pub batch_id: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct AgentTaskFanoutRunPlanArgs {
     #[command(flatten)]
     pub input: AgentTaskFanoutInputArgs,

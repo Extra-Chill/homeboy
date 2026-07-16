@@ -99,6 +99,10 @@ pub fn route_after_parse(
         return Ok(Some(exit_code));
     }
 
+    if let Some(exit_code) = run_split_placement_fanout(cli, output_file, cli.runner.as_deref())? {
+        return Ok(Some(exit_code));
+    }
+
     let run_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
         materialize_agent_task_run_handoff(cli, normalized_args)?
     } else {
@@ -239,6 +243,68 @@ pub fn route_after_parse(
     }
 }
 
+/// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
+/// gates, and finalization on the controller. Each child provider attempt is
+/// the only unit handed to the explicitly selected Lab runner.
+fn run_split_placement_fanout(
+    cli: &Cli,
+    output_file: Option<&str>,
+    runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<i32>> {
+    if cli.placement == homeboy::cli_surface::Placement::Local {
+        return Ok(None);
+    }
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+        command:
+            crate::commands::agent_task::AgentTaskCommand::Fanout(
+                crate::commands::agent_task::AgentTaskFanoutArgs {
+                    command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
+                },
+            ),
+    }) = &cli.command
+    else {
+        return Ok(None);
+    };
+
+    let dispatcher = LabCookAttemptDispatcher {
+        runner_id: runner_id.to_string(),
+        allow_local_fallback: false,
+        allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
+        skip_deps_hydration: cli.skip_deps_hydration,
+        detach_after_handoff: cli.detach_after_handoff,
+        source_path: None,
+        job_overrides: lab_job_overrides(cli)?,
+    };
+    let (value, exit_code) =
+        crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher(
+            args.clone(),
+            move |options| {
+                let mut dispatcher = dispatcher.clone();
+                dispatcher.source_path = options
+                    .initial_plan
+                    .tasks
+                    .first()
+                    .and_then(|task| task.workspace.root.as_ref())
+                    .map(PathBuf::from);
+                Arc::new(dispatcher)
+            },
+        )?;
+    let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize controller-owned fanout result".to_string()),
+        )
+    })?;
+    if let Some(path) = output_file {
+        write_output_file(path, &stdout)?;
+    }
+    print!("{stdout}");
+    Ok(Some(exit_code))
+}
+
 /// Cook owns controller-local target resolution, promotion, gates, retries, and
 /// finalization. Its provider attempt is the only portable unit: a materialized
 /// typed run-plan that mirrors its aggregate and artifacts back into the same
@@ -314,7 +380,7 @@ fn run_split_placement_cook(
 
 /// The controller supplies this transport to the cook service. Every attempt
 /// uses the same durable run id, while Lab only executes the provider plan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LabCookAttemptDispatcher {
     runner_id: String,
     allow_local_fallback: bool,
