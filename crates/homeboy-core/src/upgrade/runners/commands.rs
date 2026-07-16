@@ -2,10 +2,10 @@ use super::super::helpers::version_is_newer;
 use super::super::types::InstallMethod;
 use crate::runner;
 use crate::runner::Runner;
-use crate::runner::RunnerCapabilityPreflight;
 use crate::runner::RunnerExecOptions;
 use crate::Error;
 use crate::Result;
+use homeboy_runner_contract::RunnerCapabilityPreflight;
 use homeboy_runner_contract::RunnerRequiredTool;
 
 pub fn runner_upgrade_command(
