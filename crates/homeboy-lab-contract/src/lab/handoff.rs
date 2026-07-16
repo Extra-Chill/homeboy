@@ -115,6 +115,7 @@ impl RunnerHandoffEnvelope {
         job_id: &str,
         remote_cwd: String,
         path_materialization_plan: Option<PathMaterializationPlan>,
+        accepted_run_id: Option<String>,
         mirror_run_id: Option<String>,
         liveness_heartbeat_timestamp: String,
     ) -> Self {
@@ -145,7 +146,8 @@ impl RunnerHandoffEnvelope {
                 command: job_cancel_command.clone(),
             },
         ];
-        if let Some(run_id) = mirror_run_id.as_ref() {
+        let actionable_run_id = accepted_run_id.as_ref().or(mirror_run_id.as_ref());
+        if let Some(run_id) = actionable_run_id {
             next_commands.extend([
                 RunnerHandoffNextCommand {
                     label: "run_status".to_string(),
@@ -181,20 +183,20 @@ impl RunnerHandoffEnvelope {
         let follow_commands = RunnerHandoffFollowCommands {
             job_logs: format!("homeboy runner job logs {runner_id} {job_id} --follow"),
             job_cancel: format!("homeboy runner job cancel {runner_id} {job_id}"),
-            status: mirror_run_id
+            status: actionable_run_id
                 .as_ref()
                 .map(|run_id| format!("homeboy agent-task status {run_id}")),
-            logs: mirror_run_id
+            logs: actionable_run_id
                 .as_ref()
                 .map(|run_id| format!("homeboy agent-task logs {run_id}")),
-            artifacts: mirror_run_id
+            artifacts: actionable_run_id
                 .as_ref()
                 .map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
         };
         let run_location_index = RunLocationIndex {
             schema: RUN_LOCATION_INDEX_SCHEMA.to_string(),
-            run_id: mirror_run_id
-                .clone()
+            run_id: actionable_run_id
+                .cloned()
                 .unwrap_or_else(|| format!("runner:{runner_id}:job:{job_id}")),
             controller_location: "controller:local".to_string(),
             runner_id: runner_id.to_string(),
@@ -206,11 +208,13 @@ impl RunnerHandoffEnvelope {
         };
         let evidence = RunnerHandoffEvidence {
             schema: "homeboy/runner-handoff-evidence/v1".to_string(),
-            status: "running".to_string(),
+            // The daemon has accepted this job even though its execution remains
+            // in flight. Keep that acceptance distinct from terminal state.
+            status: "accepted".to_string(),
             runner_id: runner_id.to_string(),
             runner_job_id: job_id.to_string(),
-            run_id: mirror_run_id.clone(),
-            persisted_run_id: mirror_run_id.clone(),
+            run_id: actionable_run_id.cloned(),
+            persisted_run_id: accepted_run_id.clone(),
             mirror_run_id: mirror_run_id.clone(),
             remote_cwd: remote_cwd.clone(),
             artifact_manifest: artifact_manifest.clone(),
@@ -237,14 +241,14 @@ impl RunnerHandoffEnvelope {
             identity: AgentTaskDispatchIdentity {
                 runner_id: runner_id.to_string(),
                 runner_job_id: job_id.to_string(),
-                persisted_run_id: mirror_run_id.clone(),
-                run_id: mirror_run_id.clone(),
+                persisted_run_id: accepted_run_id.clone(),
+                run_id: actionable_run_id.cloned(),
                 handoff_id: Some(format!("runner:{runner_id}:job:{job_id}")),
             },
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
-            durable_run_id: mirror_run_id.clone(),
-            persisted_run_id: mirror_run_id.clone(),
+            durable_run_id: accepted_run_id.clone(),
+            persisted_run_id: accepted_run_id,
             mirror_run_id,
             artifact_manifest,
             run_location_index,
