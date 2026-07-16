@@ -269,6 +269,7 @@ pub fn submit_plan(
         .unwrap_or_else(default_run_id);
     let plan_path = store::write_plan(&run_id, plan)?;
 
+    let admission = crate::controller_runtime::admit_current()?;
     let mut metadata = json!({
         "task_count": plan.tasks.len(),
         "max_concurrency": plan.options.max_concurrency,
@@ -277,7 +278,7 @@ pub fn submit_plan(
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
     metadata[crate::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-        crate::controller_runtime::pin_current()?;
+        admission.runtime.clone();
     if let Ok(runner_id) = std::env::var(crate::runner::RUNNER_ID_ENV) {
         if !runner_id.trim().is_empty() {
             metadata["runner_id"] = json!(runner_id);

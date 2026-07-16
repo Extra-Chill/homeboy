@@ -160,17 +160,17 @@ fn submit_plan_persists_owner_only_plan_file_before_observation() {
 }
 
 #[test]
-fn active_pinned_run_blocks_controller_binary_replacement() {
+fn active_pinned_run_does_not_block_controller_promotion() {
     with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("active-pinned-runtime")).expect("submitted");
 
-        let error = crate::upgrade::refuse_upgrade_while_durable_runs_are_active()
-            .expect_err("active durable run must hold its controller runtime");
-
-        assert!(error.message.contains("active-pinned-runtime"));
-        assert!(error
-            .message
-            .contains("refusing to replace the controller binary"));
+        // Promotion no longer drains durable work. The record owns its pinned
+        // runtime and remains available while later admissions switch.
+        crate::controller_runtime::activate_current_generation()
+            .expect("active durable run must not block promotion");
+        let after = submit_plan(&test_plan(), Some("post-promotion-runtime"))
+            .expect("post-switch submission");
+        assert_eq!(after.state, AgentTaskRunState::Queued);
     });
 }
 

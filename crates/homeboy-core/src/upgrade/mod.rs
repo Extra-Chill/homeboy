@@ -9,8 +9,6 @@ pub mod update_check;
 mod validation;
 
 pub(crate) use constants::VERSION;
-#[cfg(test)]
-pub(crate) use helpers::refuse_upgrade_while_durable_runs_are_active;
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
     run_upgrade_with_method,

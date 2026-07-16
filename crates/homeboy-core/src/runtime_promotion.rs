@@ -107,20 +107,6 @@ pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimeProm
     let generation = current_generation();
     let subprocess_capability = subprocess_capability_from_env();
 
-    if let Some(pin) = active_pin(&root)? {
-        return Err(Error::validation_invalid_argument(
-            "runtime_generation_pin",
-            format!(
-                "runtime promotion waits for active cook `{}` (pid {}) pinned to generation `{}`",
-                pin.cook_id, pin.pid, pin.generation
-            ),
-            Some(pin.cook_id),
-            Some(vec![
-                "Follow: `homeboy activity` and retry after the cook finalizes.".to_string(),
-            ]),
-        ));
-    }
-
     match create_lease_dir(&path) {
         Ok(()) => {
             let capability = uuid::Uuid::new_v4().to_string();
@@ -359,22 +345,6 @@ fn prune_pins(root: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn active_pin(root: &Path) -> Result<Option<RuntimeGenerationPin>> {
-    let pins = root.join(PIN_DIR);
-    if !pins.exists() {
-        return Ok(None);
-    }
-    prune_pins(&pins)?;
-    for entry in fs::read_dir(&pins).map_err(io("read runtime generation pins"))? {
-        let path = entry.map_err(io("read runtime generation pin"))?.path();
-        let content = fs::read_to_string(path).map_err(io("read runtime generation pin"))?;
-        if let Ok(pin) = serde_json::from_str(&content) {
-            return Ok(Some(pin));
-        }
-    }
-    Ok(None)
 }
 
 fn current_generation() -> String {
