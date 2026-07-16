@@ -5,9 +5,13 @@ extern crate self as homeboy;
 // so `homeboy::cli_runtime::*`, `homeboy::commands::*`, `homeboy::core::*` etc.
 // call sites (including the binary entry point and integration tests) are
 // unchanged.
-pub use homeboy_cli::{
-    cli_runtime, cli_surface, command_contract, commands, core, help_topics, test_support,
-};
+pub use homeboy_cli::{cli_runtime, cli_surface, command_contract, commands, core, help_topics};
 pub use homeboy_core::{is_zero, is_zero_u32, log_status};
+
+// Shared hermetic test fixtures live in homeboy-core (exposed via its
+// `test-support` feature, enabled here as a dev-dependency). Re-exported so
+// integration tests reach `homeboy::test_support::*` unchanged.
+#[cfg(any(test, feature = "test-support"))]
+pub use homeboy_core::test_support;
 
 pub mod extensions;

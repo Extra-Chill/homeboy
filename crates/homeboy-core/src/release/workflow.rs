@@ -490,7 +490,11 @@ fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>>
                 .iter()
                 .filter(|c| c.category.to_changelog_entry_type().is_some())
                 .count();
-            Ok(Some((bump.as_str().to_string(), releasable)))
+            Ok(Some((
+                super::planner::oversized_patch_release_bump(bump.as_str(), commits.len())
+                    .to_string(),
+                releasable,
+            )))
         }
         None => Ok(None),
     }
@@ -1421,5 +1425,130 @@ mod tests {
             dir,
             &["git", "checkout", "-q", "-b", "feature/retry-release"],
         );
+    }
+
+    #[test]
+    fn oversized_automatic_release_exports_a_replayable_minor_bump() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        setup_release_range_fixture(temp.path(), "1.2.3", 50);
+
+        let (automatic, exit_code) = run_command(dry_run_release_input(temp.path(), None))
+            .expect("automatic dry run should plan the release");
+        assert_eq!(exit_code, 0);
+        assert_eq!(automatic.bump_type, "minor");
+        assert_eq!(automatic.new_version.as_deref(), Some("1.3.0"));
+        assert_eq!(automatic.tag.as_deref(), Some("v1.3.0"));
+
+        let (replayed, exit_code) = run_command(dry_run_release_input(
+            temp.path(),
+            Some(automatic.bump_type.clone()),
+        ))
+        .expect("exported bump should replay the dry-run release");
+        assert_eq!(exit_code, 0);
+        assert_eq!(replayed.new_version, automatic.new_version);
+        assert_eq!(replayed.tag, automatic.tag);
+    }
+
+    #[test]
+    fn explicit_patch_on_oversized_range_keeps_the_underbump_guard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        setup_release_range_fixture(temp.path(), "1.2.3", 50);
+
+        let plan = crate::release::plan(
+            "fixture",
+            &ReleaseOptions {
+                bump_type: "patch".to_string(),
+                dry_run: true,
+                path_override: Some(temp.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("explicit patch plan should describe the underbump policy");
+        let bump_policy = plan
+            .plan
+            .steps
+            .iter()
+            .find(|step| step.id == "preflight.bump_policy")
+            .expect("bump policy step");
+        assert_eq!(
+            bump_policy
+                .inputs
+                .get("requested")
+                .and_then(|value| value.as_str()),
+            Some("patch")
+        );
+        assert_eq!(
+            bump_policy
+                .inputs
+                .get("recommended")
+                .and_then(|value| value.as_str()),
+            Some("minor")
+        );
+        assert_eq!(
+            bump_policy
+                .inputs
+                .get("underbump")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn small_fix_only_automatic_release_remains_a_patch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        setup_release_range_fixture(temp.path(), "1.2.3", 1);
+
+        let (result, exit_code) = run_command(dry_run_release_input(temp.path(), None))
+            .expect("small fix dry run should plan the release");
+        assert_eq!(exit_code, 0);
+        assert_eq!(result.bump_type, "patch");
+        assert_eq!(result.new_version.as_deref(), Some("1.2.4"));
+        assert_eq!(result.tag.as_deref(), Some("v1.2.4"));
+    }
+
+    fn dry_run_release_input(
+        path: &std::path::Path,
+        bump_override: Option<String>,
+    ) -> ReleaseCommandInput {
+        ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(path.to_string_lossy().to_string()),
+            dry_run: true,
+            bump_override,
+            ..Default::default()
+        }
+    }
+
+    fn setup_release_range_fixture(dir: &std::path::Path, version: &str, commit_count: usize) {
+        run_in(dir, &["git", "init", "-q", "--initial-branch", "main"]);
+        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
+        run_in(dir, &["git", "config", "user.name", "Test"]);
+        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "changelog_target": "CHANGELOG.md",
+                "version_targets": [
+                    { "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }
+                ]
+            }"#,
+        )
+        .expect("write homeboy config");
+        std::fs::write(dir.join("VERSION"), format!("{version}\n")).expect("write version");
+        std::fs::write(dir.join("CHANGELOG.md"), "# Changelog\n").expect("write changelog");
+        std::fs::write(dir.join("work.txt"), "0\n").expect("write work");
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "chore: initial"]);
+        run_in(dir, &["git", "tag", &format!("v{version}")]);
+
+        for index in 1..=commit_count {
+            std::fs::write(dir.join("work.txt"), format!("{index}\n")).expect("write work");
+            run_in(dir, &["git", "add", "work.txt"]);
+            run_in(
+                dir,
+                &["git", "commit", "-q", "-m", &format!("fix: change {index}")],
+            );
+        }
     }
 }

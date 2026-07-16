@@ -2,6 +2,16 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 
+const LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS: i64 = 120;
+
+fn lab_handoff_acceptance_timeout_seconds() -> i64 {
+    std::env::var("HOMEBOY_TEST_LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|seconds| *seconds >= 0)
+        .unwrap_or(LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS)
+}
+
 /// Merge a completed deferred-cleanup candidate into its timeout outcome.
 ///
 /// The worker owns the mutable workspace until it exits; this lifecycle-side
@@ -1405,8 +1415,17 @@ pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentT
             task.state = AgentTaskState::Running;
         }
     }
+    let accepted_at = record.updated_at.clone();
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_detached_handoff"));
+    metadata.insert(
+        "handoff_acceptance".to_string(),
+        json!({
+            "state": "accepted",
+            "accepted_at": accepted_at,
+            "runner_job_id": input.runner_job_id,
+        }),
+    );
     metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
     metadata.insert(
         "phase_activity".to_string(),
@@ -1525,6 +1544,26 @@ fn record_lab_offload_proxy(
     }
     let metadata = record.ensure_metadata_object();
     metadata.insert("kind".to_string(), json!("lab_offload_controller_proxy"));
+    // This record is the controller's durable projection of a runner handoff.
+    // It remains controller-owned until a runner-local record is independently
+    // discovered, so controller-generated commands must keep resolving here.
+    metadata.insert("lifecycle_store_owner".to_string(), json!("controller"));
+    if metadata
+        .get("handoff_acceptance")
+        .and_then(|acceptance| acceptance.get("state"))
+        .and_then(Value::as_str)
+        != Some("accepted")
+    {
+        let now = chrono::Utc::now();
+        metadata.insert(
+            "handoff_acceptance".to_string(),
+            json!({
+                "state": "pending",
+                "started_at": now.to_rfc3339(),
+                "deadline_at": (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds())).to_rfc3339(),
+            }),
+        );
+    }
     metadata.insert("runner_id".to_string(), json!(runner_id));
     if remote_workspace != "pending" {
         metadata.insert("remote_workspace".to_string(), json!(remote_workspace));

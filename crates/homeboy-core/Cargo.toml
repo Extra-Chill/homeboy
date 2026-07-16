@@ -7,11 +7,17 @@ authors = ["Chris Huber <chubes@extrachill.com>"]
 description = "Core engine for homeboy: build/deploy/test/triage orchestration, runners, agent-task, code audit, and evidence"
 repository = "https://github.com/Extra-Chill/homeboy"
 publish = false
-build = "build.rs"
 
 [lib]
 name = "homeboy_core"
 path = "src/lib.rs"
+
+[features]
+# Exposes the shared hermetic test-support fixtures (test_support module and the
+# cache-reset helpers it needs) to other crates' test builds. Enabled as a
+# dev-dependency feature by the CLI and feature crates; never in production.
+test-support = []
+slow-tests = []
 
 [dependencies]
 homeboy-cli-contract = { version = "0.1.0", path = "../homeboy-cli-contract" }
@@ -50,6 +56,3 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "string"] }
 toml = "1.0.3"
 sha2 = "0.10.9"
-
-[features]
-slow-tests = []

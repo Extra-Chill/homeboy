@@ -616,7 +616,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
     with_temp_home(|| {
         let run_id = "run-contract-import-diagnostics";
         let outcome = fixture_outcome(
-            "../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json",
+            "../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json",
         );
 
         run_loaded_plan(
@@ -684,7 +684,7 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
         std::fs::write(&log_path, "runtime import failed").expect("write log evidence");
 
         let raw = include_str!(
-            "../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"
+            "../../../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"
         )
         .replace(
             "__LOCAL_FILE_URI__",
@@ -733,7 +733,7 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
 #[test]
 fn generic_contract_fixtures_accept_successful_required_artifact_handoff() {
     let outcome = fixture_outcome(
-        "../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json",
+        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json",
     );
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
@@ -750,9 +750,9 @@ fn generic_contract_fixtures_accept_successful_required_artifact_handoff() {
 
 fn fixture_outcome(relative_path: &str) -> AgentTaskOutcome {
     let raw = match relative_path {
-        "../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json" => include_str!("../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
-        "../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json" => include_str!("../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
-        "../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json" => include_str!("../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
+        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
+        "../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
+        "../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
         _ => panic!("unknown fixture {relative_path}"),
     };
     serde_json::from_str(raw).expect("fixture outcome")

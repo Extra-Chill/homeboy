@@ -1,4 +1,4 @@
-use crate::core::rig::WorkloadSpec;
+use crate::rig::WorkloadSpec;
 
 #[test]
 fn test_trace_public_preview_parse() {
@@ -72,7 +72,7 @@ fn test_trace_public_preview_parse_homeboy_native() {
     assert_eq!(preview.local_origin, "http://127.0.0.1:49823");
     assert_eq!(
         preview.mode,
-        crate::core::rig::TracePublicPreviewMode::HomeboyNative
+        crate::rig::TracePublicPreviewMode::HomeboyNative
     );
     let native = preview.native.as_ref().expect("native settings");
     assert_eq!(

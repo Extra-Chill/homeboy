@@ -288,9 +288,16 @@ fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary 
 fn classify_liveness(
     record: &AgentTaskRunRecord,
     last_update_age_minutes: Option<i64>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
     if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
-        // Queued runs are genuinely pending work, not stale.
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+            && handoff_acceptance_expired(record, now)
+        {
+            return AgentTaskLiveness::Unreconciled;
+        }
+        // Queued runs are genuinely pending work unless their controller-owned
+        // Lab handoff exceeded its durable acceptance deadline.
         return AgentTaskLiveness::Active;
     }
 
@@ -311,6 +318,19 @@ fn classify_liveness(
         // we genuinely cannot confirm this run either way.
         (false, false) => AgentTaskLiveness::Unreconciled,
     }
+}
+
+fn handoff_acceptance_expired(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    record
+        .metadata
+        .get("handoff_acceptance")
+        .filter(|acceptance| acceptance.get("state").and_then(Value::as_str) == Some("pending"))
+        .and_then(|acceptance| acceptance.get("deadline_at").and_then(Value::as_str))
+        .and_then(|deadline| chrono::DateTime::parse_from_rfc3339(deadline).ok())
+        .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) <= now)
 }
 
 /// Label where a run executes so an operator can trace the runner process.
@@ -365,18 +385,23 @@ fn discovery_run(
     let last_update = record.updated_at.clone();
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
-    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes));
+    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes, now));
 
-    // A runner-backed run's durable record (status/logs/artifacts/review) lives
-    // on the runner, so the emitted recovery commands must be runner-scoped to
-    // resolve against the run's actual location. Local runs use the bare
-    // command. This keeps "commands emitted in run metadata valid for the run
-    // location" (#5681).
+    // Runner metadata describes execution placement, not necessarily lifecycle
+    // record ownership. Controller handoff projections retain their durable
+    // record locally across runner reconnects, so their commands must remain
+    // controller-scoped until a runner-local record is independently discovered.
     let runner_id = metadata_string(&record.metadata, "runner_id")
         .filter(|runner_id| !runner_id.trim().is_empty());
-    let command_prefix = match runner_id.as_deref() {
-        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task"),
-        None => "homeboy agent-task".to_string(),
+    let command_prefix = if metadata_string(&record.metadata, "lifecycle_store_owner").as_deref()
+        == Some("controller")
+    {
+        "homeboy agent-task".to_string()
+    } else {
+        match runner_id.as_deref() {
+            Some(runner_id) => format!("homeboy --runner {runner_id} agent-task"),
+            None => "homeboy agent-task".to_string(),
+        }
     };
 
     AgentTaskDiscoveryRun {

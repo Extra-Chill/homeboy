@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use crate::core::observation::{ObservationStore, RunListFilter};
-use crate::core::paths;
-use crate::core::resource_lifecycle_index::{
+use crate::observation::{ObservationStore, RunListFilter};
+use crate::paths;
+use crate::resource_lifecycle_index::{
     resource_lifecycle_index_from_artifacts, ResourceLifecycleResourceStatus,
 };
-use crate::core::rig::runner::{run_check, run_up};
-use crate::core::rig::spec::{ComponentSpec, PipelineStep, RigResourcesSpec, RigSpec};
-use crate::core::rig::{RigSourceMetadata, RigState};
+use crate::rig::runner::{run_check, run_up};
+use crate::rig::spec::{ComponentSpec, PipelineStep, RigResourcesSpec, RigSpec};
+use crate::rig::{RigSourceMetadata, RigState};
 use crate::test_support::with_isolated_home;
 
 fn observation_spec(id: &str) -> RigSpec {
@@ -68,7 +68,7 @@ impl Drop for XdgDataHomeGuard {
     }
 }
 
-fn list_rig_runs(rig_id: &str) -> Vec<crate::core::observation::RunRecord> {
+fn list_rig_runs(rig_id: &str) -> Vec<crate::observation::RunRecord> {
     ObservationStore::open_initialized()
         .expect("observation store")
         .list_runs(RunListFilter {
@@ -167,7 +167,7 @@ fn test_run_check_persists_failing_observation() {
         let runs = list_rig_runs(&rig.id);
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        let persisted_index = crate::core::rig::artifact_index_for_run(
+        let persisted_index = crate::rig::artifact_index_for_run(
             &ObservationStore::open_initialized().expect("store"),
             run,
         )

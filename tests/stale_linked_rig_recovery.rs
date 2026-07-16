@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Output;
 
-use homeboy::test_support::{HermeticTestContext, TestBinary};
+use homeboy_core::test_support::{HermeticTestContext, TestBinary};
 
 fn run_homeboy(context: &HermeticTestContext, args: &[&str]) -> Output {
     context

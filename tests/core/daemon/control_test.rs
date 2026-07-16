@@ -10,9 +10,9 @@ use super::{
     reconcile_dead_lease_and_ensure_running_with_operations,
     reconcile_leaseless_orphan_store_with_operations,
 };
-use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
-use crate::core::build_identity::BuildIdentity;
-use crate::core::daemon::{
+use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
+use crate::build_identity::BuildIdentity;
+use crate::daemon::{
     DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
 };
 use crate::test_support::with_isolated_home;
@@ -55,9 +55,7 @@ fn record_test_local_child(store: &JobStore, job_id: uuid::Uuid, pid: u32) {
             job_id,
             pid,
             None,
-            crate::core::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks {
-                ticks: 1,
-            },
+            crate::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks: 1 },
         )
         .expect("record local child identity");
 }
@@ -71,7 +69,7 @@ fn record_test_absent_local_child(store: &JobStore, job_id: uuid::Uuid) {
             job_id,
             u32::MAX,
             None,
-            crate::core::api_jobs::LocalChildStartDiscriminator::Unsupported {
+            crate::api_jobs::LocalChildStartDiscriminator::Unsupported {
                 evidence: "test process identity unavailable".to_string(),
             },
         )
@@ -81,7 +79,7 @@ fn record_test_absent_local_child(store: &JobStore, job_id: uuid::Uuid) {
 #[test]
 fn leaseless_store_requires_missing_lease_and_no_owner_then_preserves_evidence() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path).expect("store");
         let job = store.create("runner.exec");
         record_test_absent_local_child(&store, job.id);
@@ -125,7 +123,7 @@ fn leaseless_store_requires_missing_lease_and_no_owner_then_preserves_evidence()
 #[test]
 fn corrupt_lease_reconciliation_terminalizes_queued_durable_agent_task_after_proof() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path).expect("store");
         let job = store.create("agent-task.cook");
 
@@ -167,7 +165,7 @@ fn corrupt_lease_reconciliation_terminalizes_queued_durable_agent_task_after_pro
 #[test]
 fn version_mismatched_split_view_reconciles_only_after_no_owner_proof() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path).expect("store");
         let job = store.create("runner.exec");
         record_test_absent_local_child(&store, job.id);
@@ -212,7 +210,7 @@ fn version_mismatched_split_view_reconciles_only_after_no_owner_proof() {
 #[test]
 fn version_mismatched_split_view_refuses_preserved_remote_claim_before_replacement() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path)
             .expect("store")
             .with_daemon_lease("stale-lease".to_string());
@@ -299,8 +297,7 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
             replacement: Some(replacement.clone()),
             replacement_startup_token: Some("fake-startup-token".to_string()),
         };
-        let path =
-            crate::core::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
+        let path = crate::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
         super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
 
         let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0")
@@ -319,12 +316,12 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
 fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
     for probe in [
         || {
-            Err(crate::core::Error::internal_unexpected(
+            Err(crate::Error::internal_unexpected(
                 "daemon listener probe was ambiguous",
             ))
         },
         || {
-            Err(crate::core::Error::validation_invalid_argument(
+            Err(crate::Error::validation_invalid_argument(
                 "owner_probe",
                 "a Homeboy daemon listener is live",
                 None,
@@ -422,7 +419,7 @@ fn multiple_ambiguous_candidates_block_recovery_and_pid_reuse_blocks_adoption() 
 #[test]
 fn concurrent_leaseless_recovery_callers_commit_once_and_preserve_job_evidence() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path).expect("store");
         let job = store.create("runner.exec");
         record_test_absent_local_child(&store, job.id);
@@ -491,14 +488,13 @@ fn concurrent_leaseless_recovery(
     lifecycle: Arc<Mutex<bool>>,
     starts: Arc<Mutex<usize>>,
     path: std::path::PathBuf,
-) -> std::thread::JoinHandle<
-    crate::core::error::Result<super::DaemonLeaselessOrphanReconciliationResult>,
-> {
+) -> std::thread::JoinHandle<crate::error::Result<super::DaemonLeaselessOrphanReconciliationResult>>
+{
     std::thread::spawn(move || {
         barrier.wait();
         let mut committed = lifecycle.lock().expect("lifecycle lock");
         if *committed {
-            return Err(crate::core::Error::validation_invalid_argument(
+            return Err(crate::Error::validation_invalid_argument(
                 "lifecycle",
                 "replacement daemon already committed by concurrent recovery",
                 None,
@@ -596,14 +592,14 @@ fn leaseless_snapshot_uses_the_exact_bytes_opened_for_reconciliation() {
 #[test]
 fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
     with_isolated_home(|_| {
-        let state_path = crate::core::paths::daemon_state_file().expect("state path");
+        let state_path = crate::paths::daemon_state_file().expect("state path");
         let mut state = fake_daemon_state(fake_daemon(999_999, "lease-dead"));
         state.state_path = state_path.display().to_string();
         std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state parent");
         std::fs::write(&state_path, serde_json::to_vec(&state).expect("state json"))
             .expect("state");
 
-        let jobs_path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let jobs_path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&jobs_path)
             .expect("store")
             .with_daemon_lease("lease-dead".to_string());
@@ -627,7 +623,7 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
 fn legacy_child_recovery_refuses_operation_and_owner_locks_without_mutation() {
     with_isolated_home(|_| {
         let (store, job, endpoint) = legacy_recovery_fixture("lease-dead");
-        let before = std::fs::read(crate::core::paths::daemon_jobs_file().expect("jobs path"))
+        let before = std::fs::read(crate::paths::daemon_jobs_file().expect("jobs path"))
             .expect("store bytes");
 
         let operation = super::super::acquire_daemon_operation_lock().expect("operation lock");
@@ -644,7 +640,7 @@ fn legacy_child_recovery_refuses_operation_and_owner_locks_without_mutation() {
             .message
             .contains("operation already in progress"));
         assert_eq!(
-            std::fs::read(crate::core::paths::daemon_jobs_file().expect("jobs path"))
+            std::fs::read(crate::paths::daemon_jobs_file().expect("jobs path"))
                 .expect("store bytes"),
             before
         );
@@ -719,9 +715,9 @@ fn legacy_child_recovery_refuses_live_daemon_endpoint_and_lease_mismatch() {
 fn legacy_child_recovery_requires_matching_persisted_lease_address() {
     with_isolated_home(|_| {
         let (_store, job, endpoint) = legacy_recovery_fixture("lease-dead");
-        let jobs_path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let jobs_path = crate::paths::daemon_jobs_file().expect("jobs path");
         let before = std::fs::read(&jobs_path).expect("store bytes");
-        std::fs::remove_file(crate::core::paths::daemon_state_file().expect("state path"))
+        std::fs::remove_file(crate::paths::daemon_state_file().expect("state path"))
             .expect("remove state");
         let missing = super::recover_missing_child_identity(
             "lease-dead",
@@ -756,7 +752,7 @@ fn legacy_child_recovery_requires_matching_persisted_lease_address() {
 #[test]
 fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let marker_dir = tempfile::tempdir().expect("marker dir");
         let marker = marker_dir.path().join("descendant.pid");
         let store = JobStore::open_without_reconciliation(&path)
@@ -776,7 +772,7 @@ fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
                     "-c",
                     &format!(
                         "sleep 30 & echo $! > {}",
-                        crate::core::engine::shell::quote_arg(marker_for_child.to_str().expect("marker"))
+                        crate::engine::shell::quote_arg(marker_for_child.to_str().expect("marker"))
                     ),
                 ]);
                 unsafe {
@@ -789,13 +785,13 @@ fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
                 }
                 let mut child = command.spawn().expect("spawn root");
                 let pid = child.id();
-                let pgid = crate::core::process::isolated_process_group_id(pid)
+                let pgid = crate::process::isolated_process_group_id(pid)
                     .expect("read process group")
                     .expect("Unix group identity");
-                let discriminator = match crate::core::process::linux_process_starttime_ticks(pid) {
-                    Ok(Some(ticks)) => crate::core::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
+                let discriminator = match crate::process::linux_process_starttime_ticks(pid) {
+                    Ok(Some(ticks)) => crate::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
                     Ok(None) => panic!("root exited before identity persisted"),
-                    Err(evidence) => crate::core::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
+                    Err(evidence) => crate::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
                 };
                 job.start_with_reserved_child_identity(pid, Some(pgid), discriminator)
                     .expect("persist root and group identity");
@@ -813,7 +809,7 @@ fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
             .trim()
             .parse()
             .expect("descendant pid");
-        assert!(crate::core::process::pid_is_running(descendant));
+        assert!(crate::process::pid_is_running(descendant));
 
         let blocked = JobStore::open_without_reconciliation(&path)
             .expect("reopen store")
@@ -825,8 +821,7 @@ fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
             JobStatus::Running
         );
 
-        crate::core::process::terminate_isolated_process_group(pgid)
-            .expect("terminate recorded group");
+        crate::process::terminate_isolated_process_group(pgid).expect("terminate recorded group");
         std::thread::sleep(Duration::from_millis(150));
         let recovered = JobStore::open_without_reconciliation(&path)
             .expect("reopen store")
@@ -847,7 +842,7 @@ fn leaseless_recovery_blocks_a_surviving_recorded_process_group() {
 #[test]
 fn local_child_reservation_recovery_requires_death_before_one_replacement() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path)
             .expect("durable store")
             .with_daemon_lease("lease-dead".to_string());
@@ -877,10 +872,10 @@ fn local_child_reservation_recovery_requires_death_before_one_replacement() {
                     }
                     let mut child = child_command.spawn().expect("spawn child");
                     let pid = child.id();
-                    let discriminator = match crate::core::process::linux_process_starttime_ticks(pid) {
-                        Ok(Some(ticks)) => crate::core::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
+                    let discriminator = match crate::process::linux_process_starttime_ticks(pid) {
+                        Ok(Some(ticks)) => crate::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
                         Ok(None) => panic!("child exited before identity persisted"),
-                        Err(evidence) => crate::core::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
+                        Err(evidence) => crate::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
                     };
                     job.start_with_reserved_child_identity(pid, None, discriminator)
                         .expect("persist child identity before running");
@@ -940,10 +935,9 @@ fn local_child_reservation_recovery_requires_death_before_one_replacement() {
         )
         .expect_err("live local child blocks replacement");
         assert!(blocked.message.contains("active child process"));
-        assert!(crate::core::process::pid_is_running(pid));
+        assert!(crate::process::pid_is_running(pid));
 
-        crate::core::process::terminate_isolated_process_group(pid)
-            .expect("terminate process group");
+        crate::process::terminate_isolated_process_group(pid).expect("terminate process group");
         reaped_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("child reaped");
@@ -1052,7 +1046,7 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
 #[test]
 fn exact_lease_adoption_reconciles_terminal_children_idempotently() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path)
             .expect("store")
             .with_daemon_lease("lease-dead".to_string());
@@ -1270,7 +1264,7 @@ fn locked_start_operations_publish_once_and_converge_concurrent_callers() {
 #[allow(unreachable_code, unused_variables)]
 fn dead_matching_lease_reconciles_jobs_before_starting_replacement() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("daemon jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("daemon jobs path");
         let store = JobStore::open_without_reconciliation(&path)
             .expect("create durable store")
             .with_daemon_lease("lease-dead".to_string());
@@ -1340,7 +1334,7 @@ fn dead_matching_lease_reconciles_jobs_before_starting_replacement() {
 #[test]
 fn legacy_unowned_job_blocks_replacement_start() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("daemon jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("daemon jobs path");
         let store = JobStore::open_without_reconciliation(&path).expect("create durable store");
         let job = store.create("runner.exec");
         store.start(job.id).expect("job starts");
@@ -1365,7 +1359,7 @@ fn legacy_unowned_job_blocks_replacement_start() {
 #[allow(unreachable_code, unused_variables)]
 fn state_loss_exact_lease_recovery_terminalizes_only_matching_jobs_and_starts_once() {
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&path)
             .expect("store")
             .with_daemon_lease("exact-lease".to_string());
@@ -1482,7 +1476,7 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
     assert!(replay.message.contains("absent daemon state"));
 
     with_isolated_home(|_| {
-        let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+        let path = crate::paths::daemon_jobs_file().expect("jobs path");
         let exact = JobStore::open_without_reconciliation(&path)
             .expect("store")
             .with_daemon_lease("exact-lease".to_string());
@@ -1507,7 +1501,7 @@ fn state_loss_exact_recovery_refuses_live_pid_lock_endpoint_and_mixed_lease() {
                     JobStore::open_without_reconciliation_from_bytes(&path, &raw).expect("store");
                 let diagnostics = recovered.daemon_lease_job_diagnostics("exact-lease");
                 if !diagnostics.other_lease_job_ids.is_empty() {
-                    return Err(crate::core::Error::validation_invalid_argument(
+                    return Err(crate::Error::validation_invalid_argument(
                         "lease_id",
                         "mixed exact leases",
                         None,
@@ -1546,7 +1540,7 @@ fn state_loss_recovery_requires_a_concrete_unreachable_recorded_endpoint() {
 #[test]
 fn state_loss_receipt_survives_start_failure_and_replay_starts_once() {
     with_isolated_home(|_| {
-        let receipt_path = crate::core::paths::daemon_state_loss_recovery_receipt_file("lease-old")
+        let receipt_path = crate::paths::daemon_state_loss_recovery_receipt_file("lease-old")
             .expect("receipt path");
         let job_id = uuid::Uuid::new_v4();
         let mut receipt = super::StateLossRecoveryReceipt {
@@ -1562,9 +1556,7 @@ fn state_loss_receipt_survives_start_failure_and_replay_starts_once() {
         };
         super::write_state_loss_receipt(&receipt_path, &receipt).expect("persist receipt");
         let error = super::complete_state_loss_replacement(&mut receipt, &receipt_path, || {
-            Err(crate::core::Error::internal_unexpected(
-                "replacement failed",
-            ))
+            Err(crate::Error::internal_unexpected("replacement failed"))
         })
         .expect_err("failed replacement preserves receipt");
         assert_eq!(error.details["state_loss_recovery"]["phase"], "reconciled");
@@ -1641,7 +1633,7 @@ fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
 #[test]
 fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
     with_isolated_home(|_| {
-        let receipt_path = crate::core::paths::daemon_state_loss_recovery_receipt_file("lease-old")
+        let receipt_path = crate::paths::daemon_state_loss_recovery_receipt_file("lease-old")
             .expect("receipt path");
         let mut receipt = super::StateLossRecoveryReceipt {
             lease_id: "lease-old".to_string(),
@@ -1655,7 +1647,7 @@ fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
             replacement_startup_token: None,
         };
         let error = super::start_state_loss_replacement_with(&mut receipt, &receipt_path, |_| {
-            Err(crate::core::Error::internal_unexpected(
+            Err(crate::Error::internal_unexpected(
                 "interrupted after launch intent",
             ))
         })
@@ -1728,7 +1720,7 @@ fn ensure_with_fake_operations(
     barrier: Arc<Barrier>,
     state: Arc<Mutex<FakeEnsureState>>,
     daemon: super::DaemonStartResult,
-) -> std::thread::JoinHandle<crate::core::error::Result<super::DaemonStartResult>> {
+) -> std::thread::JoinHandle<crate::error::Result<super::DaemonStartResult>> {
     std::thread::spawn(move || {
         barrier.wait();
         let read_state = Arc::clone(&state);
@@ -1758,7 +1750,7 @@ fn locked_start_with_fake_operations(
     barrier: Arc<Barrier>,
     state: Arc<Mutex<FakeEnsureState>>,
     daemon: super::DaemonStartResult,
-) -> std::thread::JoinHandle<crate::core::error::Result<super::DaemonStartResult>> {
+) -> std::thread::JoinHandle<crate::error::Result<super::DaemonStartResult>> {
     std::thread::spawn(move || {
         barrier.wait();
         let read_state = Arc::clone(&state);
@@ -1806,8 +1798,8 @@ fn fake_daemon(pid: u32, lease_id: &str) -> super::DaemonStartResult {
     }
 }
 
-fn legacy_recovery_fixture(lease_id: &str) -> (JobStore, crate::core::api_jobs::Job, String) {
-    let path = crate::core::paths::daemon_jobs_file().expect("jobs path");
+fn legacy_recovery_fixture(lease_id: &str) -> (JobStore, crate::api_jobs::Job, String) {
+    let path = crate::paths::daemon_jobs_file().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(lease_id.to_string());
@@ -1821,7 +1813,7 @@ fn legacy_recovery_fixture(lease_id: &str) -> (JobStore, crate::core::api_jobs::
 }
 
 fn write_legacy_recovery_state(lease_id: &str, pid: u32, endpoint: &str) {
-    let state_path = crate::core::paths::daemon_state_file().expect("state path");
+    let state_path = crate::paths::daemon_state_file().expect("state path");
     let mut state = fake_daemon_state(super::DaemonStartResult {
         pid,
         address: endpoint.to_string(),

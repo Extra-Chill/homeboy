@@ -568,8 +568,8 @@ impl CookFollowUpBaseline {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_derived_cook_baseline_capability(
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_derived_cook_baseline_capability(
     path: PathBuf,
     commit: String,
     tree: String,

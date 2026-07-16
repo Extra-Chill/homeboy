@@ -54,6 +54,7 @@ impl RuntimeMaterializationStatus {
             .as_ref()
             .map(|session| session.homeboy_version.clone());
         let stale_daemon = status.stale_daemon.as_ref();
+        let controller_version = controller.version.clone();
         let controller_cli = Self::controller_cli_source(controller.version, controller.display);
         let active_daemon =
             Self::active_daemon_source(&status.session, &active_daemon_version, stale_daemon);
@@ -63,7 +64,6 @@ impl RuntimeMaterializationStatus {
             active_daemon.clone(),
             configured_job_binary.clone(),
         ];
-        let controller_version = env!("CARGO_PKG_VERSION").to_string();
         let version_drift = active_daemon_version
             .as_ref()
             .is_some_and(|version| version != &controller_version);
@@ -200,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             status.active_daemon_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(homeboy_product_identity::product_version())
         );
         assert_eq!(status.stale_daemon_hint(), None);
     }
@@ -250,7 +250,7 @@ mod tests {
                 tunnel_pid: Some(123),
                 remote_daemon_pid: Some(456),
                 remote_daemon_lease_id: Some("lease-456".to_string()),
-                homeboy_version: env!("CARGO_PKG_VERSION").to_string(),
+                homeboy_version: homeboy_product_identity::product_version().to_string(),
                 homeboy_build_identity: Some("homeboy current-build".to_string()),
                 connected_at: "2026-06-19T00:00:00Z".to_string(),
                 worker_identity: None,

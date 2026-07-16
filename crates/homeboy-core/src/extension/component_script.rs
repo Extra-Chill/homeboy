@@ -287,3 +287,8 @@ pub(crate) fn source_path(component: &Component, path_override: Option<&str>) ->
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&component.local_path))
 }
+
+// NOTE: the component_script tests exercise the `test` CLI command (they run
+// component scripts end-to-end through commands::test), so they live in the
+// homeboy-cli crate's test scope rather than here — core cannot depend on the CLI
+// command layer. See crates/homeboy-cli tests for component-script coverage.

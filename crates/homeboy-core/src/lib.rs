@@ -218,6 +218,15 @@ pub mod trace_compare;
 pub mod trace_experiment;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
+
+/// Test-only fixtures and hermetic process contexts, shared across the workspace
+/// (core, cli, and feature crates all rely on the same isolation contract).
+/// Compiled for core's own tests and, via the `test-support` feature, for the
+/// test builds of crates that depend on core.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[allow(dead_code)]
+pub mod test_support;
 pub mod triage;
 pub mod tunnel;
 #[cfg(test)]
@@ -227,9 +236,6 @@ pub mod upgrade;
 pub mod validation_progress;
 pub mod worktree;
 pub mod worktree_providers;
-
-#[cfg(test)]
-mod test_support;
 
 // Internal path resolution helpers.
 // paths moved to the internal `homeboy-paths` crate. Re-exported so existing

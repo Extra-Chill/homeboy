@@ -130,7 +130,7 @@ pub fn run_main_bench_workflow(
         };
         if let Some(results) = parsed.as_mut() {
             results.run_metadata = Some(BenchRunMetadata {
-                homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                homeboy_version: Some(crate::build_identity::current().version),
                 started_at: started_at.clone(),
                 shared_state: args
                     .shared_state

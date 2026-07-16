@@ -563,13 +563,29 @@ fn run_promotion_gate(
         &format!("gate-{index}"),
         1,
     )?;
+    let runtime_tmpdir = match crate::engine::run_dir::RunDir::create().and_then(|run_dir| {
+        crate::engine::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &crate::engine::invocation::InvocationRequirements::default(),
+        )
+    }) {
+        Ok(runtime_tmpdir) => runtime_tmpdir,
+        Err(error) => {
+            crate::controller_scratch::release_attempt(
+                &allocation,
+                "verification_runtime_setup_failed",
+                serde_json::json!({ "error": error.message }),
+            )?;
+            return Err(error);
+        }
+    };
     let result = provider.verify_with_runtime_tmpdir(
         worktree_path,
         index,
         command,
         visibility,
         reveal_policy,
-        &allocation.path,
+        &runtime_tmpdir.context().tmp_dir,
     );
     let evidence = match &result {
         Ok(report) => serde_json::json!({

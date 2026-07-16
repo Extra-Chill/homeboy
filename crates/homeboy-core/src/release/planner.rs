@@ -19,7 +19,15 @@ use super::types::{
     ReleaseChangelogPlan, ReleaseOptions, ReleasePlan, ReleaseSemverRecommendation,
 };
 
-const OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD: usize = 50;
+pub(super) const OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD: usize = 50;
+
+pub(super) fn oversized_patch_release_bump(bump: &str, item_count: usize) -> &str {
+    if bump == "patch" && item_count >= OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD {
+        "minor"
+    } else {
+        bump
+    }
+}
 
 /// Plan a release: run all preflight validations, then return a description
 /// of the steps the executor will run. Used by `--dry-run` to preview work
@@ -252,8 +260,8 @@ fn apply_oversized_patch_release_policy(
 
     let commit_count = semver_recommendation.commits.len();
     let changelog_entry_count = changelog_plan.entry_count;
-    if commit_count < OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD
-        && changelog_entry_count < OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD
+    if oversized_patch_release_bump("patch", commit_count) == "patch"
+        && oversized_patch_release_bump("patch", changelog_entry_count) == "patch"
     {
         return None;
     }
@@ -273,8 +281,8 @@ fn apply_oversized_patch_release_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_oversized_patch_release_policy;
     use super::guard_stale_primary_at_head;
+    use super::{apply_oversized_patch_release_policy, oversized_patch_release_bump};
     use crate::release::types::{
         ReleaseChangelogPlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
     };
@@ -348,6 +356,13 @@ mod tests {
         assert!(recommendation.reasons.iter().any(|reason| {
             reason.contains("release-train-sized patch ranges require a minor bump")
         }));
+    }
+
+    #[test]
+    fn oversized_patch_release_escalates_automatic_bump() {
+        assert_eq!(oversized_patch_release_bump("patch", 50), "minor");
+        assert_eq!(oversized_patch_release_bump("patch", 49), "patch");
+        assert_eq!(oversized_patch_release_bump("minor", 50), "minor");
     }
 
     #[test]

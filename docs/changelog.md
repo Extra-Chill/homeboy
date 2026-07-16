@@ -4,6 +4,69 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.287.0] - 2026-07-16
+
+### Changed
+- move engine::baseline into homeboy-engine-primitives (#8425)
+- relocate refactor_primitive from engine to refactor (#8425)
+- split TaggedEditOp fixer-glue out of engine::edit_op (#8425)
+- relocate Language primitive from code_audit to engine (#8425)
+- relocate release_download from deploy to git (#8425)
+- Recover late Lab agent-task aggregates
+- Persist local cook rotation model
+- Persist aggregate-sourced promotion state
+- decompose secrets god-file test module into submodules
+- refactor(api_jobs): decompose god-file test module into submodules
+- decompose homeboy_refresh god-file test module into submodules
+- decompose execution god-file test module into submodules
+- extract homeboy-cli crate (command layer, ~142k LOC)
+- extract homeboy-core crate (the 484k-LOC engine)
+- decompose route god-file into submodules
+- Preserve controller plan identity across detached Lab retries
+- decompose agent_task_finalization god-file into submodules
+- decompose lab_workspaces god-file into submodules
+- normalize homeboy::core absolute paths to crate:: in core
+- remove core test edges into cli_surface/commands
+- Make runner refresh transactional
+- Honor authorized dirty Lab snapshots
+- Recover runner refresh after daemon stop transport failure
+- decompose worktree god-file into submodules
+- Introduce reusable immutable component deployment payloads
+- Unify Lab-offloaded agent-task observability
+- invert lab-runner hint edges off command_contract
+- repoint core test lab-type imports to core::lab_contract
+- decompose runs_service god-file into submodules
+- Recover stale runner split views safely
+- Isolate harvest context across parallel cook batches
+- extract homeboy-lab-contract crate, break core<->command_contract cycle
+
+### Fixed
+- Fix detached Lab handoff recovery
+- restore root product metadata
+- align automatic release bump with policy
+- restore workspace test compilation after the crate splits
+- Fix promotion verification socket paths
+- avoid unrelated test-target compilation
+- restore source build identity
+- Fix cross-platform Lab snapshot hashing
+- make binary releases authoritative
+- persist typed daemon job projection
+- Fix detached Lab cook ownership
+- fix(agent-task): attach late Lab artifacts
+- retain accepted job identity (#8126)
+- import guard_stale_primary_at_head in planner tests
+- fail closed when release plans against a stale checkout
+- Fix runtime promotion subprocess lease handoff
+- fix(agent-task): persist durable cook continuations
+- Fix selected runner binary promotion panic
+- fail changed-scope gate when source changed but zero tests selected
+- materialize controller Lab run workspace
+- Fix split-placement provider lifecycle identity
+- Fix Lab handoff result reconciliation
+- Fix agent-task Lab run ownership materialization
+- honor --skip-build-validation for package completeness
+- don't refuse warm-machine commands in CI or advertise absent Lab
+
 ## [0.286.8] - 2026-07-15
 
 ### Changed

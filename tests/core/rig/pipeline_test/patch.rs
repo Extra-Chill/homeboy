@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::fs;
 
-use crate::core::rig::pipeline::run_pipeline;
-use crate::core::rig::spec::{ComponentSpec, PatchOp, PipelineStep, RigSpec};
+use crate::rig::pipeline::run_pipeline;
+use crate::rig::spec::{ComponentSpec, PatchOp, PipelineStep, RigSpec};
 
 fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
     let mut components = HashMap::new();

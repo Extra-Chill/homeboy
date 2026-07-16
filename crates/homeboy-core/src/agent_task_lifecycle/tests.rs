@@ -308,6 +308,8 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 
         assert_eq!(planned.state, AgentTaskRunState::Queued);
         assert!(planned.metadata.get("runner_job_id").is_none());
+        assert_eq!(planned.metadata["lifecycle_store_owner"], "controller");
+        assert_eq!(planned.metadata["handoff_acceptance"]["state"], "pending");
         assert!(load_plan("agent-task-controller-proxy")
             .expect("proxy plan")
             .tasks[0]
@@ -336,6 +338,8 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
         .expect("accepted child binds proxy");
         assert_eq!(running.state, AgentTaskRunState::Running);
         assert_eq!(running.metadata["runner_job_id"], "job-123");
+        assert_eq!(running.metadata["lifecycle_store_owner"], "controller");
+        assert_eq!(running.metadata["handoff_acceptance"]["state"], "accepted");
         assert_eq!(
             running.metadata["runner_execution_record"]["status"],
             "running"
@@ -740,11 +744,7 @@ fn terminal_lab_artifact_attachment_skips_missing_controller_plan_and_preserves_
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact").expect("status");
-        apply_runner_job_terminal_state(
-            &mut record,
-            crate::core::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
+        apply_runner_job_terminal_state(&mut record, crate::api_jobs::JobStatus::Succeeded, &[]);
         store::write_record(&record).expect("terminal record");
         std::fs::remove_file(&record.plan_path).expect("remove controller plan");
 
@@ -776,11 +776,7 @@ fn terminal_lab_artifact_attachment_refuses_runner_provenance_mismatch() {
         })
         .expect("running proxy");
         let mut record = status("agent-task-late-artifact-mismatch").expect("status");
-        apply_runner_job_terminal_state(
-            &mut record,
-            crate::core::api_jobs::JobStatus::Succeeded,
-            &[],
-        );
+        apply_runner_job_terminal_state(&mut record, crate::api_jobs::JobStatus::Succeeded, &[]);
         store::write_record(&record).expect("terminal record");
 
         let error = record_detached_lab_run(DetachedLabRunRecord {

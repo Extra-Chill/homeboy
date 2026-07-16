@@ -494,7 +494,10 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
 
     assert_eq!(metadata["schema"], "homeboy/lab-runner-homeboy/v1");
     assert_eq!(metadata["runner_id"], "homeboy lab");
-    assert_eq!(metadata["controller_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        metadata["controller_version"],
+        homeboy_product_identity::product_version()
+    );
     assert!(metadata["controller_build_identity"]
         .as_str()
         .is_some_and(|identity| identity.starts_with("homeboy ")));
@@ -513,7 +516,7 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
         serde_json::json!([
             format!(
                 "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             ),
             "homeboy runner disconnect 'homeboy lab'",
             "homeboy runner connect 'homeboy lab'"
@@ -547,12 +550,14 @@ fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
     assert!(err
         .message
         .contains("connected runner daemon reports Homeboy version `homeboy 0.0.0`"));
-    assert!(err.message.contains(env!("CARGO_PKG_VERSION")));
+    assert!(err
+        .message
+        .contains(homeboy_product_identity::product_version()));
     let tried = err.details["tried"].as_array().expect("tried hints");
     assert!(tried.iter().any(
         |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         )))
     ));
     assert!(tried.iter().any(|hint| hint
@@ -572,7 +577,7 @@ fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusRep
 
 /// A version string sharing the controller's MAJOR.MINOR but a different patch.
 fn same_minor_patch_drift_version(prefix: &str) -> String {
-    let controller = env!("CARGO_PKG_VERSION");
+    let controller = homeboy_product_identity::product_version();
     let mut parts = controller.split('.');
     let major = parts.next().unwrap_or("0");
     let minor = parts.next().unwrap_or("0");
@@ -605,14 +610,15 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
     assert!(warning.contains("wire-compatible"));
     assert!(warning.contains(&format!(
         "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-        env!("CARGO_PKG_VERSION")
+        homeboy_product_identity::product_version()
     )));
     assert!(warning.contains("require_exact_homeboy_version"));
 }
 
 #[test]
 fn matching_runner_version_has_no_compatible_drift_warning() {
-    let status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    let status =
+        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
 
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
@@ -634,7 +640,7 @@ fn same_minor_patch_drift_is_refused_under_strict_mode() {
 
 #[test]
 fn minor_version_drift_is_incompatible_and_refused() {
-    let controller = env!("CARGO_PKG_VERSION");
+    let controller = homeboy_product_identity::product_version();
     let mut parts = controller.split('.');
     let major = parts.next().unwrap_or("0");
     let minor: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -674,12 +680,13 @@ fn newer_runner_than_controller_points_to_local_upgrade_first() {
 
 #[test]
 fn newer_stale_daemon_control_plane_points_to_local_upgrade_first() {
-    let mut status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    let mut status =
+        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
     let runner_version = higher_minor_version();
     status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         runner_version,
-        env!("CARGO_PKG_VERSION").to_string(),
+        homeboy_product_identity::product_version().to_string(),
         None,
         None,
     ));
@@ -709,7 +716,7 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
         metadata["primary_remediation_command"],
         format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         )
     );
 
@@ -720,7 +727,7 @@ fn older_runner_than_controller_points_to_runner_refresh_first() {
         .and_then(|hint| hint.as_str())
         .is_some_and(|hint| hint.contains(&format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         ))));
 }
 
@@ -790,7 +797,8 @@ fn controller_recovery_command_uses_install_method_for_known_binary_locations() 
 
 #[test]
 fn exact_version_match_has_no_drift() {
-    let status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    let status =
+        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
 
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
@@ -806,7 +814,8 @@ fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() 
     // Runner version matches the controller exactly, but the runner's active
     // daemon was started by a different build than its job command binary: that
     // internal inconsistency is always blocking, independent of the version policy.
-    let mut status = status_with_runner_version("homeboy-lab", env!("CARGO_PKG_VERSION"));
+    let mut status =
+        status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
     status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "homeboy 0.228.0".to_string(),
@@ -909,7 +918,7 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     assert!(tried.iter().any(
         |hint| hint.as_str().is_some_and(|hint| hint.contains(&format!(
             "homeboy runner refresh-homeboy 'homeboy lab' --ref v{} --reconnect",
-            env!("CARGO_PKG_VERSION")
+            homeboy_product_identity::product_version()
         )))
     ));
     assert!(tried.iter().any(|hint| hint
@@ -918,7 +927,7 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
 }
 
 fn higher_minor_version() -> String {
-    let controller = env!("CARGO_PKG_VERSION");
+    let controller = homeboy_product_identity::product_version();
     let mut parts = controller.split('.');
     let major = parts.next().unwrap_or("0");
     let minor: u64 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -969,7 +978,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     // disconnect/connect fallback (matching the connection.rs contract).
     let expected_refresh = format!(
         "homeboy runner refresh-homeboy lab --ref v{} --reconnect && homeboy runner disconnect lab && homeboy runner connect lab",
-        env!("CARGO_PKG_VERSION")
+        homeboy_product_identity::product_version()
     );
     assert_eq!(
         metadata["stale_daemon"]["refresh_command"],
@@ -987,7 +996,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         serde_json::json!([
             format!(
                 "homeboy runner refresh-homeboy lab --ref v{} --reconnect",
-                env!("CARGO_PKG_VERSION")
+                homeboy_product_identity::product_version()
             ),
             "homeboy runner disconnect lab",
             "homeboy runner connect lab"

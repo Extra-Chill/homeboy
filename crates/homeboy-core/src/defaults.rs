@@ -16,8 +16,8 @@ pub use policy::{
     ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,
 };
 
-#[cfg(test)]
-pub(crate) use io::reset_config_cache_for_test;
+#[cfg(any(test, feature = "test-support"))]
+pub use io::reset_config_cache_for_test;
 
 pub(crate) use builtins::deploy_generated_build_dir;
 pub(crate) use builtins::extension_provided_detector_profile;

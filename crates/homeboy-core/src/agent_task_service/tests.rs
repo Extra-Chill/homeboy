@@ -683,6 +683,112 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
     });
 }
 
+#[test]
+fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        agent_task_lifecycle::record_lab_offload_planned(
+            agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: "controller-handoff-reconnect",
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: Some(&discovery_plan()),
+            },
+        )
+        .expect("controller handoff persisted before runner acceptance");
+        let before_acceptance = discover_runs(AgentTaskDiscoveryFilter::Active).expect("listed");
+        let queued = before_acceptance
+            .runs
+            .iter()
+            .find(|run| run.run_id == "controller-handoff-reconnect")
+            .expect("unaccepted controller handoff listed");
+        assert_eq!(
+            queued.commands.status,
+            "homeboy agent-task status controller-handoff-reconnect"
+        );
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: "controller-handoff-reconnect",
+            runner_id: "homeboy-lab",
+            runner_job_id: "reconnected-daemon-job",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted handoff remains controller materialized");
+
+        let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("listed");
+        let run = report
+            .runs
+            .iter()
+            .find(|run| run.run_id == "controller-handoff-reconnect")
+            .expect("accepted controller handoff listed");
+
+        assert_eq!(run.runner_id.as_deref(), Some("homeboy-lab"));
+        assert_eq!(
+            run.commands.status,
+            "homeboy agent-task status controller-handoff-reconnect"
+        );
+        assert_eq!(
+            run.commands.logs,
+            "homeboy agent-task logs controller-handoff-reconnect"
+        );
+        assert!(agent_task_lifecycle::status(&run.run_id).is_ok());
+        assert!(agent_task_lifecycle::logs(&run.run_id).is_ok());
+    });
+}
+
+#[test]
+fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        agent_task_lifecycle::record_lab_offload_planned(
+            agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id: "controller-handoff-unaccepted",
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: Some(&discovery_plan()),
+            },
+        )
+        .expect("controller handoff persisted before runner acceptance");
+        agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
+            record.metadata["handoff_acceptance"]["deadline_at"] =
+                serde_json::json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("expire acceptance deadline");
+
+        let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("listed");
+        let run = active
+            .runs
+            .iter()
+            .find(|run| run.run_id == "controller-handoff-unaccepted")
+            .expect("unaccepted handoff listed");
+        assert_eq!(run.liveness, Some(AgentTaskLiveness::Unreconciled));
+        assert_eq!(
+            run.commands.status,
+            "homeboy agent-task status controller-handoff-unaccepted"
+        );
+
+        let reconciliation = reconcile_stale_active_runs(false).expect("reconciled");
+        assert_eq!(reconciliation.reconciled, 1);
+        assert_eq!(reconciliation.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status("controller-handoff-unaccepted")
+                .expect("terminal controller record")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+    });
+}
+
 #[derive(Clone)]
 struct SucceedingExecutor;
 

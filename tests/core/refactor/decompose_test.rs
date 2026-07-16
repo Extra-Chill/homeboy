@@ -1,5 +1,5 @@
-use homeboy::core::extension::ParsedItem;
-use homeboy::core::refactor::{self, DecomposeGroup, DecomposePlan};
+use crate::extension::ParsedItem;
+use crate::refactor::{self, DecomposeGroup, DecomposePlan};
 use std::fs;
 
 #[path = "../../support/mod.rs"]
