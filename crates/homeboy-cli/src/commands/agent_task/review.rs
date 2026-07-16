@@ -201,10 +201,14 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let to_worktree = args.to_worktree.clone();
-    let source_run_id = agent_task_lifecycle::status(&args.source)
-        .ok()
-        .map(|record| record.run_id);
     let (raw, source_path) = read_promotion_source(&args.source)?;
+    let source_run_id = match agent_task_lifecycle::status(&args.source) {
+        Ok(record) => Some(record.run_id),
+        Err(_) => match source_path.as_deref() {
+            Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
+            None => None,
+        },
+    };
     let promotion_options = AgentTaskPromotionOptions {
         source: raw,
         source_run_id: source_run_id.clone(),
