@@ -116,7 +116,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
 }
 
 #[test]
-fn lab_runner_preparation_refreshes_stale_default_daemon_version() {
+fn lab_runner_preparation_falls_back_for_stale_default_daemon_version_without_reconnecting() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
         source: LabRunnerSelectionSource::Default,
@@ -147,11 +147,14 @@ fn lab_runner_preparation_refreshes_stale_default_daemon_version() {
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
-        |runner_id| Ok((successful_connect_report(runner_id), 0)),
+        |_| panic!("stale daemon drift must not rotate a shared tunnel during handoff"),
     )
     .expect("prepared");
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    assert!(matches!(
+        prepared,
+        LabRunnerPreparation::FallBackLocal { .. }
+    ));
 }
 
 #[test]
@@ -230,16 +233,11 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
-        |runner_id| Ok((failed_connect_report(runner_id, "daemon restart failed"), 1)),
+        |_| panic!("stale daemon drift must not reconnect during handoff"),
     )
-    .expect_err("explicit stale daemon refresh failure should error");
+    .expect_err("explicit stale daemon should require an explicit refresh");
 
-    assert!(err
-        .message
-        .contains("stale daemon and automatic refresh failed"));
-    assert!(err
-        .message
-        .contains("automatic refresh failed: daemon restart failed"));
+    assert!(err.message.contains("connected but is not ready"));
     assert!(err.message.contains("daemon is stale"));
     assert!(err.message.contains("homeboy 0.218.0"));
     assert!(err.message.contains("homeboy 0.219.0"));
@@ -262,42 +260,66 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
 }
 
 #[test]
-fn lab_runner_preparation_refreshes_stale_explicit_daemon_version() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
+fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
     };
 
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
-                    runner_id,
-                    Some("http://127.0.0.1:1234"),
-                )),
-                stale_daemon: Some(stale_daemon_warning(runner_id)),
-                daemon_freshness: Some(restartable_daemon_freshness()),
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                session_path: "/tmp/lab.json".to_string(),
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+    let barrier = Arc::new(Barrier::new(5));
+    let reconnects = Arc::new(AtomicUsize::new(0));
+    let handoffs: Vec<_> = (0..5)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let reconnects = Arc::clone(&reconnects);
+            let selection = selection.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                prepare_lab_runner_for_offload_with(
+                    &selection,
+                    |runner_id| {
+                        Ok(RunnerStatusReport {
+                            runner_id: runner_id.to_string(),
+                            connected: true,
+                            state: super::super::RunnerSessionState::Connected,
+                            session: Some(connected_direct_session(
+                                runner_id,
+                                Some("http://127.0.0.1:63378"),
+                            )),
+                            stale_daemon: Some(stale_daemon_warning(runner_id)),
+                            daemon_freshness: Some(restartable_daemon_freshness()),
+                            active_jobs: Vec::new(),
+                            active_runner_jobs: Vec::new(),
+                            active_job_count: 0,
+                            stale_runner_jobs: Vec::new(),
+                            stale_runner_job_count: 0,
+                            active_job_state: RunnerActiveJobState::Available,
+                            active_job_source: None,
+                            active_job_error: None,
+                            session_path: "/tmp/lab.json".to_string(),
+                        })
+                    },
+                    |_| {
+                        reconnects.fetch_add(1, Ordering::SeqCst);
+                        unreachable!("stale handoff must not reconnect")
+                    },
+                )
             })
-        },
-        |runner_id| Ok((successful_connect_report(runner_id), 0)),
-    )
-    .expect("prepared");
+        })
+        .collect();
 
-    assert_eq!(prepared, LabRunnerPreparation::Ready);
+    for handoff in handoffs {
+        assert!(matches!(
+            handoff.join().expect("handoff thread"),
+            Ok(LabRunnerPreparation::FallBackLocal { .. })
+        ));
+    }
+    assert_eq!(reconnects.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -535,56 +557,6 @@ fn connected_direct_session(
         worker_pid: None,
         last_seen_at: None,
         leaseless_recovery_evidence: None,
-    }
-}
-
-fn successful_connect_report(runner_id: &str) -> RunnerConnectReport {
-    RunnerConnectReport {
-        runner_id: runner_id.to_string(),
-        mode: Some(RunnerTunnelMode::DirectSsh),
-        role: Some(super::super::RunnerSessionRole::Controller),
-        connected: true,
-        recorded: None,
-        local_url: Some("http://127.0.0.1:1234".to_string()),
-        broker_url: None,
-        controller_id: None,
-        remote_daemon_address: Some("127.0.0.1:5678".to_string()),
-        tunnel_pid: None,
-        remote_daemon_pid: Some(42),
-        connection_warning: None,
-        homeboy_version: Some("homeboy 0.219.0".to_string()),
-        homeboy_build_identity: Some("homeboy 0.219.0+new".to_string()),
-        session_path: Some("/tmp/lab.json".to_string()),
-        leaseless_recovery: None,
-        state_loss_recovery: None,
-        leaseless_recovery_evidence: None,
-        failure_kind: None,
-        failure_message: None,
-    }
-}
-
-fn failed_connect_report(runner_id: &str, failure_message: &str) -> RunnerConnectReport {
-    RunnerConnectReport {
-        runner_id: runner_id.to_string(),
-        mode: None,
-        role: None,
-        connected: false,
-        recorded: None,
-        local_url: None,
-        broker_url: None,
-        controller_id: None,
-        remote_daemon_address: None,
-        tunnel_pid: None,
-        remote_daemon_pid: None,
-        connection_warning: None,
-        homeboy_version: None,
-        homeboy_build_identity: None,
-        session_path: Some("/tmp/lab.json".to_string()),
-        leaseless_recovery: None,
-        state_loss_recovery: None,
-        leaseless_recovery_evidence: None,
-        failure_kind: Some(super::super::RunnerFailureKind::DaemonStartupFailure),
-        failure_message: Some(failure_message.to_string()),
     }
 }
 

@@ -28,7 +28,6 @@ pub use cli_resolver::{
 };
 mod command_path;
 mod connection;
-mod daemon_freshness;
 mod daemon_health;
 mod daemon_http_get;
 mod evidence;

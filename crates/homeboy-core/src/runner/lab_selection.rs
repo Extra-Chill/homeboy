@@ -6,7 +6,6 @@ use crate::lab_contract::LabCommandPortability;
 use crate::runner::resolve_lab_runner_hint;
 use crate::{Error, ErrorCode, Result};
 
-use super::daemon_freshness::repair_or_fail;
 use super::{
     default_lab_runner_availability, load, status, LabOffloadCommand, LabRunnerGateMode,
     RunnerAvailability, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
@@ -335,36 +334,6 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
-            if status
-                .daemon_freshness
-                .as_ref()
-                .is_some_and(|report| repair_or_fail(report).is_ok())
-            {
-                eprintln!(
-                    "Lab offload: connected runner `{}` daemon is stale; attempting automatic refresh.",
-                    selection.runner_id
-                );
-                let (report, _) = connect_fn(&selection.runner_id)?;
-                if report.connected {
-                    eprintln!(
-                        "Lab offload: refreshed runner `{}` daemon session before dispatch.",
-                        selection.runner_id
-                    );
-                    return Ok(LabRunnerPreparation::Ready);
-                }
-                let refresh_reason = report.failure_message.unwrap_or_else(|| {
-                    "runner connect did not establish a fresh daemon session".to_string()
-                });
-                return automatic_fallback_or_explicit_error(
-                    selection,
-                    format!("{reason}; automatic refresh failed: {refresh_reason}"),
-                    format!(
-                        "Lab offload runner `{}` has a stale daemon and automatic refresh failed",
-                        selection.runner_id
-                    ),
-                    daemon_repair_command(&selection.runner_id, &status),
-                );
-            }
             return automatic_fallback_or_explicit_error(
                 selection,
                 reason,

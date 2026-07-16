@@ -9,9 +9,17 @@ pub(super) fn session_is_live(session: &RunnerSession) -> bool {
             return false;
         }
     }
-    session
-        .local_port
-        .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
+    let Some(local_url) = session.local_url.as_deref() else {
+        return false;
+    };
+    session.local_port.is_some_and(|port| {
+        wait_for_tcp(port, Duration::from_millis(200))
+            && super::connection_daemon::daemon_http_health_matches(
+                local_url,
+                session.remote_daemon_lease_id.as_deref(),
+                session.remote_daemon_pid,
+            )
+    })
 }
 
 pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
