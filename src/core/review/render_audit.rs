@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
-use homeboy::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
-use homeboy::core::finding::HomeboyFinding;
+use crate::core::code_audit::{AuditCommandOutput, AuditFinding, Finding, Severity};
+use crate::core::finding::HomeboyFinding;
 
 use super::TOP_N;
 

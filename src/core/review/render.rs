@@ -17,13 +17,13 @@
 
 use std::fmt::Write as _;
 
-use homeboy::core::ci_profile::CiRunOutput;
-use homeboy::core::code_audit::AuditCommandOutput;
-use homeboy::core::extension::lint::LintCommandOutput;
-use homeboy::core::extension::test::TestCommandOutput;
-use homeboy::core::extension::ExtensionPhaseTiming;
-use homeboy::core::finding::HomeboyFinding;
-use homeboy::core::top_n::top_n_by;
+use crate::core::ci_profile::CiRunOutput;
+use crate::core::code_audit::AuditCommandOutput;
+use crate::core::extension::lint::LintCommandOutput;
+use crate::core::extension::test::TestCommandOutput;
+use crate::core::extension::ExtensionPhaseTiming;
+use crate::core::finding::HomeboyFinding;
+use crate::core::top_n::top_n_by;
 
 use super::{ReviewCommandOutput, ReviewStage};
 
@@ -376,16 +376,16 @@ fn render_ci_body(out: &mut String, output: &CiRunOutput) {
 mod tests {
     use super::*;
 
-    use homeboy::core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
-    use homeboy::core::code_audit::{
+    use crate::core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
+    use crate::core::code_audit::{
         AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
     };
-    use homeboy::core::extension::lint::LintCommandOutput;
-    use homeboy::core::extension::test::{TestCommandOutput, TestCounts};
-    use homeboy::core::extension::CiJobMapping;
-    use homeboy::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
-    use homeboy::core::finding::HomeboyFinding;
-    use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
+    use crate::core::extension::lint::LintCommandOutput;
+    use crate::core::extension::test::{TestCommandOutput, TestCounts};
+    use crate::core::extension::CiJobMapping;
+    use crate::core::extension::{PhaseReport, PhaseStatus, VerificationPhase};
+    use crate::core::finding::HomeboyFinding;
+    use crate::core::quality::{build_quality_plan, QualityPlanOptions};
 
     // ── Builders for fixture envelopes ──────────────────────────────────
 
@@ -519,7 +519,7 @@ mod tests {
         let result = CodeAuditResult {
             component_id: "my-comp".to_string(),
             source_path: "/tmp/my-comp".to_string(),
-            summary: homeboy::core::code_audit::AuditSummary {
+            summary: crate::core::code_audit::AuditSummary {
                 files_scanned: 0,
                 conventions_detected: 0,
                 outliers_found: 0,

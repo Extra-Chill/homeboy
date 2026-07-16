@@ -7,7 +7,7 @@ pub mod runners;
 #[macro_use]
 pub mod config;
 
-// Compatibility exports for existing `homeboy::core::<module>` consumers. Prefer the
+// Compatibility exports for existing `crate::core::<module>` consumers. Prefer the
 // facade modules above for new code so implementation files can move without
 // becoming accidental public API.
 pub mod activity;
