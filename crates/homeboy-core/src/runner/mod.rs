@@ -103,7 +103,6 @@ pub use evidence::{
     refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path, runner_job_log_snapshot,
     RemoteArtifactDownload, RunnerJobLogSnapshot,
 };
-pub(crate) use execution::is_internal_control_env;
 pub use execution::{
     daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,

@@ -9,10 +9,10 @@ use super::diagnostic::BenchDiagnostic;
 use super::parsing::BenchResults;
 use super::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::ci_profile::CiContext;
+use crate::execution_contract::reportable_artifact_evidence_path;
 use crate::finding::HomeboyFinding;
 use crate::gate::HomeboyGateResult;
 use crate::rig::RigStateSnapshot;
-use crate::runner::reportable_artifact_evidence_path;
 
 pub use super::side_by_side::{
     BenchSideBySideArtifact, BenchSideBySideMetric, BenchSideBySidePreviewLink,

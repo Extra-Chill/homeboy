@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::build_identity;
+use crate::execution_contract::is_reportable_artifact_evidence_path;
 use crate::execution_contract::EXECUTION_CONTRACT;
 use crate::observation::{
     ArtifactRecord, ObservationStore, RecordedHomeboyFinding, RunRecord, TraceSpanRecord,
 };
-use crate::runners::is_reportable_artifact_evidence_path;
 use crate::Error;
 
 pub const BUNDLE_FORMAT: &str = "homeboy-observations";

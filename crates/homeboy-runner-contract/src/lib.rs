@@ -69,6 +69,13 @@ pub const RUNNER_PLACEMENT_RESOLVED_ENV: &str = "HOMEBOY_RUNNER_PLACEMENT_RESOLV
 /// Identifies the runner an exec is bound to.
 pub const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
 
+/// Whether an env-var name is an internal runner control marker (not a
+/// user-facing variable). Contract-level classification, so it lives here and
+/// core can call it without a core -> runner edge.
+pub fn is_internal_control_env(name: &str) -> bool {
+    name == RUNNER_PLACEMENT_RESOLVED_ENV
+}
+
 /// A tool that must be present on a runner for a capability to be satisfied.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RunnerRequiredTool {
