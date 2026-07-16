@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use base64::Engine;
 use serde_json::json;
@@ -40,22 +40,6 @@ pub fn materialize_recovered_patch_artifact(
             {
                 continue;
             }
-            let typed_path = outcome.typed_artifacts.iter().find_map(|typed| {
-                let typed_artifact = typed.artifact.as_ref()?;
-                (typed_artifact.id == artifact.id
-                    && typed_artifact.size_bytes == artifact.size_bytes
-                    && typed_artifact.sha256 == artifact.sha256)
-                    .then(|| {
-                        typed_artifact.path.clone().or_else(|| {
-                            typed
-                                .payload
-                                .get("path")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string)
-                        })
-                    })
-                    .flatten()
-            });
             changed |= materialize_artifact(
                 artifact,
                 &runner_id,
@@ -63,7 +47,6 @@ pub fn materialize_recovered_patch_artifact(
                 &record.run_id,
                 &outcome.task_id,
                 |id| crate::runner::runner_artifact_content(&runner_id, &job_id, id),
-                typed_path.as_deref(),
             )?;
         }
         let finalized = outcome.artifacts.clone();
@@ -91,7 +74,6 @@ fn materialize_artifact(
     run_id: &str,
     task_id: &str,
     fetch: impl FnOnce(&str) -> Result<serde_json::Value>,
-    typed_path: Option<&str>,
 ) -> Result<bool> {
     if let Some(path) = artifact
         .path
@@ -115,13 +97,7 @@ fn materialize_artifact(
         artifact.path = Some(path.display().to_string());
         return Ok(false);
     }
-    let response = match fetch(&artifact.id) {
-        Ok(response) => response,
-        Err(error) => match typed_path {
-            Some(path) => legacy_direct_typed_artifact_content(runner_id, artifact, path)?,
-            None => return Err(error),
-        },
-    };
+    let response = fetch(&artifact.id)?;
     let encoded = response
         .get("content_base64")
         .and_then(serde_json::Value::as_str)
@@ -160,88 +136,6 @@ fn materialize_artifact(
         "verified_sha256": expected_sha,
     });
     Ok(true)
-}
-
-/// Legacy Lab terminal results can describe finalized files only in their typed
-/// aggregate. Capture those files through the managed `runs artifact attach`
-/// source primitive after checking the remote path against runner-owned roots.
-fn legacy_direct_typed_artifact_content(
-    runner_id: &str,
-    artifact: &AgentTaskArtifact,
-    path: &str,
-) -> Result<serde_json::Value> {
-    let status = crate::runner::status(runner_id)?;
-    if status.session.as_ref().map(|session| &session.mode)
-        != Some(&crate::runner::RunnerTunnelMode::DirectSsh)
-    {
-        return Err(Error::validation_invalid_argument(
-            "artifact.path",
-            "legacy typed artifact fallback is only available through a direct runner session",
-            Some(path.to_string()),
-            None,
-        ));
-    }
-    let runner = crate::runner::load(runner_id)?;
-    authorize_legacy_runner_path(&runner, artifact, path)?;
-    let source =
-        crate::observation::runner_artifact_attach::copy_runner_artifact_source(&runner, path)?;
-    let bytes = fs::read(&source.path).map_err(io_error(&source.path))?;
-    crate::observation::runner_artifact_attach::cleanup_runner_attach_source(&source);
-    Ok(json!({
-        "command": "runs.artifact.attach.legacy_typed_path",
-        "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
-    }))
-}
-
-fn authorize_legacy_runner_path(
-    runner: &crate::runner::Runner,
-    artifact: &AgentTaskArtifact,
-    path: &str,
-) -> Result<()> {
-    let mut roots = runner
-        .workspace_root
-        .iter()
-        .chain(runner.policy.workspace_roots.iter())
-        .map(|root| crate::paths::normalize_remote_root(root))
-        .collect::<Vec<_>>();
-    if let Some(root) = runner.env.get("HOMEBOY_ARTIFACT_ROOT") {
-        roots.push(crate::paths::normalize_remote_root(root));
-    }
-    if let Some(root) = finalized_artifact_root(artifact, path) {
-        roots.push(root);
-    }
-    roots.sort();
-    roots.dedup();
-    crate::paths::authorize_remote_artifact_path(
-        Path::new(path),
-        &roots,
-        crate::paths::RemotePathRootContainment::RemoteString,
-    )
-    .map_err(|error| Error::validation_invalid_argument(
-        "artifact.path",
-        format!("legacy typed runner artifact path is not authorized: {error:?}"),
-        Some(path.to_string()),
-        Some(vec!["The path must be absolute, traversal-free, and beneath a configured runner workspace or HOMEBOY_ARTIFACT_ROOT.".to_string()]),
-    ))
-}
-
-fn finalized_artifact_root(artifact: &AgentTaskArtifact, path: &str) -> Option<String> {
-    let path = Path::new(path);
-    let file = path.file_name()?.to_str()?;
-    let parent = path.parent()?;
-    let finalized = parent.parent()?;
-    let artifacts = finalized.parent()?;
-    if finalized.file_name()?.to_str()? != "executor-finalized"
-        || artifacts.file_name()?.to_str()? != "artifacts"
-        || uuid::Uuid::parse_str(parent.file_name()?.to_str()?).is_err()
-    {
-        return None;
-    }
-    let mut hash = Sha256::new();
-    hash.update(artifact.kind.as_bytes());
-    hash.update([0]);
-    hash.update(artifact.id.as_bytes());
-    (file == format!("artifact-{:x}", hash.finalize())).then(|| artifacts.display().to_string())
 }
 
 fn materialized_path(
@@ -339,28 +233,18 @@ mod tests {
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
         let bytes = b"patch bytes";
         let mut value = artifact(bytes);
-        assert!(materialize_artifact(
-            &mut value,
-            "lab",
-            "job",
-            "run",
-            "task",
-            |_| Ok(
+        assert!(
+            materialize_artifact(&mut value, "lab", "job", "run", "task", |_| Ok(
                 json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
-            ),
-            None
-        )
-        .expect("materialize"));
-        assert!(!materialize_artifact(
-            &mut value,
-            "lab",
-            "job",
-            "run",
-            "task",
-            |_| panic!("must reuse controller artifact"),
-            None
-        )
-        .expect("replay"));
+            ),)
+            .expect("materialize")
+        );
+        assert!(
+            !materialize_artifact(&mut value, "lab", "job", "run", "task", |_| panic!(
+                "must reuse controller artifact"
+            ),)
+            .expect("replay")
+        );
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
     }
 
@@ -370,7 +254,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", root.path());
         let mut value = artifact(b"expected");
-        let error = materialize_artifact(&mut value, "lab", "job", "run", "task", |_| Ok(json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(b"wrong") })), None).expect_err("integrity failure");
+        let error = materialize_artifact(&mut value, "lab", "job", "run", "task", |_| Ok(json!({ "content_base64": base64::engine::general_purpose::STANDARD.encode(b"wrong") }))).expect_err("integrity failure");
         assert!(error.message.contains("mismatch"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
     }
@@ -383,46 +267,12 @@ mod tests {
         let mut value = artifact(b"local patch");
         value.path = Some(source.display().to_string());
 
-        assert!(!materialize_artifact(
-            &mut value,
-            "lab",
-            "job",
-            "run",
-            "task",
-            |_| panic!("must preserve a usable local artifact"),
-            None
-        )
-        .expect("local artifact"));
+        assert!(
+            !materialize_artifact(&mut value, "lab", "job", "run", "task", |_| panic!(
+                "must preserve a usable local artifact"
+            ),)
+            .expect("local artifact")
+        );
         assert_eq!(value.path.as_deref(), source.to_str());
-    }
-
-    #[test]
-    fn recognizes_a_legacy_finalized_typed_artifact_path() {
-        let value = artifact(b"patch");
-        let mut hash = Sha256::new();
-        hash.update(b"patch\0patch");
-        let path = format!(
-            "/home/runner/.local/share/homeboy/artifacts/executor-finalized/41e5fcb2-fbc4-4a55-b745-377684e3e16f/artifact-{:x}",
-            hash.finalize()
-        );
-        assert_eq!(
-            finalized_artifact_root(&value, &path).as_deref(),
-            Some("/home/runner/.local/share/homeboy/artifacts")
-        );
-    }
-
-    #[test]
-    fn rejects_traversal_or_noncanonical_finalized_typed_paths() {
-        let value = artifact(b"patch");
-        assert!(finalized_artifact_root(
-            &value,
-            "/home/runner/.local/share/homeboy/artifacts/executor-finalized/../secret"
-        )
-        .is_none());
-        assert!(finalized_artifact_root(
-            &value,
-            "/tmp/artifacts/executor-finalized/41e5fcb2-fbc4-4a55-b745-377684e3e16f/artifact-forged"
-        )
-        .is_none());
     }
 }
